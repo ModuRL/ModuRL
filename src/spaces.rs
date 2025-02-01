@@ -79,16 +79,20 @@ impl Box {
         Self { low, high }
     }
 
-    pub fn new_with_universal_bounds(shape: Vec<usize>) -> Self {
-        let mut low = vec![];
-        let mut high = vec![];
+    pub fn new_with_universal_bounds(shape: Vec<usize>, low: f32, high: f32) -> Self {
+        let mut lows = vec![];
+        let mut highs = vec![];
         for _ in 0..shape.iter().product::<usize>() {
-            low.push(f32::NEG_INFINITY);
-            high.push(f32::INFINITY);
+            lows.push(low);
+            highs.push(high);
         }
         Self {
-            low: ArrayD::from_shape_vec(shape.clone(), low).unwrap(),
-            high: ArrayD::from_shape_vec(shape, high).unwrap(),
+            low: ArrayD::from_shape_vec(shape.clone(), lows).unwrap(),
+            high: ArrayD::from_shape_vec(shape, highs).unwrap(),
         }
+    }
+
+    pub fn new_unbounded(shape: Vec<usize>) -> Self {
+        Self::new_with_universal_bounds(shape, f32::NEG_INFINITY, f32::INFINITY)
     }
 }
