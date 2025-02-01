@@ -1,0 +1,8 @@
+[package]
+name = "rust_rl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ndarray = "0.16.1"
+rand = "0.9.0"
