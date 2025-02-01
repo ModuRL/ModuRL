@@ -1,21 +1,18 @@
-use ndarray::{ArrayD, IxDyn, IxDynImpl, StrideShape};
+use ndarray::ArrayD;
 use rand::{rng, Rng};
 
-trait Space<T> {
+pub trait Space<T> {
     fn sample(&self) -> T;
     fn contains(&self, x: &T) -> bool;
 }
 
-struct Discrete {
+pub struct Discrete {
     dims: Vec<usize>,
 }
 
 impl Space<ArrayD<bool>> for Discrete {
     fn sample(&self) -> ArrayD<bool> {
-        let mut total_num_of_bools = 1;
-        for dim in &self.dims {
-            total_num_of_bools *= dim;
-        }
+        let total_num_of_bools = self.dims.iter().product::<usize>();
         let mut bools = vec![];
         let mut rng = rng();
         for _ in 0..(total_num_of_bools / 64) {
@@ -36,5 +33,62 @@ impl Space<ArrayD<bool>> for Discrete {
             return false;
         }
         true
+    }
+}
+
+impl Discrete {
+    pub fn new(dims: Vec<usize>) -> Self {
+        Self { dims }
+    }
+}
+
+/// Box
+/// A box space is a bounded, n-dimensional space.
+/// The bounds are defined by two vectors: low and high.
+// I don't like forcing the user to use f32, but this is what we'll do for now.
+pub struct Box {
+    low: ArrayD<f32>,
+    high: ArrayD<f32>,
+}
+
+impl Space<ArrayD<f32>> for Box {
+    fn sample(&self) -> ArrayD<f32> {
+        let mut rng = rng();
+        let mut values = vec![];
+        for i in 0..self.low.len() {
+            values.push(rng.random_range(self.low[i]..self.high[i]));
+        }
+        ArrayD::from_shape_vec(self.low.shape(), values).unwrap()
+    }
+
+    fn contains(&self, x: &ArrayD<f32>) -> bool {
+        if x.shape() != self.low.shape() {
+            return false;
+        }
+        for i in 0..x.len() {
+            if x[i] < self.low[i] || x[i] > self.high[i] {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl Box {
+    pub fn new(low: ArrayD<f32>, high: ArrayD<f32>) -> Self {
+        Self { low, high }
+    }
+
+    pub fn new_with_universal_bounds(shape: Vec<usize>) -> Self {
+        let mut low = vec![];
+        let mut high = vec![];
+        for _ in 0..shape.iter().product::<usize>() {
+            low.push(f32::NEG_INFINITY);
+            high.push(f32::INFINITY);
+        }
+        Self {
+            low: ArrayD::from_shape_vec(shape.clone(), low).unwrap(),
+            high: ArrayD::from_shape_vec(shape, high).unwrap(),
+        }
     }
 }
