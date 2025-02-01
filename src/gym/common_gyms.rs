@@ -139,3 +139,27 @@ impl Gym<bool, f32> for CartPole {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spaces::Space;
+    use crate::Gym;
+    use ndarray::ArrayD;
+
+    #[test]
+    fn test_cartpole() {
+        let mut env = CartPole::new();
+        let state = env.reset();
+        assert_eq!(state.len(), 4);
+        // This is really just to test the action space is discrete and with shape [2]
+        assert!(env
+            .action_space
+            .contains(&ArrayD::from_shape_vec(vec![2], vec![true, true]).unwrap()));
+        let (next_state, reward, done) =
+            env.step(ArrayD::from_shape_vec(vec![2], vec![true, true]).unwrap());
+        assert_eq!(next_state.len(), 4);
+        assert!(reward == 1.0);
+        assert!(!done);
+    }
+}
