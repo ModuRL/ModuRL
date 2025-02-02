@@ -1,6 +1,6 @@
 use crate::{spaces, Gym};
+use candle_core::{Device, Tensor};
 use log;
-use ndarray::ArrayD;
 
 /// The classic CartPole environment.
 /// Converted from the OpenAI Gym CartPole environment.
@@ -18,12 +18,12 @@ pub struct CartPole {
     pub(crate) is_euler: bool,
     pub(crate) steps_beyond_terminated: Option<usize>,
     pub(crate) action_space: spaces::Discrete,
-    pub(crate) observation_space: spaces::Box,
-    pub(crate) state: ArrayD<f32>,
+    pub(crate) observation_space: spaces::BoxSpace,
+    pub(crate) state: Tensor,
 }
 
 impl CartPole {
-    pub fn new() -> Self {
+    pub fn new(device: &Device) -> Self {
         let gravity = 9.8;
         let masscart = 1.0;
         let masspole = 0.1;
@@ -45,11 +45,11 @@ impl CartPole {
             std::f32::INFINITY,
         ];
         let low = high.iter().map(|x| -x).collect::<Vec<_>>();
-        let high = ArrayD::from_shape_vec(vec![4], high).unwrap();
-        let low = ArrayD::from_shape_vec(vec![4], low).unwrap();
+        let high = Tensor::from_vec(high, vec![4], device).expect("Failed to create tensor.");
+        let low = Tensor::from_vec(low, vec![4], device).expect("Failed to create tensor.");
 
         let action_space = spaces::Discrete::new(vec![2]);
-        let observation_space = spaces::Box::new(low, high);
+        let observation_space = spaces::BoxSpace::new(low, high);
 
         Self {
             gravity,
@@ -66,32 +66,36 @@ impl CartPole {
             is_euler,
             action_space,
             observation_space,
-            state: ArrayD::zeros(vec![4]),
+            state: Tensor::zeros(vec![4], candle_core::DType::F32, device)
+                .expect("Failed to create tensor."),
         }
     }
 }
 
 impl Default for CartPole {
     fn default() -> Self {
-        Self::new()
+        Self::new(&Device::Cpu)
     }
 }
 
-impl Gym<bool, f32> for CartPole {
+impl Gym for CartPole {
     fn get_name(&self) -> &str {
         "CartPole"
     }
-    fn reset(&mut self) -> ArrayD<f32> {
+    fn reset(&mut self) -> Tensor {
         self.steps_beyond_terminated = None;
         // TODO: make this a little bit random
-        self.state = ArrayD::zeros(vec![4]);
+        self.state = Tensor::zeros(vec![4], candle_core::DType::F32, self.state.device())
+            .expect("Failed to create tensor.");
         self.state.clone()
     }
-    fn step(&mut self, action: ArrayD<bool>) -> (ArrayD<f32>, f32, bool) {
+    fn step(&mut self, action: Tensor) -> (Tensor, f32, bool) {
+        let state_vec = self.state.to_vec1::<f32>().unwrap();
         let (mut x, mut x_dot, mut theta, mut theta_dot) =
-            (self.state[0], self.state[1], self.state[2], self.state[3]);
+            (state_vec[0], state_vec[1], state_vec[2], state_vec[3]);
 
-        let force = if action[0] {
+        let action_vec = action.to_vec1::<f32>().unwrap();
+        let force = if action_vec[0] > 0.5 {
             self.force_mag
         } else {
             -self.force_mag
@@ -106,7 +110,7 @@ impl Gym<bool, f32> for CartPole {
             / (self.length * (4.0 / 3.0 - self.masspole * costheta * costheta / self.total_mass));
         let xacc = temp - self.polemass_length * thetaacc * costheta / self.total_mass;
 
-        if (self.is_euler) {
+        if self.is_euler {
             x += self.tau * x_dot;
             x_dot += self.tau * xacc;
             theta += self.tau * theta_dot;
@@ -118,7 +122,12 @@ impl Gym<bool, f32> for CartPole {
             theta_dot += 0.5 * self.tau * (thetaacc + temp);
         }
 
-        (self.state[0], self.state[1], self.state[2], self.state[3]) = (x, x_dot, theta, theta_dot);
+        self.state = Tensor::from_vec(
+            vec![x, x_dot, theta, theta_dot],
+            vec![4],
+            self.state.device(),
+        )
+        .expect("Failed to create tensor.");
         let terminated = x < -self.x_threshold
             || x > self.x_threshold
             || theta < -self.theta_threshold_radians
@@ -138,27 +147,29 @@ impl Gym<bool, f32> for CartPole {
             (self.state.clone(), 0.0, true)
         }
     }
+
+    fn observation_space(&self) -> Box<dyn crate::Space> {
+        Box::new(self.observation_space.clone())
+    }
+
+    fn action_space(&self) -> Box<dyn crate::Space> {
+        Box::new(self.action_space.clone())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spaces::Space;
     use crate::Gym;
-    use ndarray::ArrayD;
 
     #[test]
     fn test_cartpole() {
-        let mut env = CartPole::new();
+        let mut env = CartPole::new(&Device::Cpu);
         let state = env.reset();
-        assert_eq!(state.len(), 4);
-        // This is really just to test the action space is discrete and with shape [2]
-        assert!(env
-            .action_space
-            .contains(&ArrayD::from_shape_vec(vec![2], vec![true, true]).unwrap()));
+        assert_eq!(state.shape().dim(0).unwrap(), 4);
         let (next_state, reward, done) =
-            env.step(ArrayD::from_shape_vec(vec![2], vec![true, true]).unwrap());
-        assert_eq!(next_state.len(), 4);
+            env.step(Tensor::from_vec(vec![0.0], vec![1], &Device::Cpu).unwrap());
+        assert_eq!(next_state.shape().dim(0).unwrap(), 4);
         assert!(reward == 1.0);
         assert!(!done);
     }

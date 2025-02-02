@@ -1,35 +1,31 @@
-use ndarray::ArrayD;
+use candle_core::{Device, Tensor};
 use rand::{rng, Rng};
 
-pub trait Space<T> {
-    fn sample(&self) -> T;
-    fn contains(&self, x: &T) -> bool;
+pub trait Space {
+    fn sample(&self, device: &Device) -> Tensor;
+    fn contains(&self, x: &Tensor) -> bool;
 }
 
+#[derive(Clone)]
 pub struct Discrete {
     dims: Vec<usize>,
 }
 
-impl Space<ArrayD<bool>> for Discrete {
-    fn sample(&self) -> ArrayD<bool> {
+impl Space for Discrete {
+    fn sample(&self, device: &Device) -> Tensor {
         let total_num_of_bools = self.dims.iter().product::<usize>();
         let mut bools = vec![];
         let mut rng = rng();
-        for _ in 0..(total_num_of_bools / 64) {
-            let chunk = rng.random::<u64>();
-            for i in 0..64 {
-                if bools.len() < total_num_of_bools {
-                    bools.push((chunk >> i) & 1 == 1);
-                }
-            }
+        for _ in 0..total_num_of_bools {
+            bools.push(rng.random_bool(0.5) as u32 as f32);
         }
-        ArrayD::from_shape_vec(self.dims.clone(), bools).unwrap()
+        Tensor::from_vec(bools, self.dims.clone(), &device).expect("Failed to create tensor.")
     }
 
-    fn contains(&self, x: &ArrayD<bool>) -> bool {
+    fn contains(&self, x: &Tensor) -> bool {
         // This is kinda weird, because if the shape is not equal,
         // Should we just say false, or should we return an error?
-        if x.shape() != self.dims {
+        if *x.shape() != candle_core::Shape::from_dims(self.dims.as_slice()) {
             return false;
         }
         true
@@ -46,27 +42,61 @@ impl Discrete {
 /// A box space is a bounded, n-dimensional space.
 /// The bounds are defined by two vectors: low and high.
 // I don't like forcing the user to use f32, but this is what we'll do for now.
-pub struct Box {
-    low: ArrayD<f32>,
-    high: ArrayD<f32>,
+#[derive(Clone)]
+pub struct BoxSpace {
+    low: Tensor,
+    high: Tensor,
 }
 
-impl Space<ArrayD<f32>> for Box {
-    fn sample(&self) -> ArrayD<f32> {
+impl Space for BoxSpace {
+    fn sample(&self, device: &Device) -> Tensor {
         let mut rng = rng();
         let mut values = vec![];
-        for i in 0..self.low.len() {
-            values.push(rng.random_range(self.low[i]..self.high[i]));
+        // flatten the low and high tensors
+        let low = self.low.flatten_all().expect("Failed to flatten tensor.");
+        let high = self.high.flatten_all().expect("Failed to flatten tensor.");
+        for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
+            let low = low
+                .get(i)
+                .expect("Failed to get value.")
+                .to_vec0::<f32>()
+                .expect("Failed to convert to f32.");
+            let high = high
+                .get(i)
+                .expect("Failed to get value.")
+                .to_vec0::<f32>()
+                .expect("Failed to convert to f32.");
+            values.push(rng.random_range(low..high));
         }
-        ArrayD::from_shape_vec(self.low.shape(), values).unwrap()
+        Tensor::from_vec(values, low.shape(), device).expect("Failed to create tensor.")
     }
 
-    fn contains(&self, x: &ArrayD<f32>) -> bool {
-        if x.shape() != self.low.shape() {
+    fn contains(&self, x: &Tensor) -> bool {
+        // This is kinda weird, because if the shape is not equal,
+        // Should we just say false, or should we return an error?
+        if *x.shape() != *self.low.shape() {
             return false;
         }
-        for i in 0..x.len() {
-            if x[i] < self.low[i] || x[i] > self.high[i] {
+        let low = self.low.flatten_all().expect("Failed to flatten tensor.");
+        let high = self.high.flatten_all().expect("Failed to flatten tensor.");
+        // So inefficient :*(
+        for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
+            let low = low
+                .get(i)
+                .expect("Failed to get value.")
+                .to_vec0::<f32>()
+                .expect("Failed to convert to f32.");
+            let high = high
+                .get(i)
+                .expect("Failed to get value.")
+                .to_vec0::<f32>()
+                .expect("Failed to convert to f32.");
+            let value = x
+                .get(i)
+                .expect("Failed to get value.")
+                .to_vec0::<f32>()
+                .expect("Failed to convert to f32.");
+            if value < low || value > high {
                 return false;
             }
         }
@@ -74,25 +104,34 @@ impl Space<ArrayD<f32>> for Box {
     }
 }
 
-impl Box {
-    pub fn new(low: ArrayD<f32>, high: ArrayD<f32>) -> Self {
+impl BoxSpace {
+    pub fn new(low: Tensor, high: Tensor) -> Self {
+        assert!(low.shape() == high.shape());
         Self { low, high }
     }
 
-    pub fn new_with_universal_bounds(shape: Vec<usize>, low: f32, high: f32) -> Self {
+    pub fn new_with_universal_bounds(
+        shape: Vec<usize>,
+        low: f32,
+        high: f32,
+        device: &Device,
+    ) -> Self {
         let mut lows = vec![];
         let mut highs = vec![];
         for _ in 0..shape.iter().product::<usize>() {
             lows.push(low);
             highs.push(high);
         }
+        let lows = Tensor::from_vec(lows, shape.clone(), device).expect("Failed to create tensor.");
+        let highs =
+            Tensor::from_vec(highs, shape.clone(), device).expect("Failed to create tensor.");
         Self {
-            low: ArrayD::from_shape_vec(shape.clone(), lows).unwrap(),
-            high: ArrayD::from_shape_vec(shape, highs).unwrap(),
+            low: lows,
+            high: highs,
         }
     }
 
-    pub fn new_unbounded(shape: Vec<usize>) -> Self {
-        Self::new_with_universal_bounds(shape, f32::NEG_INFINITY, f32::INFINITY)
+    pub fn new_unbounded(shape: Vec<usize>, device: &Device) -> Self {
+        Self::new_with_universal_bounds(shape, f32::NEG_INFINITY, f32::INFINITY, device)
     }
 }
