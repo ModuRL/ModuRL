@@ -4,3 +4,7 @@ mod spaces;
 pub use spaces::*;
 mod actors;
 pub use actors::*;
+mod experience_replay;
+pub use experience_replay::*;
+mod models;
+pub use models::*;

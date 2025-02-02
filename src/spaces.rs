@@ -39,6 +39,10 @@ impl Discrete {
             start_value,
         }
     }
+
+    pub fn get_possible_values(&self) -> usize {
+        self.possible_values
+    }
 }
 
 /// Box
