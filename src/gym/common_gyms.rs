@@ -1,4 +1,4 @@
-use crate::{spaces, Gym};
+use crate::{spaces, Gym, Space};
 use candle_core::{Device, Tensor};
 use log;
 
@@ -48,7 +48,7 @@ impl CartPole {
         let high = Tensor::from_vec(high, vec![4], device).expect("Failed to create tensor.");
         let low = Tensor::from_vec(low, vec![4], device).expect("Failed to create tensor.");
 
-        let action_space = spaces::Discrete::new(vec![2]);
+        let action_space = spaces::Discrete::new(2, 0);
         let observation_space = spaces::BoxSpace::new(low, high);
 
         Self {
@@ -82,6 +82,7 @@ impl Gym for CartPole {
     fn get_name(&self) -> &str {
         "CartPole"
     }
+
     fn reset(&mut self) -> Tensor {
         self.steps_beyond_terminated = None;
         // TODO: make this a little bit random
@@ -89,13 +90,15 @@ impl Gym for CartPole {
             .expect("Failed to create tensor.");
         self.state.clone()
     }
+
     fn step(&mut self, action: Tensor) -> (Tensor, f32, bool) {
+        assert!(self.action_space.contains(&action));
         let state_vec = self.state.to_vec1::<f32>().unwrap();
         let (mut x, mut x_dot, mut theta, mut theta_dot) =
             (state_vec[0], state_vec[1], state_vec[2], state_vec[3]);
 
-        let action_vec = action.to_vec1::<f32>().unwrap();
-        let force = if action_vec[0] > 0.5 {
+        let action_vec = action.to_vec0::<u32>().unwrap();
+        let force = if action_vec == 0 {
             self.force_mag
         } else {
             -self.force_mag
@@ -168,9 +171,18 @@ mod tests {
         let state = env.reset();
         assert_eq!(state.shape().dim(0).unwrap(), 4);
         let (next_state, reward, done) =
-            env.step(Tensor::from_vec(vec![0.0], vec![1], &Device::Cpu).unwrap());
+            env.step(Tensor::from_vec(vec![0 as u32], vec![], &Device::Cpu).unwrap());
         assert_eq!(next_state.shape().dim(0).unwrap(), 4);
         assert!(reward == 1.0);
         assert!(!done);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_cartpole_invalid_action() {
+        let mut env = CartPole::new(&Device::Cpu);
+        let _state = env.reset();
+        let (_next_state, _reward, _done) =
+            env.step(Tensor::from_vec(vec![1 as u32], vec![1], &Device::Cpu).unwrap());
     }
 }

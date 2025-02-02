@@ -8,33 +8,36 @@ pub trait Space {
 
 #[derive(Clone)]
 pub struct Discrete {
-    dims: Vec<usize>,
+    possible_values: usize,
+    start_value: i32, // inclusive
 }
 
 impl Space for Discrete {
     fn sample(&self, device: &Device) -> Tensor {
-        let total_num_of_bools = self.dims.iter().product::<usize>();
-        let mut bools = vec![];
         let mut rng = rng();
-        for _ in 0..total_num_of_bools {
-            bools.push(rng.random_bool(0.5) as u32 as f32);
-        }
-        Tensor::from_vec(bools, self.dims.clone(), &device).expect("Failed to create tensor.")
+        let value = rng
+            .random_range(self.start_value..(self.start_value + self.possible_values as i32))
+            as u32;
+        Tensor::from_vec(vec![value], vec![], device).expect("Failed to create tensor.")
     }
 
     fn contains(&self, x: &Tensor) -> bool {
-        // This is kinda weird, because if the shape is not equal,
-        // Should we just say false, or should we return an error?
-        if *x.shape() != candle_core::Shape::from_dims(self.dims.as_slice()) {
+        if x.dims() != Vec::<usize>::new() {
             return false;
         }
-        true
+        println!("Dims: {:?}", x.dims());
+        let value = x.to_vec0::<u32>().expect("Failed to convert to u32.");
+        value >= self.start_value as u32
+            && value < (self.start_value + self.possible_values as i32) as u32
     }
 }
 
 impl Discrete {
-    pub fn new(dims: Vec<usize>) -> Self {
-        Self { dims }
+    pub fn new(possible_values: usize, start_value: i32) -> Self {
+        Self {
+            possible_values,
+            start_value,
+        }
     }
 }
 
