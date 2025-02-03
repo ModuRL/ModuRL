@@ -25,7 +25,6 @@ impl Space for Discrete {
         if x.dims() != Vec::<usize>::new() {
             return false;
         }
-        println!("Dims: {:?}", x.dims());
         let value = x.to_vec0::<u32>().expect("Failed to convert to u32.");
         value >= self.start_value as u32
             && value < (self.start_value + self.possible_values as i32) as u32
@@ -63,16 +62,19 @@ impl Space for BoxSpace {
         let low = self.low.flatten_all().expect("Failed to flatten tensor.");
         let high = self.high.flatten_all().expect("Failed to flatten tensor.");
         for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
-            let low = low
+            let mut low = low
                 .get(i)
                 .expect("Failed to get value.")
                 .to_vec0::<f32>()
                 .expect("Failed to convert to f32.");
-            let high = high
+            let mut high = high
                 .get(i)
                 .expect("Failed to get value.")
                 .to_vec0::<f32>()
                 .expect("Failed to convert to f32.");
+            low = finitize(low);
+            high = finitize(high);
+
             values.push(rng.random_range(low..high));
         }
         Tensor::from_vec(values, low.shape(), device).expect("Failed to create tensor.")
@@ -141,4 +143,18 @@ impl BoxSpace {
     pub fn new_unbounded(shape: Vec<usize>, device: &Device) -> Self {
         Self::new_with_universal_bounds(shape, f32::NEG_INFINITY, f32::INFINITY, device)
     }
+}
+
+// A helper function to finitize the value.
+// This way random_range can work with f32::INFINITY and f32::NEG_INFINITY.
+// We just return f32::MAX / 2.0 and f32::MIN / 2.0 respectively.
+// It's pretty dumb, but it lies and says min and max aren't finite otherwise.
+fn finitize(value: f32) -> f32 {
+    if value == f32::INFINITY {
+        return f32::MAX / 2.0;
+    }
+    if value == f32::NEG_INFINITY {
+        return f32::MIN / 2.0;
+    }
+    value
 }

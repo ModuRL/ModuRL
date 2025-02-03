@@ -21,9 +21,17 @@ impl MLP {
         let mut hidden_layers = Vec::new();
         let input_layer = linear(input_size, hidden_layer_sizes[0], vb.pp("input layer"))?;
         for i in 0..hidden_layer_sizes.len() - 1 {
-            hidden_layers.push(linear(hidden_layer_sizes[i], hidden_layer_sizes[i + 1], vb.pp(format!("hidden layer {}", i)))?);
+            hidden_layers.push(linear(
+                hidden_layer_sizes[i],
+                hidden_layer_sizes[i + 1],
+                vb.pp(format!("hidden layer {}", i)),
+            )?);
         }
-        let output_layer = linear(hidden_layer_sizes[hidden_layer_sizes.len() - 1], output_size, vb.pp("output layer"))?;
+        let output_layer = linear(
+            hidden_layer_sizes[hidden_layer_sizes.len() - 1],
+            output_size,
+            vb.pp("output layer"),
+        )?;
         Ok(Self {
             hidden_layers,
             activation,

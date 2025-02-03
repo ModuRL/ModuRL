@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use candle_core::{Tensor, Device};
+use candle_core::{Device, Tensor};
 use rand::Rng;
 
 // Not sure if this needs to be more flexible or not.
@@ -13,7 +13,7 @@ pub(crate) struct Experience {
 }
 
 impl Experience {
-    pub fn new(state: Tensor, next_state: Tensor, action: Tensor, reward: f32,  done: bool) -> Self {
+    pub fn new(state: Tensor, next_state: Tensor, action: Tensor, reward: f32, done: bool) -> Self {
         Self {
             state,
             next_state,
@@ -68,9 +68,7 @@ impl ExperienceReplay {
         let rewards = Tensor::from_vec(rewards, vec![self.batch_size], states.device()).unwrap();
         let next_states = Tensor::stack(&next_states, 0).unwrap();
         let dones = Tensor::from_vec(dones, vec![self.batch_size], states.device()).unwrap();
-        ExperienceSample::new(
-            states, actions, rewards, next_states, dones
-        )
+        ExperienceSample::new(states, actions, rewards, next_states, dones)
     }
 
     pub fn len(&self) -> usize {
@@ -91,8 +89,13 @@ pub(crate) struct ExperienceSample {
 }
 
 impl ExperienceSample {
-    fn new(states: Tensor, actions: Tensor, rewards: Tensor, next_states: Tensor, dones: Tensor) -> Self
-    {
+    fn new(
+        states: Tensor,
+        actions: Tensor,
+        rewards: Tensor,
+        next_states: Tensor,
+        dones: Tensor,
+    ) -> Self {
         Self {
             states,
             actions,
