@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use candle_core::{Device, Error, Tensor};
+use candle_core::{Error, Tensor};
 use rand::Rng;
 
 // Not sure if this needs to be more flexible or not.

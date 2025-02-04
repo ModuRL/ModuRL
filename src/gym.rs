@@ -1,7 +1,6 @@
+use crate::spaces::Space;
 use candle_core::Tensor;
-mod common_gyms;
-use crate::Space;
-pub use common_gyms::*;
+pub mod common_gyms;
 
 pub trait Gym {
     type Error;
