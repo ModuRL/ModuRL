@@ -4,11 +4,12 @@ use crate::Space;
 pub use common_gyms::*;
 
 pub trait Gym {
+    type Error;
     fn get_name(&self) -> &str;
     /// Returns the next state, reward, and done flag.
-    fn step(&mut self, action: Tensor) -> (Tensor, f32, bool);
+    fn step(&mut self, action: Tensor) -> Result<(Tensor, f32, bool), Self::Error>;
     /// Resets the environment to its initial state. Returns the initial state.
-    fn reset(&mut self) -> Tensor;
+    fn reset(&mut self) -> Result<Tensor, Self::Error>;
     /// Returns the observation space.
     fn observation_space(&self) -> Box<dyn Space>;
     /// Returns the action space.
