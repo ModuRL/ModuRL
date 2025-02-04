@@ -79,25 +79,27 @@ impl Default for CartPole {
 }
 
 impl Gym for CartPole {
+    type Error = candle_core::Error;
+
     fn get_name(&self) -> &str {
         "CartPole"
     }
 
-    fn reset(&mut self) -> Tensor {
+    fn reset(&mut self) -> Result<Tensor, Self::Error> {
         self.steps_beyond_terminated = None;
         // TODO: make this a little bit random
         self.state = Tensor::zeros(vec![4], candle_core::DType::F32, self.state.device())
             .expect("Failed to create tensor.");
-        self.state.clone()
+        Ok(self.state.clone())
     }
 
-    fn step(&mut self, action: Tensor) -> (Tensor, f32, bool) {
+    fn step(&mut self, action: Tensor) -> Result<(Tensor, f32, bool), Self::Error> {
         assert!(self.action_space.contains(&action));
-        let state_vec = self.state.to_vec1::<f32>().unwrap();
+        let state_vec = self.state.to_vec1::<f32>()?;
         let (mut x, mut x_dot, mut theta, mut theta_dot) =
             (state_vec[0], state_vec[1], state_vec[2], state_vec[3]);
 
-        let action_vec = action.to_vec0::<u32>().unwrap();
+        let action_vec = action.to_vec0::<u32>()?;
         let force = if action_vec == 0 {
             self.force_mag
         } else {
@@ -137,17 +139,18 @@ impl Gym for CartPole {
             || theta > self.theta_threshold_radians;
 
         if !terminated {
-            (self.state.clone(), 1.0, false)
+            Ok((self.state.clone(), 1.0, false))
         } else if self.steps_beyond_terminated.is_none() {
             // Pole just fell!
             self.steps_beyond_terminated = Some(0);
-            (self.state.clone(), 1.0, false)
+            Ok((self.state.clone(), 1.0, false))
         } else {
             if self.steps_beyond_terminated == Some(0) {
                 log::warn!("You are calling 'step()' even though this environment has already returned terminated = True. You should always call 'reset()' once you receive 'terminated = True' -- any further steps are undefined behavior.");
             }
+            // We already checked this is Some above, so this is safe.
             self.steps_beyond_terminated = Some(self.steps_beyond_terminated.unwrap() + 1);
-            (self.state.clone(), 0.0, true)
+            Ok((self.state.clone(), 0.0, true))
         }
     }
 
@@ -168,11 +171,21 @@ mod tests {
     #[test]
     fn test_cartpole() {
         let mut env = CartPole::new(&Device::Cpu);
-        let state = env.reset();
-        assert_eq!(state.shape().dim(0).unwrap(), 4);
-        let (next_state, reward, done) =
-            env.step(Tensor::from_vec(vec![0 as u32], vec![], &Device::Cpu).unwrap());
-        assert_eq!(next_state.shape().dim(0).unwrap(), 4);
+        let state = env.reset().expect("Failed to reset environment.");
+        assert_eq!(state.shape().dim(0).expect("Failed to get state dim."), 4);
+        let (next_state, reward, done) = env
+            .step(
+                Tensor::from_vec(vec![0 as u32], vec![], &Device::Cpu)
+                    .expect("Failed to create tensor."),
+            )
+            .expect("Failed to step environment.");
+        assert_eq!(
+            next_state
+                .shape()
+                .dim(0)
+                .expect("Failed to get next state dim."),
+            4
+        );
         assert!(reward == 1.0);
         assert!(!done);
     }
@@ -182,7 +195,11 @@ mod tests {
     fn test_cartpole_invalid_action() {
         let mut env = CartPole::new(&Device::Cpu);
         let _state = env.reset();
-        let (_next_state, _reward, _done) =
-            env.step(Tensor::from_vec(vec![1 as u32], vec![1], &Device::Cpu).unwrap());
+        let (_next_state, _reward, _done) = env
+            .step(
+                Tensor::from_vec(vec![1 as u32], vec![1], &Device::Cpu)
+                    .expect("Failed to create tensor."),
+            )
+            .expect("Failed to step environment.");
     }
 }

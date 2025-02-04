@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use candle_core::{Device, Tensor};
+use candle_core::{Device, Error, Tensor};
 use rand::Rng;
 
 // Not sure if this needs to be more flexible or not.
@@ -46,7 +46,7 @@ impl ExperienceReplay {
         self.buffer.push_front(experience);
     }
 
-    pub fn sample(&self) -> ExperienceSample {
+    pub fn sample(&self) -> Result<ExperienceSample, Error> {
         let mut rng = rand::rng();
         let mut states = vec![];
         let mut actions = vec![];
@@ -63,12 +63,18 @@ impl ExperienceReplay {
             dones.push(if self.buffer[i].done { 1.0 } else { 0.0 });
         }
 
-        let states = Tensor::stack(&states, 0).unwrap();
-        let actions = Tensor::stack(&actions, 0).unwrap();
-        let rewards = Tensor::from_vec(rewards, vec![self.batch_size], states.device()).unwrap();
-        let next_states = Tensor::stack(&next_states, 0).unwrap();
-        let dones = Tensor::from_vec(dones, vec![self.batch_size], states.device()).unwrap();
-        ExperienceSample::new(states, actions, rewards, next_states, dones)
+        let states = Tensor::stack(&states, 0)?;
+        let actions = Tensor::stack(&actions, 0)?;
+        let rewards = Tensor::from_vec(rewards, vec![self.batch_size], states.device())?;
+        let next_states = Tensor::stack(&next_states, 0)?;
+        let dones = Tensor::from_vec(dones, vec![self.batch_size], states.device())?;
+        Ok(ExperienceSample::new(
+            states,
+            actions,
+            rewards,
+            next_states,
+            dones,
+        ))
     }
 
     pub fn len(&self) -> usize {
