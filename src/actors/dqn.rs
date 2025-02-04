@@ -110,18 +110,17 @@ where
         let replay_capacity = self.replay_capacity.unwrap_or(10000);
         let epochs = self.epochs.unwrap_or(10);
 
-        DQNActor::new(
-            self.q_network,
-            self.optimizer,
-            epsilon_start,
+        DQNActor {
+            q_network: self.q_network,
+            optimizer: self.optimizer,
+            epsilon: epsilon_start,
             epsilon_decay,
-            self.action_space,
-            self.observation_space,
-            batch_size,
+            action_space: self.action_space,
+            observation_space: self.observation_space,
+            experience_replay: ExperienceReplay::new(replay_capacity, batch_size),
             gamma,
-            replay_capacity,
             epochs,
-        )
+        }
     }
 }
 
@@ -129,31 +128,6 @@ impl<O> DQNActor<O>
 where
     O: Optimizer,
 {
-    fn new(
-        q_network: Box<dyn candle_core::Module>,
-        optimizer: O,
-        epsilon_start: f32,
-        epsilon_decay: f32,
-        action_space: Discrete,
-        observation_space: Box<dyn Space>,
-        batch_size: usize,
-        gamma: f32,
-        replay_capacity: usize,
-        epochs: usize,
-    ) -> Self {
-        Self {
-            q_network,
-            optimizer: optimizer,
-            epsilon: epsilon_start,
-            epsilon_decay,
-            action_space,
-            observation_space,
-            experience_replay: ExperienceReplay::new(replay_capacity, batch_size),
-            gamma: gamma,
-            epochs: epochs,
-        }
-    }
-
     pub fn get_action_space(&self) -> &Discrete {
         &self.action_space
     }
@@ -162,7 +136,7 @@ where
         &self.observation_space
     }
 
-    fn optimize(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn optimize(&mut self) -> Result<(), Error> {
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(()); // Not enough samples to train.
         }
@@ -270,10 +244,7 @@ where
 
             // Optimize the Q-network.
             for _ in 0..self.epochs {
-                let result = self.optimize();
-                if let Err(e) = result {
-                    println!("Error optimizing the Q-network: {:?}", e);
-                }
+                self.optimize()?;
             }
         }
 

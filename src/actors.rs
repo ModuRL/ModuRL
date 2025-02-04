@@ -1,7 +1,7 @@
 use crate::gym::Gym;
 use candle_core::{Tensor, Var};
-mod dqn;
-pub use dqn::*;
+pub mod dqn;
+pub mod ppo;
 
 pub trait Actor {
     type Error;
