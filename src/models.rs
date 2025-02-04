@@ -9,8 +9,58 @@ pub struct MLP {
     output_activation: Option<candle_nn::Activation>,
 }
 
+pub struct MLPBuilder {
+    pub input_size: usize,
+    pub output_size: usize,
+    pub hidden_layer_sizes: Option<Vec<usize>>,
+    pub activation: Option<candle_nn::Activation>,
+    pub output_activation: Option<candle_nn::Activation>,
+}
+
+impl MLPBuilder {
+    pub fn new(input_size: usize, output_size: usize) -> Self {
+        Self {
+            input_size,
+            output_size,
+            hidden_layer_sizes: None,
+            activation: None,
+            output_activation: None,
+        }
+    }
+
+    pub fn hidden_layer_sizes(mut self, hidden_layer_sizes: Vec<usize>) -> Self {
+        self.hidden_layer_sizes = Some(hidden_layer_sizes);
+        self
+    }
+
+    pub fn activation(mut self, activation: candle_nn::Activation) -> Self {
+        self.activation = Some(activation);
+        self
+    }
+
+    pub fn output_activation(mut self, output_activation: candle_nn::Activation) -> Self {
+        self.output_activation = Some(output_activation);
+        self
+    }
+
+    pub fn build(self, vb: &mut VarBuilder) -> Result<MLP, Error> {
+        let hidden_layer_sizes = self.hidden_layer_sizes.unwrap_or(vec![32, 32, 32]);
+        let activation = self.activation.unwrap_or(candle_nn::Activation::Relu);
+        // output layer activation is optional and defaults to None
+
+        MLP::new(
+            self.input_size,
+            hidden_layer_sizes,
+            self.output_size,
+            activation,
+            self.output_activation,
+            vb,
+        )
+    }
+}
+
 impl MLP {
-    pub fn new(
+    fn new(
         input_size: usize,
         hidden_layer_sizes: Vec<usize>,
         output_size: usize,

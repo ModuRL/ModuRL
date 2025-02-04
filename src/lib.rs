@@ -1,10 +1,5 @@
-mod gym;
-pub use gym::Gym;
-mod spaces;
-pub use spaces::*;
-mod actors;
-pub use actors::*;
-mod experience_replay;
-pub use experience_replay::*;
-mod models;
-pub use models::*;
+pub mod actors;
+pub mod experience_replay;
+pub mod gym;
+pub mod models;
+pub mod spaces;

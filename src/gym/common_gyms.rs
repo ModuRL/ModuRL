@@ -1,4 +1,4 @@
-use crate::{spaces, Gym, Space};
+use crate::{gym::Gym, spaces, spaces::Space};
 use candle_core::{Device, Tensor};
 use log;
 
@@ -6,7 +6,6 @@ use log;
 /// Converted from the OpenAI Gym CartPole environment.
 pub struct CartPole {
     pub(crate) gravity: f32,
-    pub(crate) masscart: f32,
     pub(crate) masspole: f32,
     pub(crate) total_mass: f32,
     pub(crate) length: f32,
@@ -53,7 +52,6 @@ impl CartPole {
 
         Self {
             gravity,
-            masscart,
             masspole,
             total_mass,
             length,
@@ -154,11 +152,11 @@ impl Gym for CartPole {
         }
     }
 
-    fn observation_space(&self) -> Box<dyn crate::Space> {
+    fn observation_space(&self) -> Box<dyn crate::spaces::Space> {
         Box::new(self.observation_space.clone())
     }
 
-    fn action_space(&self) -> Box<dyn crate::Space> {
+    fn action_space(&self) -> Box<dyn crate::spaces::Space> {
         Box::new(self.action_space.clone())
     }
 }
@@ -166,7 +164,7 @@ impl Gym for CartPole {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Gym;
+    use crate::gym::Gym;
 
     #[test]
     fn test_cartpole() {
