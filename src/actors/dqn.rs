@@ -297,7 +297,8 @@ mod tests {
 
     use super::*;
     use crate::gym::common_gyms::CartPole;
-    use crate::{gym::Gym, models::MLP};
+    use crate::gym::Gym;
+    use crate::models::MLPBuilder;
 
     // Test the DQN actor by training it on the CartPole environment.
     #[test]
@@ -307,18 +308,17 @@ mod tests {
         let var_map = VarMap::new();
         let mut vb =
             VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
-        let mlp = MLP::new(
+
+        let mlp = MLPBuilder::new(
             observation_space
                 .sample(&candle_core::Device::Cpu)
                 .shape()
                 .elem_count(),
-            vec![32, 32, 32],
             2,
-            candle_nn::Activation::Gelu,
-            None,
-            &mut vb,
         )
+        .build(&mut vb)
         .expect("Failed to create MLP");
+
         let optimizer =
             AdamW::new(var_map.all_vars(), ParamsAdamW::default()).expect("Failed to create AdamW");
 
