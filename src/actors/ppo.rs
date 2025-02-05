@@ -1,7 +1,7 @@
 use candle_core::Error;
 use candle_nn::Optimizer;
 
-use crate::spaces;
+use crate::{buffers::rollout_buffer::RolloutBuffer, spaces};
 
 pub struct PPOActor<O>
 where
@@ -21,6 +21,7 @@ where
     action_space: Box<dyn spaces::Space>,
     critic_network: Box<dyn candle_core::Module>,
     actor_network: Box<dyn candle_core::Module>,
+    replay_buffer: RolloutBuffer,
 }
 
 pub struct PPOActorBuilder<O>
@@ -43,6 +44,7 @@ where
     vf_coef: Option<f32>,
     ent_coef: Option<f32>,
     max_grad_norm: Option<f32>,
+    batch_size: Option<usize>,
 }
 
 impl<O> PPOActorBuilder<O>
@@ -71,6 +73,7 @@ where
             vf_coef: None,
             ent_coef: None,
             max_grad_norm: None,
+            batch_size: None,
         }
     }
 
@@ -119,6 +122,11 @@ where
         self
     }
 
+    pub fn batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = Some(batch_size);
+        self
+    }
+
     pub fn build(self) -> PPOActor<O> {
         PPOActor {
             clipped: self.clipped.unwrap_or(true),
@@ -135,6 +143,7 @@ where
             action_space: self.action_space,
             critic_network: self.critic_network,
             actor_network: self.actor_network,
+            replay_buffer: RolloutBuffer::new(self.batch_size.unwrap_or(64)),
         }
     }
 }
@@ -144,6 +153,7 @@ where
     O: Optimizer,
 {
     fn optimize(&mut self) -> Result<(), Error> {
-        todo!()
+        
+        Ok(())
     }
 }

@@ -5,7 +5,8 @@ use candle_nn::Optimizer;
 use rand::Rng;
 
 use crate::{
-    experience_replay::{Experience, ExperienceReplay},
+    buffers::experience_replay::ExperienceReplay,
+    buffers::Experience,
     gym::Gym,
     spaces::{Discrete, Space},
 };
