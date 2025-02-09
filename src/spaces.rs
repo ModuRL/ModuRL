@@ -2,8 +2,12 @@ use candle_core::{Device, Tensor};
 use rand::{rng, Rng};
 
 pub trait Space {
+    /// Returns a random sample from the space.
     fn sample(&self, device: &Device) -> Tensor;
+    /// Returns true if the input tensor is within the space.
     fn contains(&self, x: &Tensor) -> bool;
+    /// returns the shape of the space.
+    fn shape(&self) -> Vec<usize>;
 }
 
 #[derive(Clone)]
@@ -28,6 +32,14 @@ impl Space for Discrete {
         let value = x.to_vec0::<u32>().expect("Failed to convert to u32.");
         value >= self.start_value as u32
             && value < (self.start_value + self.possible_values as i32) as u32
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        if self.possible_values == 1 {
+            vec![]
+        } else {
+            vec![self.possible_values]
+        }
     }
 }
 
@@ -111,6 +123,10 @@ impl Space for BoxSpace {
         }
         true
     }
+
+    fn shape(&self) -> Vec<usize> {
+        self.low.shape().clone().into_dims()
+    }
 }
 
 impl BoxSpace {
@@ -134,10 +150,7 @@ impl BoxSpace {
         let lows = Tensor::from_vec(lows, shape.clone(), device).expect("Failed to create tensor.");
         let highs =
             Tensor::from_vec(highs, shape.clone(), device).expect("Failed to create tensor.");
-        Self {
-            low: lows,
-            high: highs,
-        }
+        Self::new(lows, highs)
     }
 
     pub fn new_unbounded(shape: Vec<usize>, device: &Device) -> Self {

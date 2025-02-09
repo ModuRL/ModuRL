@@ -3,7 +3,7 @@ pub mod rollout_buffer;
 use candle_core::Tensor;
 
 // Not sure if this needs to be more flexible or not.
-pub(crate) struct Experience {
+pub struct Experience {
     state: Tensor,
     next_state: Tensor,
     action: Tensor,
@@ -23,7 +23,7 @@ impl Experience {
     }
 }
 
-pub(crate) struct ExperienceSample {
+pub struct ExperienceSample {
     states: Tensor,
     actions: Tensor,
     rewards: Tensor,

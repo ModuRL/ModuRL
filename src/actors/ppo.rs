@@ -1,7 +1,14 @@
-use candle_core::Error;
+use std::collections::HashMap;
+
+use candle_core::{safetensors::save, Error};
 use candle_nn::Optimizer;
 
-use crate::{buffers::rollout_buffer::RolloutBuffer, spaces};
+use crate::{
+    buffers::{rollout_buffer::RolloutBuffer, Experience},
+    spaces,
+};
+
+use super::Actor;
 
 pub struct PPOActor<O>
 where
@@ -16,7 +23,8 @@ where
     vf_coef: f32,
     ent_coef: f32,
     max_grad_norm: f32,
-    optimizer: O,
+    critic_optimizer: O,
+    actor_optimizer: O,
     observation_space: Box<dyn spaces::Space>,
     action_space: Box<dyn spaces::Space>,
     critic_network: Box<dyn candle_core::Module>,
@@ -29,7 +37,8 @@ where
     O: Optimizer,
 {
     // Neccesary hyperparameters
-    optimizer: O,
+    critic_optimizer: O,
+    actor_optimizer: O,
     observation_space: Box<dyn spaces::Space>,
     action_space: Box<dyn spaces::Space>,
     critic_network: Box<dyn candle_core::Module>,
@@ -56,10 +65,12 @@ where
         action_space: Box<dyn spaces::Space>,
         actor_network: Box<dyn candle_core::Module>,
         critic_network: Box<dyn candle_core::Module>,
-        optimizer: O,
+        critic_optimizer: O,
+        actor_optimizer: O,
     ) -> Self {
         Self {
-            optimizer,
+            critic_optimizer,
+            actor_optimizer,
             observation_space,
             action_space,
             actor_network,
@@ -128,6 +139,10 @@ where
     }
 
     pub fn build(self) -> PPOActor<O> {
+        if let Some(batch_size) = self.batch_size {
+            assert!(batch_size > 0);
+        }
+
         PPOActor {
             clipped: self.clipped.unwrap_or(true),
             gamma: self.gamma.unwrap_or(0.99),
@@ -138,7 +153,8 @@ where
             vf_coef: self.vf_coef.unwrap_or(0.5),
             ent_coef: self.ent_coef.unwrap_or(0.01),
             max_grad_norm: self.max_grad_norm.unwrap_or(0.5),
-            optimizer: self.optimizer,
+            critic_optimizer: self.critic_optimizer,
+            actor_optimizer: self.actor_optimizer,
             observation_space: self.observation_space,
             action_space: self.action_space,
             critic_network: self.critic_network,
@@ -153,7 +169,118 @@ where
     O: Optimizer,
 {
     fn optimize(&mut self) -> Result<(), Error> {
-        
         Ok(())
+    }
+}
+
+impl<O> Actor for PPOActor<O>
+where
+    O: Optimizer,
+{
+    type Error = Error;
+    fn act(&mut self, observation: &candle_core::Tensor) -> Result<candle_core::Tensor, Error> {
+        let action = self.actor_network.forward(observation).unwrap();
+        Ok(action)
+    }
+
+    fn learn(
+        &mut self,
+        env: &mut dyn crate::gym::Gym<Error = Self::Error>,
+        num_episodes: usize,
+    ) -> Result<(), Self::Error> {
+        for _ in 0..num_episodes {
+            let mut done = false;
+            let mut obs = env.reset()?;
+            let (mut next_obs, mut reward);
+
+            while !done {
+                let mut new_observations_shape: Vec<usize> =
+                    vec![obs.elem_count() / self.observation_space.shape().iter().sum::<usize>()];
+                new_observations_shape.append(&mut self.observation_space.shape());
+                obs = obs.reshape(&*new_observations_shape)?;
+
+                let action = self.act(&obs)?;
+                (next_obs, reward, done) = env.step(action.clone())?;
+                self.replay_buffer.add(Experience::new(
+                    obs.clone(),
+                    next_obs.clone(),
+                    action,
+                    reward,
+                    done,
+                ));
+                obs = next_obs;
+            }
+            self.optimize()?;
+        }
+        Ok(())
+    }
+
+    fn save(&self, vars: Vec<candle_core::Var>, path: &str) -> Result<(), Self::Error> {
+        // TODO! Reevaluate this is there ever a case where anything different happens?
+        // This is a copy paste from the DQN actor but I guess it shouldn't be needed to be implemented for every actor
+        // It might be universal for all actors but load is different for each actor
+
+        let tensors = vars.iter().map(|v| v.as_tensor()).collect::<Vec<_>>();
+        let mut hashmap = HashMap::new();
+        for (i, tensor) in tensors.iter().enumerate() {
+            hashmap.insert(format!("var_{i}"), (*tensor).clone());
+        }
+        save(&hashmap, path)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        gym::{common_gyms::CartPole, Gym},
+        models::MLPBuilder,
+    };
+    use candle_nn::{AdamW, ParamsAdamW, VarBuilder, VarMap};
+
+    #[test]
+    fn test_ppo_actor_cartpole() {
+        let mut env = CartPole::new(&candle_core::Device::Cpu);
+        let observation_space = env.observation_space();
+        let action_space = env.action_space();
+        let var_map = VarMap::new();
+        let vb =
+            VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
+
+        let actor_network = MLPBuilder::new(
+            observation_space.shape().iter().sum(),
+            action_space.shape().iter().sum(),
+            vb.clone(),
+        )
+        .activation(candle_nn::Activation::Relu)
+        .build()
+        .unwrap();
+
+        let actor_optimizer =
+            AdamW::new(var_map.all_vars(), ParamsAdamW::default()).expect("Failed to create AdamW");
+
+        let var_map = VarMap::new();
+        let vb =
+            VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
+
+        let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, vb)
+            .activation(candle_nn::Activation::Relu)
+            .build()
+            .unwrap();
+
+        let critic_optimizer =
+            AdamW::new(var_map.all_vars(), ParamsAdamW::default()).expect("Failed to create AdamW");
+
+        let mut actor = PPOActorBuilder::new(
+            observation_space,
+            action_space,
+            Box::new(actor_network),
+            Box::new(critic_network),
+            critic_optimizer,
+            actor_optimizer,
+        )
+        .build();
+        actor.learn(&mut env, 10).unwrap();
     }
 }

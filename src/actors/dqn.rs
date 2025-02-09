@@ -214,8 +214,11 @@ where
             let mut total_reward = 0.0;
             let mut observation = env.reset()?;
             loop {
-                let previous_observation_shape = observation.shape().clone().into_dims();
-                observation = observation.reshape(&[1, previous_observation_shape[0]])?;
+                let mut new_observations_shape: Vec<usize> = vec![
+                    observation.elem_count() / self.observation_space.shape().iter().sum::<usize>(),
+                ];
+                new_observations_shape.append(&mut self.observation_space.shape());
+                observation = observation.reshape(&*new_observations_shape)?;
 
                 let action = self.act(&observation)?;
                 // outputs a tensor of shape [1, dim] so we need to squeeze it to [dim]
@@ -278,18 +281,12 @@ mod tests {
         let mut env = CartPole::new(&candle_core::Device::Cpu);
         let observation_space = env.observation_space();
         let var_map = VarMap::new();
-        let mut vb =
+        let vb =
             VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
 
-        let mlp = MLPBuilder::new(
-            observation_space
-                .sample(&candle_core::Device::Cpu)
-                .shape()
-                .elem_count(),
-            2,
-        )
-        .build(&mut vb)
-        .expect("Failed to create MLP");
+        let mlp = MLPBuilder::new(observation_space.shape().iter().sum(), 2, vb)
+            .build()
+            .expect("Failed to create MLP");
 
         let optimizer =
             AdamW::new(var_map.all_vars(), ParamsAdamW::default()).expect("Failed to create AdamW");
