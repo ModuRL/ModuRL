@@ -7,7 +7,10 @@ pub trait Space {
     /// Returns true if the input tensor is within the space.
     fn contains(&self, x: &Tensor) -> bool;
     /// returns the shape of the space.
+    /// This is the gonna be the shape of the tensor that is inputted into the from_neurons function.
     fn shape(&self) -> Vec<usize>;
+    /// "Translates" the output of the neurons (of shape [batch_size, shape]) to the space.
+    fn from_neurons(&self, neurons: &Tensor) -> Tensor;
 }
 
 #[derive(Clone)]
@@ -40,6 +43,11 @@ impl Space for Discrete {
         } else {
             vec![self.possible_values]
         }
+    }
+
+    fn from_neurons(&self, neurons: &Tensor) -> Tensor {
+        let neurons = neurons.argmax(1).expect("Failed to get argmax.");
+        neurons
     }
 }
 
@@ -100,6 +108,7 @@ impl Space for BoxSpace {
         }
         let low = self.low.flatten_all().expect("Failed to flatten tensor.");
         let high = self.high.flatten_all().expect("Failed to flatten tensor.");
+        let x = x.flatten_all().expect("Failed to flatten tensor.");
         // So inefficient :*(
         for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
             let low = low
@@ -126,6 +135,11 @@ impl Space for BoxSpace {
 
     fn shape(&self) -> Vec<usize> {
         self.low.shape().clone().into_dims()
+    }
+
+    fn from_neurons(&self, neurons: &Tensor) -> Tensor {
+        // Do not need to do anything here.
+        neurons.clone()
     }
 }
 

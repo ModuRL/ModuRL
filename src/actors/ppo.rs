@@ -179,8 +179,7 @@ where
 {
     type Error = Error;
     fn act(&mut self, observation: &candle_core::Tensor) -> Result<candle_core::Tensor, Error> {
-        let action = self.actor_network.forward(observation).unwrap();
-        Ok(action)
+        self.actor_network.forward(observation)
     }
 
     fn learn(
@@ -194,12 +193,14 @@ where
             let (mut next_obs, mut reward);
 
             while !done {
-                let mut new_observations_shape: Vec<usize> =
-                    vec![obs.elem_count() / self.observation_space.shape().iter().sum::<usize>()];
+                let mut new_observations_shape: Vec<usize> = vec![1];
                 new_observations_shape.append(&mut self.observation_space.shape());
                 obs = obs.reshape(&*new_observations_shape)?;
 
                 let action = self.act(&obs)?;
+                // Now: the action is a tensor of shape [1, dim] so we need to squeeze it to [dim]
+                let action = action.squeeze(0)?;
+
                 (next_obs, reward, done) = env.step(action.clone())?;
                 self.replay_buffer.add(Experience::new(
                     obs.clone(),

@@ -214,9 +214,7 @@ where
             let mut total_reward = 0.0;
             let mut observation = env.reset()?;
             loop {
-                let mut new_observations_shape: Vec<usize> = vec![
-                    observation.elem_count() / self.observation_space.shape().iter().sum::<usize>(),
-                ];
+                let mut new_observations_shape: Vec<usize> = vec![1];
                 new_observations_shape.append(&mut self.observation_space.shape());
                 observation = observation.reshape(&*new_observations_shape)?;
 
