@@ -1,5 +1,6 @@
 use candle_core::Error;
 use candle_nn::{self, linear, VarBuilder};
+pub mod probabilistic_model;
 
 pub struct MLP {
     hidden_layers: Vec<candle_nn::Linear>,

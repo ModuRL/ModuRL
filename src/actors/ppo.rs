@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
+use crate::tensor_operations::torch_like_min;
 use candle_core::{safetensors::save, Error};
 use candle_nn::Optimizer;
 
 use crate::{
     buffers::{rollout_buffer::RolloutBuffer, Experience},
+    models::probabilistic_model::ProbabilisticActor,
     spaces,
 };
 
@@ -18,18 +20,17 @@ where
     gamma: f32,
     gae_lambda: f32,
     clip_range: Option<f32>,
-    clip_range_vf: Option<f32>,
     normalize_advantage: bool,
     vf_coef: f32,
     ent_coef: f32,
-    max_grad_norm: f32,
     critic_optimizer: O,
     actor_optimizer: O,
     observation_space: Box<dyn spaces::Space>,
     action_space: Box<dyn spaces::Space>,
     critic_network: Box<dyn candle_core::Module>,
-    actor_network: Box<dyn candle_core::Module>,
-    replay_buffer: RolloutBuffer,
+    actor_network: Box<dyn ProbabilisticActor<Error = Error>>,
+    rollout_buffer: RolloutBuffer,
+    num_epochs: usize,
 }
 
 pub struct PPOActorBuilder<O>
@@ -42,18 +43,17 @@ where
     observation_space: Box<dyn spaces::Space>,
     action_space: Box<dyn spaces::Space>,
     critic_network: Box<dyn candle_core::Module>,
-    actor_network: Box<dyn candle_core::Module>,
+    actor_network: Box<dyn ProbabilisticActor<Error = Error>>,
     // Has default values so optional
     clipped: Option<bool>,
     gamma: Option<f32>,
     gae_lambda: Option<f32>,
     clip_range: Option<f32>,
-    clip_range_vf: Option<f32>,
     normalize_advantage: Option<bool>,
     vf_coef: Option<f32>,
     ent_coef: Option<f32>,
-    max_grad_norm: Option<f32>,
     batch_size: Option<usize>,
+    num_epochs: Option<usize>,
 }
 
 impl<O> PPOActorBuilder<O>
@@ -63,7 +63,7 @@ where
     pub fn new(
         observation_space: Box<dyn spaces::Space>,
         action_space: Box<dyn spaces::Space>,
-        actor_network: Box<dyn candle_core::Module>,
+        actor_network: Box<dyn ProbabilisticActor<Error = Error>>,
         critic_network: Box<dyn candle_core::Module>,
         critic_optimizer: O,
         actor_optimizer: O,
@@ -79,12 +79,11 @@ where
             gamma: None,
             gae_lambda: None,
             clip_range: None,
-            clip_range_vf: None,
             normalize_advantage: None,
             vf_coef: None,
             ent_coef: None,
-            max_grad_norm: None,
             batch_size: None,
+            num_epochs: None,
         }
     }
 
@@ -108,11 +107,6 @@ where
         self
     }
 
-    pub fn clip_range_vf(mut self, clip_range_vf: f32) -> Self {
-        self.clip_range_vf = Some(clip_range_vf);
-        self
-    }
-
     pub fn normalize_advantage(mut self, normalize_advantage: bool) -> Self {
         self.normalize_advantage = Some(normalize_advantage);
         self
@@ -128,13 +122,13 @@ where
         self
     }
 
-    pub fn max_grad_norm(mut self, max_grad_norm: f32) -> Self {
-        self.max_grad_norm = Some(max_grad_norm);
+    pub fn batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = Some(batch_size);
         self
     }
 
-    pub fn batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = Some(batch_size);
+    pub fn num_epochs(mut self, num_epochs: usize) -> Self {
+        self.num_epochs = Some(num_epochs);
         self
     }
 
@@ -148,18 +142,17 @@ where
             gamma: self.gamma.unwrap_or(0.99),
             gae_lambda: self.gae_lambda.unwrap_or(0.95),
             clip_range: self.clip_range,
-            clip_range_vf: self.clip_range_vf,
             normalize_advantage: self.normalize_advantage.unwrap_or(true),
             vf_coef: self.vf_coef.unwrap_or(0.5),
             ent_coef: self.ent_coef.unwrap_or(0.01),
-            max_grad_norm: self.max_grad_norm.unwrap_or(0.5),
             critic_optimizer: self.critic_optimizer,
             actor_optimizer: self.actor_optimizer,
             observation_space: self.observation_space,
             action_space: self.action_space,
             critic_network: self.critic_network,
             actor_network: self.actor_network,
-            replay_buffer: RolloutBuffer::new(self.batch_size.unwrap_or(64)),
+            rollout_buffer: RolloutBuffer::new(self.batch_size.unwrap_or(64)),
+            num_epochs: self.num_epochs.unwrap_or(1),
         }
     }
 }
@@ -169,7 +162,122 @@ where
     O: Optimizer,
 {
     fn optimize(&mut self) -> Result<(), Error> {
+        for epoch in 0..self.num_epochs {
+            for sample in self.rollout_buffer.get_all() {
+                let actions = sample.actions();
+                let states = sample.states();
+                let rewards = sample.rewards();
+                let dones = sample.dones();
+
+                let values = self.critic_network.forward(states)?;
+
+                let advantages = self.compute_advantages(rewards, values.clone(), dones)?;
+
+                let (old_log_probs, entropy) =
+                    self.actor_network.log_prob_and_entropy(states, actions)?;
+
+                let (actor_loss, critic_loss) =
+                    self.compute_loss(states, actions, old_log_probs, rewards, advantages)?;
+
+                println!(
+                    "Epoch: {}, Actor Loss: {}, Critic Loss: {}",
+                    epoch,
+                    actor_loss.to_scalar::<f64>()?,
+                    critic_loss.to_scalar::<f64>()?
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    // Uses GAE to compute the advantages
+    fn compute_advantages(
+        &self,
+        rewards: &candle_core::Tensor,
+        values: candle_core::Tensor,
+        dones: &candle_core::Tensor,
+    ) -> Result<candle_core::Tensor, Error> {
+        let mut advantages = vec![];
+        let mut last_advantage = 0.0;
+        let mut last_value = values.get(values.dims1()? - 1)?.to_scalar()?;
+        for i in (0..rewards.dims1()?).rev() {
+            if dones.get(i)?.to_scalar::<f32>()? > 0.5 {
+                last_advantage = 0.0;
+                last_value = 0.0;
+            }
+            let reward = rewards.get(i)?.to_scalar::<f32>()?;
+            let value = values.get(i)?.to_scalar()?;
+
+            let delta = reward + self.gamma * last_value - value;
+            last_advantage = delta + self.gamma * self.gae_lambda * last_advantage;
+            advantages.push(last_advantage);
+            last_value = value;
+        }
+
+        let advantages =
+            candle_core::Tensor::from_vec(advantages, rewards.shape(), rewards.device())?;
+
+        Ok(advantages)
+    }
+
+    fn compute_loss(
+        &mut self,
+        states: &candle_core::Tensor,
+        actions: &candle_core::Tensor,
+        old_log_probs: candle_core::Tensor,
+        rewards: &candle_core::Tensor,
+        advantages: candle_core::Tensor,
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor), Error> {
+        let values = self.critic_network.forward(states)?;
+        let values = values.squeeze(1)?;
+
+        let advantages = advantages.clone();
+        let advantages = if self.normalize_advantage {
+            let advantages_mean = advantages.mean(0)?;
+            let advantages_std_sqrt = (advantages.clone() - advantages_mean.clone())?.abs()?;
+            ((advantages.clone() - advantages.mean(0)?) / advantages_std_sqrt)?
+        } else {
+            advantages
+        };
+
+        let (log_probs, entropy) = self.actor_network.log_prob_and_entropy(states, actions)?;
+
+        let ratio = (log_probs - old_log_probs)?.exp()?;
+
+        let actor_loss = match self.clipped {
+            true => {
+                let clip_range = self.clip_range.unwrap_or(0.2);
+                let clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range);
+                let actor_loss = (-1.0
+                    * torch_like_min(
+                        &(ratio.clone() * advantages.clone())?,
+                        &(clipped_ratio?.clone() * advantages.clone())?,
+                    )?
+                    .mean(0)?)?;
+                actor_loss
+            }
+            false => {
+                let actor_loss = (-1.0 * (ratio.clone() * advantages.clone())?.mean(0)?)?;
+                actor_loss
+            }
+        };
+
+        let values_minus_rewards = (values - rewards)?;
+        let critic_loss = (values_minus_rewards.clone() * values_minus_rewards)?;
+        // Use mse for now
+        let critic_loss = critic_loss.mean(0)?;
+
+        let entropy_loss = (-1.0 * entropy.mean(0)?)?;
+
+        let loss = (actor_loss.clone()
+            + ((self.vf_coef as f64) * critic_loss.clone())?
+            + ((-self.ent_coef as f64) * entropy_loss)?)?;
+
+        self.actor_optimizer.backward_step(&loss.clone())?;
+        self.critic_optimizer.backward_step(&loss)?;
+
+        Ok((actor_loss, critic_loss))
     }
 }
 
@@ -179,7 +287,7 @@ where
 {
     type Error = Error;
     fn act(&mut self, observation: &candle_core::Tensor) -> Result<candle_core::Tensor, Error> {
-        self.actor_network.forward(observation)
+        self.actor_network.sample(observation)
     }
 
     fn learn(
@@ -199,10 +307,11 @@ where
 
                 let action = self.act(&obs)?;
                 // Now: the action is a tensor of shape [1, dim] so we need to squeeze it to [dim]
+                let action = self.action_space.from_neurons(&action);
                 let action = action.squeeze(0)?;
 
                 (next_obs, reward, done) = env.step(action.clone())?;
-                self.replay_buffer.add(Experience::new(
+                self.rollout_buffer.add(Experience::new(
                     obs.clone(),
                     next_obs.clone(),
                     action,
@@ -236,7 +345,7 @@ mod tests {
     use super::*;
     use crate::{
         gym::{common_gyms::CartPole, Gym},
-        models::MLPBuilder,
+        models::{probabilistic_model::MLPProbabilisticActor, MLPBuilder},
     };
     use candle_nn::{AdamW, ParamsAdamW, VarBuilder, VarMap};
 
@@ -276,7 +385,7 @@ mod tests {
         let mut actor = PPOActorBuilder::new(
             observation_space,
             action_space,
-            Box::new(actor_network),
+            Box::new(MLPProbabilisticActor::new(actor_network)),
             Box::new(critic_network),
             critic_optimizer,
             actor_optimizer,

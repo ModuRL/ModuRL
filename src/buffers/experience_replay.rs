@@ -35,8 +35,13 @@ impl ExperienceReplay {
         let mut next_states = vec![];
         let mut dones = vec![];
 
+        let total_samples = self.buffer.len();
+
         for _ in 0..self.batch_size {
-            let i = rng.random_range(0..self.buffer.len());
+            // There could be duplicates in the batch
+            // TODO: fix
+            let i = rng.random_range(0..total_samples);
+
             states.push(self.buffer[i].state.clone());
             actions.push(self.buffer[i].action.clone());
             rewards.push(self.buffer[i].reward);

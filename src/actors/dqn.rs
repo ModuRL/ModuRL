@@ -200,8 +200,8 @@ where
             actions
         } else {
             let q_values = self.q_network.forward(observation)?;
-            let actions = q_values.argmax(1)?;
-            Ok(actions)
+            let actions = q_values.argmax(1);
+            actions
         }
     }
 
@@ -295,8 +295,10 @@ mod tests {
             Box::new(mlp),
             optimizer,
         )
+        .replay_capacity(10)
+        .batch_size(10) // So that it actually reaches the optimization step.
         .build();
 
-        actor.learn(&mut env, 20).expect("Failed to learn");
+        actor.learn(&mut env, 5).expect("Failed to learn");
     }
 }
