@@ -1,6 +1,7 @@
 use std::vec;
 
 use candle_core::Tensor;
+use rand::seq::SliceRandom;
 
 use super::{Experience, ExperienceSample};
 
@@ -21,7 +22,10 @@ impl RolloutBuffer {
         self.buffer.push(experience);
     }
 
-    pub fn get_all(&mut self) -> Vec<ExperienceSample> {
+    pub fn get_all_shuffled(&mut self) -> Vec<ExperienceSample> {
+        // Shuffle the buffer
+        self.buffer.shuffle(&mut rand::rng());
+
         let mut samples = vec![];
         for i in 0..(self.buffer.len() / self.batch_size) {
             let start = i * self.batch_size;
@@ -36,7 +40,7 @@ impl RolloutBuffer {
             for experience in experiences {
                 actions.push(experience.action.clone());
                 rewards.push(experience.reward);
-                dones.push(if experience.done { 1.0 } else { 0.0 });
+                dones.push(if experience.done { 1.0f32 } else { 0.0f32 });
                 states.push(experience.state.clone());
                 next_states.push(experience.next_state.clone());
             }
@@ -57,9 +61,16 @@ impl RolloutBuffer {
             ));
         }
 
-        // Clear the buffer
         self.buffer.clear();
 
         samples
+    }
+
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn get_batch_size(&self) -> usize {
+        self.batch_size
     }
 }
