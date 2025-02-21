@@ -22,10 +22,7 @@ impl RolloutBuffer {
         self.buffer.push(experience);
     }
 
-    pub fn get_all_shuffled(&mut self) -> Vec<ExperienceSample> {
-        // Shuffle the buffer
-        self.buffer.shuffle(&mut rand::rng());
-
+    pub fn get_all(&mut self) -> Vec<ExperienceSample> {
         let mut samples = vec![];
         for i in 0..(self.buffer.len() / self.batch_size) {
             let start = i * self.batch_size;
@@ -63,6 +60,13 @@ impl RolloutBuffer {
 
         self.buffer.clear();
 
+        samples
+    }
+
+    pub fn get_all_shuffled(&mut self) -> Vec<ExperienceSample> {
+        // Shuffle the buffer
+        self.buffer.shuffle(&mut rand::rng());
+        let samples = self.get_all();
         samples
     }
 

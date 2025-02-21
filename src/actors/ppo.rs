@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::tensor_operations::torch_like_min;
-use candle_core::{safetensors::save, Error};
+use candle_core::{safetensors::save, Error, Tensor};
 use candle_nn::Optimizer;
 
 use crate::{
@@ -172,7 +172,21 @@ where
 {
     fn optimize(&mut self) -> Result<(), Error> {
         for epoch in 0..self.num_epochs {
-            for sample in self.rollout_buffer.get_all_shuffled() {
+            let samples = self.rollout_buffer.get_all();
+            let mut old_log_probs = VecDeque::new();
+            for sample in &samples {
+                let actions = sample.actions();
+                let states = sample.states();
+
+                let (log_probs, entropy) = self
+                    .actor_network
+                    .log_prob_and_entropy(states, actions)
+                    .unwrap();
+
+                old_log_probs.push_back(log_probs);
+            }
+
+            for sample in &samples {
                 let actions = sample.actions();
                 let states = sample.states();
                 let rewards = sample.rewards();
@@ -184,14 +198,11 @@ where
                     .compute_advantages(rewards, values.clone(), dones)
                     .unwrap();
 
-                let (old_log_probs, entropy) = self
-                    .actor_network
-                    .log_prob_and_entropy(states, actions)
-                    .unwrap();
+                let batch_old_log_probs = old_log_probs.pop_front().unwrap();
 
                 // Compute the loss and backpropagate
                 let (actor_loss, critic_loss) = self
-                    .compute_loss(states, actions, old_log_probs, rewards, advantages)
+                    .compute_loss(states, actions, batch_old_log_probs, advantages)
                     .unwrap();
 
                 println!("Actor Loss: {}, Critic Loss: {}", actor_loss, critic_loss);
@@ -235,6 +246,7 @@ where
             last_value = value;
         }
 
+        advantages.reverse();
         let advantages =
             candle_core::Tensor::from_vec(advantages, rewards.shape(), rewards.device()).unwrap();
 
@@ -250,6 +262,7 @@ where
                 .unwrap()
                 .to_scalar::<f32>()
                 .unwrap()
+                .sqrt()
                 .max(epsilon);
             ((advantages.clone() - advantages_mean.clone() as f64).unwrap()
                 / (advantages_std_sqrt as f64))
@@ -268,7 +281,6 @@ where
         states: &candle_core::Tensor,
         actions: &candle_core::Tensor,
         old_log_probs: candle_core::Tensor,
-        rewards: &candle_core::Tensor,
         advantages: candle_core::Tensor,
     ) -> Result<(f64, f64), Error> {
         let values = self.critic_network.forward(states).unwrap();
@@ -295,7 +307,12 @@ where
             log_probs.mean_all().unwrap().to_scalar::<f32>().unwrap()
         );
 
-        let ratio = (log_probs - old_log_probs).unwrap().exp().unwrap();
+        let ratio = (log_probs - old_log_probs)
+            .unwrap()
+            .clamp(-20.0, 20.0)
+            .unwrap()
+            .exp()
+            .unwrap();
 
         let advantages = advantages.unsqueeze(1).unwrap();
         let advantages = advantages.expand(ratio.dims()).unwrap();
@@ -334,13 +351,42 @@ where
         let critic_loss = critic_loss.mean(0).unwrap().to_scalar::<f32>().unwrap() as f64;
 
         let entropy_loss = (-1.0 * entropy.mean(0).unwrap()).unwrap();
+        println!(
+            "Entropy: {}",
+            entropy.mean_all().unwrap().to_scalar::<f32>().unwrap()
+        );
 
-        let loss = ((actor_loss.clone() + ((self.vf_coef as f64) * critic_loss.clone())).unwrap()
-            + ((-self.ent_coef as f64) * entropy_loss))
+        //let loss = ((actor_loss.clone() + ((self.vf_coef as f64) * critic_loss.clone())).unwrap()
+        //    + ((self.ent_coef as f64) * entropy_loss))
+        //    .unwrap();
+        let final_actor_loss =
+            (actor_loss.clone() + ((self.ent_coef as f64) * entropy_loss.clone()))?;
+
+        let final_critic_loss = (self.vf_coef as f64) * critic_loss.clone();
+        let final_critic_loss = Tensor::from_vec(vec![final_critic_loss], vec![1], states.device())
+            .unwrap()
+            .mean_all()
             .unwrap();
+        println!(
+            "Final Critic Loss: {}",
+            final_critic_loss.to_scalar::<f64>().unwrap()
+        );
 
-        self.actor_optimizer.backward_step(&loss.clone()).unwrap();
-        self.critic_optimizer.backward_step(&loss).unwrap();
+        println!(
+            "Final Actor Loss: {}",
+            final_actor_loss
+                .mean_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap()
+        );
+
+        self.actor_optimizer
+            .backward_step(&final_actor_loss)
+            .unwrap();
+        self.critic_optimizer
+            .backward_step(&final_critic_loss)
+            .unwrap();
 
         let actor_loss_scalar = actor_loss.mean_all().unwrap().to_scalar::<f32>().unwrap() as f64;
 
@@ -439,7 +485,6 @@ mod tests {
             vb.clone(),
         )
         .activation(candle_nn::Activation::Relu)
-        .output_activation(candle_nn::Activation::Sigmoid)
         .build()
         .unwrap();
 
@@ -469,8 +514,9 @@ mod tests {
             critic_optimizer,
             actor_optimizer,
         )
-        .batch_size(128)
-        .normalize_advantage(false)
+        .batch_size(1024)
+        .mini_batch_size(256)
+        .normalize_advantage(true)
         .build();
         actor.learn(&mut env, 100000).unwrap();
     }

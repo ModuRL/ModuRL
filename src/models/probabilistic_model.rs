@@ -52,15 +52,14 @@ impl ProbabilisticActor for MLPProbabilisticActor {
         let action_std = output
             .narrow(1, output.dims()[1] / 2, output.dims()[1] / 2)
             .unwrap();
-        let action_std = action_std.abs().unwrap(); // make sure std is positive
-                                                    // calculate the probability of the action
+        let action_std = action_std.exp().unwrap();
         let log_std = (action_std.log().unwrap() + f32::EPSILON as f64).unwrap();
         let log_prob = -0.5
             * ((((action.clone() - action_mean.clone()).unwrap()
                 * (action - action_mean.clone()).unwrap()
                 / (action_std.clone() * action_std).unwrap())
             .unwrap()
-                + log_std.clone())
+                + 2.0 * log_std.clone())
             .unwrap()
                 + (2.0 * std::f64::consts::PI).ln())
             .unwrap();
