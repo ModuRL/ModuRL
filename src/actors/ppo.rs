@@ -1,13 +1,12 @@
-use std::collections::{HashMap, VecDeque};
-
-use crate::tensor_operations::torch_like_min;
 use candle_core::{safetensors::save, Error, Tensor};
 use candle_nn::Optimizer;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{
     buffers::{rollout_buffer::RolloutBuffer, Experience},
     models::probabilistic_model::ProbabilisticActor,
     spaces,
+    tensor_operations::torch_like_min,
 };
 
 use super::Actor;
@@ -173,39 +172,45 @@ where
     fn optimize(&mut self) -> Result<(), Error> {
         for epoch in 0..self.num_epochs {
             let samples = self.rollout_buffer.get_all();
-            let mut old_log_probs = VecDeque::new();
-            for sample in &samples {
-                let actions = sample.actions();
-                let states = sample.states();
-
-                let (log_probs, entropy) = self
-                    .actor_network
-                    .log_prob_and_entropy(states, actions)
-                    .unwrap();
-
-                old_log_probs.push_back(log_probs);
-            }
-
+            let mut old_log_probs = vec![];
+            let mut returns = vec![];
+            let mut advantages = vec![];
             for sample in &samples {
                 let actions = sample.actions();
                 let states = sample.states();
                 let rewards = sample.rewards();
                 let dones = sample.dones();
 
+                let (log_probs, entropy) = self
+                    .actor_network
+                    .log_prob_and_entropy(states, actions)
+                    .unwrap();
+
                 let values = self.critic_network.forward(states).unwrap();
 
-                let advantages = self
+                let advantage = self
                     .compute_advantages(rewards, values.clone(), dones)
                     .unwrap();
 
-                let batch_old_log_probs = old_log_probs.pop_front().unwrap();
+                let this_return = self.compute_returns(rewards, dones).unwrap();
+
+                old_log_probs.push(log_probs);
+                returns.push(this_return);
+                advantages.push(advantage);
+            }
+
+            for (i, sample) in samples.iter().enumerate() {
+                let actions = sample.actions();
+                let states = sample.states();
+
+                let returns = returns[i].clone();
+                let advantages = advantages[i].clone();
+                let batch_old_log_probs = old_log_probs[i].clone();
 
                 // Compute the loss and backpropagate
                 let (actor_loss, critic_loss) = self
-                    .compute_loss(states, actions, batch_old_log_probs, advantages)
+                    .compute_loss(states, actions, batch_old_log_probs, advantages, returns)
                     .unwrap();
-
-                println!("Actor Loss: {}, Critic Loss: {}", actor_loss, critic_loss);
             }
         }
 
@@ -250,7 +255,46 @@ where
         let advantages =
             candle_core::Tensor::from_vec(advantages, rewards.shape(), rewards.device()).unwrap();
 
-        let advantages = advantages.clone();
+        Ok(advantages)
+    }
+
+    // Computes returns as the discounted sum of rewards.
+    // Assumes rewards and dones are 1D tensors.
+    fn compute_returns(
+        &self,
+        rewards: &candle_core::Tensor,
+        dones: &candle_core::Tensor,
+    ) -> Result<candle_core::Tensor, candle_core::Error> {
+        let mut returns = Vec::new();
+        let mut next_return = 0.0f32;
+        // Loop over the trajectory in reverse
+        for i in (0..rewards.dims1().unwrap()).rev() {
+            let done = dones.get(i).unwrap().to_scalar::<f32>().unwrap();
+            // If the episode ended at this step, reset the return
+            if done > 0.5 {
+                next_return = 0.0;
+            }
+            let reward = rewards.get(i).unwrap().to_scalar::<f32>().unwrap();
+            next_return = reward + self.gamma * next_return;
+            returns.push(next_return);
+        }
+        // Reverse back to match the original order
+        returns.reverse();
+        let returns_tensor =
+            candle_core::Tensor::from_vec(returns, rewards.shape(), rewards.device())?;
+        Ok(returns_tensor)
+    }
+
+    /// Compute the loss for the actor and critic networks
+    /// Then backpropagate the loss
+    fn compute_loss(
+        &mut self,
+        states: &candle_core::Tensor,
+        actions: &candle_core::Tensor,
+        old_log_probs: candle_core::Tensor,
+        advantages: candle_core::Tensor,
+        returns: candle_core::Tensor,
+    ) -> Result<(f64, f64), Error> {
         let advantages = if self.normalize_advantage {
             let advantages_mean = advantages.mean(0).unwrap().to_scalar::<f32>().unwrap();
             let advantage_diff = (advantages.clone() - advantages_mean.clone() as f64).unwrap();
@@ -271,41 +315,10 @@ where
             advantages
         };
 
-        Ok(advantages)
-    }
-
-    /// Compute the loss for the actor and critic networks
-    /// Then backpropagate the loss
-    fn compute_loss(
-        &mut self,
-        states: &candle_core::Tensor,
-        actions: &candle_core::Tensor,
-        old_log_probs: candle_core::Tensor,
-        advantages: candle_core::Tensor,
-    ) -> Result<(f64, f64), Error> {
-        let values = self.critic_network.forward(states).unwrap();
-        let values = values.squeeze(1).unwrap();
-
-        println!(
-            "Advantages mean: {}",
-            advantages.mean(0).unwrap().to_scalar::<f32>().unwrap()
-        );
-        let values = values.squeeze(1).unwrap();
-        let target_values = (advantages.clone() + values.clone()).unwrap();
-        println!(
-            "Values mean: {}",
-            values.mean(0).unwrap().to_scalar::<f32>().unwrap()
-        );
-
         let (log_probs, entropy) = self
             .actor_network
             .log_prob_and_entropy(states, actions)
             .unwrap();
-
-        println!(
-            "Log probs: {}",
-            log_probs.mean_all().unwrap().to_scalar::<f32>().unwrap()
-        );
 
         let ratio = (log_probs - old_log_probs)
             .unwrap()
@@ -344,37 +357,33 @@ where
             }
         };
 
-        let values_minus_targets = (values.clone() - target_values.clone()).unwrap();
+        let values = self.critic_network.forward(states).unwrap();
+        let values = values.squeeze(1).unwrap();
+
+        let values = values.squeeze(1).unwrap();
+        let values_minus_targets = (values - returns.clone()).unwrap();
+
         let critic_loss = (values_minus_targets.clone() * values_minus_targets).unwrap();
 
         // Use mse for now
-        let critic_loss = critic_loss.mean(0).unwrap().to_scalar::<f32>().unwrap() as f64;
+        let critic_loss = critic_loss.mean(0).unwrap();
 
         let entropy_loss = (-1.0 * entropy.mean(0).unwrap()).unwrap();
-        println!(
-            "Entropy: {}",
-            entropy.mean_all().unwrap().to_scalar::<f32>().unwrap()
-        );
 
-        //let loss = ((actor_loss.clone() + ((self.vf_coef as f64) * critic_loss.clone())).unwrap()
-        //    + ((self.ent_coef as f64) * entropy_loss))
-        //    .unwrap();
         let final_actor_loss =
             (actor_loss.clone() + ((self.ent_coef as f64) * entropy_loss.clone()))?;
 
-        let final_critic_loss = (self.vf_coef as f64) * critic_loss.clone();
-        let final_critic_loss = Tensor::from_vec(vec![final_critic_loss], vec![1], states.device())
-            .unwrap()
-            .mean_all()
-            .unwrap();
+        let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone()).unwrap();
         println!(
-            "Final Critic Loss: {}",
-            final_critic_loss.to_scalar::<f64>().unwrap()
-        );
-
-        println!(
-            "Final Actor Loss: {}",
+            "Critic Loss: {}, Final Actor Loss Magnitude: {}",
+            final_critic_loss
+                .mean_all()
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap(),
             final_actor_loss
+                .abs()
+                .unwrap()
                 .mean_all()
                 .unwrap()
                 .to_scalar::<f32>()
@@ -390,7 +399,10 @@ where
 
         let actor_loss_scalar = actor_loss.mean_all().unwrap().to_scalar::<f32>().unwrap() as f64;
 
-        Ok((actor_loss_scalar, critic_loss))
+        Ok((
+            actor_loss_scalar,
+            critic_loss.mean_all().unwrap().to_scalar::<f32>().unwrap() as f64,
+        ))
     }
 }
 
@@ -471,7 +483,11 @@ mod tests {
     use candle_nn::{AdamW, ParamsAdamW, VarBuilder, VarMap};
 
     #[test]
-    fn test_ppo_actor_cartpole() {
+    fn ppo_cartpole() {
+        let tracer = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::set_global_default(tracer).unwrap();
         let mut env = CartPole::new(&candle_core::Device::Cpu);
         let observation_space = env.observation_space();
         let action_space = env.action_space();
@@ -484,12 +500,14 @@ mod tests {
             action_space.shape().iter().sum::<usize>() * 2,
             vb.clone(),
         )
-        .activation(candle_nn::Activation::Relu)
+        .activation(candle_nn::Activation::Gelu)
+        .output_activation(candle_nn::Activation::Sigmoid)
+        .hidden_layer_sizes(vec![64, 64])
         .build()
         .unwrap();
 
         let mut config = ParamsAdamW::default();
-        config.lr = 1e-4;
+        config.lr = 3e-5;
 
         let actor_optimizer =
             AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
@@ -499,7 +517,8 @@ mod tests {
             VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
 
         let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, vb)
-            .activation(candle_nn::Activation::Relu)
+            .activation(candle_nn::Activation::Gelu)
+            .hidden_layer_sizes(vec![64, 32])
             .build()
             .unwrap();
 
@@ -514,10 +533,11 @@ mod tests {
             critic_optimizer,
             actor_optimizer,
         )
-        .batch_size(1024)
-        .mini_batch_size(256)
+        .batch_size(128)
+        .mini_batch_size(32)
         .normalize_advantage(true)
+        .clipped(true)
         .build();
-        actor.learn(&mut env, 100000).unwrap();
+        actor.learn(&mut env, 400).unwrap();
     }
 }
