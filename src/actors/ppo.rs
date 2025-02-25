@@ -297,7 +297,7 @@ where
     ) -> Result<(f64, f64), Error> {
         let advantages = if self.normalize_advantage {
             let advantages_mean = advantages.mean(0).unwrap().to_scalar::<f32>().unwrap();
-            let advantage_diff = (advantages.clone() - advantages_mean.clone() as f64).unwrap();
+            let advantage_diff = (advantages.clone() - advantages_mean as f64).unwrap();
 
             let epsilon = f32::EPSILON;
             let advantages_std_sqrt = (advantage_diff.clone() * advantage_diff)
@@ -322,7 +322,7 @@ where
 
         let ratio = (log_probs - old_log_probs)
             .unwrap()
-            .clamp(-20.0, 20.0)
+            .clamp(-5.0, 5.0)
             .unwrap()
             .exp()
             .unwrap();
@@ -501,13 +501,12 @@ mod tests {
             vb.clone(),
         )
         .activation(candle_nn::Activation::Gelu)
-        .output_activation(candle_nn::Activation::Sigmoid)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .unwrap();
 
         let mut config = ParamsAdamW::default();
-        config.lr = 3e-5;
+        config.lr = 3e-4;
 
         let actor_optimizer =
             AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
@@ -533,11 +532,12 @@ mod tests {
             critic_optimizer,
             actor_optimizer,
         )
-        .batch_size(128)
-        .mini_batch_size(32)
+        .batch_size(1024)
+        .mini_batch_size(128)
         .normalize_advantage(true)
+        .ent_coef(0.05)
         .clipped(true)
         .build();
-        actor.learn(&mut env, 400).unwrap();
+        actor.learn(&mut env, 40000).unwrap();
     }
 }
