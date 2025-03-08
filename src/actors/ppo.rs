@@ -225,35 +225,30 @@ where
         dones: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, Error> {
         let mut advantages = vec![];
-        let mut last_advantage = 0.0;
+        let mut last_advantage = Tensor::from_vec(vec![0.0f32], &[], values.device())?;
         let values = values.squeeze(1).unwrap();
         let values = values.squeeze(1).unwrap();
 
-        let mut last_value = values
-            .get(values.dims()[0] - 1)
-            .unwrap()
-            .get(0)
-            .unwrap()
-            .to_scalar()
-            .unwrap();
+        let mut last_value = values.get(values.dims()[0] - 1).unwrap().get(0).unwrap();
 
         for i in (0..rewards.dims1().unwrap()).rev() {
             if dones.get(i).unwrap().to_scalar::<f32>().unwrap() > 0.5 {
-                last_advantage = 0.0;
-                last_value = 0.0;
+                last_advantage = Tensor::from_vec(vec![0.0f32], &[], values.device())?;
+                last_value = Tensor::from_vec(vec![0.0f32], &[], values.device()).unwrap();
             }
-            let reward = rewards.get(i).unwrap().to_scalar::<f32>().unwrap();
-            let value = values.get(i).unwrap().to_scalar().unwrap();
+            let reward = rewards.get(i).unwrap();
+            let value = values.get(i).unwrap();
 
-            let delta = reward + self.gamma * last_value - value;
-            last_advantage = delta + self.gamma * self.gae_lambda * last_advantage;
-            advantages.push(last_advantage);
+            let delta = reward + self.gamma as f64 * last_value - value.clone();
+            last_advantage = (delta.unwrap()
+                + self.gamma as f64 * self.gae_lambda as f64 * last_advantage)
+                .unwrap();
+            advantages.push(last_advantage.clone());
             last_value = value;
         }
 
         advantages.reverse();
-        let advantages =
-            candle_core::Tensor::from_vec(advantages, rewards.shape(), rewards.device()).unwrap();
+        let advantages = Tensor::stack(&advantages, 0).unwrap();
 
         Ok(advantages)
     }
@@ -266,22 +261,21 @@ where
         dones: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
         let mut returns = Vec::new();
-        let mut next_return = 0.0f32;
+        let mut next_return = Tensor::from_vec(vec![0.0f32], &[], rewards.device())?;
         // Loop over the trajectory in reverse
         for i in (0..rewards.dims1().unwrap()).rev() {
             let done = dones.get(i).unwrap().to_scalar::<f32>().unwrap();
             // If the episode ended at this step, reset the return
             if done > 0.5 {
-                next_return = 0.0;
+                next_return = Tensor::from_vec(vec![0.0f32], &[], rewards.device())?;
             }
-            let reward = rewards.get(i).unwrap().to_scalar::<f32>().unwrap();
-            next_return = reward + self.gamma * next_return;
-            returns.push(next_return);
+            let reward = rewards.get(i).unwrap();
+            next_return = (reward + self.gamma as f64 * next_return).unwrap();
+            returns.push(next_return.clone());
         }
         // Reverse back to match the original order
         returns.reverse();
-        let returns_tensor =
-            candle_core::Tensor::from_vec(returns, rewards.shape(), rewards.device())?;
+        let returns_tensor = Tensor::stack(&returns, 0).unwrap();
         Ok(returns_tensor)
     }
 
@@ -340,35 +334,29 @@ where
                         &(ratio.clone() * advantages.clone()).unwrap(),
                         &(clipped_ratio.clone() * advantages.clone()).unwrap(),
                     )
-                    .unwrap()
-                    .mean(0)
                     .unwrap())
                 .unwrap();
                 actor_loss
             }
             false => {
-                let actor_loss = (-1.0
-                    * (ratio.clone() * advantages.clone())
-                        .unwrap()
-                        .mean(0)
-                        .unwrap())
-                .unwrap();
+                let actor_loss = (-1.0 * (ratio.clone() * advantages.clone()).unwrap()).unwrap();
                 actor_loss
             }
         };
 
         let values = self.critic_network.forward(states).unwrap();
         let values = values.squeeze(1).unwrap();
-
         let values = values.squeeze(1).unwrap();
-        let values_minus_targets = (values - returns.clone()).unwrap();
 
-        let critic_loss = (values_minus_targets.clone() * values_minus_targets).unwrap();
+        println!("Returns: {:?}", returns.mean_all().unwrap());
+        println!("Values: {:?}", values.mean_all().unwrap());
+
+        let values_minus_targets = (values.clone() - returns.clone()).unwrap();
 
         // Use mse for now
-        let critic_loss = critic_loss.mean(0).unwrap();
+        let critic_loss = (values_minus_targets.clone() * values_minus_targets).unwrap();
 
-        let entropy_loss = (-1.0 * entropy.mean(0).unwrap()).unwrap();
+        let entropy_loss = (-1.0 * entropy).unwrap();
 
         let final_actor_loss =
             (actor_loss.clone() + ((self.ent_coef as f64) * entropy_loss.clone()))?;
@@ -500,7 +488,7 @@ mod tests {
             action_space.shape().iter().sum::<usize>() * 2,
             vb.clone(),
         )
-        .activation(candle_nn::Activation::Gelu)
+        .activation(candle_nn::Activation::Relu)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .unwrap();
@@ -516,8 +504,8 @@ mod tests {
             VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
 
         let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, vb)
-            .activation(candle_nn::Activation::Gelu)
-            .hidden_layer_sizes(vec![64, 32])
+            .activation(candle_nn::Activation::Relu)
+            .hidden_layer_sizes(vec![64, 64])
             .build()
             .unwrap();
 
@@ -532,12 +520,12 @@ mod tests {
             critic_optimizer,
             actor_optimizer,
         )
-        .batch_size(1024)
+        .batch_size(512)
         .mini_batch_size(128)
         .normalize_advantage(true)
-        .ent_coef(0.05)
+        .ent_coef(0.01)
         .clipped(true)
         .build();
-        actor.learn(&mut env, 40000).unwrap();
+        actor.learn(&mut env, 10000).unwrap();
     }
 }
