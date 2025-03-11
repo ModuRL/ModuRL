@@ -5,13 +5,46 @@ use candle_nn::Optimizer;
 use rand::Rng;
 
 use crate::{
+    buffers::experience,
     buffers::experience_replay::ExperienceReplay,
-    buffers::Experience,
     gym::Gym,
     spaces::{Discrete, Space},
 };
 
 use super::Actor;
+
+#[derive(Clone)]
+struct DQNActorExperience {
+    state: Tensor,
+    next_state: Tensor,
+    action: Tensor,
+    reward: f32,
+    done: f32,
+}
+
+impl experience::Experience for DQNActorExperience {
+    fn get_elements(&self) -> Vec<Tensor> {
+        vec![
+            self.state.clone(),
+            self.next_state.clone(),
+            self.action.clone(),
+            Tensor::from_vec(vec![self.reward], [].to_vec(), self.state.device()).unwrap(),
+            Tensor::from_vec(vec![self.done], [].to_vec(), self.state.device()).unwrap(),
+        ]
+    }
+}
+
+impl DQNActorExperience {
+    pub fn new(state: Tensor, next_state: Tensor, action: Tensor, reward: f32, done: f32) -> Self {
+        Self {
+            state,
+            next_state,
+            action,
+            reward,
+            done,
+        }
+    }
+}
 
 /// Deep Q-Network actor.
 /// The DQN actor uses a neural network to approximate the Q-values of the environment for each action.
@@ -27,7 +60,7 @@ where
     epsilon_decay: f32,
     action_space: Discrete,
     observation_space: Box<dyn Space>,
-    experience_replay: ExperienceReplay,
+    experience_replay: ExperienceReplay<DQNActorExperience>,
     gamma: f32,
     epochs: usize,
 }
@@ -142,11 +175,12 @@ where
             return Ok(()); // Not enough samples to train.
         }
         let training_batch = self.experience_replay.sample()?;
-        let actions = training_batch.actions();
-        let rewards = training_batch.rewards();
-        let states = training_batch.states();
-        let dones = training_batch.dones();
-        let next_states = training_batch.next_states();
+        let elements = training_batch.get_elements();
+        let states = elements[0].clone();
+        let next_states = elements[1].clone();
+        let actions = elements[2].clone();
+        let rewards = elements[3].clone();
+        let dones = elements[4].clone();
 
         // Make sure the tensors are of the correct type.
         let actions = actions.to_dtype(candle_core::DType::I64)?;
@@ -224,12 +258,12 @@ where
                 let (next_observation, reward, done) = env.step(action.clone())?;
                 total_reward += reward;
                 // Add the experience to the replay buffer.
-                self.experience_replay.add(Experience::new(
+                self.experience_replay.add(DQNActorExperience::new(
                     observation,
                     next_observation.clone(),
                     action,
                     reward,
-                    done,
+                    if done { 1.0 } else { 0.0 },
                 ));
                 observation = next_observation;
 
@@ -275,7 +309,7 @@ mod tests {
 
     // Test the DQN actor by training it on the CartPole environment.
     #[test]
-    fn test_dqn_actor() {
+    fn dqn_cartpole() {
         let mut env = CartPole::new(&candle_core::Device::Cpu);
         let observation_space = env.observation_space();
         let var_map = VarMap::new();
@@ -299,6 +333,6 @@ mod tests {
         .batch_size(10) // So that it actually reaches the optimization step.
         .build();
 
-        actor.learn(&mut env, 5).expect("Failed to learn");
+        actor.learn(&mut env, 100).expect("Failed to learn");
     }
 }

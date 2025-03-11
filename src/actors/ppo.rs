@@ -3,7 +3,7 @@ use candle_nn::Optimizer;
 use std::collections::{HashMap, VecDeque};
 
 use crate::{
-    buffers::{rollout_buffer::RolloutBuffer, Experience},
+    buffers::{rollout_buffer::RolloutBuffer, experience},
     models::probabilistic_model::ProbabilisticActor,
     spaces,
     tensor_operations::torch_like_min,
@@ -222,7 +222,7 @@ where
             average_actor_loss /= samples.len() as f64;
             average_critic_loss /= samples.len() as f64;
 
-            println!("Epoch: {}", epoch);
+            println!("Epoch: {}", epoch + 1);
             println!(
                 "Average Actor Loss: {}, Average Critic Loss: {}",
                 average_actor_loss, average_critic_loss
@@ -332,7 +332,7 @@ where
 
         println!(
             "KL Divergence: {}",
-            (old_log_probs.clone() - log_probs.clone())
+            (log_probs.clone() - old_log_probs.clone())
                 .unwrap()
                 .mean_all()
                 .unwrap()
@@ -436,7 +436,7 @@ where
                 let actual_action = actual_action.squeeze(0).unwrap();
 
                 (next_obs, reward, done) = env.step(actual_action).unwrap();
-                self.rollout_buffer.add(Experience::new(
+                self.rollout_buffer.add(experience::new(
                     obs.clone(),
                     next_obs.clone(),
                     action,
