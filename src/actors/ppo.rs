@@ -3,13 +3,61 @@ use candle_nn::Optimizer;
 use std::collections::{HashMap, VecDeque};
 
 use crate::{
-    buffers::{rollout_buffer::RolloutBuffer, experience},
+    buffers::{experience, rollout_buffer::RolloutBuffer},
     models::probabilistic_model::ProbabilisticActor,
     spaces,
     tensor_operations::torch_like_min,
 };
 
 use super::Actor;
+
+#[derive(Debug, Clone)]
+struct PPOExperience {
+    state: Tensor,
+    next_state: Tensor,
+    action: Tensor,
+    reward: f32,
+    done: bool,
+    log_prob: Tensor,
+}
+
+impl PPOExperience {
+    pub fn new(
+        state: Tensor,
+        next_state: Tensor,
+        action: Tensor,
+        reward: f32,
+        done: bool,
+        log_prob: Tensor,
+    ) -> Self {
+        Self {
+            state,
+            next_state,
+            action,
+            reward,
+            done,
+            log_prob,
+        }
+    }
+}
+
+impl experience::Experience for PPOExperience {
+    fn get_elements(&self) -> Vec<Tensor> {
+        vec![
+            self.state.clone(),
+            self.next_state.clone(),
+            self.action.clone(),
+            Tensor::from_vec(vec![self.reward], &[], self.state.device()).unwrap(),
+            Tensor::from_vec(
+                vec![if self.done { 1.0f32 } else { 0.0f32 }],
+                &[],
+                self.state.device(),
+            )
+            .unwrap(),
+            self.log_prob.clone(),
+        ]
+    }
+}
 
 pub struct PPOActor<O>
 where
@@ -28,7 +76,7 @@ where
     action_space: Box<dyn spaces::Space>,
     critic_network: Box<dyn candle_core::Module>,
     actor_network: Box<dyn ProbabilisticActor<Error = Error>>,
-    rollout_buffer: RolloutBuffer,
+    rollout_buffer: RolloutBuffer<PPOExperience>,
     num_epochs: usize,
     batch_size: usize,
 }
@@ -176,23 +224,19 @@ where
             let mut returns = vec![];
             let mut advantages = vec![];
             for sample in &samples {
-                let actions = sample.actions();
-                let states = sample.states();
-                let rewards = sample.rewards();
-                let dones = sample.dones();
+                let elements = sample.get_elements();
+                let states = elements[0].clone();
+                let rewards = elements[3].clone();
+                let dones = elements[4].clone();
+                let log_probs = elements[5].clone();
 
-                let (log_probs, entropy) = self
-                    .actor_network
-                    .log_prob_and_entropy(states, actions)
-                    .unwrap();
-
-                let values = self.critic_network.forward(states).unwrap();
+                let values = self.critic_network.forward(&states).unwrap();
 
                 let advantage = self
-                    .compute_advantages(rewards, values.clone(), dones)
+                    .compute_advantages(&rewards, values.clone(), &dones)
                     .unwrap();
 
-                let this_return = self.compute_returns(rewards, &values, dones).unwrap();
+                let this_return = self.compute_returns(&rewards, &values, &dones).unwrap();
 
                 old_log_probs.push(log_probs);
                 returns.push(this_return);
@@ -203,8 +247,8 @@ where
             let mut average_critic_loss = 0.0;
 
             for (i, sample) in samples.iter().enumerate() {
-                let actions = sample.actions();
-                let states = sample.states();
+                let actions = sample.get_elements()[2].clone();
+                let states = sample.get_elements()[0].clone();
 
                 let returns = returns[i].clone();
                 let advantages = advantages[i].clone();
@@ -212,7 +256,7 @@ where
 
                 // Compute the loss and backpropagate
                 let (actor_loss, critic_loss) = self
-                    .compute_loss(states, actions, batch_old_log_probs, advantages, returns)
+                    .compute_loss(&states, &actions, batch_old_log_probs, advantages, returns)
                     .unwrap();
 
                 average_actor_loss += actor_loss;
@@ -435,13 +479,20 @@ where
                 let actual_action = self.action_space.from_neurons(&action);
                 let actual_action = actual_action.squeeze(0).unwrap();
 
+                let (mut log_prob, _) = self
+                    .actor_network
+                    .log_prob_and_entropy(&obs, &action)
+                    .unwrap();
+                log_prob = log_prob.squeeze(0).unwrap();
+
                 (next_obs, reward, done) = env.step(actual_action).unwrap();
-                self.rollout_buffer.add(experience::new(
+                self.rollout_buffer.add(PPOExperience::new(
                     obs.clone(),
                     next_obs.clone(),
                     action,
                     reward,
                     done,
+                    log_prob,
                 ));
                 obs = next_obs;
             }
@@ -505,7 +556,7 @@ mod tests {
         .unwrap();
 
         let mut config = ParamsAdamW::default();
-        config.lr = 2.5e-4;
+        config.lr = 1e-4;
 
         let actor_optimizer =
             AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
