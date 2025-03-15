@@ -4,7 +4,7 @@ use candle_core::Tensor;
 pub mod experience;
 use experience::Experience;
 
-pub struct ExperienceSample<T>
+pub struct ExperienceBatch<T>
 where
     T: Experience,
 {
@@ -12,7 +12,7 @@ where
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T> ExperienceSample<T>
+impl<T> ExperienceBatch<T>
 where
     T: Experience,
 {

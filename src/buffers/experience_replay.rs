@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use candle_core::{Error, Tensor};
 use rand::{seq::SliceRandom, Rng};
 
-use super::{experience, ExperienceSample};
+use super::{experience, ExperienceBatch};
 
 pub(crate) struct ExperienceReplay<T>
 where
@@ -33,7 +33,7 @@ where
         self.buffer.push_front(experience);
     }
 
-    pub fn sample(&self) -> Result<ExperienceSample<T>, Error> {
+    pub fn sample(&self) -> Result<ExperienceBatch<T>, Error> {
         let mut rng = rand::rng();
 
         // shuffle the buffer
@@ -45,7 +45,7 @@ where
         let batch = &buffer[0..self.batch_size.min(total_samples)];
 
         let experience_sample =
-            ExperienceSample::new(batch.to_vec().iter().cloned().cloned().collect());
+            ExperienceBatch::new(batch.to_vec().iter().cloned().cloned().collect());
 
         Ok(experience_sample)
     }

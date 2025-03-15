@@ -3,7 +3,7 @@ use std::vec;
 use candle_core::Tensor;
 use rand::seq::SliceRandom;
 
-use super::{experience, ExperienceSample};
+use super::{experience, ExperienceBatch};
 
 pub struct RolloutBuffer<T> {
     buffer: Vec<T>,
@@ -25,14 +25,14 @@ where
         self.buffer.push(experience);
     }
 
-    pub fn clear_and_get_all(&mut self) -> Vec<ExperienceSample<T>> {
+    pub fn clear_and_get_all(&mut self) -> Vec<ExperienceBatch<T>> {
         let mut samples = vec![];
         for i in 0..(self.buffer.len() / self.batch_size) {
             let start = i * self.batch_size;
             let end = start + self.batch_size;
             let experiences = &self.buffer[start..end];
 
-            let experience_sample = ExperienceSample::new(experiences.to_vec());
+            let experience_sample = ExperienceBatch::new(experiences.to_vec());
 
             samples.push(experience_sample);
         }
@@ -42,7 +42,7 @@ where
         samples
     }
 
-    pub fn get_all_shuffled(&mut self) -> Vec<ExperienceSample<T>> {
+    pub fn get_all_shuffled(&mut self) -> Vec<ExperienceBatch<T>> {
         // Shuffle the buffer
         self.buffer.shuffle(&mut rand::rng());
         let samples = self.clear_and_get_all();

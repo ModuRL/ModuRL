@@ -218,13 +218,13 @@ where
     O: Optimizer,
 {
     fn optimize(&mut self) -> Result<(), Error> {
-        let samples = self.rollout_buffer.clear_and_get_all();
+        let batches = self.rollout_buffer.clear_and_get_all();
         for epoch in 0..self.num_epochs {
             let mut old_log_probs = vec![];
             let mut returns = vec![];
             let mut advantages = vec![];
-            for sample in &samples {
-                let elements = sample.get_elements();
+            for batch in &batches {
+                let elements = batch.get_elements();
                 let states = elements[0].clone();
                 let rewards = elements[3].clone();
                 let dones = elements[4].clone();
@@ -232,23 +232,20 @@ where
 
                 let values = self.critic_network.forward(&states).unwrap();
 
-                let advantage = self
-                    .compute_advantages(&rewards, values.clone(), &dones)
-                    .unwrap();
+                let this_return = self.compute_returns(&rewards, &dones).unwrap();
+                let this_advantage = self.compute_gae(&rewards, &values, &dones).unwrap();
 
-                let this_return = self.compute_returns(&rewards, &values, &dones).unwrap();
-
-                old_log_probs.push(log_probs);
-                returns.push(this_return);
-                advantages.push(advantage);
+                returns.push(this_return.detach());
+                advantages.push(this_advantage.detach());
+                old_log_probs.push(log_probs.detach().clone());
             }
 
             let mut average_actor_loss = 0.0;
             let mut average_critic_loss = 0.0;
 
-            for (i, sample) in samples.iter().enumerate() {
-                let actions = sample.get_elements()[2].clone();
-                let states = sample.get_elements()[0].clone();
+            for (i, batch) in batches.iter().enumerate() {
+                let actions = batch.get_elements()[2].clone();
+                let states = batch.get_elements()[0].clone();
 
                 let returns = returns[i].clone();
                 let advantages = advantages[i].clone();
@@ -263,8 +260,8 @@ where
                 average_critic_loss += critic_loss;
             }
 
-            average_actor_loss /= samples.len() as f64;
-            average_critic_loss /= samples.len() as f64;
+            average_actor_loss /= batches.len() as f64;
+            average_critic_loss /= batches.len() as f64;
 
             println!("Epoch: {}", epoch + 1);
             println!(
@@ -276,67 +273,94 @@ where
         Ok(())
     }
 
-    // Uses GAE to compute the advantages
-    fn compute_advantages(
-        &self,
-        rewards: &candle_core::Tensor,
-        values: candle_core::Tensor,
-        dones: &candle_core::Tensor,
-    ) -> Result<candle_core::Tensor, Error> {
-        let mut advantages = vec![];
-        let mut last_advantage = Tensor::from_vec(vec![0.0f32], &[], values.device())?;
-        let values = values.squeeze(1).unwrap();
-        let values = values.squeeze(1).unwrap();
-
-        let mut last_value = values.get(values.dims()[0] - 1).unwrap().get(0).unwrap();
-
-        for i in (0..rewards.dims1().unwrap()).rev() {
-            if dones.get(i).unwrap().to_scalar::<f32>().unwrap() > 0.5 {
-                last_advantage = Tensor::from_vec(vec![0.0f32], &[], values.device())?;
-                last_value = Tensor::from_vec(vec![0.0f32], &[], values.device()).unwrap();
-            }
-            let reward = rewards.get(i).unwrap();
-            let value = values.get(i).unwrap();
-
-            let delta = reward + self.gamma as f64 * last_value - value.clone();
-            last_advantage = (delta.unwrap()
-                + self.gamma as f64 * self.gae_lambda as f64 * last_advantage)
-                .unwrap();
-            advantages.push(last_advantage.clone());
-            last_value = value;
-        }
-
-        advantages.reverse();
-        let advantages = Tensor::stack(&advantages, 0).unwrap();
-
-        Ok(advantages)
-    }
-
     // Computes returns as the discounted sum of rewards.
     // Assumes rewards and dones are 1D tensors.
     fn compute_returns(
         &self,
         rewards: &candle_core::Tensor,
+        dones: &candle_core::Tensor,
+    ) -> Result<candle_core::Tensor, candle_core::Error> {
+        let mut running_return = 0.0;
+        let mut returns = vec![];
+
+        for i in (0..rewards.dims1().unwrap()).rev() {
+            let reward = rewards.i(i).unwrap().to_scalar::<f32>().unwrap() as f64;
+            let done = dones.i(i).unwrap().to_scalar::<f32>().unwrap() as f64 > 0.5;
+            if done {
+                running_return = 0.0;
+            }
+
+            running_return = reward + self.gamma as f64 * running_return;
+            returns.push(running_return as f32);
+        }
+
+        returns.reverse();
+        let returns_tensor =
+            candle_core::Tensor::from_vec(returns, rewards.shape(), rewards.device())?;
+
+        Ok(returns_tensor)
+    }
+
+    fn compute_gae(
+        &self,
+        rewards: &candle_core::Tensor,
         values: &candle_core::Tensor,
         dones: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
-        let seq_len = rewards.dims()[0];
+        let mut advantages: Vec<f32> = vec![];
+        let mut last_gae = 0.0;
 
-        // Create next_values by shifting values tensor
-        let next_values = values.i(1..seq_len).unwrap();
-        let next_values = next_values.squeeze(1).unwrap();
-        let next_values = next_values.squeeze(1).unwrap();
+        for i in (0..rewards.dims1().unwrap()).rev() {
+            let reward = rewards
+                .i(i)
+                .unwrap()
+                .reshape(&[])
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap() as f64;
+            let value = values
+                .i(i)
+                .unwrap()
+                .reshape(&[])
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap() as f64;
+            let done = dones
+                .i(i)
+                .unwrap()
+                .reshape(&[])
+                .unwrap()
+                .to_scalar::<f32>()
+                .unwrap() as f64
+                > 0.5;
+            let next_value = if i == rewards.dims1().unwrap() - 1 || done {
+                0.0
+            } else {
+                values
+                    .i(i + 1)
+                    .unwrap()
+                    .reshape(&[])
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap() as f64
+            };
 
-        // put an extra 0 at the end of next_values
-        let last_value = Tensor::from_vec(vec![0.0f32], &[1], values.device())?;
-        let next_values = Tensor::cat(&[next_values, last_value], 0).unwrap();
+            //delta = rewards[t] + gamma * next_value - values[t]
+            //last_gae = delta + gamma * gae_lambda * last_gae * (1 - dones[t])
+            //advantages[t] = last_gae
 
-        // Calculate returns: rewards + gamma * (1-dones) * next_values
-        let gamma_tensor = Tensor::full(self.gamma, rewards.shape(), rewards.device())?;
-        let next_value_contribution = ((1.0 - dones) * gamma_tensor * next_values).unwrap();
-        let returns = (rewards + next_value_contribution)?;
+            let delta = reward + self.gamma as f64 * next_value - value;
+            last_gae = delta
+                + self.gamma as f64 * self.gae_lambda as f64 * last_gae * (1.0 - f64::from(done));
+            advantages.push(last_gae as f32);
+        }
 
-        Ok(returns)
+        advantages.reverse();
+
+        let advantages_tensor =
+            candle_core::Tensor::from_vec(advantages, rewards.shape(), rewards.device()).unwrap();
+
+        return Ok(advantages_tensor);
     }
 
     /// Compute the loss for the actor and critic networks
@@ -353,7 +377,6 @@ where
             let advantages_mean = advantages.mean(0).unwrap().to_scalar::<f32>().unwrap();
             let advantage_diff = (advantages.clone() - advantages_mean as f64).unwrap();
 
-            let epsilon = f32::EPSILON;
             let advantages_std_sqrt = (advantage_diff.clone() * advantage_diff)
                 .unwrap()
                 .mean(0)
@@ -361,7 +384,7 @@ where
                 .to_scalar::<f32>()
                 .unwrap()
                 .sqrt()
-                .max(epsilon);
+                .max(f32::EPSILON);
             ((advantages.clone() - advantages_mean.clone() as f64).unwrap()
                 / (advantages_std_sqrt as f64))
                 .unwrap()
@@ -373,16 +396,6 @@ where
             .actor_network
             .log_prob_and_entropy(states, actions)
             .unwrap();
-
-        println!(
-            "KL Divergence: {}",
-            (log_probs.clone() - old_log_probs.clone())
-                .unwrap()
-                .mean_all()
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap()
-        );
 
         let ratio = (log_probs - old_log_probs)
             .unwrap()
@@ -418,15 +431,15 @@ where
         let values = values.squeeze(1).unwrap();
         let values = values.squeeze(1).unwrap();
 
-        //println!("Returns: {:?}", returns.mean_all().unwrap());
-        //println!("Values: {:?}", values.mean_all().unwrap());
+        println!("Returns: {:?}", returns.mean_all().unwrap());
+        println!("Values: {:?}", values.mean_all().unwrap());
 
         let values_minus_targets = (values.clone() - returns.clone()).unwrap();
 
         // Use mse for now
         let critic_loss = (values_minus_targets.clone() * values_minus_targets).unwrap();
 
-        let entropy_loss = (-1.0 * entropy).unwrap();
+        let entropy_loss = entropy;
 
         let final_actor_loss =
             (actor_loss.clone() + ((self.ent_coef as f64) * entropy_loss.clone()))?;
@@ -509,7 +522,7 @@ where
     }
 
     fn save(&self, vars: Vec<candle_core::Var>, path: &str) -> Result<(), Self::Error> {
-        // TODO! Reevaluate this is there ever a case where anything different happens.unwrap()
+        // TODO! Reevaluate this is there ever a case where anything different happens?
         // This is a copy paste from the DQN actor but I guess it shouldn't be needed to be implemented for every actor
         // It might be universal for all actors but load is different for each actor
 
@@ -556,7 +569,7 @@ mod tests {
         .unwrap();
 
         let mut config = ParamsAdamW::default();
-        config.lr = 1e-4;
+        config.lr = 3e-4;
 
         let actor_optimizer =
             AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
@@ -582,11 +595,15 @@ mod tests {
             critic_optimizer,
             actor_optimizer,
         )
-        .batch_size(512)
-        .mini_batch_size(64)
+        .batch_size(128)
+        .mini_batch_size(32)
         .normalize_advantage(true)
         .ent_coef(0.01)
+        .gamma(0.99)
+        .vf_coef(1.0)
+        .clip_range(0.2)
         .clipped(true)
+        .num_epochs(3)
         .build();
         actor.learn(&mut env, 1000).unwrap();
     }
