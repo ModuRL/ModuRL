@@ -36,7 +36,7 @@ impl ProbabilisticActor for MLPProbabilisticActor {
             Tensor::randn(0.0, 1.0, action_mean.dims(), action_mean.device()).unwrap();
         let dtype = action_mean.dtype();
         unit_normal = unit_normal.to_dtype(dtype).unwrap();
-        let action = action_mean + action_std * unit_normal;
+        let action = action_mean + action_std.exp() * unit_normal;
         action
     }
 
@@ -56,12 +56,12 @@ impl ProbabilisticActor for MLPProbabilisticActor {
         let log_std = (action_std.log().unwrap() + f32::EPSILON as f64).unwrap();
         let log_prob = -0.5
             * ((((action.clone() - action_mean.clone()).unwrap()
-                * (action - action_mean.clone()).unwrap()
+                * (action.clone() - action_mean.clone()).unwrap()
                 / (action_std.clone() * action_std).unwrap())
             .unwrap()
                 + 2.0 * log_std.clone())
             .unwrap()
-                + (2.0 * std::f64::consts::PI).ln())
+                + action.dims()[1] as f64 * (2.0 * std::f64::consts::PI).ln())
             .unwrap();
         let log_prob = log_prob.unwrap();
         // calculate the entropy

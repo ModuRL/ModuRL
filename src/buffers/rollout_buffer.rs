@@ -25,11 +25,20 @@ where
         self.buffer.push(experience);
     }
 
+    pub fn get_raw(&self) -> &Vec<T> {
+        &self.buffer
+    }
+
+    pub fn get_raw_mut(&mut self) -> &mut Vec<T> {
+        &mut self.buffer
+    }
+
     pub fn clear_and_get_all(&mut self) -> Vec<ExperienceBatch<T>> {
         let mut samples = vec![];
         for i in 0..(self.buffer.len() / self.batch_size) {
             let start = i * self.batch_size;
-            let end = start + self.batch_size;
+            let mut end = start + self.batch_size;
+            end = end.max(self.buffer.len());
             let experiences = &self.buffer[start..end];
 
             let experience_sample = ExperienceBatch::new(experiences.to_vec());
@@ -42,7 +51,9 @@ where
         samples
     }
 
-    pub fn get_all_shuffled(&mut self) -> Vec<ExperienceBatch<T>> {
+    /// Shuffles the buffer and returns all samples in a shuffled order.
+    /// Clears the buffer after returning the samples.
+    pub fn clear_and_get_all_shuffled(&mut self) -> Vec<ExperienceBatch<T>> {
         // Shuffle the buffer
         self.buffer.shuffle(&mut rand::rng());
         let samples = self.clear_and_get_all();

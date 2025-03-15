@@ -1,5 +1,5 @@
 use candle_core::{safetensors::save, Error, IndexOp, Tensor};
-use candle_nn::Optimizer;
+use candle_nn::{loss, Optimizer};
 use std::collections::{HashMap, VecDeque};
 
 use crate::{
@@ -19,6 +19,8 @@ struct PPOExperience {
     reward: f32,
     done: bool,
     log_prob: Tensor,
+    advantage: Option<Tensor>,
+    this_return: Option<Tensor>,
 }
 
 impl PPOExperience {
@@ -29,6 +31,8 @@ impl PPOExperience {
         reward: f32,
         done: bool,
         log_prob: Tensor,
+        advantage: Option<Tensor>,
+        this_return: Option<Tensor>,
     ) -> Self {
         Self {
             state,
@@ -37,6 +41,8 @@ impl PPOExperience {
             reward,
             done,
             log_prob,
+            advantage,
+            this_return,
         }
     }
 }
@@ -55,6 +61,12 @@ impl experience::Experience for PPOExperience {
             )
             .unwrap(),
             self.log_prob.clone(),
+            self.advantage
+                .clone()
+                .unwrap_or_else(|| panic!("Advantage not set")),
+            self.this_return
+                .clone()
+                .unwrap_or_else(|| panic!("Return not set")),
         ]
     }
 }
@@ -218,42 +230,28 @@ where
     O: Optimizer,
 {
     fn optimize(&mut self) -> Result<(), Error> {
-        let batches = self.rollout_buffer.clear_and_get_all();
+        self.add_advantage_and_return();
+        let batches = self.rollout_buffer.clear_and_get_all_shuffled();
         for epoch in 0..self.num_epochs {
-            let mut old_log_probs = vec![];
-            let mut returns = vec![];
-            let mut advantages = vec![];
-            for batch in &batches {
-                let elements = batch.get_elements();
-                let states = elements[0].clone();
-                let rewards = elements[3].clone();
-                let dones = elements[4].clone();
-                let log_probs = elements[5].clone();
-
-                let values = self.critic_network.forward(&states).unwrap();
-
-                let this_return = self.compute_returns(&rewards, &dones).unwrap();
-                let this_advantage = self.compute_gae(&rewards, &values, &dones).unwrap();
-
-                returns.push(this_return.detach());
-                advantages.push(this_advantage.detach());
-                old_log_probs.push(log_probs.detach().clone());
-            }
-
             let mut average_actor_loss = 0.0;
             let mut average_critic_loss = 0.0;
 
             for (i, batch) in batches.iter().enumerate() {
                 let actions = batch.get_elements()[2].clone();
                 let states = batch.get_elements()[0].clone();
-
-                let returns = returns[i].clone();
-                let advantages = advantages[i].clone();
-                let batch_old_log_probs = old_log_probs[i].clone();
+                let batch_old_log_probs = batch.get_elements()[5].clone();
+                let advantages = batch.get_elements()[6].clone();
+                let returns = batch.get_elements()[7].clone();
 
                 // Compute the loss and backpropagate
                 let (actor_loss, critic_loss) = self
-                    .compute_loss(&states, &actions, batch_old_log_probs, advantages, returns)
+                    .compute_loss(
+                        &states,
+                        &actions.detach(),
+                        batch_old_log_probs,
+                        advantages,
+                        returns,
+                    )
                     .unwrap();
 
                 average_actor_loss += actor_loss;
@@ -271,6 +269,51 @@ where
         }
 
         Ok(())
+    }
+
+    fn add_advantage_and_return(&mut self) {
+        let experiences = self.rollout_buffer.get_raw();
+        let mut rewards = vec![];
+        let mut dones = vec![];
+        let mut states = vec![];
+        let mut log_probs = vec![];
+
+        for experience in experiences.into_iter() {
+            rewards.push(experience.reward);
+            dones.push(if experience.done { 1.0f32 } else { 0.0f32 });
+            states.push(experience.state.clone());
+            log_probs.push(experience.log_prob.clone());
+        }
+
+        let values_tensor = self
+            .critic_network
+            .forward(&Tensor::stack(&states, 0).unwrap())
+            .unwrap();
+
+        let device = experiences[0].log_prob.device();
+
+        let rewards_length = rewards.len();
+        let dones_length = dones.len();
+        let rewards_tensor =
+            candle_core::Tensor::from_vec(rewards, &[rewards_length], device).unwrap();
+        let dones_tensor = candle_core::Tensor::from_vec(dones, &[dones_length], device).unwrap();
+        let log_probs_tensor = candle_core::Tensor::stack(&log_probs, 0).unwrap();
+
+        // Compute returns and advantages
+        let returns = self
+            .compute_returns(&rewards_tensor, &dones_tensor)
+            .unwrap();
+        let advantages = self
+            .compute_gae(&rewards_tensor, &values_tensor, &dones_tensor)
+            .unwrap();
+
+        let experiences = self.rollout_buffer.get_raw_mut();
+
+        for (i, experience) in experiences.iter_mut().enumerate() {
+            experience.advantage = Some(advantages.i(i).unwrap().clone());
+            experience.this_return = Some(returns.i(i).unwrap().clone());
+            experience.log_prob = log_probs_tensor.i(i).unwrap().clone();
+        }
     }
 
     // Computes returns as the discounted sum of rewards.
@@ -308,57 +351,35 @@ where
         dones: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
         let mut advantages: Vec<f32> = vec![];
-        let mut last_gae = 0.0;
 
-        for i in (0..rewards.dims1().unwrap()).rev() {
-            let reward = rewards
-                .i(i)
-                .unwrap()
-                .reshape(&[])
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap() as f64;
-            let value = values
-                .i(i)
-                .unwrap()
-                .reshape(&[])
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap() as f64;
-            let done = dones
-                .i(i)
-                .unwrap()
-                .reshape(&[])
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap() as f64
-                > 0.5;
-            let next_value = if i == rewards.dims1().unwrap() - 1 || done {
-                0.0
-            } else {
-                values
-                    .i(i + 1)
-                    .unwrap()
-                    .reshape(&[])
-                    .unwrap()
-                    .to_scalar::<f32>()
-                    .unwrap() as f64
-            };
+        let shape = rewards.shape();
+        let device = rewards.device();
 
-            //delta = rewards[t] + gamma * next_value - values[t]
-            //last_gae = delta + gamma * gae_lambda * last_gae * (1 - dones[t])
-            //advantages[t] = last_gae
+        let rewards: Vec<f32> = rewards.flatten_all().unwrap().to_vec1().unwrap();
+        let dones: Vec<f32> = dones.flatten_all().unwrap().to_vec1().unwrap();
+        let values: Vec<f32> = values.flatten_all().unwrap().to_vec1().unwrap();
 
-            let delta = reward + self.gamma as f64 * next_value - value;
-            last_gae = delta
-                + self.gamma as f64 * self.gae_lambda as f64 * last_gae * (1.0 - f64::from(done));
-            advantages.push(last_gae as f32);
+        for i in (0..rewards.len()).rev() {
+            let mut advantage = 0.0;
+            for j in 0..(rewards.len() - i - 1) {
+                let done = dones[j] > 0.5;
+                if done {
+                    break;
+                }
+
+                let delta = rewards[i + 1] + self.gamma * values[i + j + 1] - values[i + 1];
+                advantage += ((self.gamma * self.gae_lambda).powi(j as i32)) * delta;
+            }
+            let last_j = rewards.len() - i - 1;
+            advantage += ((self.gamma * self.gae_lambda).powi(last_j as i32))
+                * (rewards[i + last_j] - values[i + last_j]);
+
+            advantages.push(advantage as f32);
         }
 
         advantages.reverse();
 
-        let advantages_tensor =
-            candle_core::Tensor::from_vec(advantages, rewards.shape(), rewards.device()).unwrap();
+        let advantages_tensor = candle_core::Tensor::from_vec(advantages, shape, device).unwrap();
 
         return Ok(advantages_tensor);
     }
@@ -384,7 +405,7 @@ where
                 .to_scalar::<f32>()
                 .unwrap()
                 .sqrt()
-                .max(f32::EPSILON);
+                .max(2.0 * f32::EPSILON);
             ((advantages.clone() - advantages_mean.clone() as f64).unwrap()
                 / (advantages_std_sqrt as f64))
                 .unwrap()
@@ -431,13 +452,11 @@ where
         let values = values.squeeze(1).unwrap();
         let values = values.squeeze(1).unwrap();
 
-        println!("Returns: {:?}", returns.mean_all().unwrap());
-        println!("Values: {:?}", values.mean_all().unwrap());
-
-        let values_minus_targets = (values.clone() - returns.clone()).unwrap();
+        //println!("Returns: {:?}", returns.mean_all().unwrap());
+        //println!("Values: {:?}", values.mean_all().unwrap());
 
         // Use mse for now
-        let critic_loss = (values_minus_targets.clone() * values_minus_targets).unwrap();
+        let critic_loss = loss::mse(&values, &returns).unwrap();
 
         let entropy_loss = entropy;
 
@@ -506,10 +525,15 @@ where
                     reward,
                     done,
                     log_prob,
+                    None,
+                    None,
                 ));
                 obs = next_obs;
             }
+
             if self.rollout_buffer.len() >= self.batch_size {
+                println!("Episode: {}", episode_idx + 1);
+
                 println!(
                     "Average episode length: {}",
                     self.rollout_buffer.len() / (episode_idx + 1 - last_optimization_step)
@@ -565,11 +589,12 @@ mod tests {
         )
         .activation(candle_nn::Activation::Relu)
         .hidden_layer_sizes(vec![64, 64])
+        .output_activation(candle_nn::Activation::Sigmoid)
         .build()
         .unwrap();
 
         let mut config = ParamsAdamW::default();
-        config.lr = 3e-4;
+        config.lr = 0.001;
 
         let actor_optimizer =
             AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
@@ -583,6 +608,8 @@ mod tests {
             .hidden_layer_sizes(vec![64, 64])
             .build()
             .unwrap();
+
+        config.lr = 0.01;
 
         let critic_optimizer =
             AdamW::new(var_map.all_vars(), config).expect("Failed to create AdamW");
@@ -603,7 +630,6 @@ mod tests {
         .vf_coef(1.0)
         .clip_range(0.2)
         .clipped(true)
-        .num_epochs(3)
         .build();
         actor.learn(&mut env, 1000).unwrap();
     }
