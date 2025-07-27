@@ -9,6 +9,19 @@ use crate::{
     tensor_operations::torch_like_min,
 };
 
+fn print_tensor_stats(name: &str, tensor: &Tensor) {
+    let mean = tensor.mean_all().unwrap().to_scalar::<f32>().unwrap();
+    let min = tensor.min_all().unwrap().to_scalar::<f32>().unwrap();
+    let max = tensor.max_all().unwrap().to_scalar::<f32>().unwrap();
+    println!("{name}: mean={mean}, min={min}, max={max}");
+}
+
+fn print_tensor_head(name: &str, tensor: &Tensor, n: usize) {
+    let vec = tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let head = &vec[..vec.len().min(n)];
+    println!("{name} head: {:?}", head);
+}
+
 use super::Actor;
 
 #[derive(Debug, Clone)]
@@ -244,8 +257,8 @@ where
         self.add_advantage_and_return();
         let batches = self.rollout_buffer.clear_and_get_all_shuffled();
         for epoch in 0..self.num_epochs {
-            let mut average_actor_loss = 0.0;
-            let mut average_critic_loss = 0.0;
+            let mut average_abs_actor_loss = 0.0;
+            let mut average_abs_critic_loss = 0.0;
 
             for batch in batches.iter() {
                 let actions = batch.get_elements()[PPOElement::Action as usize].clone();
@@ -266,17 +279,17 @@ where
                     )
                     .unwrap();
 
-                average_actor_loss += actor_loss;
-                average_critic_loss += critic_loss;
+                average_abs_actor_loss += actor_loss.abs();
+                average_abs_critic_loss += critic_loss.abs();
             }
 
-            average_actor_loss /= batches.len() as f64;
-            average_critic_loss /= batches.len() as f64;
+            average_abs_actor_loss /= batches.len() as f64;
+            average_abs_critic_loss /= batches.len() as f64;
 
             println!("Epoch: {}", epoch + 1);
             println!(
                 "Average Actor Loss: {}, Average Critic Loss: {}",
-                average_actor_loss, average_critic_loss
+                average_abs_actor_loss, average_abs_critic_loss
             );
         }
 
@@ -289,14 +302,12 @@ where
         let mut dones = vec![];
         let mut states = vec![];
         let mut next_states = vec![];
-        let mut log_probs = vec![];
 
         for experience in experiences.into_iter() {
             rewards.push(experience.reward);
             dones.push(if experience.done { 1.0f32 } else { 0.0f32 });
             states.push(experience.state.clone());
             next_states.push(experience.next_state.clone());
-            log_probs.push(experience.log_prob.clone());
         }
 
         let values_tensor = self
@@ -316,7 +327,6 @@ where
         let rewards_tensor =
             candle_core::Tensor::from_vec(rewards, &[rewards_length], device).unwrap();
         let dones_tensor = candle_core::Tensor::from_vec(dones, &[dones_length], device).unwrap();
-        let log_probs_tensor = candle_core::Tensor::stack(&log_probs, 0).unwrap();
 
         // Compute returns and advantages
         let returns = self
@@ -336,7 +346,6 @@ where
         for (i, experience) in experiences.iter_mut().enumerate() {
             experience.advantage = Some(advantages.i(i).unwrap().clone());
             experience.this_return = Some(returns.i(i).unwrap().clone());
-            experience.log_prob = log_probs_tensor.i(i).unwrap().clone();
         }
     }
 
@@ -441,7 +450,7 @@ where
             .log_prob_and_entropy(states, actions)
             .unwrap();
 
-        let ratio = (log_probs - old_log_probs)
+        let ratio = (&log_probs - &old_log_probs)
             .unwrap()
             .clamp(-5.0, 5.0)
             .unwrap()
@@ -481,7 +490,7 @@ where
         let entropy_loss = entropy;
 
         let final_actor_loss =
-            (actor_loss.clone() + ((self.ent_coef as f64) * entropy_loss.clone()))?;
+            (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
 
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone()).unwrap();
 
@@ -493,6 +502,24 @@ where
             .unwrap();
 
         let actor_loss_scalar = actor_loss.mean_all().unwrap().to_scalar::<f32>().unwrap() as f64;
+
+        print_tensor_stats("Advantages", &advantages);
+        print_tensor_stats("Log_probs", &log_probs);
+        print_tensor_stats("Old_log_probs", &old_log_probs);
+        print_tensor_stats("Ratio", &ratio);
+        print_tensor_stats(
+            "log_probs - old_log_probs",
+            &(&log_probs - &old_log_probs).unwrap(),
+        );
+        print_tensor_stats("Returns", &returns);
+        print_tensor_head("log_probs", &log_probs, 5);
+        print_tensor_head("old_log_probs", &old_log_probs, 5);
+        print_tensor_head(
+            "log_probs - old_log_probs",
+            &(log_probs.clone() - old_log_probs.clone()).unwrap(),
+            5,
+        );
+        print_tensor_head("ratio", &ratio, 5);
 
         Ok((
             actor_loss_scalar,
@@ -609,12 +636,11 @@ mod tests {
         )
         .activation(candle_nn::Activation::Relu)
         .hidden_layer_sizes(vec![40, 35, 30])
-        .output_activation(candle_nn::Activation::Sigmoid)
         .build()
         .unwrap();
 
         let mut config = ParamsAdamW::default();
-        config.lr = 0.01;
+        config.lr = 0.005;
 
         let actor_optimizer =
             AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
@@ -642,8 +668,8 @@ mod tests {
             critic_optimizer,
             actor_optimizer,
         )
-        .batch_size(256)
-        .mini_batch_size(128)
+        .batch_size(512)
+        .mini_batch_size(512)
         .normalize_advantage(true)
         .ent_coef(0.01)
         .gamma(0.99)
