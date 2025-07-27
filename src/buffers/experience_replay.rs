@@ -1,9 +1,7 @@
-use std::collections::VecDeque;
-
-use candle_core::{Error, Tensor};
-use rand::{seq::SliceRandom, Rng};
-
 use super::{experience, ExperienceBatch};
+use candle_core::Error;
+use rand::seq::SliceRandom;
+use std::collections::VecDeque;
 
 pub(crate) struct ExperienceReplay<T>
 where

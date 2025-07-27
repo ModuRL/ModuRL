@@ -18,7 +18,7 @@ where
 {
     pub fn new(experiences: Vec<T>) -> Self {
         let mut tensor_elements = vec![];
-        for (exp_index, experience) in experiences.iter().enumerate() {
+        for experience in experiences.iter() {
             let mut experience_elements = experience.get_elements();
             for (i, element) in experience_elements.iter_mut().enumerate() {
                 *element = element.unsqueeze(0).unwrap();

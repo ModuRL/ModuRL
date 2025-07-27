@@ -1,9 +1,6 @@
-use std::vec;
-
-use candle_core::Tensor;
-use rand::seq::SliceRandom;
-
 use super::{experience, ExperienceBatch};
+use rand::seq::SliceRandom;
+use std::vec;
 
 pub struct RolloutBuffer<T> {
     buffer: Vec<T>,
@@ -51,10 +48,9 @@ where
         samples
     }
 
-    /// Shuffles the buffer and returns all samples in a shuffled order.
+    /// Shuffles the buffer and returns all samples.
     /// Clears the buffer after returning the samples.
     pub fn clear_and_get_all_shuffled(&mut self) -> Vec<ExperienceBatch<T>> {
-        // Shuffle the buffer
         self.buffer.shuffle(&mut rand::rng());
         let samples = self.clear_and_get_all();
         samples

@@ -211,8 +211,6 @@ where
         let loss = criterion(&state_action_q_values, &target_q_values)?;
         self.optimizer.backward_step(&loss)?;
 
-        println!("Loss: {:?}", loss.to_vec0::<f32>()?);
-
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
 use candle_core::{safetensors::save, Error, IndexOp, Tensor};
 use candle_nn::{loss, Optimizer};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
@@ -69,6 +69,17 @@ impl experience::Experience for PPOExperience {
                 .unwrap_or_else(|| panic!("Return not set")),
         ]
     }
+}
+
+enum PPOElement {
+    State = 0,
+    NextState = 1,
+    Action = 2,
+    Reward = 3,
+    Done = 4,
+    LogProb = 5,
+    Advantage = 6,
+    Return = 7,
 }
 
 pub struct PPOActor<O>
@@ -236,12 +247,13 @@ where
             let mut average_actor_loss = 0.0;
             let mut average_critic_loss = 0.0;
 
-            for (i, batch) in batches.iter().enumerate() {
-                let actions = batch.get_elements()[2].clone();
-                let states = batch.get_elements()[0].clone();
-                let batch_old_log_probs = batch.get_elements()[5].clone();
-                let advantages = batch.get_elements()[6].clone();
-                let returns = batch.get_elements()[7].clone();
+            for batch in batches.iter() {
+                let actions = batch.get_elements()[PPOElement::Action as usize].clone();
+                let states = batch.get_elements()[PPOElement::State as usize].clone();
+                let batch_old_log_probs =
+                    batch.get_elements()[PPOElement::LogProb as usize].clone();
+                let advantages = batch.get_elements()[PPOElement::Advantage as usize].clone();
+                let returns = batch.get_elements()[PPOElement::Return as usize].clone();
 
                 // Compute the loss and backpropagate
                 let (actor_loss, critic_loss) = self
@@ -276,18 +288,25 @@ where
         let mut rewards = vec![];
         let mut dones = vec![];
         let mut states = vec![];
+        let mut next_states = vec![];
         let mut log_probs = vec![];
 
         for experience in experiences.into_iter() {
             rewards.push(experience.reward);
             dones.push(if experience.done { 1.0f32 } else { 0.0f32 });
             states.push(experience.state.clone());
+            next_states.push(experience.next_state.clone());
             log_probs.push(experience.log_prob.clone());
         }
 
         let values_tensor = self
             .critic_network
             .forward(&Tensor::stack(&states, 0).unwrap())
+            .unwrap();
+
+        let next_values_tensor = self
+            .critic_network
+            .forward(&Tensor::stack(&next_states, 0).unwrap())
             .unwrap();
 
         let device = experiences[0].log_prob.device();
@@ -304,7 +323,12 @@ where
             .compute_returns(&rewards_tensor, &dones_tensor)
             .unwrap();
         let advantages = self
-            .compute_gae(&rewards_tensor, &values_tensor, &dones_tensor)
+            .compute_gae(
+                &rewards_tensor,
+                &values_tensor,
+                &next_values_tensor,
+                &dones_tensor,
+            )
             .unwrap();
 
         let experiences = self.rollout_buffer.get_raw_mut();
@@ -348,40 +372,39 @@ where
         &self,
         rewards: &candle_core::Tensor,
         values: &candle_core::Tensor,
+        next_values: &candle_core::Tensor,
         dones: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
-        let mut advantages: Vec<f32> = vec![];
-
         let shape = rewards.shape();
         let device = rewards.device();
 
         let rewards: Vec<f32> = rewards.flatten_all().unwrap().to_vec1().unwrap();
         let dones: Vec<f32> = dones.flatten_all().unwrap().to_vec1().unwrap();
         let values: Vec<f32> = values.flatten_all().unwrap().to_vec1().unwrap();
+        let next_values: Vec<f32> = next_values.flatten_all().unwrap().to_vec1().unwrap();
 
+        let mut advantages = vec![0.0; rewards.len()];
+        let mut gae = 0.0;
+
+        // Compute GAE backwards through the trajectory
         for i in (0..rewards.len()).rev() {
-            let mut advantage = 0.0;
-            for j in 0..(rewards.len() - i - 1) {
-                let done = dones[j] > 0.5;
-                if done {
-                    break;
-                }
+            let done = dones[i] > 0.5;
+            let next_non_terminal = if done { 0.0 } else { 1.0 };
 
-                let delta = rewards[i + 1] + self.gamma * values[i + j + 1] - values[i + 1];
-                advantage += ((self.gamma * self.gae_lambda).powi(j as i32)) * delta;
-            }
-            let last_j = rewards.len() - i - 1;
-            advantage += ((self.gamma * self.gae_lambda).powi(last_j as i32))
-                * (rewards[i + last_j] - values[i + last_j]);
+            // Use actual next state value (zero for terminal states due to next_non_terminal)
+            let next_value = next_values[i] * next_non_terminal;
 
-            advantages.push(advantage as f32);
+            // TD error: δ = r + γ * V(s') - V(s)
+            let delta = rewards[i] + self.gamma * next_value - values[i];
+
+            // GAE: A = δ + γ * λ * next_gae * (1 - done)
+            gae = delta + self.gamma * self.gae_lambda * gae * next_non_terminal;
+            advantages[i] = gae;
         }
-
-        advantages.reverse();
 
         let advantages_tensor = candle_core::Tensor::from_vec(advantages, shape, device).unwrap();
 
-        return Ok(advantages_tensor);
+        Ok(advantages_tensor)
     }
 
     /// Compute the loss for the actor and critic networks
@@ -451,9 +474,6 @@ where
         let values = self.critic_network.forward(states).unwrap();
         let values = values.squeeze(1).unwrap();
         let values = values.squeeze(1).unwrap();
-
-        //println!("Returns: {:?}", returns.mean_all().unwrap());
-        //println!("Values: {:?}", values.mean_all().unwrap());
 
         // Use mse for now
         let critic_loss = loss::mse(&values, &returns).unwrap();
@@ -588,13 +608,13 @@ mod tests {
             vb.clone(),
         )
         .activation(candle_nn::Activation::Relu)
-        .hidden_layer_sizes(vec![64, 64])
+        .hidden_layer_sizes(vec![40, 35, 30])
         .output_activation(candle_nn::Activation::Sigmoid)
         .build()
         .unwrap();
 
         let mut config = ParamsAdamW::default();
-        config.lr = 0.001;
+        config.lr = 0.01;
 
         let actor_optimizer =
             AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
@@ -605,11 +625,11 @@ mod tests {
 
         let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, vb)
             .activation(candle_nn::Activation::Relu)
-            .hidden_layer_sizes(vec![64, 64])
+            .hidden_layer_sizes(vec![100])
             .build()
             .unwrap();
 
-        config.lr = 0.01;
+        config.lr = 0.001;
 
         let critic_optimizer =
             AdamW::new(var_map.all_vars(), config).expect("Failed to create AdamW");
@@ -622,15 +642,17 @@ mod tests {
             critic_optimizer,
             actor_optimizer,
         )
-        .batch_size(128)
-        .mini_batch_size(32)
+        .batch_size(256)
+        .mini_batch_size(128)
         .normalize_advantage(true)
         .ent_coef(0.01)
         .gamma(0.99)
         .vf_coef(1.0)
         .clip_range(0.2)
         .clipped(true)
+        .gae_lambda(0.95)
         .build();
-        actor.learn(&mut env, 1000).unwrap();
+
+        actor.learn(&mut env, 1024).unwrap();
     }
 }
