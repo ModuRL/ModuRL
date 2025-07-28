@@ -1,6 +1,8 @@
 use candle_core::{Error, Tensor};
 use candle_nn::Module;
 
+use crate::actors::ppo::print_tensor_stats;
+
 use super::MLP;
 
 pub trait ProbabilisticActor {
@@ -45,19 +47,43 @@ impl ProbabilisticActor for MLPProbabilisticActor {
         let state = state.squeeze(1)?;
         let action = action.squeeze(1)?;
         let output = self.mlp.forward(&state)?;
-        let action_mean = output.narrow(1, 0, output.dims()[1] / 2)?;
-        let mut action_std = output.narrow(1, output.dims()[1] / 2, output.dims()[1] / 2)?;
-        action_std = action_std.exp()?;
-        let log_std = (action_std.clone() + f32::EPSILON as f64)?.log()?;
-        let log_prob = -0.5
-            * ((((action.clone() - action_mean.clone())?.powf(2.0)
-                / ((&action_std).powf(2.0))?)?
-                + 2.0 * &log_std)?
-                + action.dims()[1] as f64 * (2.0 * std::f64::consts::PI).ln())?;
-        let log_prob = log_prob?;
-        // calculate the entropy
-        let entropy = log_std + 0.5 * (std::f64::consts::PI * 2.0 * std::f64::consts::E).ln();
 
-        Ok((log_prob, entropy?))
+        let action_mean = output.narrow(1, 0, output.dims()[1] / 2)?;
+        let mut log_std = output.narrow(1, output.dims()[1] / 2, output.dims()[1] / 2)?;
+        log_std = log_std.clamp(-5.0, 2.0)?;
+        let action_std = (&log_std).exp()?;
+        // Break down each component
+        let action_diff = (action.clone() - action_mean.clone())?;
+        let normalized_diff = (action_diff.powf(2.0)? / action_std.powf(2.0))?;
+        let log_det_term = (2.0 * &log_std)?;
+        let normalization = action.dims()[1] as f64 * (2.0 * std::f64::consts::PI).ln();
+
+        let total_inside = ((&normalized_diff + &log_det_term)? + normalization)?;
+        let log_prob = -0.5 * total_inside;
+
+        let log_prob = log_prob?.sum(1)?;
+        // calculate the entropy
+        let entropy = ((2.0 * &log_std)?
+            + 0.5 * (std::f64::consts::PI * 2.0 * std::f64::consts::E).ln())?
+        .sum(1)?;
+
+        if action_mean.dims()[0] > 2 {
+            print_tensor_stats("Raw Output", &output);
+
+            println!("=== LOG PROB BREAKDOWN ===");
+            print_tensor_stats("Action Mean", &action_mean);
+            print_tensor_stats("Action Std", &action_std);
+            print_tensor_stats("Log Std", &log_std);
+            print_tensor_stats("Action Diff", &action_diff);
+            print_tensor_stats("Normalized Diff", &normalized_diff);
+            print_tensor_stats("Log Det Term", &log_det_term);
+            println!("Normalization constant: {:.3}", normalization);
+
+            print_tensor_stats("Log Prob", &log_prob);
+            print_tensor_stats("Entropy", &entropy);
+            print_tensor_stats("Action", &action);
+        }
+
+        Ok((log_prob, entropy))
     }
 }

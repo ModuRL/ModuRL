@@ -85,7 +85,12 @@ impl Gym for CartPole {
 
     fn reset(&mut self) -> Result<Tensor, Self::Error> {
         self.steps_beyond_terminated = None;
-        // TODO: make this a little bit random
+        Tensor::rand(-0.05, 0.05, vec![4], self.state.device())
+            .and_then(|t| {
+                self.state = t.to_dtype(candle_core::DType::F32)?;
+                Ok(self.state.clone())
+            })
+            .map_err(|e| -> Self::Error { <Self::Error>::into(e) })?;
         self.state = Tensor::zeros(vec![4], candle_core::DType::F32, self.state.device())
             .expect("Failed to create tensor.");
         Ok(self.state.clone())
@@ -141,7 +146,7 @@ impl Gym for CartPole {
         } else if self.steps_beyond_terminated.is_none() {
             // Pole just fell!
             self.steps_beyond_terminated = Some(0);
-            Ok((self.state.clone(), 1.0, false))
+            Ok((self.state.clone(), 0.0, true))
         } else {
             if self.steps_beyond_terminated == Some(0) {
                 log::warn!("You are calling 'step()' even though this environment has already returned terminated = True. You should always call 'reset()' once you receive 'terminated = True' -- any further steps are undefined behavior.");

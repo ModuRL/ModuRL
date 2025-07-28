@@ -9,14 +9,14 @@ use crate::{
     tensor_operations::torch_like_min,
 };
 
-fn print_tensor_stats(name: &str, tensor: &Tensor) {
+pub fn print_tensor_stats(name: &str, tensor: &Tensor) {
     let mean = tensor.mean_all().unwrap().to_scalar::<f32>().unwrap();
     let min = tensor.min_all().unwrap().to_scalar::<f32>().unwrap();
     let max = tensor.max_all().unwrap().to_scalar::<f32>().unwrap();
     println!("{name}: mean={mean}, min={min}, max={max}");
 }
 
-fn print_tensor_head(name: &str, tensor: &Tensor, n: usize) {
+pub fn print_tensor_head(name: &str, tensor: &Tensor, n: usize) {
     let vec = tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap();
     let head = &vec[..vec.len().min(n)];
     println!("{name} head: {:?}", head);
@@ -279,8 +279,8 @@ where
                     )
                     .unwrap();
 
-                average_abs_actor_loss += actor_loss.abs();
-                average_abs_critic_loss += critic_loss.abs();
+                average_abs_actor_loss += actor_loss;
+                average_abs_critic_loss += critic_loss;
             }
 
             average_abs_actor_loss /= batches.len() as f64;
@@ -288,7 +288,7 @@ where
 
             println!("Epoch: {}", epoch + 1);
             println!(
-                "Average Actor Loss: {}, Average Critic Loss: {}",
+                "Average Abs Actor Loss: {}, Average Abs Critic Loss: {}",
                 average_abs_actor_loss, average_abs_critic_loss
             );
         }
@@ -457,9 +457,6 @@ where
             .exp()
             .unwrap();
 
-        let advantages = advantages.unsqueeze(1).unwrap();
-        let advantages = advantages.expand(ratio.dims()).unwrap();
-
         let actor_loss = match self.clipped {
             true => {
                 let clip_range = self.clip_range;
@@ -494,14 +491,14 @@ where
 
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone()).unwrap();
 
+        // clip the gradients
+
         self.actor_optimizer
             .backward_step(&final_actor_loss)
             .unwrap();
         self.critic_optimizer
             .backward_step(&final_critic_loss)
             .unwrap();
-
-        let actor_loss_scalar = actor_loss.mean_all().unwrap().to_scalar::<f32>().unwrap() as f64;
 
         print_tensor_stats("Advantages", &advantages);
         print_tensor_stats("Log_probs", &log_probs);
@@ -512,6 +509,9 @@ where
             &(&log_probs - &old_log_probs).unwrap(),
         );
         print_tensor_stats("Returns", &returns);
+        print_tensor_stats("values", &values);
+        print_tensor_stats("Actor Loss", &final_actor_loss);
+        print_tensor_stats("Critic Loss", &final_critic_loss);
         print_tensor_head("log_probs", &log_probs, 5);
         print_tensor_head("old_log_probs", &old_log_probs, 5);
         print_tensor_head(
@@ -521,10 +521,19 @@ where
         );
         print_tensor_head("ratio", &ratio, 5);
 
-        Ok((
-            actor_loss_scalar,
-            critic_loss.mean_all().unwrap().to_scalar::<f32>().unwrap() as f64,
-        ))
+        let actor_loss_scalar = actor_loss
+            .abs()?
+            .mean_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap() as f64;
+        let critic_loss_scalar = critic_loss
+            .abs()?
+            .mean_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap() as f64;
+        Ok((actor_loss_scalar, critic_loss_scalar))
     }
 }
 
@@ -622,6 +631,7 @@ mod tests {
             .with_max_level(tracing::Level::INFO)
             .finish();
         tracing::subscriber::set_global_default(tracer).unwrap();
+
         let mut env = CartPole::new(&candle_core::Device::Cpu);
         let observation_space = env.observation_space();
         let action_space = env.action_space();
@@ -636,11 +646,12 @@ mod tests {
         )
         .activation(candle_nn::Activation::Relu)
         .hidden_layer_sizes(vec![40, 35, 30])
+        .output_activation(candle_nn::Activation::Sigmoid)
         .build()
         .unwrap();
 
         let mut config = ParamsAdamW::default();
-        config.lr = 0.005;
+        config.lr = 0.01;
 
         let actor_optimizer =
             AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
@@ -669,10 +680,10 @@ mod tests {
             actor_optimizer,
         )
         .batch_size(512)
-        .mini_batch_size(512)
+        .mini_batch_size(128)
         .normalize_advantage(true)
         .ent_coef(0.01)
-        .gamma(0.99)
+        .gamma(0.98)
         .vf_coef(1.0)
         .clip_range(0.2)
         .clipped(true)
