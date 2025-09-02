@@ -16,10 +16,10 @@ impl<T> ExperienceBatch<T>
 where
     T: Experience,
 {
-    pub fn new(experiences: Vec<T>) -> Self {
+    pub fn new(experiences: Vec<T>) -> Result<Self, T::Error> {
         let mut tensor_elements = vec![];
         for experience in experiences.iter() {
-            let mut experience_elements = experience.get_elements();
+            let mut experience_elements = experience.get_elements()?;
             for (i, element) in experience_elements.iter_mut().enumerate() {
                 *element = element.unsqueeze(0).unwrap();
                 if tensor_elements.len() <= i {
@@ -29,10 +29,10 @@ where
                 }
             }
         }
-        Self {
+        Ok(Self {
             elements: tensor_elements,
             _phantom: std::marker::PhantomData,
-        }
+        })
     }
 
     pub fn get_elements(&self) -> Vec<Tensor> {

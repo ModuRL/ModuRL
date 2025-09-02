@@ -1,5 +1,4 @@
 use super::{experience, ExperienceBatch};
-use candle_core::Error;
 use rand::seq::SliceRandom;
 use std::collections::VecDeque;
 
@@ -31,7 +30,7 @@ where
         self.buffer.push_front(experience);
     }
 
-    pub fn sample(&self) -> Result<ExperienceBatch<T>, Error> {
+    pub fn sample(&self) -> Result<ExperienceBatch<T>, T::Error> {
         let mut rng = rand::rng();
 
         // shuffle the buffer
@@ -43,7 +42,7 @@ where
         let batch = &buffer[0..self.batch_size.min(total_samples)];
 
         let experience_sample =
-            ExperienceBatch::new(batch.to_vec().iter().cloned().cloned().collect());
+            ExperienceBatch::new(batch.to_vec().iter().cloned().cloned().collect())?;
 
         Ok(experience_sample)
     }

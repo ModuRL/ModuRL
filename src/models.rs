@@ -4,18 +4,18 @@ pub mod probabilistic_model;
 
 pub struct MLP {
     hidden_layers: Vec<candle_nn::Linear>,
-    activation: candle_nn::Activation,
+    activation: Box<dyn candle_nn::Module>,
     output_layer: candle_nn::Linear,
     input_layer: candle_nn::Linear,
-    output_activation: Option<candle_nn::Activation>,
+    output_activation: Option<Box<dyn candle_nn::Module>>,
 }
 
 pub struct MLPBuilder<'a> {
     pub input_size: usize,
     pub output_size: usize,
     pub hidden_layer_sizes: Option<Vec<usize>>,
-    pub activation: Option<candle_nn::Activation>,
-    pub output_activation: Option<candle_nn::Activation>,
+    pub activation: Option<Box<dyn candle_nn::Module>>,
+    pub output_activation: Option<Box<dyn candle_nn::Module>>,
     pub vb: VarBuilder<'a>,
 }
 
@@ -36,12 +36,12 @@ impl<'a> MLPBuilder<'a> {
         self
     }
 
-    pub fn activation(mut self, activation: candle_nn::Activation) -> Self {
+    pub fn activation(mut self, activation: Box<dyn candle_nn::Module>) -> Self {
         self.activation = Some(activation);
         self
     }
 
-    pub fn output_activation(mut self, output_activation: candle_nn::Activation) -> Self {
+    pub fn output_activation(mut self, output_activation: Box<dyn candle_nn::Module>) -> Self {
         self.output_activation = Some(output_activation);
         self
     }
@@ -49,7 +49,9 @@ impl<'a> MLPBuilder<'a> {
     pub fn build(mut self) -> Result<MLP, Error> {
         // TODO: make the default hidden layer size change based on input and output size
         let hidden_layer_sizes = self.hidden_layer_sizes.unwrap_or(vec![32, 32, 32]);
-        let activation = self.activation.unwrap_or(candle_nn::Activation::Relu);
+        let activation = self
+            .activation
+            .unwrap_or(Box::new(candle_nn::Activation::Relu));
         // output layer activation is optional and defaults to None
 
         MLP::new(
@@ -68,8 +70,8 @@ impl MLP {
         input_size: usize,
         hidden_layer_sizes: Vec<usize>,
         output_size: usize,
-        activation: candle_nn::Activation,
-        output_activation: Option<candle_nn::Activation>,
+        activation: Box<dyn candle_nn::Module>,
+        output_activation: Option<Box<dyn candle_nn::Module>>,
         vb: &mut VarBuilder,
     ) -> Result<Self, Error> {
         let mut hidden_layers = Vec::new();

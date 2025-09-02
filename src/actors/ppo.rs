@@ -1,6 +1,7 @@
-use candle_core::{safetensors::save, Error, IndexOp, Tensor};
+use candle_core::{safetensors::save, IndexOp, Tensor};
 use candle_nn::{loss, Optimizer};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
@@ -20,6 +21,27 @@ pub fn print_tensor_head(name: &str, tensor: &Tensor, n: usize) {
     let vec = tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap();
     let head = &vec[..vec.len().min(n)];
     println!("{name} head: {:?}", head);
+}
+
+#[derive(Debug)]
+pub enum PPOError<AE, GE>
+where
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
+{
+    ActorError(AE),
+    GymError(GE),
+    TensorError(candle_core::Error),
+}
+
+impl<AE, GE> From<candle_core::Error> for PPOError<AE, GE>
+where
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
+{
+    fn from(err: candle_core::Error) -> Self {
+        PPOError::TensorError(err)
+    }
 }
 
 use super::Actor;
@@ -61,18 +83,18 @@ impl PPOExperience {
 }
 
 impl experience::Experience for PPOExperience {
-    fn get_elements(&self) -> Vec<Tensor> {
-        vec![
+    type Error = candle_core::Error;
+    fn get_elements(&self) -> Result<Vec<Tensor>, candle_core::Error> {
+        Ok(vec![
             self.state.clone(),
             self.next_state.clone(),
             self.action.clone(),
-            Tensor::from_vec(vec![self.reward], &[], self.state.device()).unwrap(),
+            Tensor::from_vec(vec![self.reward], &[], self.state.device())?,
             Tensor::from_vec(
                 vec![if self.done { 1.0f32 } else { 0.0f32 }],
                 &[],
                 self.state.device(),
-            )
-            .unwrap(),
+            )?,
             self.log_prob.clone(),
             self.advantage
                 .clone()
@@ -80,10 +102,11 @@ impl experience::Experience for PPOExperience {
             self.this_return
                 .clone()
                 .unwrap_or_else(|| panic!("Return not set")),
-        ]
+        ])
     }
 }
 
+#[allow(unused)]
 enum PPOElement {
     State = 0,
     NextState = 1,
@@ -95,9 +118,12 @@ enum PPOElement {
     Return = 7,
 }
 
-pub struct PPOActor<O>
+pub struct PPOActor<O1, O2, AE, GE>
 where
-    O: Optimizer,
+    O1: Optimizer,
+    O2: Optimizer,
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
 {
     clipped: bool,
     gamma: f32,
@@ -106,28 +132,32 @@ where
     normalize_advantage: bool,
     vf_coef: f32,
     ent_coef: f32,
-    critic_optimizer: O,
-    actor_optimizer: O,
+    critic_optimizer: O1,
+    actor_optimizer: O2,
     observation_space: Box<dyn spaces::Space>,
     action_space: Box<dyn spaces::Space>,
     critic_network: Box<dyn candle_core::Module>,
-    actor_network: Box<dyn ProbabilisticActor<Error = Error>>,
+    actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
     rollout_buffer: RolloutBuffer<PPOExperience>,
     num_epochs: usize,
     batch_size: usize,
+    _phantom: PhantomData<GE>,
 }
 
-pub struct PPOActorBuilder<O>
+pub struct PPOActorBuilder<O1, O2, AE, GE>
 where
-    O: Optimizer,
+    O1: Optimizer,
+    O2: Optimizer,
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
 {
     // Neccesary hyperparameters
-    critic_optimizer: O,
-    actor_optimizer: O,
+    critic_optimizer: O1,
+    actor_optimizer: O2,
     observation_space: Box<dyn spaces::Space>,
     action_space: Box<dyn spaces::Space>,
     critic_network: Box<dyn candle_core::Module>,
-    actor_network: Box<dyn ProbabilisticActor<Error = Error>>,
+    actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
     // Has default values so optional
     clipped: Option<bool>,
     gamma: Option<f32>,
@@ -139,19 +169,23 @@ where
     batch_size: Option<usize>,
     mini_batch_size: Option<usize>,
     num_epochs: Option<usize>,
+    _phantom: PhantomData<GE>,
 }
 
-impl<O> PPOActorBuilder<O>
+impl<O1, O2, AE, GE> PPOActorBuilder<O1, O2, AE, GE>
 where
-    O: Optimizer,
+    O1: Optimizer,
+    O2: Optimizer,
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
 {
     pub fn new(
         observation_space: Box<dyn spaces::Space>,
         action_space: Box<dyn spaces::Space>,
-        actor_network: Box<dyn ProbabilisticActor<Error = Error>>,
+        actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
         critic_network: Box<dyn candle_core::Module>,
-        critic_optimizer: O,
-        actor_optimizer: O,
+        critic_optimizer: O1,
+        actor_optimizer: O2,
     ) -> Self {
         Self {
             critic_optimizer,
@@ -170,6 +204,7 @@ where
             batch_size: None,
             mini_batch_size: None,
             num_epochs: None,
+            _phantom: PhantomData,
         }
     }
 
@@ -223,7 +258,7 @@ where
         self
     }
 
-    pub fn build(self) -> PPOActor<O> {
+    pub fn build(self) -> PPOActor<O1, O2, AE, GE> {
         if let Some(batch_size) = self.batch_size {
             assert!(batch_size > 0);
         }
@@ -245,17 +280,21 @@ where
             rollout_buffer: RolloutBuffer::new(self.mini_batch_size.unwrap_or(128)),
             num_epochs: self.num_epochs.unwrap_or(1),
             batch_size: self.batch_size.unwrap_or(1024),
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<O> PPOActor<O>
+impl<O1, O2, AE, GE> PPOActor<O1, O2, AE, GE>
 where
-    O: Optimizer,
+    O1: Optimizer,
+    O2: Optimizer,
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
 {
-    fn optimize(&mut self) -> Result<(), Error> {
-        self.add_advantage_and_return();
-        let batches = self.rollout_buffer.clear_and_get_all_shuffled();
+    fn optimize(&mut self) -> Result<(), PPOError<AE, GE>> {
+        self.add_advantages_and_returns()?;
+        let batches = self.rollout_buffer.clear_and_get_all_shuffled()?;
         for epoch in 0..self.num_epochs {
             let mut average_abs_actor_loss = 0.0;
             let mut average_abs_critic_loss = 0.0;
@@ -269,15 +308,13 @@ where
                 let returns = batch.get_elements()[PPOElement::Return as usize].clone();
 
                 // Compute the loss and backpropagate
-                let (actor_loss, critic_loss) = self
-                    .compute_loss(
-                        &states,
-                        &actions.detach(),
-                        batch_old_log_probs,
-                        advantages,
-                        returns,
-                    )
-                    .unwrap();
+                let (actor_loss, critic_loss) = self.compute_loss(
+                    &states,
+                    &actions.detach(),
+                    batch_old_log_probs,
+                    advantages,
+                    returns,
+                )?;
 
                 average_abs_actor_loss += actor_loss;
                 average_abs_critic_loss += critic_loss;
@@ -296,7 +333,7 @@ where
         Ok(())
     }
 
-    fn add_advantage_and_return(&mut self) {
+    fn add_advantages_and_returns(&mut self) -> Result<(), PPOError<AE, GE>> {
         let experiences = self.rollout_buffer.get_raw();
         let mut rewards = vec![];
         let mut dones = vec![];
@@ -310,43 +347,36 @@ where
             next_states.push(experience.next_state.clone());
         }
 
-        let values_tensor = self
-            .critic_network
-            .forward(&Tensor::stack(&states, 0).unwrap())
-            .unwrap();
+        let values_tensor = self.critic_network.forward(&Tensor::stack(&states, 0)?)?;
 
         let next_values_tensor = self
             .critic_network
-            .forward(&Tensor::stack(&next_states, 0).unwrap())
-            .unwrap();
+            .forward(&Tensor::stack(&next_states, 0)?)?;
 
         let device = experiences[0].log_prob.device();
 
         let rewards_length = rewards.len();
         let dones_length = dones.len();
-        let rewards_tensor =
-            candle_core::Tensor::from_vec(rewards, &[rewards_length], device).unwrap();
-        let dones_tensor = candle_core::Tensor::from_vec(dones, &[dones_length], device).unwrap();
+        let rewards_tensor = candle_core::Tensor::from_vec(rewards, &[rewards_length], device)?;
+        let dones_tensor = candle_core::Tensor::from_vec(dones, &[dones_length], device)?;
 
         // Compute returns and advantages
-        let returns = self
-            .compute_returns(&rewards_tensor, &dones_tensor)
-            .unwrap();
-        let advantages = self
-            .compute_gae(
-                &rewards_tensor,
-                &values_tensor,
-                &next_values_tensor,
-                &dones_tensor,
-            )
-            .unwrap();
+        let returns = self.compute_returns(&rewards_tensor, &dones_tensor)?;
+        let advantages = self.compute_gae(
+            &rewards_tensor,
+            &values_tensor,
+            &next_values_tensor,
+            &dones_tensor,
+        )?;
 
         let experiences = self.rollout_buffer.get_raw_mut();
 
         for (i, experience) in experiences.iter_mut().enumerate() {
-            experience.advantage = Some(advantages.i(i).unwrap().clone());
-            experience.this_return = Some(returns.i(i).unwrap().clone());
+            experience.advantage = Some(advantages.i(i)?.clone());
+            experience.this_return = Some(returns.i(i)?.clone());
         }
+
+        Ok(())
     }
 
     // Computes returns as the discounted sum of rewards.
@@ -359,15 +389,16 @@ where
         let mut running_return = 0.0;
         let mut returns = vec![];
 
-        for i in (0..rewards.dims1().unwrap()).rev() {
-            let reward = rewards.i(i).unwrap().to_scalar::<f32>().unwrap() as f64;
-            let done = dones.i(i).unwrap().to_scalar::<f32>().unwrap() as f64 > 0.5;
-            if done {
-                running_return = 0.0;
-            }
+        for i in (0..rewards.dims1()?).rev() {
+            let reward = rewards.i(i)?.to_scalar::<f32>()? as f64;
+            let done = dones.i(i)?.to_scalar::<f32>()? as f64 > 0.5;
 
             running_return = reward + self.gamma as f64 * running_return;
             returns.push(running_return as f32);
+
+            if done {
+                running_return = 0.0;
+            }
         }
 
         returns.reverse();
@@ -387,10 +418,10 @@ where
         let shape = rewards.shape();
         let device = rewards.device();
 
-        let rewards: Vec<f32> = rewards.flatten_all().unwrap().to_vec1().unwrap();
-        let dones: Vec<f32> = dones.flatten_all().unwrap().to_vec1().unwrap();
-        let values: Vec<f32> = values.flatten_all().unwrap().to_vec1().unwrap();
-        let next_values: Vec<f32> = next_values.flatten_all().unwrap().to_vec1().unwrap();
+        let rewards: Vec<f32> = rewards.flatten_all()?.to_vec1()?;
+        let dones: Vec<f32> = dones.flatten_all()?.to_vec1()?;
+        let values: Vec<f32> = values.flatten_all()?.to_vec1()?;
+        let next_values: Vec<f32> = next_values.flatten_all()?.to_vec1()?;
 
         let mut advantages = vec![0.0; rewards.len()];
         let mut gae = 0.0;
@@ -411,7 +442,7 @@ where
             advantages[i] = gae;
         }
 
-        let advantages_tensor = candle_core::Tensor::from_vec(advantages, shape, device).unwrap();
+        let advantages_tensor = candle_core::Tensor::from_vec(advantages, shape, device)?;
 
         Ok(advantages_tensor)
     }
@@ -425,22 +456,17 @@ where
         old_log_probs: candle_core::Tensor,
         advantages: candle_core::Tensor,
         returns: candle_core::Tensor,
-    ) -> Result<(f64, f64), Error> {
+    ) -> Result<(f64, f64), PPOError<AE, GE>> {
         let advantages = if self.normalize_advantage {
-            let advantages_mean = advantages.mean(0).unwrap().to_scalar::<f32>().unwrap();
-            let advantage_diff = (advantages.clone() - advantages_mean as f64).unwrap();
+            let advantages_mean = advantages.mean(0)?.to_scalar::<f32>()?;
+            let advantage_diff = (advantages.clone() - advantages_mean as f64)?;
 
-            let advantages_std_sqrt = (advantage_diff.clone() * advantage_diff)
-                .unwrap()
-                .mean(0)
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap()
+            let advantages_std_sqrt = (advantage_diff.clone() * advantage_diff)?
+                .mean(0)?
+                .to_scalar::<f32>()?
                 .sqrt()
                 .max(2.0 * f32::EPSILON);
-            ((advantages.clone() - advantages_mean.clone() as f64).unwrap()
-                / (advantages_std_sqrt as f64))
-                .unwrap()
+            ((advantages.clone() - advantages_mean.clone() as f64)? / (advantages_std_sqrt as f64))?
         } else {
             advantages
         };
@@ -448,132 +474,108 @@ where
         let (log_probs, entropy) = self
             .actor_network
             .log_prob_and_entropy(states, actions)
-            .unwrap();
+            .map_err(PPOError::ActorError)?;
 
-        let ratio = (&log_probs - &old_log_probs)
-            .unwrap()
-            .clamp(-5.0, 5.0)
-            .unwrap()
-            .exp()
-            .unwrap();
+        let ratio = (&log_probs - &old_log_probs)?.clamp(-5.0, 5.0)?.exp()?;
 
         let actor_loss = match self.clipped {
             true => {
                 let clip_range = self.clip_range;
-                let clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range).unwrap();
+                let clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)?;
 
                 let actor_loss = (-1.0
                     * torch_like_min(
-                        &(ratio.clone() * advantages.clone()).unwrap(),
-                        &(clipped_ratio.clone() * advantages.clone()).unwrap(),
-                    )
-                    .unwrap())
-                .unwrap();
+                        &(ratio.clone() * advantages.clone())?,
+                        &(clipped_ratio.clone() * advantages.clone())?,
+                    )?)?;
                 actor_loss
             }
             false => {
-                let actor_loss = (-1.0 * (ratio.clone() * advantages.clone()).unwrap()).unwrap();
+                let actor_loss = (-1.0 * (ratio.clone() * advantages.clone())?)?;
                 actor_loss
             }
         };
 
-        let values = self.critic_network.forward(states).unwrap();
-        let values = values.squeeze(1).unwrap();
-        let values = values.squeeze(1).unwrap();
+        let values = self.critic_network.forward(states)?;
+        let values = values.squeeze(1)?;
+        let values = values.squeeze(1)?;
 
         // Use mse for now
-        let critic_loss = loss::mse(&values, &returns).unwrap();
+        let critic_loss = loss::mse(&values, &returns)?;
 
         let entropy_loss = entropy;
 
         let final_actor_loss =
             (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
 
-        let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone()).unwrap();
+        let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
 
-        // clip the gradients
+        // clip the gradients and step the optimizers
+        let actor_grad = &mut final_actor_loss.backward()?;
+        let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 0.5)?;
+        self.actor_optimizer.step(actor_grad)?;
 
-        self.actor_optimizer
-            .backward_step(&final_actor_loss)
-            .unwrap();
-        self.critic_optimizer
-            .backward_step(&final_critic_loss)
-            .unwrap();
+        let critic_grad = &mut final_critic_loss.backward()?;
+        let _critic_grad_norm = crate::tensor_operations::clip_gradients(critic_grad, 0.5)?;
+        self.critic_optimizer.step(critic_grad)?;
 
         print_tensor_stats("Advantages", &advantages);
         print_tensor_stats("Log_probs", &log_probs);
         print_tensor_stats("Old_log_probs", &old_log_probs);
-        print_tensor_stats("Ratio", &ratio);
-        print_tensor_stats(
-            "log_probs - old_log_probs",
-            &(&log_probs - &old_log_probs).unwrap(),
-        );
-        print_tensor_stats("Returns", &returns);
-        print_tensor_stats("values", &values);
-        print_tensor_stats("Actor Loss", &final_actor_loss);
-        print_tensor_stats("Critic Loss", &final_critic_loss);
-        print_tensor_head("log_probs", &log_probs, 5);
-        print_tensor_head("old_log_probs", &old_log_probs, 5);
-        print_tensor_head(
-            "log_probs - old_log_probs",
-            &(log_probs.clone() - old_log_probs.clone()).unwrap(),
-            5,
-        );
-        print_tensor_head("ratio", &ratio, 5);
+        print_tensor_stats("old_log_probs - log_probs", &(&old_log_probs - &log_probs)?);
 
-        let actor_loss_scalar = actor_loss
-            .abs()?
-            .mean_all()
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap() as f64;
-        let critic_loss_scalar = critic_loss
-            .abs()?
-            .mean_all()
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap() as f64;
+        let actor_loss_scalar = actor_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
+        let critic_loss_scalar = critic_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
         Ok((actor_loss_scalar, critic_loss_scalar))
     }
 }
 
-impl<O> Actor for PPOActor<O>
+impl<O1, O2, AE, GE> Actor for PPOActor<O1, O2, AE, GE>
 where
-    O: Optimizer,
+    O1: Optimizer,
+    O2: Optimizer,
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
 {
-    type Error = Error;
-    fn act(&mut self, observation: &candle_core::Tensor) -> Result<candle_core::Tensor, Error> {
-        self.actor_network.sample(observation)
+    type Error = PPOError<AE, GE>;
+    type GymError = GE;
+    fn act(
+        &mut self,
+        observation: &candle_core::Tensor,
+    ) -> Result<candle_core::Tensor, PPOError<AE, GE>> {
+        self.actor_network
+            .sample(observation)
+            .map_err(PPOError::ActorError)
     }
 
     fn learn(
         &mut self,
-        env: &mut dyn crate::gym::Gym<Error = Self::Error>,
+        env: &mut dyn crate::gym::Gym<Error = Self::GymError>,
         num_episodes: usize,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), PPOError<AE, GE>> {
         let mut last_optimization_step = 0;
         for episode_idx in 0..num_episodes {
             let mut done = false;
-            let mut obs = env.reset().unwrap();
+            let mut obs = env.reset().map_err(PPOError::GymError)?;
             let (mut next_obs, mut reward);
 
             while !done {
                 let mut new_observations_shape: Vec<usize> = vec![1];
                 new_observations_shape.append(&mut self.observation_space.shape());
-                obs = obs.reshape(&*new_observations_shape).unwrap();
+                obs = obs.reshape(&*new_observations_shape)?;
 
-                let action = self.act(&obs).unwrap();
+                let action = self.act(&obs)?;
                 // Now: the action is a tensor of shape [1, dim] so we need to squeeze it to [dim]
                 let actual_action = self.action_space.from_neurons(&action);
-                let actual_action = actual_action.squeeze(0).unwrap();
+                let actual_action = actual_action.squeeze(0)?;
 
                 let (mut log_prob, _) = self
                     .actor_network
                     .log_prob_and_entropy(&obs, &action)
-                    .unwrap();
-                log_prob = log_prob.squeeze(0).unwrap();
+                    .map_err(PPOError::ActorError)?;
+                log_prob = log_prob.squeeze(0)?;
 
-                (next_obs, reward, done) = env.step(actual_action).unwrap();
+                (next_obs, reward, done) = env.step(actual_action).map_err(PPOError::GymError)?;
                 self.rollout_buffer.add(PPOExperience::new(
                     obs.clone(),
                     next_obs.clone(),
@@ -595,7 +597,7 @@ where
                     self.rollout_buffer.len() / (episode_idx + 1 - last_optimization_step)
                 );
                 last_optimization_step = episode_idx;
-                self.optimize().unwrap();
+                self.optimize()?;
             }
         }
         Ok(())
@@ -611,7 +613,7 @@ where
         for (i, tensor) in tensors.iter().enumerate() {
             hashmap.insert(format!("var_{i}"), (*tensor).clone());
         }
-        save(&hashmap, path).unwrap();
+        save(&hashmap, path)?;
         Ok(())
     }
 }
@@ -620,10 +622,13 @@ where
 mod tests {
     use super::*;
     use crate::{
+        distributions::GuassianDistribution,
         gym::{common_gyms::CartPole, Gym},
         models::{probabilistic_model::MLPProbabilisticActor, MLPBuilder},
+        tensor_operations::tanh,
     };
-    use candle_nn::{AdamW, ParamsAdamW, VarBuilder, VarMap};
+    use candle_nn::{VarBuilder, VarMap};
+    use candle_optimisers::adam::{Adam, ParamsAdam};
 
     #[test]
     fn ppo_cartpole() {
@@ -644,50 +649,53 @@ mod tests {
             action_space.shape().iter().sum::<usize>() * 2,
             vb.clone(),
         )
-        .activation(candle_nn::Activation::Relu)
-        .hidden_layer_sizes(vec![40, 35, 30])
-        .output_activation(candle_nn::Activation::Sigmoid)
+        .activation(Box::new(candle_nn::Activation::Gelu))
+        .hidden_layer_sizes(vec![64, 64])
+        .output_activation(Box::new(tanh))
         .build()
         .unwrap();
 
-        let mut config = ParamsAdamW::default();
-        config.lr = 0.01;
+        let mut config = ParamsAdam::default();
+        config.lr = 3e-4;
 
         let actor_optimizer =
-            AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
+            Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
         let var_map = VarMap::new();
         let vb =
             VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
 
         let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, vb)
-            .activation(candle_nn::Activation::Relu)
-            .hidden_layer_sizes(vec![100])
+            .activation(Box::new(candle_nn::Activation::Gelu))
+            .hidden_layer_sizes(vec![64, 64])
             .build()
             .unwrap();
 
-        config.lr = 0.001;
+        config.lr = 3e-4;
 
         let critic_optimizer =
-            AdamW::new(var_map.all_vars(), config).expect("Failed to create AdamW");
+            Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
 
         let mut actor = PPOActorBuilder::new(
             observation_space,
             action_space,
-            Box::new(MLPProbabilisticActor::new(actor_network)),
+            Box::new(MLPProbabilisticActor::<GuassianDistribution>::new(
+                actor_network,
+            )),
             Box::new(critic_network),
             critic_optimizer,
             actor_optimizer,
         )
-        .batch_size(512)
-        .mini_batch_size(128)
+        .batch_size(2048)
+        .mini_batch_size(64)
         .normalize_advantage(true)
-        .ent_coef(0.01)
-        .gamma(0.98)
-        .vf_coef(1.0)
+        .ent_coef(0.0)
+        .gamma(0.99)
+        .vf_coef(0.5)
         .clip_range(0.2)
         .clipped(true)
         .gae_lambda(0.95)
+        .num_epochs(10)
         .build();
 
         actor.learn(&mut env, 1024).unwrap();

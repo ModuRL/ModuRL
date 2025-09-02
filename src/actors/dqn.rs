@@ -13,6 +13,24 @@ use crate::{
 
 use super::Actor;
 
+#[derive(Debug)]
+pub enum DQNActorError<GE>
+where
+    GE: std::fmt::Debug,
+{
+    TensorError(candle_core::Error),
+    GymError(GE),
+}
+
+impl<GE> From<candle_core::Error> for DQNActorError<GE>
+where
+    GE: std::fmt::Debug,
+{
+    fn from(err: candle_core::Error) -> Self {
+        DQNActorError::TensorError(err)
+    }
+}
+
 #[derive(Clone)]
 struct DQNActorExperience {
     state: Tensor,
@@ -23,14 +41,15 @@ struct DQNActorExperience {
 }
 
 impl experience::Experience for DQNActorExperience {
-    fn get_elements(&self) -> Vec<Tensor> {
-        vec![
+    type Error = candle_core::Error;
+    fn get_elements(&self) -> Result<Vec<Tensor>, Self::Error> {
+        Ok(vec![
             self.state.clone(),
             self.next_state.clone(),
             self.action.clone(),
-            Tensor::from_vec(vec![self.reward], [].to_vec(), self.state.device()).unwrap(),
-            Tensor::from_vec(vec![self.done], [].to_vec(), self.state.device()).unwrap(),
-        ]
+            Tensor::from_vec(vec![self.reward], [].to_vec(), self.state.device())?,
+            Tensor::from_vec(vec![self.done], [].to_vec(), self.state.device())?,
+        ])
     }
 }
 
@@ -50,9 +69,10 @@ impl DQNActorExperience {
 /// The DQN actor uses a neural network to approximate the Q-values of the environment for each action.
 /// The actor then picks the action with the highest Q-value. (Greedy)
 /// The actor also sometimes picks a random action with probability epsilon. (Exploration)
-pub struct DQNActor<O>
+pub struct DQNActor<O, GE>
 where
     O: Optimizer,
+    GE: std::fmt::Debug,
 {
     q_network: Box<dyn candle_core::Module>,
     optimizer: O,
@@ -63,11 +83,13 @@ where
     experience_replay: ExperienceReplay<DQNActorExperience>,
     gamma: f32,
     epochs: usize,
+    _phantom: std::marker::PhantomData<GE>,
 }
 
-pub struct DQNActorBuilder<O>
+pub struct DQNActorBuilder<O, GE>
 where
     O: Optimizer,
+    GE: std::fmt::Debug,
 {
     // Everything other than the spaces are optional.
     q_network: Box<dyn candle_core::Module>,
@@ -80,11 +102,13 @@ where
     gamma: Option<f32>,
     replay_capacity: Option<usize>,
     epochs: Option<usize>,
+    _phantom: std::marker::PhantomData<GE>,
 }
 
-impl<O> DQNActorBuilder<O>
+impl<O, GE> DQNActorBuilder<O, GE>
 where
     O: Optimizer,
+    GE: std::fmt::Debug,
 {
     pub fn new(
         action_space: Discrete,
@@ -103,6 +127,7 @@ where
             gamma: None,
             replay_capacity: None,
             epochs: None,
+            _phantom: std::marker::PhantomData,
         }
     }
 
@@ -136,7 +161,7 @@ where
         self
     }
 
-    pub fn build(self) -> DQNActor<O> {
+    pub fn build(self) -> DQNActor<O, GE> {
         let epsilon_start = self.epsilon_start.unwrap_or(0.9);
         let epsilon_decay = self.epsilon_decay.unwrap_or(0.99);
         let batch_size = self.batch_size.unwrap_or(32);
@@ -154,13 +179,15 @@ where
             experience_replay: ExperienceReplay::new(replay_capacity, batch_size),
             gamma,
             epochs,
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<O> DQNActor<O>
+impl<O, GE> DQNActor<O, GE>
 where
     O: Optimizer,
+    GE: std::fmt::Debug,
 {
     pub fn get_action_space(&self) -> &Discrete {
         &self.action_space
@@ -215,12 +242,14 @@ where
     }
 }
 
-impl<O> Actor for DQNActor<O>
+impl<O, GE> Actor for DQNActor<O, GE>
 where
     O: Optimizer,
+    GE: std::fmt::Debug,
 {
-    type Error = Error;
-    fn act(&mut self, observation: &Tensor) -> Result<Tensor, Error> {
+    type Error = DQNActorError<GE>;
+    type GymError = GE;
+    fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
         self.epsilon *= self.epsilon_decay;
         if rand::rng().random_range(0.0..1.0) < self.epsilon {
             let mut actions = vec![];
@@ -228,23 +257,23 @@ where
             for _ in 0..batch_size {
                 actions.push(self.action_space.sample(observation.device()));
             }
-            let actions = Tensor::stack(&actions, 0);
-            actions
+            let actions = Tensor::stack(&actions, 0)?;
+            Ok(actions)
         } else {
             let q_values = self.q_network.forward(observation)?;
-            let actions = q_values.argmax(1);
-            actions
+            let actions = q_values.argmax(1)?;
+            Ok(actions)
         }
     }
 
     fn learn(
         &mut self,
-        env: &mut dyn Gym<Error = Self::Error>,
+        env: &mut dyn Gym<Error = Self::GymError>,
         num_episodes: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Self::Error> {
         for episode_idx in 0..num_episodes {
             let mut total_reward = 0.0;
-            let mut observation = env.reset()?;
+            let mut observation = env.reset().map_err(DQNActorError::GymError)?;
             loop {
                 let mut new_observations_shape: Vec<usize> = vec![1];
                 new_observations_shape.append(&mut self.observation_space.shape());
@@ -253,7 +282,8 @@ where
                 let action = self.act(&observation)?;
                 // outputs a tensor of shape [1, dim] so we need to squeeze it to [dim]
                 let action = action.squeeze(0)?;
-                let (next_observation, reward, done) = env.step(action.clone())?;
+                let (next_observation, reward, done) =
+                    env.step(action.clone()).map_err(DQNActorError::GymError)?;
                 total_reward += reward;
                 // Add the experience to the replay buffer.
                 self.experience_replay.add(DQNActorExperience::new(
@@ -285,7 +315,7 @@ where
         Ok(())
     }
 
-    fn save(&self, vars: Vec<Var>, path: &str) -> Result<(), Error> {
+    fn save(&self, vars: Vec<Var>, path: &str) -> Result<(), Self::Error> {
         let tensors = vars.iter().map(|v| v.as_tensor()).collect::<Vec<_>>();
         let mut hashmap = HashMap::new();
         for (i, tensor) in tensors.iter().enumerate() {
@@ -315,6 +345,7 @@ mod tests {
             VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
 
         let mlp = MLPBuilder::new(observation_space.shape().iter().sum(), 2, vb)
+            .hidden_layer_sizes(vec![64, 64])
             .build()
             .expect("Failed to create MLP");
 
@@ -327,8 +358,8 @@ mod tests {
             Box::new(mlp),
             optimizer,
         )
-        .replay_capacity(10)
-        .batch_size(10) // So that it actually reaches the optimization step.
+        .replay_capacity(128)
+        .batch_size(32) // So that it actually reaches the optimization step.
         .build();
 
         actor.learn(&mut env, 100).expect("Failed to learn");
