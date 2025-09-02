@@ -483,16 +483,16 @@ where
                 let clip_range = self.clip_range;
                 let clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)?;
 
-                let actor_loss = (-1.0
-                    * torch_like_min(
-                        &(ratio.clone() * advantages.clone())?,
-                        &(clipped_ratio.clone() * advantages.clone())?,
-                    )?)?;
+                let surrogate1 = (ratio.clone() * advantages.clone())?;
+                let surrogate2 = (clipped_ratio.clone() * advantages.clone())?;
+                let surrogate = torch_like_min(&surrogate1, &surrogate2)?;
+                let actor_loss = (-1.0 * surrogate.mean(0)?)?;
+
                 actor_loss
             }
             false => {
-                let actor_loss = (-1.0 * (ratio.clone() * advantages.clone())?)?;
-                actor_loss
+                let surrogate = (ratio * &advantages)?;
+                (-1.0 * surrogate.mean(0)?)?
             }
         };
 
@@ -503,7 +503,7 @@ where
         // Use mse for now
         let critic_loss = loss::mse(&values, &returns)?;
 
-        let entropy_loss = entropy;
+        let entropy_loss = entropy.mean(0)?;
 
         let final_actor_loss =
             (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
@@ -625,7 +625,6 @@ mod tests {
         distributions::CategoricalDistribution,
         gym::{common_gyms::CartPole, Gym},
         models::{probabilistic_model::MLPProbabilisticActor, MLPBuilder},
-        tensor_operations::tanh,
     };
     use candle_nn::{VarBuilder, VarMap};
     use candle_optimisers::adam::{Adam, ParamsAdam};
@@ -651,7 +650,7 @@ mod tests {
         )
         .activation(Box::new(candle_nn::Activation::Gelu))
         .hidden_layer_sizes(vec![64, 64])
-        .output_activation(Box::new(tanh))
+        //.output_activation(Box::new(|x: &Tensor| softmax(x, D::Minus1)))
         .build()
         .unwrap();
 
@@ -671,7 +670,7 @@ mod tests {
             .build()
             .unwrap();
 
-        config.lr = 3e-4;
+        config.lr = 6e-4;
 
         let critic_optimizer =
             Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
@@ -689,7 +688,7 @@ mod tests {
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
-        .ent_coef(0.0)
+        .ent_coef(0.01)
         .gamma(0.99)
         .vf_coef(0.5)
         .clip_range(0.2)

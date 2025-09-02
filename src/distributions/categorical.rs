@@ -8,14 +8,21 @@ pub struct CategoricalDistribution {
     logits: Tensor, // shape: [batch, num_classes]
 }
 
+fn log_softmax(tensor: &Tensor, dim: D) -> Result<Tensor, candle_core::Error> {
+    let max = tensor.max_keepdim(dim.clone())?.expand(tensor.dims())?;
+    let exps = (tensor - &max)?.exp()?;
+    let sum_exps = exps.sum_keepdim(dim.clone())?.expand(tensor.dims())?;
+    let log_sum_exps = sum_exps.log()?;
+    (tensor - max - log_sum_exps).map_err(Into::into)
+}
+
 impl CategoricalDistribution {
     fn probs(&self) -> Result<Tensor, candle_core::Error> {
         softmax(&self.logits, D::Minus1)
     }
 
     fn log_probs(&self) -> Result<Tensor, candle_core::Error> {
-        let probs = self.probs()?;
-        probs.log()
+        log_softmax(&self.logits, D::Minus1)
     }
 
     fn gumbel_noise(shape: &[usize], device: &Device) -> Result<Tensor, candle_core::Error> {

@@ -40,6 +40,7 @@ pub(crate) fn clip_gradients(
     Ok(total_norm)
 }
 
+#[allow(dead_code)]
 // implement the tanh activation function
 pub(crate) fn tanh(x: &Tensor) -> Result<Tensor, Error> {
     let e_pos = x.exp()?;
