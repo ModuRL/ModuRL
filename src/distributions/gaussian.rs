@@ -2,7 +2,6 @@ use candle_core::Tensor;
 
 use crate::distributions::{DistEval, Distribution};
 
-#[derive(Debug)]
 pub struct GuassianDistribution {
     action_mean: Tensor,
     action_log_std: Tensor,

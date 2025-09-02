@@ -1,4 +1,4 @@
-use candle_core::{Device, Tensor};
+use candle_core::{Device, Tensor, D};
 use rand::{rng, Rng};
 
 pub trait Space {
@@ -46,7 +46,7 @@ impl Space for Discrete {
     }
 
     fn from_neurons(&self, neurons: &Tensor) -> Tensor {
-        let neurons = neurons.argmax(1).expect("Failed to get argmax.");
+        let neurons = neurons.argmax(D::Minus1).expect("Failed to get argmax.");
         neurons
     }
 }

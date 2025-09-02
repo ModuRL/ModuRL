@@ -622,7 +622,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        distributions::GuassianDistribution,
+        distributions::CategoricalDistribution,
         gym::{common_gyms::CartPole, Gym},
         models::{probabilistic_model::MLPProbabilisticActor, MLPBuilder},
         tensor_operations::tanh,
@@ -646,7 +646,7 @@ mod tests {
 
         let actor_network = MLPBuilder::new(
             observation_space.shape().iter().sum(),
-            action_space.shape().iter().sum::<usize>() * 2,
+            action_space.shape().iter().sum::<usize>(),
             vb.clone(),
         )
         .activation(Box::new(candle_nn::Activation::Gelu))
@@ -679,7 +679,7 @@ mod tests {
         let mut actor = PPOActorBuilder::new(
             observation_space,
             action_space,
-            Box::new(MLPProbabilisticActor::<GuassianDistribution>::new(
+            Box::new(MLPProbabilisticActor::<CategoricalDistribution>::new(
                 actor_network,
             )),
             Box::new(critic_network),

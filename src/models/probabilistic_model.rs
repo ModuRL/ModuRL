@@ -37,19 +37,17 @@ where
 }
 
 #[derive(Debug)]
-pub enum MLPProbabilisticActorError<D>
+pub enum MLPProbabilisticActorError<DE>
 where
-    D: Distribution,
-    <D as Distribution>::Error: std::fmt::Debug,
+    DE: std::fmt::Debug,
 {
     MLPError(candle_core::Error),
-    DistError(<D as Distribution>::Error),
+    DistError(DE),
 }
 
-impl<D> From<candle_core::Error> for MLPProbabilisticActorError<D>
+impl<DE> From<candle_core::Error> for MLPProbabilisticActorError<DE>
 where
-    D: Distribution,
-    <D as Distribution>::Error: std::fmt::Debug,
+    DE: std::fmt::Debug,
 {
     fn from(error: candle_core::Error) -> Self {
         MLPProbabilisticActorError::MLPError(error)
@@ -61,7 +59,7 @@ where
     D: Distribution,
     <D as Distribution>::Error: std::fmt::Debug,
 {
-    type Error = MLPProbabilisticActorError<D>;
+    type Error = MLPProbabilisticActorError<<D as Distribution>::Error>;
 
     fn sample(&self, state: &Tensor) -> Result<Tensor, Self::Error> {
         let output = self.mlp.forward(state)?;

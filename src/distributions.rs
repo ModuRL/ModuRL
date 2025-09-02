@@ -1,5 +1,7 @@
 use candle_core::Tensor;
+mod categorical;
 mod gaussian;
+pub use categorical::CategoricalDistribution;
 pub use gaussian::GuassianDistribution;
 
 pub struct DistEval {
