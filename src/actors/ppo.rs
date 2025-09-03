@@ -15,7 +15,7 @@ pub fn print_tensor_stats(name: &str, tensor: &Tensor) {
     let mean = tensor.mean_all().unwrap().to_scalar::<f32>().unwrap();
     let min = tensor.min_all().unwrap().to_scalar::<f32>().unwrap();
     let max = tensor.max_all().unwrap().to_scalar::<f32>().unwrap();
-    //println!("{name}: mean={mean}, min={min}, max={max}");
+    println!("{name}: mean={mean}, min={min}, max={max}");
 }
 
 pub fn print_tensor_head(name: &str, tensor: &Tensor, n: usize) {
@@ -378,7 +378,7 @@ where
             &next_values_tensor,
             &dones_tensor,
         )?;
-        let returns = (&advantages + &values_tensor.flatten_all()?)?;
+        let returns = (&advantages + &values_tensor.flatten_all()?)?.clamp(-1e3, 1e3)?;
 
         let experiences = self.rollout_buffer.get_raw_mut();
 
@@ -448,7 +448,7 @@ where
                 .mean(0)?
                 .to_scalar::<f32>()?
                 .sqrt()
-                .max(2.0 * f32::EPSILON);
+                .max(1e-6);
             ((advantages.clone() - advantages_mean.clone() as f64)? / (advantages_std_sqrt as f64))?
         } else {
             advantages
@@ -459,8 +459,7 @@ where
             .log_prob_and_entropy(states, actions)
             .map_err(PPOError::ActorError)?;
 
-        let ratio = (&log_probs - &old_log_probs)?.exp()?;
-        print_tensor_stats("ratio", &ratio);
+        let ratio = (&log_probs - &old_log_probs)?.clamp(-20.0, 20.0)?.exp()?;
 
         let actor_loss = match self.clipped {
             true => {
@@ -503,12 +502,7 @@ where
         let _critic_grad_norm = crate::tensor_operations::clip_gradients(critic_grad, 0.5)?;
         self.critic_optimizer.step(critic_grad)?;
 
-        print_tensor_stats("Advantages", &advantages);
-        print_tensor_stats("Log_probs", &log_probs);
-        print_tensor_stats("Old_log_probs", &old_log_probs);
-        print_tensor_stats("Actor_loss", &actor_loss);
-        print_tensor_stats("Critic_loss", &critic_loss);
-        print_tensor_stats("Entropy", &entropy);
+        //print_tensor_stats("Advantages", &advantages);
 
         let actor_loss_scalar = actor_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
         let critic_loss_scalar = critic_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
@@ -650,7 +644,7 @@ mod tests {
         .unwrap();
         let mut config = ParamsAdam::default();
         // Optimizers: both with lr=3e-4
-        config.lr = 3e-4;
+        config.lr = 6e-4;
         let actor_optimizer =
             Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -664,7 +658,7 @@ mod tests {
         // Critic network: 2x64, tanh activation
         let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, critic_vb)
             .activation(Box::new(tanh))
-            .hidden_layer_sizes(vec![64, 64])
+            .hidden_layer_sizes(vec![100])
             .name("critic_network")
             .build()
             .unwrap();
