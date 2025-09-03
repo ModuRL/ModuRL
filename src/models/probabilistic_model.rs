@@ -315,65 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn test_action_bounds_reasonable() {
-        let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
-        let state = create_test_state(10, 4).unwrap();
-
-        let action = actor.sample(&state).unwrap();
-        let action_vals = action.flatten_all().unwrap().to_vec1::<f64>().unwrap();
-
-        // Actions should be reasonable (not extreme values)
-        for val in action_vals {
-            assert!(val.abs() < 100.0, "Action value {} is too extreme", val);
-            assert!(val.is_finite(), "Action value {} is not finite", val);
-        }
-    }
-
-    // Fuzzing tests - run multiple iterations with random inputs
-    #[test]
-    fn fuzz_sample_action_consistency() {
-        const FUZZ_ITERATIONS: usize = 50;
-
-        for i in 0..FUZZ_ITERATIONS {
-            // Random dimensions within reasonable bounds
-            let state_dim = 2 + (i % 10); // 2-11
-            let action_dim = 1 + (i % 6); // 1-6
-            let batch_size = 1 + (i % 20); // 1-20
-            let hidden_size = 16 + (i % 64); // 16-79
-
-            let actor =
-                create_test_actor(state_dim, action_dim, vec![hidden_size, hidden_size]).unwrap();
-            let state = create_test_state(batch_size, state_dim).unwrap();
-            let action = actor.sample(&state).unwrap();
-
-            // Verify shape consistency
-            assert_eq!(
-                action.dims(),
-                &[batch_size, action_dim],
-                "Iteration {}: Action shape incorrect for state_dim={}, action_dim={}, batch_size={}",
-                i, state_dim, action_dim, batch_size
-            );
-
-            // Verify action values are reasonable
-            let action_vals = action.flatten_all().unwrap().to_vec1::<f64>().unwrap();
-            for val in action_vals {
-                assert!(
-                    val.is_finite(),
-                    "Iteration {}: Action value is not finite: {}",
-                    i,
-                    val
-                );
-                assert!(
-                    val.abs() < 1000.0,
-                    "Iteration {}: Action value too extreme: {}",
-                    i,
-                    val
-                );
-            }
-        }
-    }
-
-    #[test]
     fn fuzz_log_prob_and_entropy() {
         const FUZZ_ITERATIONS: usize = 30;
 

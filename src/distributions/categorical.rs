@@ -1,4 +1,4 @@
-use candle_core::{Device, Tensor, D};
+use candle_core::{Device, IndexOp, Tensor, D};
 use candle_nn::ops::softmax;
 
 use crate::distributions::{DistEval, Distribution};
@@ -64,7 +64,7 @@ impl Distribution for CategoricalDistribution {
 
     fn from_outputs(outputs: &Tensor) -> Self {
         Self {
-            logits: outputs.clone(),
+            logits: outputs.clamp(-20.0, 20.0).unwrap(),
         }
     }
 }

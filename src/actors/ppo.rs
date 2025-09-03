@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 
 use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
+    lr_scheduler::LrScheduler,
     models::probabilistic_model::ProbabilisticActor,
     spaces,
     tensor_operations::torch_like_min,
@@ -14,7 +15,7 @@ pub fn print_tensor_stats(name: &str, tensor: &Tensor) {
     let mean = tensor.mean_all().unwrap().to_scalar::<f32>().unwrap();
     let min = tensor.min_all().unwrap().to_scalar::<f32>().unwrap();
     let max = tensor.max_all().unwrap().to_scalar::<f32>().unwrap();
-    println!("{name}: mean={mean}, min={min}, max={max}");
+    //println!("{name}: mean={mean}, min={min}, max={max}");
 }
 
 pub fn print_tensor_head(name: &str, tensor: &Tensor, n: usize) {
@@ -141,6 +142,7 @@ where
     rollout_buffer: RolloutBuffer<PPOExperience>,
     num_epochs: usize,
     batch_size: usize,
+    lr_scheduler: Option<Box<dyn LrScheduler>>,
     _phantom: PhantomData<GE>,
 }
 
@@ -169,6 +171,7 @@ where
     batch_size: Option<usize>,
     mini_batch_size: Option<usize>,
     num_epochs: Option<usize>,
+    lr_scheduler: Option<Box<dyn LrScheduler>>,
     _phantom: PhantomData<GE>,
 }
 
@@ -204,6 +207,7 @@ where
             batch_size: None,
             mini_batch_size: None,
             num_epochs: None,
+            lr_scheduler: None,
             _phantom: PhantomData,
         }
     }
@@ -258,6 +262,11 @@ where
         self
     }
 
+    pub fn lr_scheduler(mut self, lr_scheduler: Box<dyn LrScheduler>) -> Self {
+        self.lr_scheduler = Some(lr_scheduler);
+        self
+    }
+
     pub fn build(self) -> PPOActor<O1, O2, AE, GE> {
         if let Some(batch_size) = self.batch_size {
             assert!(batch_size > 0);
@@ -280,6 +289,7 @@ where
             rollout_buffer: RolloutBuffer::new(self.mini_batch_size.unwrap_or(128)),
             num_epochs: self.num_epochs.unwrap_or(1),
             batch_size: self.batch_size.unwrap_or(1024),
+            lr_scheduler: self.lr_scheduler,
             _phantom: PhantomData,
         }
     }
@@ -294,8 +304,8 @@ where
 {
     fn optimize(&mut self) -> Result<(), PPOError<AE, GE>> {
         self.add_advantages_and_returns()?;
-        let batches = self.rollout_buffer.clear_and_get_all_shuffled()?;
         for epoch in 0..self.num_epochs {
+            let batches = self.rollout_buffer.get_all_shuffled()?;
             let mut average_abs_actor_loss = 0.0;
             let mut average_abs_critic_loss = 0.0;
 
@@ -330,6 +340,8 @@ where
             );
         }
 
+        self.rollout_buffer.clear();
+
         Ok(())
     }
 
@@ -360,14 +372,13 @@ where
         let rewards_tensor = candle_core::Tensor::from_vec(rewards, &[rewards_length], device)?;
         let dones_tensor = candle_core::Tensor::from_vec(dones, &[dones_length], device)?;
 
-        // Compute returns and advantages
-        let returns = self.compute_returns(&rewards_tensor, &dones_tensor)?;
         let advantages = self.compute_gae(
             &rewards_tensor,
             &values_tensor,
             &next_values_tensor,
             &dones_tensor,
         )?;
+        let returns = (&advantages + &values_tensor.flatten_all()?)?;
 
         let experiences = self.rollout_buffer.get_raw_mut();
 
@@ -377,35 +388,6 @@ where
         }
 
         Ok(())
-    }
-
-    // Computes returns as the discounted sum of rewards.
-    // Assumes rewards and dones are 1D tensors.
-    fn compute_returns(
-        &self,
-        rewards: &candle_core::Tensor,
-        dones: &candle_core::Tensor,
-    ) -> Result<candle_core::Tensor, candle_core::Error> {
-        let mut running_return = 0.0;
-        let mut returns = vec![];
-
-        for i in (0..rewards.dims1()?).rev() {
-            let reward = rewards.i(i)?.to_scalar::<f32>()? as f64;
-            let done = dones.i(i)?.to_scalar::<f32>()? as f64 > 0.5;
-
-            running_return = reward + self.gamma as f64 * running_return;
-            returns.push(running_return as f32);
-
-            if done {
-                running_return = 0.0;
-            }
-        }
-
-        returns.reverse();
-        let returns_tensor =
-            candle_core::Tensor::from_vec(returns, rewards.shape(), rewards.device())?;
-
-        Ok(returns_tensor)
     }
 
     fn compute_gae(
@@ -461,7 +443,8 @@ where
             let advantages_mean = advantages.mean(0)?.to_scalar::<f32>()?;
             let advantage_diff = (advantages.clone() - advantages_mean as f64)?;
 
-            let advantages_std_sqrt = (advantage_diff.clone() * advantage_diff)?
+            let advantages_std_sqrt = advantage_diff
+                .sqr()?
                 .mean(0)?
                 .to_scalar::<f32>()?
                 .sqrt()
@@ -476,7 +459,8 @@ where
             .log_prob_and_entropy(states, actions)
             .map_err(PPOError::ActorError)?;
 
-        let ratio = (&log_probs - &old_log_probs)?.clamp(-5.0, 5.0)?.exp()?;
+        let ratio = (&log_probs - &old_log_probs)?.exp()?;
+        print_tensor_stats("ratio", &ratio);
 
         let actor_loss = match self.clipped {
             true => {
@@ -522,7 +506,9 @@ where
         print_tensor_stats("Advantages", &advantages);
         print_tensor_stats("Log_probs", &log_probs);
         print_tensor_stats("Old_log_probs", &old_log_probs);
-        print_tensor_stats("old_log_probs - log_probs", &(&old_log_probs - &log_probs)?);
+        print_tensor_stats("Actor_loss", &actor_loss);
+        print_tensor_stats("Critic_loss", &critic_loss);
+        print_tensor_stats("Entropy", &entropy);
 
         let actor_loss_scalar = actor_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
         let critic_loss_scalar = critic_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
@@ -597,6 +583,13 @@ where
                     self.rollout_buffer.len() / (episode_idx + 1 - last_optimization_step)
                 );
                 last_optimization_step = episode_idx;
+                if let Some(scheduler) = &mut self.lr_scheduler {
+                    let percent_done = (episode_idx + 1) as f64 / num_episodes as f64;
+                    self.actor_optimizer
+                        .set_learning_rate(scheduler.get_lr(percent_done));
+                    self.critic_optimizer
+                        .set_learning_rate(scheduler.get_lr(percent_done));
+                }
                 self.optimize()?;
             }
         }
@@ -625,6 +618,7 @@ mod tests {
         distributions::CategoricalDistribution,
         gym::{common_gyms::CartPole, Gym},
         models::{probabilistic_model::MLPProbabilisticActor, MLPBuilder},
+        tensor_operations::tanh,
     };
     use candle_nn::{VarBuilder, VarMap};
     use candle_optimisers::adam::{Adam, ParamsAdam};
@@ -643,38 +637,43 @@ mod tests {
         let vb =
             VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
 
+        // Actor network: 2x64, tanh activation
         let actor_network = MLPBuilder::new(
             observation_space.shape().iter().sum(),
             action_space.shape().iter().sum::<usize>(),
             vb.clone(),
         )
-        .activation(Box::new(candle_nn::Activation::Gelu))
+        .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
-        //.output_activation(Box::new(|x: &Tensor| softmax(x, D::Minus1)))
+        .name("actor_network")
         .build()
         .unwrap();
-
         let mut config = ParamsAdam::default();
+        // Optimizers: both with lr=3e-4
         config.lr = 3e-4;
-
         let actor_optimizer =
             Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
-        let var_map = VarMap::new();
-        let vb =
-            VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
+        let critic_var_map = VarMap::new();
+        let critic_vb = VarBuilder::from_varmap(
+            &critic_var_map,
+            candle_core::DType::F32,
+            &candle_core::Device::Cpu,
+        );
 
-        let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, vb)
-            .activation(Box::new(candle_nn::Activation::Gelu))
+        // Critic network: 2x64, tanh activation
+        let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, critic_vb)
+            .activation(Box::new(tanh))
             .hidden_layer_sizes(vec![64, 64])
+            .name("critic_network")
             .build()
             .unwrap();
 
-        config.lr = 6e-4;
-
+        config.lr = 3e-4;
         let critic_optimizer =
-            Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
+            Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
+        // PPO config
         let mut actor = PPOActorBuilder::new(
             observation_space,
             action_space,

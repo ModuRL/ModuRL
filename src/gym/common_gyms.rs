@@ -85,14 +85,9 @@ impl Gym for CartPole {
 
     fn reset(&mut self) -> Result<Tensor, Self::Error> {
         self.steps_beyond_terminated = None;
-        Tensor::rand(-0.05, 0.05, vec![4], self.state.device())
-            .and_then(|t| {
-                self.state = t.to_dtype(candle_core::DType::F32)?;
-                Ok(self.state.clone())
-            })
-            .map_err(|e| -> Self::Error { <Self::Error>::into(e) })?;
-        self.state = Tensor::zeros(vec![4], candle_core::DType::F32, self.state.device())
-            .expect("Failed to create tensor.");
+        let state = Tensor::rand(-0.05, 0.05, vec![4], self.state.device())?
+            .to_dtype(candle_core::DType::F32)?;
+        self.state = state;
         Ok(self.state.clone())
     }
 
@@ -104,9 +99,9 @@ impl Gym for CartPole {
 
         let action_vec = action.to_vec0::<u32>()?;
         let force = if action_vec == 0 {
-            self.force_mag
-        } else {
             -self.force_mag
+        } else {
+            self.force_mag
         };
 
         let costheta = theta.cos();
@@ -124,8 +119,8 @@ impl Gym for CartPole {
             theta += self.tau * theta_dot;
             theta_dot += self.tau * thetaacc;
         } else {
-            x += self.tau * x_dot + 0.5 * self.tau * self.tau * xacc;
             x_dot += 0.5 * self.tau * (xacc + temp);
+            theta_dot += 0.5 * self.tau * (thetaacc + temp);
             theta += self.tau * theta_dot + 0.5 * self.tau * self.tau * thetaacc;
             theta_dot += 0.5 * self.tau * (thetaacc + temp);
         }
@@ -204,5 +199,49 @@ mod tests {
                     .expect("Failed to create tensor."),
             )
             .expect("Failed to step environment.");
+    }
+
+    #[test]
+    fn reward_is_one_when_not_terminated() {
+        let mut env = CartPole::new(&Device::Cpu);
+        env.reset().unwrap();
+        let action = Tensor::from_vec(vec![1u32], vec![], &Device::Cpu).unwrap();
+        let (_next_state, reward, done) = env.step(action).unwrap();
+        assert_eq!(reward, 1.0);
+        assert!(!done);
+
+        let mut reward = 0.0;
+        let mut done = false;
+        for _ in 0..50 {
+            let action = Tensor::from_vec(vec![1u32], vec![], &Device::Cpu).unwrap();
+            let (_next_state, r, d) = env.step(action).unwrap();
+            reward = r;
+            done = d;
+            if done {
+                break;
+            }
+        }
+        assert_eq!(reward, 0.0);
+        assert!(done);
+    }
+
+    #[test]
+    fn reward_is_zero_when_terminated() {
+        let mut env = CartPole::new(&Device::Cpu);
+        env.reset().unwrap();
+
+        // Force termination by moving x beyond threshold
+        env.state = Tensor::from_vec(
+            vec![env.x_threshold + 0.1, 0.0, 0.0, 0.0],
+            vec![4],
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let action = Tensor::from_vec(vec![0u32], vec![], &Device::Cpu).unwrap();
+        let (_next_state, reward, done) = env.step(action).unwrap();
+
+        assert_eq!(reward, 0.0);
+        assert!(done);
     }
 }
