@@ -1,4 +1,4 @@
-use candle_core::{Device, IndexOp, Tensor, D};
+use candle_core::{Device, Tensor, D};
 use candle_nn::ops::softmax;
 
 use crate::distributions::{DistEval, Distribution};

@@ -11,7 +11,7 @@ pub trait Actor {
     fn learn(
         &mut self,
         env: &mut dyn Gym<Error = Self::GymError>,
-        num_episodes: usize,
+        num_timesteps: usize,
     ) -> Result<(), Self::Error>;
     fn save(&self, vars: Vec<Var>, path: &str) -> Result<(), Self::Error>;
 }

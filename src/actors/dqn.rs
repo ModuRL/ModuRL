@@ -5,9 +5,8 @@ use candle_nn::Optimizer;
 use rand::Rng;
 
 use crate::{
-    buffers::experience,
-    buffers::experience_replay::ExperienceReplay,
-    gym::Gym,
+    buffers::{experience, experience_replay::ExperienceReplay},
+    gym::{Gym, StepInfo},
     spaces::{Discrete, Space},
 };
 
@@ -269,9 +268,11 @@ where
     fn learn(
         &mut self,
         env: &mut dyn Gym<Error = Self::GymError>,
-        num_episodes: usize,
+        num_timesteps: usize,
     ) -> Result<(), Self::Error> {
-        for episode_idx in 0..num_episodes {
+        let mut elapsed_timesteps = 0;
+        let mut episode_idx = 0;
+        while elapsed_timesteps < num_timesteps {
             let mut total_reward = 0.0;
             let mut observation = env.reset().map_err(DQNActorError::GymError)?;
             loop {
@@ -282,8 +283,12 @@ where
                 let action = self.act(&observation)?;
                 // outputs a tensor of shape [1, dim] so we need to squeeze it to [dim]
                 let action = action.squeeze(0)?;
-                let (next_observation, reward, done) =
-                    env.step(action.clone()).map_err(DQNActorError::GymError)?;
+                let StepInfo {
+                    state: next_observation,
+                    reward,
+                    done,
+                    truncated,
+                } = env.step(action.clone()).map_err(DQNActorError::GymError)?;
                 total_reward += reward;
                 // Add the experience to the replay buffer.
                 self.experience_replay.add(DQNActorExperience::new(
@@ -295,9 +300,11 @@ where
                 ));
                 observation = next_observation;
 
-                if done {
+                if done || truncated {
                     break;
                 }
+
+                elapsed_timesteps += 1;
             }
 
             println!(
@@ -310,6 +317,7 @@ where
             for _ in 0..self.epochs {
                 self.optimize()?;
             }
+            episode_idx += 1;
         }
 
         Ok(())
@@ -362,6 +370,6 @@ mod tests {
         .batch_size(32) // So that it actually reaches the optimization step.
         .build();
 
-        actor.learn(&mut env, 100).expect("Failed to learn");
+        actor.learn(&mut env, 500000).expect("Failed to learn");
     }
 }

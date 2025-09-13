@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 
 use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
+    gym::StepInfo,
     lr_scheduler::LrScheduler,
     models::probabilistic_model::ProbabilisticActor,
     spaces,
@@ -321,7 +322,7 @@ where
                 let (actor_loss, critic_loss) = self.compute_loss(
                     &states,
                     &actions.detach(),
-                    batch_old_log_probs,
+                    batch_old_log_probs.detach(),
                     advantages,
                     returns,
                 )?;
@@ -341,7 +342,6 @@ where
         }
 
         self.rollout_buffer.clear();
-
         Ok(())
     }
 
@@ -439,6 +439,7 @@ where
         advantages: candle_core::Tensor,
         returns: candle_core::Tensor,
     ) -> Result<(f64, f64), PPOError<AE, GE>> {
+        //print_tensor_stats("Pre-normalized advantage", &advantages);
         let advantages = if self.normalize_advantage {
             let advantages_mean = advantages.mean(0)?.to_scalar::<f32>()?;
             let advantage_diff = (advantages.clone() - advantages_mean as f64)?;
@@ -459,18 +460,21 @@ where
             .log_prob_and_entropy(states, actions)
             .map_err(PPOError::ActorError)?;
 
-        let ratio = (&log_probs - &old_log_probs)?.clamp(-20.0, 20.0)?.exp()?;
+        let ratio = (&log_probs - &old_log_probs)?.clamp(-20.0, 10.0)?.exp()?;
 
         let actor_loss = match self.clipped {
             true => {
                 let clip_range = self.clip_range;
                 let clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)?;
+                //print_tensor_stats("Ratio", &ratio);
+                //print_tensor_stats("Clipped Ratio", &clipped_ratio);
 
                 let surrogate1 = (ratio.clone() * advantages.clone())?;
                 let surrogate2 = (clipped_ratio.clone() * advantages.clone())?;
                 let surrogate = torch_like_min(&surrogate1, &surrogate2)?;
                 let actor_loss = (-1.0 * surrogate.mean(0)?)?;
 
+                //print_tensor_stats("Actor loss", &actor_loss);
                 actor_loss
             }
             false => {
@@ -482,6 +486,18 @@ where
         let values = self.critic_network.forward(states)?;
         let values = values.squeeze(1)?;
         let values = values.squeeze(1)?;
+
+        let returns = {
+            let returns_mean = returns.mean(0)?.to_scalar::<f32>()?;
+            let returns_diff = (returns.clone() - returns_mean as f64)?;
+            let returns_std_sqrt = returns_diff
+                .sqr()?
+                .mean(0)?
+                .to_scalar::<f32>()?
+                .sqrt()
+                .max(1e-6);
+            ((returns.clone() - returns_mean.clone() as f64)? / (returns_std_sqrt as f64))?
+        };
 
         // Use mse for now
         let critic_loss = loss::mse(&values, &returns)?;
@@ -495,11 +511,18 @@ where
 
         // clip the gradients and step the optimizers
         let actor_grad = &mut final_actor_loss.backward()?;
-        let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 0.5)?;
+        let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 1.0)?;
         self.actor_optimizer.step(actor_grad)?;
 
         let critic_grad = &mut final_critic_loss.backward()?;
-        let _critic_grad_norm = crate::tensor_operations::clip_gradients(critic_grad, 0.5)?;
+        let _critic_grad_norm = crate::tensor_operations::clip_gradients(critic_grad, 1.0)?;
+        /*println!(
+            "Actor norm: {}, Critic norm: {}",
+            _actor_grad_norm, _critic_grad_norm
+        );*/
+        if (_actor_grad_norm - 0.25).abs() < 1e-3 {
+            println!("Actor grad norm is 0.25, something might be wrong!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        }
         self.critic_optimizer.step(critic_grad)?;
 
         //print_tensor_stats("Advantages", &advantages);
@@ -531,15 +554,17 @@ where
     fn learn(
         &mut self,
         env: &mut dyn crate::gym::Gym<Error = Self::GymError>,
-        num_episodes: usize,
+        num_timesteps: usize,
     ) -> Result<(), PPOError<AE, GE>> {
         let mut last_optimization_step = 0;
-        for episode_idx in 0..num_episodes {
+        let mut elapsed_timesteps = 0;
+        let mut episode_idx = 0;
+        while elapsed_timesteps < num_timesteps {
             let mut done = false;
             let mut obs = env.reset().map_err(PPOError::GymError)?;
             let (mut next_obs, mut reward);
 
-            while !done {
+            while !done && self.rollout_buffer.len() < self.batch_size {
                 let mut new_observations_shape: Vec<usize> = vec![1];
                 new_observations_shape.append(&mut self.observation_space.shape());
                 obs = obs.reshape(&*new_observations_shape)?;
@@ -555,7 +580,13 @@ where
                     .map_err(PPOError::ActorError)?;
                 log_prob = log_prob.squeeze(0)?;
 
-                (next_obs, reward, done) = env.step(actual_action).map_err(PPOError::GymError)?;
+                let truncated;
+                StepInfo {
+                    state: next_obs,
+                    reward,
+                    done,
+                    truncated,
+                } = env.step(actual_action).map_err(PPOError::GymError)?;
                 self.rollout_buffer.add(PPOExperience::new(
                     obs.clone(),
                     next_obs.clone(),
@@ -567,7 +598,11 @@ where
                     None,
                 ));
                 obs = next_obs;
+                done = done || truncated;
             }
+
+            elapsed_timesteps += self.rollout_buffer.len();
+            episode_idx += 1;
 
             if self.rollout_buffer.len() >= self.batch_size {
                 println!("Episode: {}", episode_idx + 1);
@@ -578,7 +613,7 @@ where
                 );
                 last_optimization_step = episode_idx;
                 if let Some(scheduler) = &mut self.lr_scheduler {
-                    let percent_done = (episode_idx + 1) as f64 / num_episodes as f64;
+                    let percent_done = elapsed_timesteps as f64 / num_timesteps as f64;
                     self.actor_optimizer
                         .set_learning_rate(scheduler.get_lr(percent_done));
                     self.critic_optimizer
@@ -644,7 +679,7 @@ mod tests {
         .unwrap();
         let mut config = ParamsAdam::default();
         // Optimizers: both with lr=3e-4
-        config.lr = 6e-4;
+        config.lr = 3e-4;
         let actor_optimizer =
             Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -658,7 +693,7 @@ mod tests {
         // Critic network: 2x64, tanh activation
         let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, critic_vb)
             .activation(Box::new(tanh))
-            .hidden_layer_sizes(vec![100])
+            .hidden_layer_sizes(vec![64, 64])
             .name("critic_network")
             .build()
             .unwrap();
@@ -681,15 +716,16 @@ mod tests {
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
-        .ent_coef(0.01)
+        .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
         .clip_range(0.2)
         .clipped(true)
-        .gae_lambda(0.95)
+        .gae_lambda(0.97)
         .num_epochs(10)
+        .lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress)))
         .build();
 
-        actor.learn(&mut env, 1024).unwrap();
+        actor.learn(&mut env, 500000).unwrap();
     }
 }
