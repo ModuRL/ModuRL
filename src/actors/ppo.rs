@@ -12,19 +12,6 @@ use crate::{
     tensor_operations::torch_like_min,
 };
 
-pub fn print_tensor_stats(name: &str, tensor: &Tensor) {
-    let mean = tensor.mean_all().unwrap().to_scalar::<f32>().unwrap();
-    let min = tensor.min_all().unwrap().to_scalar::<f32>().unwrap();
-    let max = tensor.max_all().unwrap().to_scalar::<f32>().unwrap();
-    println!("{name}: mean={mean}, min={min}, max={max}");
-}
-
-pub fn print_tensor_head(name: &str, tensor: &Tensor, n: usize) {
-    let vec = tensor.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-    let head = &vec[..vec.len().min(n)];
-    println!("{name} head: {:?}", head);
-}
-
 #[derive(Debug)]
 pub enum PPOError<AE, GE>
 where
@@ -143,7 +130,8 @@ where
     rollout_buffer: RolloutBuffer<PPOExperience>,
     num_epochs: usize,
     batch_size: usize,
-    lr_scheduler: Option<Box<dyn LrScheduler>>,
+    actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
+    critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
     _phantom: PhantomData<GE>,
 }
 
@@ -172,7 +160,8 @@ where
     batch_size: Option<usize>,
     mini_batch_size: Option<usize>,
     num_epochs: Option<usize>,
-    lr_scheduler: Option<Box<dyn LrScheduler>>,
+    actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
+    critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
     _phantom: PhantomData<GE>,
 }
 
@@ -208,7 +197,8 @@ where
             batch_size: None,
             mini_batch_size: None,
             num_epochs: None,
-            lr_scheduler: None,
+            actor_lr_scheduler: None,
+            critic_lr_scheduler: None,
             _phantom: PhantomData,
         }
     }
@@ -263,8 +253,14 @@ where
         self
     }
 
-    pub fn lr_scheduler(mut self, lr_scheduler: Box<dyn LrScheduler>) -> Self {
-        self.lr_scheduler = Some(lr_scheduler);
+    /// returns a percent of t
+    pub fn actor_lr_scheduler(mut self, lr_scheduler: Box<dyn LrScheduler>) -> Self {
+        self.actor_lr_scheduler = Some(lr_scheduler);
+        self
+    }
+
+    pub fn critic_lr_scheduler(mut self, lr_scheduler: Box<dyn LrScheduler>) -> Self {
+        self.critic_lr_scheduler = Some(lr_scheduler);
         self
     }
 
@@ -290,7 +286,8 @@ where
             rollout_buffer: RolloutBuffer::new(self.mini_batch_size.unwrap_or(128)),
             num_epochs: self.num_epochs.unwrap_or(1),
             batch_size: self.batch_size.unwrap_or(1024),
-            lr_scheduler: self.lr_scheduler,
+            actor_lr_scheduler: self.actor_lr_scheduler,
+            critic_lr_scheduler: self.critic_lr_scheduler,
             _phantom: PhantomData,
         }
     }
@@ -439,7 +436,6 @@ where
         advantages: candle_core::Tensor,
         returns: candle_core::Tensor,
     ) -> Result<(f64, f64), PPOError<AE, GE>> {
-        //print_tensor_stats("Pre-normalized advantage", &advantages);
         let advantages = if self.normalize_advantage {
             let advantages_mean = advantages.mean(0)?.to_scalar::<f32>()?;
             let advantage_diff = (advantages.clone() - advantages_mean as f64)?;
@@ -466,15 +462,12 @@ where
             true => {
                 let clip_range = self.clip_range;
                 let clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)?;
-                //print_tensor_stats("Ratio", &ratio);
-                //print_tensor_stats("Clipped Ratio", &clipped_ratio);
 
                 let surrogate1 = (ratio.clone() * advantages.clone())?;
                 let surrogate2 = (clipped_ratio.clone() * advantages.clone())?;
                 let surrogate = torch_like_min(&surrogate1, &surrogate2)?;
                 let actor_loss = (-1.0 * surrogate.mean(0)?)?;
 
-                //print_tensor_stats("Actor loss", &actor_loss);
                 actor_loss
             }
             false => {
@@ -516,16 +509,7 @@ where
 
         let critic_grad = &mut final_critic_loss.backward()?;
         let _critic_grad_norm = crate::tensor_operations::clip_gradients(critic_grad, 1.0)?;
-        /*println!(
-            "Actor norm: {}, Critic norm: {}",
-            _actor_grad_norm, _critic_grad_norm
-        );*/
-        if (_actor_grad_norm - 0.25).abs() < 1e-3 {
-            println!("Actor grad norm is 0.25, something might be wrong!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-        }
         self.critic_optimizer.step(critic_grad)?;
-
-        //print_tensor_stats("Advantages", &advantages);
 
         let actor_loss_scalar = actor_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
         let critic_loss_scalar = critic_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
@@ -601,10 +585,11 @@ where
                 done = done || truncated;
             }
 
-            elapsed_timesteps += self.rollout_buffer.len();
             episode_idx += 1;
 
             if self.rollout_buffer.len() >= self.batch_size {
+                elapsed_timesteps += self.rollout_buffer.len();
+
                 println!("Episode: {}", episode_idx + 1);
 
                 println!(
@@ -612,12 +597,15 @@ where
                     self.rollout_buffer.len() / (episode_idx + 1 - last_optimization_step)
                 );
                 last_optimization_step = episode_idx;
-                if let Some(scheduler) = &mut self.lr_scheduler {
-                    let percent_done = elapsed_timesteps as f64 / num_timesteps as f64;
-                    self.actor_optimizer
-                        .set_learning_rate(scheduler.get_lr(percent_done));
-                    self.critic_optimizer
-                        .set_learning_rate(scheduler.get_lr(percent_done));
+                if let Some(scheduler) = &self.actor_lr_scheduler {
+                    let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
+                    let new_lr = scheduler.get_lr(progress);
+                    self.actor_optimizer.set_learning_rate(new_lr);
+                }
+                if let Some(scheduler) = &self.critic_lr_scheduler {
+                    let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
+                    let new_lr = scheduler.get_lr(progress);
+                    self.critic_optimizer.set_learning_rate(new_lr);
                 }
                 self.optimize()?;
             }
@@ -703,6 +691,7 @@ mod tests {
             Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
         // PPO config
+        // Stable baselines3 config:
         let mut actor = PPOActorBuilder::new(
             observation_space,
             action_space,
@@ -716,14 +705,15 @@ mod tests {
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
-        .ent_coef(0.005)
+        .ent_coef(0.01)
         .gamma(0.99)
         .vf_coef(0.5)
         .clip_range(0.2)
         .clipped(true)
-        .gae_lambda(0.97)
+        .gae_lambda(0.95)
         .num_epochs(10)
-        .lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress)))
+        .actor_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress)))
+        .critic_lr_scheduler(Box::new(|progress: f64| 6e-4 * (1.0 - progress)))
         .build();
 
         actor.learn(&mut env, 500000).unwrap();

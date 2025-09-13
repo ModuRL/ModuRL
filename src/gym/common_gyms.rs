@@ -143,7 +143,6 @@ impl Gym for CartPole {
 
         self.steps_since_reset += 1;
         if self.steps_since_reset >= 500 {
-            println!("Episode reached 500 steps, terminating.");
             // Consider it done if it has lasted 500 steps.
             self.steps_beyond_terminated = Some(0);
             return Ok(StepInfo {
@@ -173,7 +172,7 @@ impl Gym for CartPole {
         } else {
             #[cfg(feature = "logging")]
             if self.steps_beyond_terminated == Some(0) {
-                log::warn!("You are calling 'step()' even though this environment has already returned terminated = True. You should always call 'reset()' once you receive 'terminated = True' -- any further steps are undefined behavior.");
+                log::warn!("You are calling 'step()' even though this environment has already returned terminated = True. You should always call 'reset()' once you receive 'terminated = True'");
             }
             // We already checked this is Some above, so this is safe.
             self.steps_beyond_terminated = Some(self.steps_beyond_terminated.unwrap() + 1);
