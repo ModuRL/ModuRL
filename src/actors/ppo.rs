@@ -643,7 +643,7 @@ mod tests {
             .batch_size(2048)
             .mini_batch_size(64)
             .normalize_advantage(true)
-            .ent_coef(0.0)
+            .ent_coef(0.005)
             .gamma(0.99)
             .vf_coef(0.5)
             .clip_range(0.2)
@@ -652,7 +652,7 @@ mod tests {
             .num_epochs(10)
             .build();
 
-        for i in 0..5 {
+        for i in 0..6 {
             actor.learn(&mut env, 20000).unwrap();
             println!("Testing if PPO solved CartPole-v1...");
 
