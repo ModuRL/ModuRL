@@ -279,7 +279,7 @@ mod tests {
     use super::*;
     use crate::gym::common_gyms::CartPoleV1;
     use crate::gym::Gym;
-    use crate::models::MLPBuilder;
+    use crate::models::MLP;
 
     // Test the DQN actor by training it on the CartPole environment.
     #[test]
@@ -290,7 +290,10 @@ mod tests {
         let vb =
             VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
 
-        let mlp = MLPBuilder::new(observation_space.shape().iter().sum(), 2, vb)
+        let mlp = MLP::builder()
+            .input_size(observation_space.shape().iter().sum())
+            .output_size(2)
+            .vb(vb)
             .hidden_layer_sizes(vec![64, 64])
             .build()
             .expect("Failed to create MLP");
