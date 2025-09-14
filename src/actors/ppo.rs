@@ -654,10 +654,11 @@ mod tests {
             .critic_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress * 0.5)))
             .build();
 
-        actor.learn(&mut env, 20000).unwrap();
+        actor.learn(&mut env, 40000).unwrap();
         println!("Testing if PPO solved CartPole-v1...");
 
         let avg_steps = get_average_steps(&mut actor);
+        println!("Average steps over 100 episodes: {}", avg_steps);
         // Cartpole v1 should be using 475, which we can reach but no need for that here
         assert!(avg_steps >= 195.0, "PPO did not solve CartPole-v1");
     }
