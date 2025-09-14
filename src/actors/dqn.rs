@@ -339,14 +339,14 @@ mod tests {
     use candle_nn::{AdamW, ParamsAdamW, VarBuilder, VarMap};
 
     use super::*;
-    use crate::gym::common_gyms::CartPole;
+    use crate::gym::common_gyms::CartPoleV1;
     use crate::gym::Gym;
     use crate::models::MLPBuilder;
 
     // Test the DQN actor by training it on the CartPole environment.
     #[test]
     fn dqn_cartpole() {
-        let mut env = CartPole::new(&candle_core::Device::Cpu);
+        let mut env = CartPoleV1::new(&candle_core::Device::Cpu);
         let observation_space = env.observation_space();
         let var_map = VarMap::new();
         let vb =

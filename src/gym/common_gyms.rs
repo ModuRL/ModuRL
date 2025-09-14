@@ -6,7 +6,7 @@ use candle_core::{Device, Tensor};
 
 /// The classic CartPole environment.
 /// Converted from the OpenAI Gym CartPole environment.
-pub struct CartPole {
+pub struct CartPoleV1 {
     gravity: f32,
     masspole: f32,
     total_mass: f32,
@@ -24,7 +24,7 @@ pub struct CartPole {
     steps_since_reset: usize,
 }
 
-impl CartPole {
+impl CartPoleV1 {
     pub fn new(device: &Device) -> Self {
         let gravity = 9.8;
         let masscart = 1.0;
@@ -74,17 +74,17 @@ impl CartPole {
     }
 }
 
-impl Default for CartPole {
+impl Default for CartPoleV1 {
     fn default() -> Self {
         Self::new(&Device::Cpu)
     }
 }
 
-impl Gym for CartPole {
+impl Gym for CartPoleV1 {
     type Error = candle_core::Error;
 
     fn get_name(&self) -> &str {
-        "CartPole"
+        "CartPoleV1"
     }
 
     fn reset(&mut self) -> Result<Tensor, Self::Error> {
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_cartpole() {
-        let mut env = CartPole::new(&Device::Cpu);
+        let mut env = CartPoleV1::new(&Device::Cpu);
         let state = env.reset().expect("Failed to reset environment.");
         assert_eq!(state.shape().dim(0).expect("Failed to get state dim."), 4);
         let StepInfo {
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_cartpole_invalid_action() {
-        let mut env = CartPole::new(&Device::Cpu);
+        let mut env = CartPoleV1::new(&Device::Cpu);
         let _state = env.reset();
         let _info = env
             .step(
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn reward_is_one_when_not_terminated() {
-        let mut env = CartPole::new(&Device::Cpu);
+        let mut env = CartPoleV1::new(&Device::Cpu);
         env.reset().unwrap();
         let action = Tensor::from_vec(vec![1u32], vec![], &Device::Cpu).unwrap();
         let StepInfo {
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn reward_is_zero_when_terminated() {
-        let mut env = CartPole::new(&Device::Cpu);
+        let mut env = CartPoleV1::new(&Device::Cpu);
         env.reset().unwrap();
 
         // Force termination by moving x beyond threshold

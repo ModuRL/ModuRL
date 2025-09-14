@@ -540,7 +540,6 @@ where
         env: &mut dyn crate::gym::Gym<Error = Self::GymError>,
         num_timesteps: usize,
     ) -> Result<(), PPOError<AE, GE>> {
-        let mut last_optimization_step = 0;
         let mut elapsed_timesteps = 0;
         let mut episode_idx = 0;
         while elapsed_timesteps < num_timesteps {
@@ -592,18 +591,16 @@ where
 
                 println!("Episode: {}", episode_idx + 1);
 
-                println!(
-                    "Average episode length: {}",
-                    self.rollout_buffer.len() / (episode_idx + 1 - last_optimization_step)
-                );
-                last_optimization_step = episode_idx;
                 if let Some(scheduler) = &self.actor_lr_scheduler {
-                    let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
+                    let progress =
+                        ((elapsed_timesteps as f64) / (num_timesteps as f64)).clamp(0.0, 1.0);
+
                     let new_lr = scheduler.get_lr(progress);
                     self.actor_optimizer.set_learning_rate(new_lr);
                 }
                 if let Some(scheduler) = &self.critic_lr_scheduler {
-                    let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
+                    let progress =
+                        ((elapsed_timesteps as f64) / (num_timesteps as f64)).clamp(0.0, 1.0);
                     let new_lr = scheduler.get_lr(progress);
                     self.critic_optimizer.set_learning_rate(new_lr);
                 }
@@ -633,12 +630,52 @@ mod tests {
     use super::*;
     use crate::{
         distributions::CategoricalDistribution,
-        gym::{common_gyms::CartPole, Gym},
+        gym::{common_gyms::CartPoleV1, Gym},
         models::{probabilistic_model::MLPProbabilisticActor, MLPBuilder},
         tensor_operations::tanh,
     };
     use candle_nn::{VarBuilder, VarMap};
     use candle_optimisers::adam::{Adam, ParamsAdam};
+
+    fn get_average_steps<AE, GE>(actor: &mut dyn Actor<Error = AE, GymError = GE>) -> f32
+    where
+        AE: std::fmt::Debug,
+        GE: std::fmt::Debug,
+    {
+        // We consider PPO to be solved if it gets an average reward of 475.0 over 100 consecutive episodes.
+        let mut env = CartPoleV1::new(&candle_core::Device::Cpu);
+        let mut total_steps = 0;
+
+        for _ in 0..100 {
+            let mut obs = env.reset().expect("Failed to reset environment.");
+            let mut done = false;
+            let mut episode_steps = 0;
+
+            while !done {
+                let mut new_observations_shape: Vec<usize> = vec![1];
+                new_observations_shape.append(&mut env.observation_space().shape());
+                obs = obs.reshape(&*new_observations_shape).unwrap();
+
+                let action = actor.act(&obs).unwrap();
+                let action = env.action_space().from_neurons(&action);
+                let action = action.squeeze(0).unwrap();
+
+                let StepInfo {
+                    state: next_obs,
+                    reward: _reward,
+                    done: step_done,
+                    truncated,
+                } = env.step(action).unwrap();
+                obs = next_obs;
+                done = step_done || truncated;
+                episode_steps += 1;
+            }
+
+            total_steps += episode_steps;
+        }
+
+        total_steps as f32 / 100.0
+    }
 
     #[test]
     fn ppo_cartpole() {
@@ -647,7 +684,7 @@ mod tests {
             .finish();
         tracing::subscriber::set_global_default(tracer).unwrap();
 
-        let mut env = CartPole::new(&candle_core::Device::Cpu);
+        let mut env = CartPoleV1::new(&candle_core::Device::Cpu);
         let observation_space = env.observation_space();
         let action_space = env.action_space();
         let var_map = VarMap::new();
@@ -705,17 +742,22 @@ mod tests {
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
-        .ent_coef(0.01)
+        .ent_coef(0.0)
         .gamma(0.99)
         .vf_coef(0.5)
         .clip_range(0.2)
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
-        .actor_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress)))
-        .critic_lr_scheduler(Box::new(|progress: f64| 6e-4 * (1.0 - progress)))
+        .actor_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress * 0.5)))
+        .critic_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress * 0.5)))
         .build();
 
-        actor.learn(&mut env, 500000).unwrap();
+        actor.learn(&mut env, 10000).unwrap();
+        println!("Testing if PPO solved CartPole-v1...");
+
+        let avg_steps = get_average_steps(&mut actor);
+        // Cartpole v1 should be using 475, which we can reach but no need for that here
+        assert!(avg_steps >= 195.0, "PPO did not solve CartPole-v1");
     }
 }
