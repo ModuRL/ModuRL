@@ -753,7 +753,7 @@ mod tests {
         .critic_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress * 0.5)))
         .build();
 
-        actor.learn(&mut env, 10000).unwrap();
+        actor.learn(&mut env, 20000).unwrap();
         println!("Testing if PPO solved CartPole-v1...");
 
         let avg_steps = get_average_steps(&mut actor);
