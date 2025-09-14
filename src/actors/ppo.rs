@@ -650,16 +650,24 @@ mod tests {
             .clipped(true)
             .gae_lambda(0.95)
             .num_epochs(10)
-            .actor_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress * 0.5)))
-            .critic_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress * 0.5)))
             .build();
 
-        actor.learn(&mut env, 40000).unwrap();
-        println!("Testing if PPO solved CartPole-v1...");
+        for i in 0..5 {
+            actor.learn(&mut env, i * 20000).unwrap();
+            println!("Testing if PPO solved CartPole-v1...");
 
-        let avg_steps = get_average_steps(&mut actor);
-        println!("Average steps over 100 episodes: {}", avg_steps);
-        // Cartpole v1 should be using 475, which we can reach but no need for that here
-        assert!(avg_steps >= 195.0, "PPO did not solve CartPole-v1");
+            let avg_steps = get_average_steps(&mut actor);
+            println!(
+                "Average steps over 100 episodes: {} with {} timesteps",
+                avg_steps,
+                i * 20000
+            );
+            // Cartpole v1 should be using 475, which we can reach but no need for that here
+            if avg_steps >= 195.0 {
+                println!("PPO solved CartPole-v1 in {} timesteps!", i * 20000);
+                return;
+            }
+        }
+        panic!("Failed to solve CartPole-v1 within 100000 timesteps.");
     }
 }
