@@ -653,7 +653,7 @@ mod tests {
             .build();
 
         for i in 0..5 {
-            actor.learn(&mut env, i * 20000).unwrap();
+            actor.learn(&mut env, 20000).unwrap();
             println!("Testing if PPO solved CartPole-v1...");
 
             let avg_steps = get_average_steps(&mut actor);
