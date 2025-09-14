@@ -1,9 +1,16 @@
-use candle_core::{Device, Tensor};
+use candle_core::{Device, Tensor, D};
 use rand::{rng, Rng};
 
 pub trait Space {
+    /// Returns a random sample from the space.
     fn sample(&self, device: &Device) -> Tensor;
+    /// Returns true if the input tensor is within the space.
     fn contains(&self, x: &Tensor) -> bool;
+    /// returns the shape of the space.
+    /// This is the gonna be the shape of the tensor that is inputted into the from_neurons function.
+    fn shape(&self) -> Vec<usize>;
+    /// "Translates" the output of the neurons (of shape [batch_size, shape]) to the space.
+    fn from_neurons(&self, neurons: &Tensor) -> Tensor;
 }
 
 #[derive(Clone)]
@@ -28,6 +35,19 @@ impl Space for Discrete {
         let value = x.to_vec0::<u32>().expect("Failed to convert to u32.");
         value >= self.start_value as u32
             && value < (self.start_value + self.possible_values as i32) as u32
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        if self.possible_values == 1 {
+            vec![]
+        } else {
+            vec![self.possible_values]
+        }
+    }
+
+    fn from_neurons(&self, neurons: &Tensor) -> Tensor {
+        let neurons = neurons.argmax(D::Minus1).expect("Failed to get argmax.");
+        neurons
     }
 }
 
@@ -88,6 +108,7 @@ impl Space for BoxSpace {
         }
         let low = self.low.flatten_all().expect("Failed to flatten tensor.");
         let high = self.high.flatten_all().expect("Failed to flatten tensor.");
+        let x = x.flatten_all().expect("Failed to flatten tensor.");
         // So inefficient :*(
         for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
             let low = low
@@ -110,6 +131,15 @@ impl Space for BoxSpace {
             }
         }
         true
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        self.low.shape().clone().into_dims()
+    }
+
+    fn from_neurons(&self, neurons: &Tensor) -> Tensor {
+        // Do not need to do anything here.
+        neurons.clone()
     }
 }
 
@@ -134,10 +164,7 @@ impl BoxSpace {
         let lows = Tensor::from_vec(lows, shape.clone(), device).expect("Failed to create tensor.");
         let highs =
             Tensor::from_vec(highs, shape.clone(), device).expect("Failed to create tensor.");
-        Self {
-            low: lows,
-            high: highs,
-        }
+        Self::new(lows, highs)
     }
 
     pub fn new_unbounded(shape: Vec<usize>, device: &Device) -> Self {

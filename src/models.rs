@@ -1,30 +1,35 @@
 use candle_core::Error;
 use candle_nn::{self, linear, VarBuilder};
+pub mod probabilistic_model;
 
 pub struct MLP {
     hidden_layers: Vec<candle_nn::Linear>,
-    activation: candle_nn::Activation,
+    activation: Box<dyn candle_nn::Module>,
     output_layer: candle_nn::Linear,
     input_layer: candle_nn::Linear,
-    output_activation: Option<candle_nn::Activation>,
+    output_activation: Option<Box<dyn candle_nn::Module>>,
 }
 
-pub struct MLPBuilder {
+pub struct MLPBuilder<'a> {
     pub input_size: usize,
     pub output_size: usize,
     pub hidden_layer_sizes: Option<Vec<usize>>,
-    pub activation: Option<candle_nn::Activation>,
-    pub output_activation: Option<candle_nn::Activation>,
+    pub activation: Option<Box<dyn candle_nn::Module>>,
+    pub output_activation: Option<Box<dyn candle_nn::Module>>,
+    pub vb: VarBuilder<'a>,
+    pub name: Option<String>,
 }
 
-impl MLPBuilder {
-    pub fn new(input_size: usize, output_size: usize) -> Self {
+impl<'a> MLPBuilder<'a> {
+    pub fn new(input_size: usize, output_size: usize, vb: VarBuilder<'a>) -> Self {
         Self {
             input_size,
             output_size,
             hidden_layer_sizes: None,
             activation: None,
             output_activation: None,
+            vb: vb,
+            name: None,
         }
     }
 
@@ -33,20 +38,29 @@ impl MLPBuilder {
         self
     }
 
-    pub fn activation(mut self, activation: candle_nn::Activation) -> Self {
+    pub fn activation(mut self, activation: Box<dyn candle_nn::Module>) -> Self {
         self.activation = Some(activation);
         self
     }
 
-    pub fn output_activation(mut self, output_activation: candle_nn::Activation) -> Self {
+    pub fn output_activation(mut self, output_activation: Box<dyn candle_nn::Module>) -> Self {
         self.output_activation = Some(output_activation);
         self
     }
 
-    pub fn build(self, vb: &mut VarBuilder) -> Result<MLP, Error> {
+    pub fn name(mut self, name: &str) -> Self {
+        self.name = Some(name.to_string());
+        self
+    }
+
+    pub fn build(mut self) -> Result<MLP, Error> {
+        // TODO: make the default hidden layer size change based on input and output size
         let hidden_layer_sizes = self.hidden_layer_sizes.unwrap_or(vec![32, 32, 32]);
-        let activation = self.activation.unwrap_or(candle_nn::Activation::Relu);
+        let activation = self
+            .activation
+            .unwrap_or(Box::new(candle_nn::Activation::Relu));
         // output layer activation is optional and defaults to None
+        let name = self.name.unwrap_or("mlp".to_string());
 
         MLP::new(
             self.input_size,
@@ -54,7 +68,8 @@ impl MLPBuilder {
             self.output_size,
             activation,
             self.output_activation,
-            vb,
+            &mut self.vb,
+            &name,
         )
     }
 }
@@ -64,23 +79,28 @@ impl MLP {
         input_size: usize,
         hidden_layer_sizes: Vec<usize>,
         output_size: usize,
-        activation: candle_nn::Activation,
-        output_activation: Option<candle_nn::Activation>,
+        activation: Box<dyn candle_nn::Module>,
+        output_activation: Option<Box<dyn candle_nn::Module>>,
         vb: &mut VarBuilder,
+        name: &str,
     ) -> Result<Self, Error> {
         let mut hidden_layers = Vec::new();
-        let input_layer = linear(input_size, hidden_layer_sizes[0], vb.pp("input layer"))?;
+        let input_layer = linear(
+            input_size,
+            hidden_layer_sizes[0],
+            vb.pp(format!("{name}_input_layer")),
+        )?;
         for i in 0..hidden_layer_sizes.len() - 1 {
             hidden_layers.push(linear(
                 hidden_layer_sizes[i],
                 hidden_layer_sizes[i + 1],
-                vb.pp(format!("hidden layer {}", i)),
+                vb.pp(format!("{name}_hidden_layer_{i}")),
             )?);
         }
         let output_layer = linear(
             hidden_layer_sizes[hidden_layer_sizes.len() - 1],
             output_size,
-            vb.pp("output layer"),
+            vb.pp(format!("{name}_output_layer")),
         )?;
         Ok(Self {
             hidden_layers,
