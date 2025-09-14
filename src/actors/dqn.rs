@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use bon::bon;
 use candle_core::{safetensors::save, Error, Tensor, Var};
 use candle_nn::Optimizer;
 use rand::Rng;
@@ -85,97 +86,34 @@ where
     _phantom: std::marker::PhantomData<GE>,
 }
 
-pub struct DQNActorBuilder<O, GE>
+#[bon]
+impl<O, GE> DQNActor<O, GE>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
 {
-    // Everything other than the spaces are optional.
-    q_network: Box<dyn candle_core::Module>,
-    optimizer: O,
-    epsilon_start: Option<f32>,
-    epsilon_decay: Option<f32>,
-    action_space: Discrete,
-    observation_space: Box<dyn Space>,
-    batch_size: Option<usize>,
-    gamma: Option<f32>,
-    replay_capacity: Option<usize>,
-    epochs: Option<usize>,
-    _phantom: std::marker::PhantomData<GE>,
-}
-
-impl<O, GE> DQNActorBuilder<O, GE>
-where
-    O: Optimizer,
-    GE: std::fmt::Debug,
-{
-    pub fn new(
+    #[builder]
+    fn new(
         action_space: Discrete,
         observation_space: Box<dyn Space>,
         q_network: Box<dyn candle_core::Module>,
         optimizer: O,
+        #[builder(default = 0.9)] epsilon_start: f32,
+        #[builder(default = 0.99)] epsilon_decay: f32,
+        #[builder(default = 10000)] replay_capacity: usize,
+        #[builder(default = 32)] batch_size: usize,
+        #[builder(default = 0.99)] gamma: f32,
+        #[builder(default = 10)] epochs: usize,
     ) -> Self {
+        let experience_replay = ExperienceReplay::new(replay_capacity, batch_size);
         Self {
-            q_network: q_network,
-            optimizer: optimizer,
-            epsilon_start: None,
-            epsilon_decay: None,
-            action_space,
-            observation_space,
-            batch_size: None,
-            gamma: None,
-            replay_capacity: None,
-            epochs: None,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
-    pub fn epsilon_start(mut self, epsilon_start: f32) -> Self {
-        self.epsilon_start = Some(epsilon_start);
-        self
-    }
-
-    pub fn epsilon_decay(mut self, epsilon_decay: f32) -> Self {
-        self.epsilon_decay = Some(epsilon_decay);
-        self
-    }
-
-    pub fn batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = Some(batch_size);
-        self
-    }
-
-    pub fn gamma(mut self, gamma: f32) -> Self {
-        self.gamma = Some(gamma);
-        self
-    }
-
-    pub fn replay_capacity(mut self, replay_capacity: usize) -> Self {
-        self.replay_capacity = Some(replay_capacity);
-        self
-    }
-
-    pub fn epochs(mut self, epochs: usize) -> Self {
-        self.epochs = Some(epochs);
-        self
-    }
-
-    pub fn build(self) -> DQNActor<O, GE> {
-        let epsilon_start = self.epsilon_start.unwrap_or(0.9);
-        let epsilon_decay = self.epsilon_decay.unwrap_or(0.99);
-        let batch_size = self.batch_size.unwrap_or(32);
-        let gamma = self.gamma.unwrap_or(0.99);
-        let replay_capacity = self.replay_capacity.unwrap_or(10000);
-        let epochs = self.epochs.unwrap_or(10);
-
-        DQNActor {
-            q_network: self.q_network,
-            optimizer: self.optimizer,
+            q_network,
+            optimizer,
             epsilon: epsilon_start,
             epsilon_decay,
-            action_space: self.action_space,
-            observation_space: self.observation_space,
-            experience_replay: ExperienceReplay::new(replay_capacity, batch_size),
+            action_space,
+            observation_space,
+            experience_replay,
             gamma,
             epochs,
             _phantom: std::marker::PhantomData,
@@ -360,16 +298,17 @@ mod tests {
         let optimizer =
             AdamW::new(var_map.all_vars(), ParamsAdamW::default()).expect("Failed to create AdamW");
 
-        let mut actor = DQNActorBuilder::new(
-            Discrete::new(2, 0), // had to hardcode this :(
-            observation_space,
-            Box::new(mlp),
-            optimizer,
-        )
-        .replay_capacity(128)
-        .batch_size(32) // So that it actually reaches the optimization step.
-        .build();
+        let mut actor = DQNActor::builder()
+            .action_space(Discrete::new(2, 0)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
+            .observation_space(observation_space)
+            .q_network(Box::new(mlp))
+            .optimizer(optimizer)
+            .replay_capacity(128)
+            .batch_size(32)
+            .build();
 
-        actor.learn(&mut env, 500000).expect("Failed to learn");
+        actor
+            .learn(&mut env, 20000)
+            .expect("DQN panicked during learning");
     }
 }
