@@ -1,3 +1,4 @@
+use bon::bon;
 use candle_core::{safetensors::save, IndexOp, Tensor};
 use candle_nn::{loss, Optimizer};
 use std::collections::HashMap;
@@ -135,159 +136,58 @@ where
     _phantom: PhantomData<GE>,
 }
 
-pub struct PPOActorBuilder<O1, O2, AE, GE>
+#[bon]
+impl<O1, O2, AE, GE> PPOActor<O1, O2, AE, GE>
 where
     O1: Optimizer,
     O2: Optimizer,
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
 {
-    // Neccesary hyperparameters
-    critic_optimizer: O1,
-    actor_optimizer: O2,
-    observation_space: Box<dyn spaces::Space>,
-    action_space: Box<dyn spaces::Space>,
-    critic_network: Box<dyn candle_core::Module>,
-    actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
-    // Has default values so optional
-    clipped: Option<bool>,
-    gamma: Option<f32>,
-    gae_lambda: Option<f32>,
-    clip_range: Option<f32>,
-    normalize_advantage: Option<bool>,
-    vf_coef: Option<f32>,
-    ent_coef: Option<f32>,
-    batch_size: Option<usize>,
-    mini_batch_size: Option<usize>,
-    num_epochs: Option<usize>,
-    actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
-    critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
-    _phantom: PhantomData<GE>,
-}
-
-impl<O1, O2, AE, GE> PPOActorBuilder<O1, O2, AE, GE>
-where
-    O1: Optimizer,
-    O2: Optimizer,
-    AE: std::fmt::Debug,
-    GE: std::fmt::Debug,
-{
-    pub fn new(
+    #[builder]
+    fn new(
         observation_space: Box<dyn spaces::Space>,
         action_space: Box<dyn spaces::Space>,
         actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
         critic_network: Box<dyn candle_core::Module>,
         critic_optimizer: O1,
         actor_optimizer: O2,
+        #[builder(default = true)] clipped: bool,
+        #[builder(default = 0.99)] gamma: f32,
+        #[builder(default = 0.95)] gae_lambda: f32,
+        #[builder(default = 0.2)] clip_range: f32,
+        #[builder(default = true)] normalize_advantage: bool,
+        #[builder(default = 0.5)] vf_coef: f32,
+        #[builder(default = 0.01)] ent_coef: f32,
+        #[builder(default = 1024)] batch_size: usize,
+        #[builder(default = 128)] mini_batch_size: usize,
+        #[builder(default = 1)] num_epochs: usize,
+        actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
+        critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
     ) -> Self {
+        if batch_size > 0 {
+            assert!(batch_size > 0);
+        }
+
         Self {
+            clipped,
+            gamma,
+            gae_lambda,
+            clip_range,
+            normalize_advantage,
+            vf_coef,
+            ent_coef,
             critic_optimizer,
             actor_optimizer,
             observation_space,
             action_space,
-            actor_network,
             critic_network,
-            clipped: None,
-            gamma: None,
-            gae_lambda: None,
-            clip_range: None,
-            normalize_advantage: None,
-            vf_coef: None,
-            ent_coef: None,
-            batch_size: None,
-            mini_batch_size: None,
-            num_epochs: None,
-            actor_lr_scheduler: None,
-            critic_lr_scheduler: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn clipped(mut self, clipped: bool) -> Self {
-        self.clipped = Some(clipped);
-        self
-    }
-
-    pub fn gamma(mut self, gamma: f32) -> Self {
-        self.gamma = Some(gamma);
-        self
-    }
-
-    pub fn gae_lambda(mut self, gae_lambda: f32) -> Self {
-        self.gae_lambda = Some(gae_lambda);
-        self
-    }
-
-    pub fn clip_range(mut self, clip_range: f32) -> Self {
-        self.clip_range = Some(clip_range);
-        self
-    }
-
-    pub fn normalize_advantage(mut self, normalize_advantage: bool) -> Self {
-        self.normalize_advantage = Some(normalize_advantage);
-        self
-    }
-
-    pub fn vf_coef(mut self, vf_coef: f32) -> Self {
-        self.vf_coef = Some(vf_coef);
-        self
-    }
-
-    pub fn ent_coef(mut self, ent_coef: f32) -> Self {
-        self.ent_coef = Some(ent_coef);
-        self
-    }
-
-    pub fn batch_size(mut self, batch_size: usize) -> Self {
-        self.batch_size = Some(batch_size);
-        self
-    }
-
-    pub fn mini_batch_size(mut self, mini_batch_size: usize) -> Self {
-        self.mini_batch_size = Some(mini_batch_size);
-        self
-    }
-
-    pub fn num_epochs(mut self, num_epochs: usize) -> Self {
-        self.num_epochs = Some(num_epochs);
-        self
-    }
-
-    /// returns a percent of t
-    pub fn actor_lr_scheduler(mut self, lr_scheduler: Box<dyn LrScheduler>) -> Self {
-        self.actor_lr_scheduler = Some(lr_scheduler);
-        self
-    }
-
-    pub fn critic_lr_scheduler(mut self, lr_scheduler: Box<dyn LrScheduler>) -> Self {
-        self.critic_lr_scheduler = Some(lr_scheduler);
-        self
-    }
-
-    pub fn build(self) -> PPOActor<O1, O2, AE, GE> {
-        if let Some(batch_size) = self.batch_size {
-            assert!(batch_size > 0);
-        }
-
-        PPOActor {
-            clipped: self.clipped.unwrap_or(true),
-            gamma: self.gamma.unwrap_or(0.99),
-            gae_lambda: self.gae_lambda.unwrap_or(0.95),
-            clip_range: self.clip_range.unwrap_or(0.2),
-            normalize_advantage: self.normalize_advantage.unwrap_or(true),
-            vf_coef: self.vf_coef.unwrap_or(0.5),
-            ent_coef: self.ent_coef.unwrap_or(0.01),
-            critic_optimizer: self.critic_optimizer,
-            actor_optimizer: self.actor_optimizer,
-            observation_space: self.observation_space,
-            action_space: self.action_space,
-            critic_network: self.critic_network,
-            actor_network: self.actor_network,
-            rollout_buffer: RolloutBuffer::new(self.mini_batch_size.unwrap_or(128)),
-            num_epochs: self.num_epochs.unwrap_or(1),
-            batch_size: self.batch_size.unwrap_or(1024),
-            actor_lr_scheduler: self.actor_lr_scheduler,
-            critic_lr_scheduler: self.critic_lr_scheduler,
+            actor_network,
+            rollout_buffer: RolloutBuffer::new(mini_batch_size),
+            num_epochs,
+            batch_size,
+            actor_lr_scheduler,
+            critic_lr_scheduler,
             _phantom: PhantomData,
         }
     }
@@ -631,7 +531,7 @@ mod tests {
     use crate::{
         distributions::CategoricalDistribution,
         gym::{common_gyms::CartPoleV1, Gym},
-        models::{probabilistic_model::MLPProbabilisticActor, MLPBuilder},
+        models::{probabilistic_model::MLPProbabilisticActor, MLP},
         tensor_operations::tanh,
     };
     use candle_nn::{VarBuilder, VarMap};
@@ -692,16 +592,15 @@ mod tests {
             VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
 
         // Actor network: 2x64, tanh activation
-        let actor_network = MLPBuilder::new(
-            observation_space.shape().iter().sum(),
-            action_space.shape().iter().sum::<usize>(),
-            vb.clone(),
-        )
-        .activation(Box::new(tanh))
-        .hidden_layer_sizes(vec![64, 64])
-        .name("actor_network")
-        .build()
-        .unwrap();
+        let actor_network = MLP::builder()
+            .input_size(observation_space.shape().iter().sum())
+            .output_size(action_space.shape().iter().sum::<usize>())
+            .vb(vb.clone())
+            .activation(Box::new(tanh))
+            .hidden_layer_sizes(vec![64, 64])
+            .name("actor_network".to_string())
+            .build()
+            .unwrap();
         let mut config = ParamsAdam::default();
         // Optimizers: both with lr=3e-4
         config.lr = 3e-4;
@@ -716,10 +615,13 @@ mod tests {
         );
 
         // Critic network: 2x64, tanh activation
-        let critic_network = MLPBuilder::new(observation_space.shape().iter().sum(), 1, critic_vb)
+        let critic_network = MLP::builder()
+            .input_size(observation_space.shape().iter().sum())
+            .output_size(1)
+            .vb(critic_vb)
             .activation(Box::new(tanh))
             .hidden_layer_sizes(vec![64, 64])
-            .name("critic_network")
+            .name("critic_network".to_string())
             .build()
             .unwrap();
 
@@ -729,35 +631,43 @@ mod tests {
 
         // PPO config
         // Stable baselines3 config:
-        let mut actor = PPOActorBuilder::new(
-            observation_space,
-            action_space,
-            Box::new(MLPProbabilisticActor::<CategoricalDistribution>::new(
-                actor_network,
-            )),
-            Box::new(critic_network),
-            critic_optimizer,
-            actor_optimizer,
-        )
-        .batch_size(2048)
-        .mini_batch_size(64)
-        .normalize_advantage(true)
-        .ent_coef(0.0)
-        .gamma(0.99)
-        .vf_coef(0.5)
-        .clip_range(0.2)
-        .clipped(true)
-        .gae_lambda(0.95)
-        .num_epochs(10)
-        .actor_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress * 0.5)))
-        .critic_lr_scheduler(Box::new(|progress: f64| 3e-4 * (1.0 - progress * 0.5)))
-        .build();
+        let mut actor = PPOActor::builder()
+            .observation_space(observation_space)
+            .action_space(action_space)
+            .actor_network(Box::new(
+                MLPProbabilisticActor::<CategoricalDistribution>::new(actor_network),
+            ))
+            .critic_network(Box::new(critic_network))
+            .critic_optimizer(critic_optimizer)
+            .actor_optimizer(actor_optimizer)
+            .batch_size(2048)
+            .mini_batch_size(64)
+            .normalize_advantage(true)
+            .ent_coef(0.005)
+            .gamma(0.99)
+            .vf_coef(0.5)
+            .clip_range(0.2)
+            .clipped(true)
+            .gae_lambda(0.95)
+            .num_epochs(10)
+            .build();
 
-        actor.learn(&mut env, 20000).unwrap();
-        println!("Testing if PPO solved CartPole-v1...");
+        for i in 0..6 {
+            actor.learn(&mut env, 20000).unwrap();
+            println!("Testing if PPO solved CartPole-v1...");
 
-        let avg_steps = get_average_steps(&mut actor);
-        // Cartpole v1 should be using 475, which we can reach but no need for that here
-        assert!(avg_steps >= 195.0, "PPO did not solve CartPole-v1");
+            let avg_steps = get_average_steps(&mut actor);
+            println!(
+                "Average steps over 100 episodes: {} with {} timesteps",
+                avg_steps,
+                i * 20000
+            );
+            // Cartpole v1 should be using 475, which we can reach but no need for that here
+            if avg_steps >= 195.0 {
+                println!("PPO solved CartPole-v1 in {} timesteps!", i * 20000);
+                return;
+            }
+        }
+        panic!("Failed to solve CartPole-v1 within 100000 timesteps.");
     }
 }

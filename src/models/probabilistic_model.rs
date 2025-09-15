@@ -91,7 +91,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{distributions::GuassianDistribution, models::MLPBuilder};
+    use crate::{distributions::GuassianDistribution, models::MLP};
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Activation, VarBuilder, VarMap};
 
@@ -105,7 +105,10 @@ mod tests {
         let vb = VarBuilder::from_varmap(&varmap, DType::F64, &device);
 
         // Output size is double action_size for mean and std
-        let mlp = MLPBuilder::new(input_size, action_size * 2, vb)
+        let mlp = MLP::builder()
+            .input_size(input_size)
+            .output_size(action_size * 2)
+            .vb(vb)
             .hidden_layer_sizes(hidden_sizes)
             .activation(Box::new(Activation::Relu))
             .build()?;
@@ -293,7 +296,10 @@ mod tests {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F64, &device);
 
-        let mlp = MLPBuilder::new(4, 4, vb)
+        let mlp = MLP::builder()
+            .input_size(4)
+            .output_size(4)
+            .vb(vb)
             .hidden_layer_sizes(vec![16])
             .activation(Box::new(Activation::Relu))
             .build()
