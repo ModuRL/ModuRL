@@ -1,6 +1,6 @@
-# Rust RL
+# FerRL
 
-Rust RL is a modular reinforcement learning (RL) library designed for flexibility and performance. It leverages the candle backend for efficient computations.
+FerRL is a modular reinforcement learning (RL) library designed for flexibility and performance. It leverages the candle backend for efficient computations.
 
 ## Key Features
 
