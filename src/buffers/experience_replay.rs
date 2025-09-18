@@ -2,7 +2,7 @@ use super::{experience, ExperienceBatch};
 use rand::seq::SliceRandom;
 use std::collections::VecDeque;
 
-pub(crate) struct ExperienceReplay<T>
+pub struct ExperienceReplay<T>
 where
     T: experience::Experience,
 {
