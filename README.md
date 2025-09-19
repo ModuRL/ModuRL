@@ -1,6 +1,6 @@
-# FerRL
+# ModuRL
 
-FerRL is a modular reinforcement learning (RL) library designed for flexibility and performance. It leverages the candle backend for efficient computations.
+ModuRL is a modular reinforcement learning (RL) library designed for flexibility and performance. It leverages the candle backend for efficient computations.
 
 ## Key Features
 
