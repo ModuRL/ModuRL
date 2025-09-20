@@ -3,20 +3,6 @@
 version = 4
 
 [[package]]
-name = "ModuRL"
-version = "0.1.0"
-dependencies = [
- "bon",
- "candle-core",
- "candle-nn",
- "candle-optimisers",
- "log",
- "rand",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -97,9 +83,10 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 [[package]]
 name = "candle-core"
 version = "0.9.1"
-source = "git+https://github.com/NoodlesOfWrath/candle?branch=gradstore_insert_id#da5498c19ca4d415c3141af2dd6edf441f7d2b93"
+source = "git+https://github.com/huggingface/candle?rev=41a674c#41a674ce8d1e37a9f8c6a97ff758552eddfd389a"
 dependencies = [
  "byteorder",
+ "float8",
  "gemm 0.17.1",
  "half",
  "memmap2",
@@ -286,6 +273,18 @@ name = "equivalent"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
+
+[[package]]
+name = "float8"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4203231de188ebbdfb85c11f3c20ca2b063945710de04e7b59268731e728b462"
+dependencies = [
+ "half",
+ "num-traits",
+ "rand",
+ "rand_distr",
+]
 
 [[package]]
 name = "fnv"
@@ -644,6 +643,20 @@ checksum = "fd3f7eed9d3848f8b98834af67102b720745c4ec028fcd0aa0239277e7de374f"
 dependencies = [
  "libc",
  "stable_deref_trait",
+]
+
+[[package]]
+name = "modurl"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "candle-core",
+ "candle-nn",
+ "candle-optimisers",
+ "log",
+ "rand",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

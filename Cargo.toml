@@ -1,11 +1,11 @@
 [package]
-name = "ModuRL"
+name = "modurl"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 bon = "3.7.2"
-candle-core = { git = "https://github.com/NoodlesOfWrath/candle", branch = "gradstore_insert_id" }
+candle-core = { git = "https://github.com/huggingface/candle", rev = "41a674c" }
 candle-nn = "0.9.1"
 log = { version = "0.4.28", optional = true }
 rand = "0.9.2"
@@ -22,4 +22,4 @@ tracing-subscriber = "0.3.20"
 tracing = { version = "0.1.37" }
 
 [patch.crates-io]
-candle-core = { git = "https://github.com/NoodlesOfWrath/candle", branch = "gradstore_insert_id" }
+candle-core = { git = "https://github.com/huggingface/candle", rev = "41a674c" }
