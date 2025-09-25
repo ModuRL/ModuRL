@@ -277,9 +277,9 @@ mod tests {
     use candle_nn::{AdamW, ParamsAdamW, VarBuilder, VarMap};
 
     use super::*;
-    use crate::gym::common_gyms::CartPoleV1;
     use crate::gym::Gym;
     use crate::models::MLP;
+    use modurl_gym::classic_control::cartpole::CartPoleV1;
 
     // Test the DQN actor by training it on the CartPole environment.
     #[test]

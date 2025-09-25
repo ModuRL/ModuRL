@@ -530,12 +530,13 @@ mod tests {
     use super::*;
     use crate::{
         distributions::CategoricalDistribution,
-        gym::{common_gyms::CartPoleV1, Gym},
+        gym::Gym,
         models::{probabilistic_model::MLPProbabilisticActor, MLP},
         tensor_operations::tanh,
     };
     use candle_nn::{VarBuilder, VarMap};
     use candle_optimisers::adam::{Adam, ParamsAdam};
+    use modurl_gym::classic_control::cartpole::CartPoleV1;
 
     fn get_average_steps<AE, GE>(actor: &mut dyn Actor<Error = AE, GymError = GE>) -> f32
     where
