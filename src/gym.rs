@@ -1,6 +1,5 @@
 use crate::spaces::Space;
 use candle_core::Tensor;
-pub mod common_gyms;
 
 pub trait Gym {
     type Error;
@@ -15,6 +14,7 @@ pub trait Gym {
     fn action_space(&self) -> Box<dyn Space>;
 }
 
+#[derive(Debug, Clone)]
 pub struct StepInfo {
     pub state: Tensor,
     pub reward: f32,

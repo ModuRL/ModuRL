@@ -1,4 +1,4 @@
-use candle_core::{backprop::GradStore, Error, Tensor};
+use candle_core::{Error, Tensor, backprop::GradStore};
 
 pub(crate) fn torch_like_min(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
     // candle has a min but all it does is takes a tensor and a dim
@@ -40,9 +40,8 @@ pub(crate) fn clip_gradients(
     Ok(total_norm)
 }
 
-#[allow(dead_code)]
 // implement the tanh activation function
-pub(crate) fn tanh(x: &Tensor) -> Result<Tensor, Error> {
+pub fn tanh(x: &Tensor) -> Result<Tensor, Error> {
     let e_pos = x.exp()?;
     let e_neg = (-1.0 * x)?.exp()?;
     let numerator = (&e_pos - &e_neg)?;
