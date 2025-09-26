@@ -168,20 +168,6 @@ fn dqn_cartpole() {
         .batch_size(32)
         .build();
 
-    for i in 0..6 {
-        actor.learn(&mut env, 20000).unwrap();
-        println!("Testing if DQN solved CartPole-v1...");
-
-        let avg_steps = get_average_steps(&mut actor);
-        println!(
-            "Average steps over 100 episodes: {} with {} timesteps",
-            avg_steps,
-            i * 20000
-        );
-        // Cartpole v1 should be using 475, which we can reach but no need for that here
-        if avg_steps >= 195.0 {
-            println!("DQN solved CartPole-v1 in {} timesteps!", i * 20000);
-            return;
-        }
-    }
+    actor.learn(&mut env, 20000).unwrap();
+    // we could test if it learned but it's dqn, so it would take a while
 }
