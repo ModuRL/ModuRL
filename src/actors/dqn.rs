@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bon::bon;
-use candle_core::{safetensors::save, Error, Tensor, Var};
+use candle_core::{Error, Tensor, Var, safetensors::save};
 use candle_nn::Optimizer;
 use rand::Rng;
 
@@ -93,7 +93,7 @@ where
     GE: std::fmt::Debug,
 {
     #[builder]
-    fn new(
+    pub fn new(
         action_space: Discrete,
         observation_space: Box<dyn Space>,
         q_network: Box<dyn candle_core::Module>,
@@ -269,49 +269,5 @@ where
         }
         save(&hashmap, path)?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use candle_nn::{AdamW, ParamsAdamW, VarBuilder, VarMap};
-
-    use super::*;
-    use crate::gym::Gym;
-    use crate::models::MLP;
-    use modurl_gym::classic_control::cartpole::CartPoleV1;
-
-    // Test the DQN actor by training it on the CartPole environment.
-    #[test]
-    fn dqn_cartpole() {
-        let mut env = CartPoleV1::new(&candle_core::Device::Cpu);
-        let observation_space = env.observation_space();
-        let var_map = VarMap::new();
-        let vb =
-            VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &candle_core::Device::Cpu);
-
-        let mlp = MLP::builder()
-            .input_size(observation_space.shape().iter().sum())
-            .output_size(2)
-            .vb(vb)
-            .hidden_layer_sizes(vec![64, 64])
-            .build()
-            .expect("Failed to create MLP");
-
-        let optimizer =
-            AdamW::new(var_map.all_vars(), ParamsAdamW::default()).expect("Failed to create AdamW");
-
-        let mut actor = DQNActor::builder()
-            .action_space(Discrete::new(2, 0)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
-            .observation_space(observation_space)
-            .q_network(Box::new(mlp))
-            .optimizer(optimizer)
-            .replay_capacity(128)
-            .batch_size(32)
-            .build();
-
-        actor
-            .learn(&mut env, 20000)
-            .expect("DQN panicked during learning");
     }
 }
