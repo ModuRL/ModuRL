@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
 use bon::bon;
-use candle_core::{Error, Tensor, Var, safetensors::save};
+use candle_core::{Error, Tensor};
 use candle_nn::Optimizer;
 use rand::Rng;
 
@@ -258,16 +256,6 @@ where
             episode_idx += 1;
         }
 
-        Ok(())
-    }
-
-    fn save(&self, vars: Vec<Var>, path: &str) -> Result<(), Self::Error> {
-        let tensors = vars.iter().map(|v| v.as_tensor()).collect::<Vec<_>>();
-        let mut hashmap = HashMap::new();
-        for (i, tensor) in tensors.iter().enumerate() {
-            hashmap.insert(format!("var_{i}"), (*tensor).clone());
-        }
-        save(&hashmap, path)?;
         Ok(())
     }
 }
