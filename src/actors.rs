@@ -1,5 +1,5 @@
 use crate::gym::Gym;
-use candle_core::{Tensor, Var};
+use candle_core::Tensor;
 pub mod dqn;
 pub mod ppo;
 
@@ -13,5 +13,4 @@ pub trait Actor {
         env: &mut dyn Gym<Error = Self::GymError>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error>;
-    fn save(&self, vars: Vec<Var>, path: &str) -> Result<(), Self::Error>;
 }

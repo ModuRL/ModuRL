@@ -1,7 +1,6 @@
 use bon::bon;
-use candle_core::{IndexOp, Tensor, safetensors::save};
+use candle_core::{IndexOp, Tensor};
 use candle_nn::{Optimizer, loss};
-use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::{
@@ -507,20 +506,6 @@ where
                 self.optimize()?;
             }
         }
-        Ok(())
-    }
-
-    fn save(&self, vars: Vec<candle_core::Var>, path: &str) -> Result<(), Self::Error> {
-        // TODO! Reevaluate this is there ever a case where anything different happens?
-        // This is a copy paste from the DQN actor but I guess it shouldn't be needed to be implemented for every actor
-        // It might be universal for all actors but load is different for each actor
-
-        let tensors = vars.iter().map(|v| v.as_tensor()).collect::<Vec<_>>();
-        let mut hashmap = HashMap::new();
-        for (i, tensor) in tensors.iter().enumerate() {
-            hashmap.insert(format!("var_{i}"), (*tensor).clone());
-        }
-        save(&hashmap, path)?;
         Ok(())
     }
 }
