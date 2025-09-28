@@ -18,7 +18,7 @@ where
     GE: std::fmt::Debug,
 {
     // We consider PPO to be solved if it gets an average reward of 475.0 over 100 consecutive episodes.
-    let mut env = CartPoleV1::new(&Device::Cpu);
+    let mut env = CartPoleV1::builder().build();
     let mut total_steps = 0;
 
     for _ in 0..100 {
@@ -59,7 +59,7 @@ fn ppo_cartpole() {
         .finish();
     tracing::subscriber::set_global_default(tracer).unwrap();
 
-    let mut env = CartPoleV1::new(&Device::Cpu);
+    let mut env = CartPoleV1::builder().build();
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let var_map = VarMap::new();
@@ -143,7 +143,7 @@ fn ppo_cartpole() {
 
 #[test]
 fn dqn_cartpole() {
-    let mut env = CartPoleV1::new(&Device::Cpu);
+    let mut env = CartPoleV1::builder().build();
     let observation_space = env.observation_space();
     let var_map = VarMap::new();
     let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &Device::Cpu);
