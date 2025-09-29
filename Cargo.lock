@@ -894,6 +894,7 @@ dependencies = [
  "log",
  "modurl_gym",
  "rand",
+ "rayon",
  "tracing",
  "tracing-subscriber",
 ]

@@ -9,12 +9,14 @@ candle-core = { git = "https://github.com/huggingface/candle", rev = "41a674c" }
 candle-nn = "0.9.1"
 log = { version = "0.4.28", optional = true }
 rand = "0.9.2"
+rayon = { version = "1.11.0", optional = true }
 tracing = { version = "0.1.37", optional = true }
 
 [features]
 default = []
 tracing = ["dep:tracing"]
 logging = ["dep:log"]
+multithreading = ["dep:rayon"]
 
 [dev-dependencies]
 # rendering isn't needed for tests but for examples
