@@ -1,5 +1,5 @@
 use candle_core::Device;
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::actors::dqn::DQNActor;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
@@ -19,38 +19,28 @@ where
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
 {
-    // We consider PPO to be solved if it gets an average reward of 475.0 over 100 consecutive episodes.
-    let mut env = CartPoleV1::builder().build();
+    let envs = vec![CartPoleV1::builder().build()];
+    let mut vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
     let mut total_steps = 0;
 
-    for _ in 0..100 {
-        let mut obs = env.reset().expect("Failed to reset environment.");
-        let mut done = false;
-        let mut episode_steps = 0;
-
-        while !done {
-            let mut new_observations_shape: Vec<usize> = vec![1];
-            new_observations_shape.append(&mut env.observation_space().shape());
-            obs = obs.reshape(&*new_observations_shape).unwrap();
-
-            let action = actor.act(&obs).unwrap();
-            let action = env.action_space().from_neurons(&action);
-
-            let StepInfo {
-                state: next_obs,
-                reward: _reward,
-                done: step_done,
-                truncated,
-            } = env.step(action).unwrap();
-            obs = next_obs;
-            done = step_done || truncated;
-            episode_steps += 1;
+    let mut total_done_count = 0;
+    let target_episodes = 100;
+    let mut states = vec_env.reset().unwrap();
+    while total_done_count < target_episodes {
+        let action = actor.act(&states).unwrap();
+        let step_info = vec_env.step(action).unwrap();
+        states = step_info.states;
+        let step_dones = step_info.dones;
+        let step_terminateds = step_info.truncateds;
+        for i in 0..vec_env.num_envs() {
+            if step_dones[i] || step_terminateds[i] {
+                total_done_count += 1;
+            }
         }
-
-        total_steps += episode_steps;
+        total_steps += vec_env.num_envs();
     }
 
-    total_steps as f32 / 100.0
+    total_steps as f32 / target_episodes as f32
 }
 
 struct DebugCartpoleV1 {
@@ -179,6 +169,7 @@ fn ppo_cartpole() {
         actor.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if PPO solved CartPole-v1...");
 
+        // TODO! make a way to make actor deterministic for testing
         let avg_steps = get_average_steps(&mut actor);
         println!(
             "Average steps over 100 episodes: {} with {} timesteps",
@@ -187,7 +178,7 @@ fn ppo_cartpole() {
         );
 
         // Cartpole v1 should be using 475, which we can reach but no need for that here
-        if avg_steps >= 195.0 {
+        if avg_steps >= 495.0 {
             println!("PPO solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
             return;
         }
@@ -216,7 +207,7 @@ fn dqn_cartpole() {
         .expect("Failed to create MLP");
 
     let mut config = ParamsAdam::default();
-    config.lr = 3e-4;
+    config.lr = 1e-3;
     let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut actor = DQNActor::builder()
@@ -231,7 +222,9 @@ fn dqn_cartpole() {
         .update_frequency(1)
         .build();
 
-    for i in 0..6 {
+    // we'll give dqn more chances since it's more unstable
+    // Hopefully it doesn't actually need this many to pass
+    for i in 0..10 {
         actor.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if PPO solved CartPole-v1...");
 

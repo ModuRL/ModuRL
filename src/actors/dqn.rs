@@ -181,8 +181,11 @@ where
             let mut actions = vec![];
             let batch_size = observation.shape().dims()[0];
             for _ in 0..batch_size {
-                actions.push(self.action_space.sample(observation.device()));
+                let sample = self.action_space.sample(observation.device());
+
+                actions.push(sample);
             }
+            // turn that into a
             let actions = Tensor::stack(&actions, 0)?;
             Ok(actions)
         } else {

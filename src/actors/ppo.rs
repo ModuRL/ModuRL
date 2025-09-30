@@ -554,6 +554,15 @@ where
             .unwrap() as f64;
         Ok((actor_loss_scalar, critic_loss_scalar))
     }
+
+    fn act_neurons(
+        &mut self,
+        observation: &candle_core::Tensor,
+    ) -> Result<candle_core::Tensor, PPOError<AE, GE>> {
+        self.actor_network
+            .sample(observation)
+            .map_err(PPOError::ActorError)
+    }
 }
 
 impl<O1, O2, AE, GE> Actor for PPOActor<O1, O2, AE, GE>
@@ -565,13 +574,11 @@ where
 {
     type Error = PPOError<AE, GE>;
     type GymError = GE;
-    fn act(
-        &mut self,
-        observation: &candle_core::Tensor,
-    ) -> Result<candle_core::Tensor, PPOError<AE, GE>> {
-        self.actor_network
-            .sample(observation)
-            .map_err(PPOError::ActorError)
+
+    fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
+        let neurons = self.act_neurons(observation)?;
+        let actions = self.action_space.from_neurons(&neurons);
+        Ok(actions)
     }
 
     fn learn(
@@ -588,7 +595,7 @@ where
         while elapsed_timesteps < num_timesteps {
             while self.rollout_buffer.len() * env.num_envs() < self.batch_size {
                 let states = next_states.clone();
-                let action = self.act(&states).unwrap();
+                let action = self.act_neurons(&states).unwrap();
                 let actual_action = self.action_space.from_neurons(&action);
 
                 let (log_probs, _) = self
