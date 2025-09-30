@@ -136,3 +136,5 @@ fn main() {
     critic_var_map.save("ppo_lunar_lander_critic_vars").unwrap();
 }
 */
+
+fn main() {}

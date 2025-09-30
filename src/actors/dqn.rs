@@ -5,7 +5,7 @@ use rand::Rng;
 
 use crate::{
     buffers::{experience, experience_replay::ExperienceReplay},
-    gym::{Gym, StepInfo},
+    gym::{Gym, StepInfo, VectorizedGym},
     spaces::{Discrete, Space},
 };
 
@@ -203,14 +203,13 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn Gym<Error = Self::GymError>,
+        env: &mut dyn VectorizedGym<Error = Self::GymError>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         let mut elapsed_timesteps = 0;
         let mut episode_idx = 0;
         while elapsed_timesteps < num_timesteps {
             let mut total_reward = 0.0;
-            let mut observation = env.reset().map_err(DQNActorError::GymError)?;
             loop {
                 let mut new_observations_shape: Vec<usize> = vec![1];
                 new_observations_shape.append(&mut self.observation_space.shape());

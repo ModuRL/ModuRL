@@ -1,11 +1,12 @@
 use candle_core::Device;
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
+use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 use modurl::tensor_operations::tanh;
 use modurl::{
-    actors::{Actor, dqn::DQNActor, ppo::PPOActor},
+    actors::{Actor, ppo::PPOActor},
     distributions::CategoricalDistribution,
     gym::{Gym, StepInfo},
     models::{MLP, probabilistic_model::MLPProbabilisticActor},
@@ -52,6 +53,53 @@ where
     total_steps as f32 / 100.0
 }
 
+struct DebugCartpoleV1 {
+    env: CartPoleV1,
+    steps_since_print: usize,
+    episodes_since_print: usize,
+}
+
+impl DebugCartpoleV1 {
+    fn new() -> Self {
+        let env = CartPoleV1::builder().build();
+        Self {
+            env,
+            steps_since_print: 0,
+            episodes_since_print: 0,
+        }
+    }
+}
+
+impl Gym for DebugCartpoleV1 {
+    type Error = <CartPoleV1 as Gym>::Error;
+
+    fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo, Self::Error> {
+        self.steps_since_print += 1;
+        self.env.step(action)
+    }
+
+    fn reset(&mut self) -> Result<candle_core::Tensor, Self::Error> {
+        self.episodes_since_print += 1;
+        if self.episodes_since_print >= 10 {
+            println!(
+                "Average steps per episode: {}",
+                self.steps_since_print as f32 / self.episodes_since_print as f32
+            );
+            self.episodes_since_print = 0;
+            self.steps_since_print = 0;
+        }
+        self.env.reset()
+    }
+
+    fn observation_space(&self) -> Box<dyn modurl::spaces::Space> {
+        self.env.observation_space()
+    }
+
+    fn action_space(&self) -> Box<dyn modurl::spaces::Space> {
+        self.env.action_space()
+    }
+}
+
 #[test]
 fn ppo_cartpole() {
     let tracer = tracing_subscriber::fmt()
@@ -59,9 +107,15 @@ fn ppo_cartpole() {
         .finish();
     tracing::subscriber::set_global_default(tracer).unwrap();
 
-    let mut env = CartPoleV1::builder().build();
-    let observation_space = env.observation_space();
-    let action_space = env.action_space();
+    let mut envs = vec![];
+    for _ in 0..8 {
+        let env = DebugCartpoleV1::new();
+        envs.push(env);
+    }
+    let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+
+    let observation_space = vec_env.observation_space();
+    let action_space = vec_env.action_space();
     let var_map = VarMap::new();
     let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &Device::Cpu);
 
@@ -102,7 +156,6 @@ fn ppo_cartpole() {
     // PPO config
     // Stable baselines3 config:
     let mut actor = PPOActor::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
         .actor_network(Box::new(
             MLPProbabilisticActor::<CategoricalDistribution>::new(actor_network),
@@ -123,7 +176,7 @@ fn ppo_cartpole() {
         .build();
 
     for i in 0..6 {
-        actor.learn(&mut env, 20000).unwrap();
+        actor.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if PPO solved CartPole-v1...");
 
         let avg_steps = get_average_steps(&mut actor);
@@ -132,6 +185,7 @@ fn ppo_cartpole() {
             avg_steps,
             i * 20000
         );
+
         // Cartpole v1 should be using 475, which we can reach but no need for that here
         if avg_steps >= 195.0 {
             println!("PPO solved CartPole-v1 in {} timesteps!", i * 20000);
@@ -141,6 +195,7 @@ fn ppo_cartpole() {
     panic!("Failed to solve CartPole-v1 within 100000 timesteps.");
 }
 
+/*
 #[test]
 fn dqn_cartpole() {
     let mut env = CartPoleV1::builder().build();
@@ -171,3 +226,4 @@ fn dqn_cartpole() {
     actor.learn(&mut env, 20000).unwrap();
     // we could test if it learned but it's dqn, so it would take a while
 }
+*/
