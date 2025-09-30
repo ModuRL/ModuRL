@@ -1,11 +1,11 @@
 use bon::bon;
-use candle_core::{Error, Tensor};
+use candle_core::{Error, IndexOp, Tensor};
 use candle_nn::Optimizer;
 use rand::Rng;
 
 use crate::{
     buffers::{experience, experience_replay::ExperienceReplay},
-    gym::{Gym, StepInfo, VectorizedGym},
+    gym::{VectorizedGym, VectorizedStepInfo},
     spaces::{Discrete, Space},
 };
 
@@ -80,7 +80,7 @@ where
     observation_space: Box<dyn Space>,
     experience_replay: ExperienceReplay<DQNActorExperience>,
     gamma: f32,
-    epochs: usize,
+    update_frequency: usize,
     _phantom: std::marker::PhantomData<GE>,
 }
 
@@ -101,7 +101,7 @@ where
         #[builder(default = 10000)] replay_capacity: usize,
         #[builder(default = 32)] batch_size: usize,
         #[builder(default = 0.99)] gamma: f32,
-        #[builder(default = 10)] epochs: usize,
+        #[builder(default = 4)] update_frequency: usize,
     ) -> Self {
         let experience_replay = ExperienceReplay::new(replay_capacity, batch_size);
         Self {
@@ -113,7 +113,7 @@ where
             observation_space,
             experience_replay,
             gamma,
-            epochs,
+            update_frequency,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -136,6 +136,7 @@ where
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(()); // Not enough samples to train.
         }
+
         let training_batch = self.experience_replay.sample()?;
         let elements = training_batch.get_elements();
         let states = elements[0].clone();
@@ -144,33 +145,24 @@ where
         let rewards = elements[3].clone();
         let dones = elements[4].clone();
 
-        // Make sure the tensors are of the correct type.
-        let actions = actions.to_dtype(candle_core::DType::I64)?;
-        let rewards = rewards.to_dtype(candle_core::DType::F32)?;
-        let states = states.to_dtype(candle_core::DType::F32)?;
-        let dones = dones.to_dtype(candle_core::DType::F32)?;
-        let next_states = next_states.to_dtype(candle_core::DType::F32)?;
-
         let mut state_action_q_values = self.q_network.forward(&states)?;
-        state_action_q_values = state_action_q_values.to_dtype(candle_core::DType::F32)?;
         state_action_q_values = state_action_q_values.squeeze(1)?;
         let actions = actions.reshape(&[actions.shape().dims()[0], 1])?.clone();
         // Select the q-values for the actions taken.
         state_action_q_values = state_action_q_values.gather(&actions, 1)?;
 
         let next_q_values = self.q_network.forward(&next_states)?;
-        let next_q_values = next_q_values.to_dtype(candle_core::DType::F32)?;
         let next_q_values = next_q_values.max(1)?;
 
         // Compute the target Q-values.
-        let gamma_tensor = Tensor::full(self.gamma, next_q_values.shape(), states.device())?
-            .to_dtype(candle_core::DType::F32)?;
+        let gamma_tensor = Tensor::full(self.gamma, next_q_values.shape(), states.device())?;
         let mut target_q_values =
             (rewards + (next_q_values * ((1.0 - dones)?.mul(&gamma_tensor)?)))?;
 
-        let criterion = candle_nn::loss::mse;
-        target_q_values = target_q_values.reshape(&[target_q_values.shape().dims()[0], 1])?;
-        let loss = criterion(&state_action_q_values, &target_q_values)?;
+        target_q_values = target_q_values
+            .reshape(&[target_q_values.shape().dims()[0], 1])?
+            .detach();
+        let loss = candle_nn::loss::mse(&state_action_q_values, &target_q_values)?;
         self.optimizer.backward_step(&loss)?;
 
         Ok(())
@@ -185,7 +177,6 @@ where
     type Error = DQNActorError<GE>;
     type GymError = GE;
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
-        self.epsilon *= self.epsilon_decay;
         if rand::rng().random_range(0.0..1.0) < self.epsilon {
             let mut actions = vec![];
             let batch_size = observation.shape().dims()[0];
@@ -207,52 +198,46 @@ where
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         let mut elapsed_timesteps = 0;
-        let mut episode_idx = 0;
+        let mut observations = env.reset().map_err(DQNActorError::GymError)?;
         while elapsed_timesteps < num_timesteps {
-            let mut total_reward = 0.0;
-            loop {
-                let mut new_observations_shape: Vec<usize> = vec![1];
-                new_observations_shape.append(&mut self.observation_space.shape());
-                observation = observation.reshape(&*new_observations_shape)?;
+            let action = self.act(&observations)?;
+            let VectorizedStepInfo {
+                states: next_observations,
+                rewards,
+                dones,
+                truncateds: _,
+            } = env.step(action.clone()).map_err(DQNActorError::GymError)?;
 
-                let action = self.act(&observation)?;
-                // outputs a tensor of shape [1, dim] so we need to squeeze it to [dim]
-                let action = action.squeeze(0)?;
-                let StepInfo {
-                    state: next_observation,
-                    reward,
-                    done,
-                    truncated,
-                } = env.step(action.clone()).map_err(DQNActorError::GymError)?;
-                total_reward += reward;
+            let rewards = rewards.chunk(env.num_envs(), 0)?;
+            let action = action.chunk(env.num_envs(), 0)?;
+            let this_observations = observations.chunk(env.num_envs(), 0)?;
+            observations = next_observations.clone();
+            let next_observations = next_observations.chunk(env.num_envs(), 0)?;
+
+            for i in 0..env.num_envs() {
+                let reward = rewards[i].i(0)?.to_scalar::<f32>()?;
+                let done = dones[i];
+                let next_observation = next_observations[i].clone().squeeze(0)?;
+                let observation = this_observations[i].clone().squeeze(0)?;
+                let action = action[i].clone().squeeze(0)?;
                 // Add the experience to the replay buffer.
                 self.experience_replay.add(DQNActorExperience::new(
-                    observation,
-                    next_observation.clone(),
+                    observation.clone(),
+                    next_observation,
                     action,
                     reward,
                     if done { 1.0 } else { 0.0 },
                 ));
-                observation = next_observation;
+            }
 
-                if done || truncated {
-                    break;
-                }
+            self.epsilon *= self.epsilon_decay;
 
+            for _ in 0..env.num_envs() {
                 elapsed_timesteps += 1;
+                if elapsed_timesteps % self.update_frequency == 0 {
+                    self.optimize()?;
+                }
             }
-
-            println!(
-                "Episode {} finished with total reward: {}",
-                episode_idx + 1,
-                total_reward
-            );
-
-            // Optimize the Q-network.
-            for _ in 0..self.epochs {
-                self.optimize()?;
-            }
-            episode_idx += 1;
         }
 
         Ok(())

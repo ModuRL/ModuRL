@@ -1,6 +1,6 @@
 use crate::gym::VectorizedGym;
 use candle_core::Tensor;
-//pub mod dqn;
+pub mod dqn;
 pub mod ppo;
 
 pub trait Actor {

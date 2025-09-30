@@ -1,6 +1,7 @@
 use candle_core::Device;
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
+use modurl::actors::dqn::DQNActor;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
@@ -34,7 +35,6 @@ where
 
             let action = actor.act(&obs).unwrap();
             let action = env.action_space().from_neurons(&action);
-            let action = action.squeeze(0).unwrap();
 
             let StepInfo {
                 state: next_obs,
@@ -121,8 +121,8 @@ fn ppo_cartpole() {
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
-        .output_size(action_space.shape().iter().sum::<usize>())
+        .input_size(observation_space.shape().iter().product())
+        .output_size(action_space.shape().iter().product::<usize>())
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
@@ -140,7 +140,7 @@ fn ppo_cartpole() {
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape().iter().product())
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
@@ -195,11 +195,15 @@ fn ppo_cartpole() {
     panic!("Failed to solve CartPole-v1 within 100000 timesteps.");
 }
 
-/*
 #[test]
 fn dqn_cartpole() {
-    let mut env = CartPoleV1::builder().build();
-    let observation_space = env.observation_space();
+    let mut envs = vec![];
+    for _ in 0..8 {
+        let env = DebugCartpoleV1::new();
+        envs.push(env);
+    }
+    let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+    let observation_space = vec_env.observation_space();
     let var_map = VarMap::new();
     let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &Device::Cpu);
 
@@ -211,19 +215,38 @@ fn dqn_cartpole() {
         .build()
         .expect("Failed to create MLP");
 
-    let optimizer =
-        AdamW::new(var_map.all_vars(), ParamsAdamW::default()).expect("Failed to create AdamW");
+    let mut config = ParamsAdam::default();
+    config.lr = 3e-4;
+    let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut actor = DQNActor::builder()
         .action_space(Discrete::new(2, 0)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
         .observation_space(observation_space)
         .q_network(Box::new(mlp))
+        .epsilon_start(1.0)
+        .epsilon_decay(0.99)
         .optimizer(optimizer)
-        .replay_capacity(128)
+        .replay_capacity(10_000)
         .batch_size(32)
+        .update_frequency(1)
         .build();
 
-    actor.learn(&mut env, 20000).unwrap();
-    // we could test if it learned but it's dqn, so it would take a while
+    for i in 0..6 {
+        actor.learn(&mut vec_env, 20000).unwrap();
+        println!("Testing if PPO solved CartPole-v1...");
+
+        let avg_steps = get_average_steps(&mut actor);
+        println!(
+            "Average steps over 100 episodes: {} with {} timesteps",
+            avg_steps,
+            (i + 1) * 20000
+        );
+
+        // Cartpole v1 should be using 475, which we can reach but no need for that here
+        if avg_steps >= 195.0 {
+            println!("PPO solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
+            return;
+        }
+    }
+    panic!("Failed to solve CartPole-v1 within 100000 timesteps.");
 }
-*/
