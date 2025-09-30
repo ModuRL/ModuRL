@@ -1,9 +1,8 @@
-/*
 use candle_core::{Device, Tensor};
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 
-use modurl::gym::StepInfo;
+use modurl::gym::{StepInfo, VectorizedGym};
 use modurl::tensor_operations::tanh;
 use modurl::{
     actors::{Actor, ppo::PPOActor},
@@ -31,9 +30,6 @@ impl DebugLunarLander {
 
 impl Gym for DebugLunarLander {
     type Error = candle_core::Error;
-    fn get_name(&self) -> &str {
-        self.env.get_name()
-    }
 
     fn action_space(&self) -> Box<dyn modurl::spaces::Space> {
         self.env.action_space()
@@ -64,8 +60,14 @@ impl Gym for DebugLunarLander {
 }
 
 fn main() {
-    let env = LunarLanderV3::builder().render(true).build();
-    let mut env = DebugLunarLander::new(env);
+    let env1 = DebugLunarLander::new(LunarLanderV3::builder().render(true).build());
+    let mut envs = vec![env1];
+    for _ in 0..15 {
+        let env = DebugLunarLander::new(LunarLanderV3::builder().build());
+        envs.push(env);
+    }
+
+    let mut env = modurl::gym::VectorizedGymWrapper::from(envs);
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let actor_var_map = VarMap::new();
@@ -108,7 +110,6 @@ fn main() {
 
     // PPO config - Optimized hyperparameters for Lunar Lander
     let mut actor = PPOActor::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
         .actor_network(Box::new(
             MLPProbabilisticActor::<CategoricalDistribution>::new(actor_network),
@@ -135,6 +136,3 @@ fn main() {
     actor_var_map.save("ppo_lunar_lander_actor_vars").unwrap();
     critic_var_map.save("ppo_lunar_lander_critic_vars").unwrap();
 }
-*/
-
-fn main() {}
