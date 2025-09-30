@@ -89,8 +89,7 @@ impl experience::Experience for PPOExperience {
                     .collect::<Vec<f32>>(),
                 &[self.dones.len()],
                 self.states.device(),
-            )
-            .unwrap(),
+            )?,
             Tensor::from_vec(
                 self.truncateds
                     .iter()
@@ -98,8 +97,7 @@ impl experience::Experience for PPOExperience {
                     .collect::<Vec<f32>>(),
                 &[self.truncateds.len()],
                 self.states.device(),
-            )
-            .unwrap(),
+            )?,
             self.log_probs.clone(),
             self.advantages
                 .clone()
@@ -214,9 +212,9 @@ where
     GE: std::fmt::Debug,
 {
     fn optimize(&mut self) -> Result<(), PPOError<AE, GE>> {
-        self.add_advantages_and_returns().unwrap();
+        self.add_advantages_and_returns()?;
         for epoch in 0..self.num_epochs {
-            let batches = self.rollout_buffer.get_all_shuffled().unwrap();
+            let batches = self.rollout_buffer.get_all_shuffled()?;
             let mut average_abs_actor_loss = 0.0;
             let mut average_abs_critic_loss = 0.0;
             let mut count = 0;
@@ -242,11 +240,11 @@ where
                     &mut returns,
                 ] {
                     let mut shape = tensor.shape().dims().to_vec();
-                    *tensor = tensor.flatten(0, 1).unwrap();
+                    *tensor = tensor.flatten(0, 1)?;
                     // now the envs are interwoven and split so we have proper batch sizes
                     shape[0] = env_count;
                     shape[1] = batch_size;
-                    tensor.reshape(shape).unwrap();
+                    tensor.reshape(shape)?;
                 }
 
                 let actions = actions.chunk(env_count, 0)?;
@@ -265,15 +263,13 @@ where
                     let batch_old_log_probs = batch_old_log_probs[env_idx].clone();
 
                     // Compute the loss and backpropagate
-                    let (actor_loss, critic_loss) = self
-                        .compute_loss(
-                            &states,
-                            &actions.detach(),
-                            batch_old_log_probs.detach(),
-                            advantages,
-                            returns,
-                        )
-                        .unwrap();
+                    let (actor_loss, critic_loss) = self.compute_loss(
+                        &states,
+                        &actions.detach(),
+                        batch_old_log_probs.detach(),
+                        advantages,
+                        returns,
+                    )?;
 
                     average_abs_actor_loss += actor_loss;
                     average_abs_critic_loss += critic_loss;
@@ -323,46 +319,39 @@ where
             actions.push(experience.actions.clone());
         }
 
-        let values_tensor = self
-            .critic_network
-            .forward(&Tensor::stack(&states, 0).unwrap())
-            .unwrap();
+        let values_tensor = self.critic_network.forward(&Tensor::stack(&states, 0)?)?;
 
         let next_values_tensor = self
             .critic_network
-            .forward(&Tensor::stack(&next_states, 0).unwrap())
-            .unwrap();
+            .forward(&Tensor::stack(&next_states, 0)?)?;
 
         let device = values_tensor.device();
 
         let dones_shape = &[dones.len(), dones[0].len()];
-        let rewards_tensor = candle_core::Tensor::stack(&rewards, 0).unwrap();
+        let rewards_tensor = candle_core::Tensor::stack(&rewards, 0)?;
         let dones_tensor = candle_core::Tensor::from_vec(
             dones.into_iter().flatten().collect(),
             dones_shape,
             device,
-        )
-        .unwrap();
+        )?;
 
-        let advantages = self
-            .compute_gae(
-                &rewards_tensor,
-                &values_tensor,
-                &next_values_tensor,
-                &dones_tensor,
-            )
-            .unwrap();
+        let advantages = self.compute_gae(
+            &rewards_tensor,
+            &values_tensor,
+            &next_values_tensor,
+            &dones_tensor,
+        )?;
 
-        let values_tensor = values_tensor.squeeze(D::Minus1).unwrap();
+        let values_tensor = values_tensor.squeeze(D::Minus1)?;
 
-        let returns = (&values_tensor + &advantages).unwrap();
-        let returns = returns.clamp(-1e3, 1e3).unwrap();
+        let returns = (&values_tensor + &advantages)?;
+        let returns = returns.clamp(-1e3, 1e3)?;
 
         let experiences = self.rollout_buffer.get_raw_mut();
 
         for (i, experience) in experiences.iter_mut().enumerate() {
-            experience.advantages = Some(advantages.i(i).unwrap().clone());
-            experience.this_returns = Some(returns.i(i).unwrap().clone());
+            experience.advantages = Some(advantages.i(i)?.clone());
+            experience.this_returns = Some(returns.i(i)?.clone());
         }
 
         Ok(())
@@ -378,12 +367,10 @@ where
         let shape = rewards.shape();
         let device = rewards.device();
 
-        println!("Rewards shape: {:?}", rewards.shape());
-
-        let rewards: Vec<Vec<f32>> = rewards.to_vec2().unwrap();
-        let dones: Vec<Vec<f32>> = dones.to_vec2().unwrap();
-        let values: Vec<Vec<f32>> = values.squeeze(D::Minus1)?.to_vec2().unwrap();
-        let next_values: Vec<Vec<f32>> = next_values.squeeze(D::Minus1)?.to_vec2().unwrap();
+        let rewards: Vec<Vec<f32>> = rewards.to_vec2()?;
+        let dones: Vec<Vec<f32>> = dones.to_vec2()?;
+        let values: Vec<Vec<f32>> = values.squeeze(D::Minus1)?.to_vec2()?;
+        let next_values: Vec<Vec<f32>> = next_values.squeeze(D::Minus1)?.to_vec2()?;
 
         let mut advantages = vec![0.0; rewards.len() * rewards[0].len()];
         let mut gae = 0.0;
@@ -411,7 +398,7 @@ where
             }
         }
 
-        let advantages_tensor = candle_core::Tensor::from_vec(advantages, shape, device).unwrap();
+        let advantages_tensor = candle_core::Tensor::from_vec(advantages, shape, device)?;
 
         Ok(advantages_tensor)
     }
@@ -427,21 +414,16 @@ where
         returns: candle_core::Tensor,
     ) -> Result<(f64, f64), PPOError<AE, GE>> {
         let advantages = if self.normalize_advantage {
-            let advantages_mean = advantages.mean_all().unwrap().to_scalar::<f32>().unwrap();
-            let advantage_diff = (advantages.clone() - advantages_mean as f64).unwrap();
+            let advantages_mean = advantages.mean_all()?.to_scalar::<f32>()?;
+            let advantage_diff = (advantages.clone() - advantages_mean as f64)?;
 
             let advantages_std_sqrt = advantage_diff
-                .sqr()
-                .unwrap()
-                .mean_all()
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap()
+                .sqr()?
+                .mean_all()?
+                .to_scalar::<f32>()?
                 .sqrt()
                 .max(1e-6);
-            ((advantages.clone() - advantages_mean.clone() as f64).unwrap()
-                / (advantages_std_sqrt as f64))
-                .unwrap()
+            ((advantages.clone() - advantages_mean.clone() as f64)? / (advantages_std_sqrt as f64))?
         } else {
             advantages
         };
@@ -449,109 +431,80 @@ where
         let (log_probs, entropy) = self
             .actor_network
             .log_prob_and_entropy(states, actions)
-            .unwrap();
+            .map_err(PPOError::ActorError)?;
 
-        let ratio = (&log_probs - &old_log_probs)
-            .unwrap()
-            .clamp(-20.0, 10.0)
-            .unwrap()
-            .exp()
-            .unwrap();
+        let ratio = (&log_probs - &old_log_probs)?.clamp(-20.0, 10.0)?.exp()?;
 
         let actor_loss = match self.clipped {
             true => {
                 let clip_range = self.clip_range;
-                let clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range).unwrap();
+                let clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)?;
 
-                let surrogate1 = (ratio.clone() * advantages.clone()).unwrap();
-                let surrogate2 = (clipped_ratio.clone() * advantages.clone()).unwrap();
-                let surrogate = torch_like_min(&surrogate1, &surrogate2).unwrap();
-                let actor_loss = (-1.0 * surrogate.mean_all().unwrap()).unwrap();
+                let surrogate1 = (ratio.clone() * advantages.clone())?;
+                let surrogate2 = (clipped_ratio.clone() * advantages.clone())?;
+                let surrogate = torch_like_min(&surrogate1, &surrogate2)?;
+                let actor_loss = (-1.0 * surrogate.mean_all()?)?;
 
                 actor_loss
             }
             false => {
-                let surrogate = (ratio * &advantages).unwrap();
-                (-1.0 * surrogate.mean_all().unwrap()).unwrap()
+                let surrogate = (ratio * &advantages)?;
+                (-1.0 * surrogate.mean_all()?)?
             }
         };
 
-        let values = self.critic_network.forward(states).unwrap();
-        let values = values.squeeze(D::Minus1).unwrap();
+        let values = self.critic_network.forward(states)?;
+        let values = values.squeeze(D::Minus1)?;
 
         let returns = {
-            let returns_mean = returns.mean_all().unwrap().to_scalar::<f32>().unwrap();
-            let returns_diff = (returns.clone() - returns_mean as f64).unwrap();
+            let returns_mean = returns.mean_all()?.to_scalar::<f32>()?;
+            let returns_diff = (returns.clone() - returns_mean as f64)?;
             let returns_std_sqrt = returns_diff
-                .sqr()
-                .unwrap()
-                .mean_all()
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap()
+                .sqr()?
+                .mean_all()?
+                .to_scalar::<f32>()?
                 .sqrt()
                 .max(1e-6);
-            ((returns.clone() - returns_mean.clone() as f64).unwrap() / (returns_std_sqrt as f64))
-                .unwrap()
+            ((returns.clone() - returns_mean.clone() as f64)? / (returns_std_sqrt as f64))?
         };
 
         // Use mse for now
-        let critic_loss = loss::mse(&values, &returns).unwrap();
+        let critic_loss = loss::mse(&values, &returns)?;
 
-        let entropy_loss = entropy.mean_all().unwrap();
+        let entropy_loss = entropy.mean_all()?;
 
         let final_actor_loss =
-            (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone())).unwrap();
+            (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
 
-        let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone()).unwrap();
+        let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
 
         // check for NaNs
         if !final_actor_loss
-            .abs()
-            .unwrap()
-            .max_all()
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap()
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?
             .is_nan()
         {
             // clip the gradients and step the optimizers
-            let actor_grad = &mut final_actor_loss.backward().unwrap();
-            let _actor_grad_norm =
-                crate::tensor_operations::clip_gradients(actor_grad, 1.0).unwrap();
-            self.actor_optimizer.step(actor_grad).unwrap();
+            let actor_grad = &mut final_actor_loss.backward()?;
+            let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 1.0)?;
+            self.actor_optimizer.step(actor_grad)?;
         }
 
         if !final_critic_loss
-            .abs()
-            .unwrap()
-            .max_all()
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap()
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?
             .is_nan()
         {
             // clip the gradients and step the optimizers
-            let critic_grad = &mut final_critic_loss.backward().unwrap();
-            let _critic_grad_norm =
-                crate::tensor_operations::clip_gradients(critic_grad, 1.0).unwrap();
-            self.critic_optimizer.step(critic_grad).unwrap();
+            let critic_grad = &mut final_critic_loss.backward()?;
+            let _critic_grad_norm = crate::tensor_operations::clip_gradients(critic_grad, 1.0)?;
+            self.critic_optimizer.step(critic_grad)?;
         }
 
-        let actor_loss_scalar = actor_loss
-            .abs()
-            .unwrap()
-            .mean_all()
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap() as f64;
-        let critic_loss_scalar = critic_loss
-            .abs()
-            .unwrap()
-            .mean_all()
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap() as f64;
+        let actor_loss_scalar = actor_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
+        let critic_loss_scalar = critic_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
         Ok((actor_loss_scalar, critic_loss_scalar))
     }
 
@@ -590,18 +543,18 @@ where
         let mut next_states: Tensor;
         let mut rewards;
 
-        next_states = env.reset().unwrap();
+        next_states = env.reset().map_err(PPOError::GymError)?;
 
         while elapsed_timesteps < num_timesteps {
             while self.rollout_buffer.len() * env.num_envs() < self.batch_size {
                 let states = next_states.clone();
-                let action = self.act_neurons(&states).unwrap();
+                let action = self.act_neurons(&states)?;
                 let actual_action = self.action_space.from_neurons(&action);
 
                 let (log_probs, _) = self
                     .actor_network
                     .log_prob_and_entropy(&states, &action)
-                    .unwrap();
+                    .map_err(PPOError::ActorError)?;
 
                 let truncateds;
                 let dones;
@@ -610,7 +563,7 @@ where
                     rewards,
                     dones,
                     truncateds,
-                } = env.step(actual_action).unwrap();
+                } = env.step(actual_action).map_err(PPOError::GymError)?;
                 self.rollout_buffer.add(PPOExperience::new(
                     states.clone(),
                     next_states.clone(),
@@ -626,8 +579,6 @@ where
 
             elapsed_timesteps += self.rollout_buffer.len() * env.num_envs();
 
-            println!("Timesteps so far: {}", elapsed_timesteps);
-
             if let Some(scheduler) = &self.actor_lr_scheduler {
                 let progress =
                     ((elapsed_timesteps as f64) / (num_timesteps as f64)).clamp(0.0, 1.0);
@@ -641,7 +592,7 @@ where
                 let new_lr = scheduler.get_lr(progress);
                 self.critic_optimizer.set_learning_rate(new_lr);
             }
-            self.optimize().unwrap();
+            self.optimize()?;
         }
         Ok(())
     }

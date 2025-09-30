@@ -331,7 +331,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.1",
 ]
 
 [[package]]
@@ -902,6 +902,7 @@ dependencies = [
 [[package]]
 name = "modurl_gym"
 version = "0.1.0"
+source = "git+https://github.com/ModuRL/ModuRL_Gym#e6b499fc0a41b74e25de744cff9469c7739e3eca"
 dependencies = [
  "bon",
  "box2d-rs",
@@ -1267,7 +1268,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.1",
 ]
 
 [[package]]
@@ -1478,7 +1479,7 @@ dependencies = [
  "getrandom",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.1",
 ]
 
 [[package]]
