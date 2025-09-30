@@ -8,13 +8,10 @@ ModuRL is a modular reinforcement learning (RL) library designed for flexibility
 
 - Candle Backend: Efficient and flexible computation using the candle library.
 
-## Roadmap
-
 - Core trait definitions for agents and environments
 
-- Enhanced backend features using Candle
-
-- Future asynchronous training methods
+## Roadmap
+- Asynchronous training methods / user-friendly multithreading
 
 - Potential multi-agent environment support
 
