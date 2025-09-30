@@ -617,9 +617,9 @@ where
                 ));
             }
 
-            println!("Timesteps so far: {}", elapsed_timesteps);
-
             elapsed_timesteps += self.rollout_buffer.len() * env.num_envs();
+
+            println!("Timesteps so far: {}", elapsed_timesteps);
 
             if let Some(scheduler) = &self.actor_lr_scheduler {
                 let progress =

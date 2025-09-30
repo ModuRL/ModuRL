@@ -77,10 +77,10 @@ impl<G: Gym> VectorizedGymWrapper<G> {
     }
 }
 
-impl<G, GE> VectorizedGym for VectorizedGymWrapper<G>
+impl<G> VectorizedGym for VectorizedGymWrapper<G>
 where
-    G: Gym<Error = GE>,
-    GE: std::fmt::Debug,
+    G: Gym,
+    G::Error: std::fmt::Debug,
 {
     type Error = VectorizedGymError<G::Error>;
 
@@ -184,14 +184,25 @@ where
 }
 
 #[cfg(feature = "multithreading")]
+use rayon::prelude::*;
+
+#[cfg(feature = "multithreading")]
 pub struct MultithreadedVectorizedGymWrapper<G: Gym> {
     envs: Vec<G>,
+    to_reset: Vec<bool>,
 }
 
 #[cfg(feature = "multithreading")]
-impl<G: Gym> MultithreadedVectorizedGymWrapper<G> {
+impl<G> MultithreadedVectorizedGymWrapper<G>
+where
+    G: Gym + Send,
+    G::Error: Send + Sync + std::fmt::Debug,
+{
     pub fn new(envs: Vec<G>) -> Self {
-        Self { envs }
+        Self {
+            to_reset: vec![true; envs.len()],
+            envs,
+        }
     }
 }
 
@@ -199,7 +210,7 @@ impl<G: Gym> MultithreadedVectorizedGymWrapper<G> {
 impl<G> VectorizedGym for MultithreadedVectorizedGymWrapper<G>
 where
     G: Gym + Send,
-    G::Error: Send + Sync,
+    G::Error: Send + Sync + std::fmt::Debug,
 {
     type Error = VectorizedGymError<G::Error>;
 
@@ -211,8 +222,27 @@ where
         let step_infos: Vec<Result<StepInfo, VectorizedGymError<G::Error>>> = self
             .envs
             .par_iter_mut()
-            .zip(actions.into_par_iter())
-            .map(|(env, act)| env.step(act).map_err(VectorizedGymError::Single))
+            .zip(
+                (
+                    actions.into_par_iter(),
+                    self.to_reset.clone().into_par_iter(),
+                )
+                    .into_par_iter(),
+            )
+            .map(|(env, info)| {
+                let (action, to_reset) = info;
+                if to_reset {
+                    let state = env.reset().map_err(VectorizedGymError::Single)?;
+                    Ok(StepInfo {
+                        state,
+                        reward: 0.0,
+                        done: false,
+                        truncated: false,
+                    })
+                } else {
+                    env.step(action).map_err(VectorizedGymError::Single)
+                }
+            })
             .collect();
 
         let mut states = Vec::with_capacity(batch_size);
@@ -237,6 +267,28 @@ where
             dones,
             truncateds,
         })
+    }
+
+    fn num_envs(&self) -> usize {
+        self.envs.len()
+    }
+
+    fn reset(&mut self) -> Result<Tensor, Self::Error> {
+        let batch_size = self.envs.len();
+
+        let states: Vec<Result<Tensor, VectorizedGymError<G::Error>>> = self
+            .envs
+            .par_iter_mut()
+            .map(|env| env.reset().map_err(VectorizedGymError::Single))
+            .collect();
+
+        let mut state_tensors = Vec::with_capacity(batch_size);
+        for state in states {
+            state_tensors.push(state?);
+        }
+
+        let states = Tensor::stack(&state_tensors, 0)?;
+        Ok(states)
     }
 
     fn observation_space(&self) -> Box<dyn Space> {

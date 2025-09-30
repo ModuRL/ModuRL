@@ -183,12 +183,12 @@ fn ppo_cartpole() {
         println!(
             "Average steps over 100 episodes: {} with {} timesteps",
             avg_steps,
-            i * 20000
+            (i + 1) * 20000
         );
 
         // Cartpole v1 should be using 475, which we can reach but no need for that here
         if avg_steps >= 195.0 {
-            println!("PPO solved CartPole-v1 in {} timesteps!", i * 20000);
+            println!("PPO solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
             return;
         }
     }
