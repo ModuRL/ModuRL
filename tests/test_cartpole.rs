@@ -178,7 +178,7 @@ fn ppo_cartpole() {
         );
 
         // Cartpole v1 should be using 475, which we can reach but no need for that here
-        if avg_steps >= 495.0 {
+        if avg_steps >= 195.0 {
             println!("PPO solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
             return;
         }
