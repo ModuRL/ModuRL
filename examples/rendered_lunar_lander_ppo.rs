@@ -60,10 +60,16 @@ impl Gym for DebugLunarLander {
 }
 
 fn main() {
-    let env1 = DebugLunarLander::new(LunarLanderV3::builder().render(true).build());
+    let device = Device::cuda_if_available(0).unwrap();
+    let env1 = DebugLunarLander::new(
+        LunarLanderV3::builder()
+            .render(true)
+            .device(device.clone())
+            .build(),
+    );
     let mut envs = vec![env1];
     for _ in 0..15 {
-        let env = DebugLunarLander::new(LunarLanderV3::builder().build());
+        let env = DebugLunarLander::new(LunarLanderV3::builder().device(device.clone()).build());
         envs.push(env);
     }
 
