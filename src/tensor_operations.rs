@@ -1,4 +1,4 @@
-use candle_core::{Error, Tensor, backprop::GradStore};
+use candle_core::{DType, Error, Tensor, backprop::GradStore};
 
 pub(crate) fn torch_like_min(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
     // candle has a min but all it does is takes a tensor and a dim
@@ -47,4 +47,61 @@ pub fn tanh(x: &Tensor) -> Result<Tensor, Error> {
     let numerator = (&e_pos - &e_neg)?;
     let denominator = (&e_pos + &e_neg)?;
     numerator.broadcast_div(&denominator)
+}
+
+/// Check if a tensor contains any NaN values.
+/// Use very sparingly extremely slow.
+pub fn tensor_has_nan(t: &Tensor) -> Result<bool, candle_core::Error> {
+    // First, ensure tensor is on CPU (or copy to CPU)
+    let t_cpu = if t.device().is_cpu() {
+        t.clone()
+    } else {
+        t.to_device(&candle_core::Device::Cpu)?
+    }
+    .flatten_all()?;
+
+    // Now get raw buffer as Vec<f32> (if dtype is f32)
+    match t_cpu.dtype() {
+        DType::F32 => {
+            // assuming there's a method to get the raw Vec<f32> or slice
+            let data: Vec<f32> = t_cpu.to_vec1()?;
+            // (you'd need to check how Candle exposes this; I didn't find `as_slice` in docs)
+            for x in data {
+                if x.is_nan() {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        DType::F64 => {
+            let data: Vec<f64> = t_cpu.to_vec1()?;
+            for x in data {
+                if x.is_nan() {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        _ => {
+            // for integer types etc, NaN isn't relevant
+            // not sure about bfloat16 or float16
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_contains_nan() {
+        let a = Tensor::full(1.0, &[2, 2], &candle_core::Device::Cpu).unwrap();
+        assert!(!tensor_has_nan(&a).unwrap());
+        let b = Tensor::full(f32::NAN, &[2, 2], &candle_core::Device::Cpu).unwrap();
+        assert!(tensor_has_nan(&b).unwrap());
+        let c =
+            Tensor::from_vec(vec![1.0, f32::NAN, 3.0], &[3], &candle_core::Device::Cpu).unwrap();
+        assert!(tensor_has_nan(&c).unwrap());
+    }
 }

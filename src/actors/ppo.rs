@@ -9,7 +9,7 @@ use crate::{
     lr_scheduler::LrScheduler,
     models::probabilistic_model::ProbabilisticActor,
     spaces,
-    tensor_operations::torch_like_min,
+    tensor_operations::{tensor_has_nan, torch_like_min},
 };
 
 #[derive(Debug)]
@@ -479,24 +479,14 @@ where
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
 
         // check for NaNs
-        if !final_actor_loss
-            .abs()?
-            .max_all()?
-            .to_scalar::<f32>()?
-            .is_nan()
-        {
+        if !tensor_has_nan(&final_critic_loss)? {
             // clip the gradients and step the optimizers
             let actor_grad = &mut final_actor_loss.backward()?;
             let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 1.0)?;
             self.actor_optimizer.step(actor_grad)?;
         }
 
-        if !final_critic_loss
-            .abs()?
-            .max_all()?
-            .to_scalar::<f32>()?
-            .is_nan()
-        {
+        if !tensor_has_nan(&final_critic_loss)? {
             // clip the gradients and step the optimizers
             let critic_grad = &mut final_critic_loss.backward()?;
             let _critic_grad_norm = crate::tensor_operations::clip_gradients(critic_grad, 1.0)?;

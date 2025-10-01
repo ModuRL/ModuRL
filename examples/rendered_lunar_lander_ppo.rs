@@ -67,11 +67,12 @@ fn main() {
         envs.push(env);
     }
 
+    let device = Device::Cpu;
     let mut env = modurl::gym::VectorizedGymWrapper::from(envs);
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let actor_var_map = VarMap::new();
-    let actor_vb = VarBuilder::from_varmap(&actor_var_map, candle_core::DType::F32, &Device::Cpu);
+    let actor_vb = VarBuilder::from_varmap(&actor_var_map, candle_core::DType::F32, &device);
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
@@ -91,7 +92,7 @@ fn main() {
         Adam::new(actor_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
     let critic_var_map = VarMap::new();
-    let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &Device::Cpu);
+    let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
@@ -131,7 +132,7 @@ fn main() {
         .critic_lr_scheduler(Box::new(|t| (1.0 - t * 0.9) * 3e-4))
         .build();
 
-    actor.learn(&mut env, 1000000).unwrap();
+    actor.learn(&mut env, 10_000_000).unwrap();
 
     actor_var_map.save("ppo_lunar_lander_actor_vars").unwrap();
     critic_var_map.save("ppo_lunar_lander_critic_vars").unwrap();
