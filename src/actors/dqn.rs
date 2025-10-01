@@ -7,6 +7,7 @@ use crate::{
     buffers::{experience, experience_replay::ExperienceReplay},
     gym::{VectorizedGym, VectorizedStepInfo},
     spaces::{Discrete, Space},
+    tensor_operations::tensor_has_nan,
 };
 
 use super::Actor;
@@ -163,7 +164,9 @@ where
             .reshape(&[target_q_values.shape().dims()[0], 1])?
             .detach();
         let loss = candle_nn::loss::mse(&state_action_q_values, &target_q_values)?;
-        self.optimizer.backward_step(&loss)?;
+        if !tensor_has_nan(&loss)? {
+            self.optimizer.backward_step(&loss)?;
+        }
 
         Ok(())
     }
