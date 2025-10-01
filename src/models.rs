@@ -1,6 +1,6 @@
 use bon::bon;
 use candle_core::Error;
-use candle_nn::{self, linear, VarBuilder};
+use candle_nn::{self, VarBuilder, linear};
 pub mod probabilistic_model;
 
 pub struct MLP {
