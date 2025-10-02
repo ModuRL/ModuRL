@@ -75,6 +75,14 @@ impl<G: Gym> VectorizedGymWrapper<G> {
             envs,
         }
     }
+
+    pub fn envs(&self) -> &Vec<G> {
+        &self.envs
+    }
+
+    pub fn envs_mut(&mut self) -> &mut Vec<G> {
+        &mut self.envs
+    }
 }
 
 impl<G> VectorizedGym for VectorizedGymWrapper<G>

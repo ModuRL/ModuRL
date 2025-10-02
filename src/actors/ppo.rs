@@ -321,6 +321,7 @@ where
 
         let values_tensor = self.critic_network.forward(&Tensor::stack(&states, 0)?)?;
 
+        // TODO! there is no need to run everything through the critic again
         let next_values_tensor = self
             .critic_network
             .forward(&Tensor::stack(&next_states, 0)?)?;
@@ -373,7 +374,6 @@ where
         let next_values: Vec<Vec<f32>> = next_values.squeeze(D::Minus1)?.to_vec2()?;
 
         let mut advantages = vec![0.0; rewards.len() * rewards[0].len()];
-        let mut gae = 0.0;
 
         for env_idx in 0..rewards[0].len() {
             let env_rewards: Vec<f32> = rewards.iter().map(|r| r[env_idx]).collect();
@@ -381,6 +381,7 @@ where
             let env_values: Vec<f32> = values.iter().map(|v| v[env_idx]).collect();
             let env_next_values: Vec<f32> = next_values.iter().map(|nv| nv[env_idx]).collect();
 
+            let mut gae = 0.0;
             // Compute GAE backwards through the trajectory
             for i in (0..env_rewards.len()).rev() {
                 let done = env_dones[i] > 0.5;
