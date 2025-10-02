@@ -73,7 +73,6 @@ fn main() {
         envs.push(env);
     }
 
-    let device = Device::Cpu;
     let mut env = modurl::gym::VectorizedGymWrapper::from(envs);
     let observation_space = env.observation_space();
     let action_space = env.action_space();

@@ -457,6 +457,20 @@ where
         let values = self.critic_network.forward(states)?;
         let values = values.squeeze(D::Minus1)?;
 
+        let entropy_loss = entropy.mean_all()?;
+
+        let final_actor_loss =
+            (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
+
+        // check for NaNs
+        if !tensor_has_nan(&final_actor_loss)? {
+            // clip the gradients and step the optimizers
+            let actor_grad = &mut final_actor_loss.backward()?;
+            let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 1.0)?;
+            self.actor_optimizer.step(actor_grad)?;
+        }
+
+        let returns = returns.detach();
         let returns = {
             let returns_mean = returns.mean_all()?.to_scalar::<f32>()?;
             let returns_diff = (returns.clone() - returns_mean as f64)?;
@@ -469,24 +483,8 @@ where
             ((returns.clone() - returns_mean.clone() as f64)? / (returns_std_sqrt as f64))?
         };
 
-        // Use mse for now
         let critic_loss = loss::mse(&values, &returns)?;
-
-        let entropy_loss = entropy.mean_all()?;
-
-        let final_actor_loss =
-            (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
-
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
-
-        // check for NaNs
-        if !tensor_has_nan(&final_critic_loss)? {
-            // clip the gradients and step the optimizers
-            let actor_grad = &mut final_actor_loss.backward()?;
-            let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 1.0)?;
-            self.actor_optimizer.step(actor_grad)?;
-        }
-
         if !tensor_has_nan(&final_critic_loss)? {
             // clip the gradients and step the optimizers
             let critic_grad = &mut final_critic_loss.backward()?;
