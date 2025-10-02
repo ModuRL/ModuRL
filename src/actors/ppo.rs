@@ -456,6 +456,7 @@ where
         let values = self.critic_network.forward(states)?;
         let values = values.squeeze(D::Minus1)?;
 
+        let returns = returns.detach();
         let returns = {
             let returns_mean = returns.mean_all()?.to_scalar::<f32>()?;
             let returns_diff = (returns.clone() - returns_mean as f64)?;
