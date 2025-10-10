@@ -28,6 +28,7 @@ tracing = { version = "0.1.37" }
 getrandom = { version = "0.2.12", default-features = false, features = [
     "custom",
 ] }
+rand = { version = "0.9.2" }
 
 [patch.crates-io]
 candle-core = { git = "https://github.com/huggingface/candle", rev = "d205fb4" }

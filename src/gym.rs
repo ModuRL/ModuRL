@@ -444,7 +444,7 @@ mod tests {
 
     impl Gym for DummyEnv {
         type Error = ();
-        type SpaceError = ();
+        type SpaceError = candle_core::Error;
 
         fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
             self.step_count += 1;
@@ -470,14 +470,14 @@ mod tests {
             )
         }
 
-        fn observation_space(&self) -> Box<dyn Space> {
+        fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
             Box::new(crate::spaces::BoxSpace::new(
                 Tensor::full(-1000.0, &[2], &candle_core::Device::Cpu).unwrap(),
                 Tensor::full(1000.0, &[2], &candle_core::Device::Cpu).unwrap(),
             ))
         }
 
-        fn action_space(&self) -> Box<dyn Space> {
+        fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
             Box::new(crate::spaces::Discrete::new(2))
         }
     }

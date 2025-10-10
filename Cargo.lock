@@ -962,6 +962,7 @@ dependencies = [
  "getrandom 0.2.16",
  "log",
  "modurl_gym",
+ "rand",
  "rayon",
  "tracing",
  "tracing-subscriber",
@@ -970,7 +971,7 @@ dependencies = [
 [[package]]
 name = "modurl_gym"
 version = "0.1.0"
-source = "git+https://github.com/ModuRL/ModuRL_Gym#f1e63d13d7cec05d74067f30ab4d4882522ff8d1"
+source = "git+https://github.com/ModuRL/ModuRL_Gym#30c8a987b2df8c104d2696b3e4a016bd714a6e89"
 dependencies = [
  "bon",
  "box2d-rs",

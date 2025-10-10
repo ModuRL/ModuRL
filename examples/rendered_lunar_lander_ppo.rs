@@ -29,17 +29,18 @@ impl DebugLunarLander {
 }
 
 impl Gym for DebugLunarLander {
-    type Error = candle_core::Error;
+    type Error = <LunarLanderV3 as Gym>::Error;
+    type SpaceError = <LunarLanderV3 as Gym>::SpaceError;
 
-    fn action_space(&self) -> Box<dyn modurl::spaces::Space> {
+    fn action_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
         self.env.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn modurl::spaces::Space> {
+    fn observation_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
         self.env.observation_space()
     }
 
-    fn reset(&mut self) -> Result<Tensor, candle_core::Error> {
+    fn reset(&mut self) -> Result<Tensor, Self::Error> {
         self.episodes_since_print += 1;
         if self.episodes_since_print >= 10 {
             println!(
@@ -135,6 +136,7 @@ fn main() {
         .num_epochs(4)
         .actor_lr_scheduler(Box::new(|t| (1.0 - t * 0.9) * 3e-4))
         .critic_lr_scheduler(Box::new(|t| (1.0 - t * 0.9) * 3e-4))
+        .device(device)
         .build();
 
     actor.learn(&mut env, 10_000_000).unwrap();

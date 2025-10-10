@@ -4,9 +4,7 @@ use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::actors::dqn::DQNActor;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl_gym::classic_control::cartpole::CartPoleV1;
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::thread::ThreadId;
 
 use modurl::tensor_operations::tanh;
 use modurl::{
@@ -32,10 +30,13 @@ fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
 
 getrandom::register_custom_getrandom!(custom_getrandom);
 
-fn get_average_steps<AE, GE>(actor: &mut dyn Actor<Error = AE, GymError = GE>) -> f32
+fn get_average_steps<AE, GE, SE>(
+    actor: &mut dyn Actor<Error = AE, GymError = GE, SpaceError = SE>,
+) -> f32
 where
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     let envs = vec![CartPoleV1::builder().build()];
     let mut vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
@@ -80,6 +81,7 @@ impl DebugCartpoleV1 {
 
 impl Gym for DebugCartpoleV1 {
     type Error = <CartPoleV1 as Gym>::Error;
+    type SpaceError = <CartPoleV1 as Gym>::SpaceError;
 
     fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo, Self::Error> {
         self.steps_since_print += 1;
@@ -99,11 +101,11 @@ impl Gym for DebugCartpoleV1 {
         self.env.reset()
     }
 
-    fn observation_space(&self) -> Box<dyn modurl::spaces::Space> {
+    fn observation_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
         self.env.observation_space()
     }
 
-    fn action_space(&self) -> Box<dyn modurl::spaces::Space> {
+    fn action_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
         self.env.action_space()
     }
 }
@@ -183,6 +185,7 @@ fn ppo_cartpole() {
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
+        .device(device)
         .build();
 
     for i in 0..6 {
@@ -243,6 +246,7 @@ fn dqn_cartpole() {
         .replay_capacity(10_000)
         .batch_size(32)
         .update_frequency(1)
+        .device(device)
         .build();
 
     // we'll give dqn more chances since it's more unstable
