@@ -3,14 +3,16 @@ use candle_core::Tensor;
 
 pub trait Gym {
     type Error;
+    type SpaceError;
+
     /// Returns the next state, reward, and done flag.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error>;
     /// Resets the environment to its initial state. Returns the initial state.
     fn reset(&mut self) -> Result<Tensor, Self::Error>;
     /// Returns the observation space.
-    fn observation_space(&self) -> Box<dyn Space>;
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     /// Returns the action space.
-    fn action_space(&self) -> Box<dyn Space>;
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
 }
 
 /// A vectorized version of Gym that can handle multiple environments in parallel.
@@ -19,9 +21,11 @@ pub trait Gym {
 /// Reset is called automatically when an environment is done.
 pub trait VectorizedGym {
     type Error;
+    type SpaceError;
+
     fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo, Self::Error>;
-    fn observation_space(&self) -> Box<dyn Space>;
-    fn action_space(&self) -> Box<dyn Space>;
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     fn num_envs(&self) -> usize;
     /// Resets all environments and returns the initial states.
     /// Only needs to be called once at the start of training.
@@ -91,6 +95,7 @@ where
     G::Error: std::fmt::Debug,
 {
     type Error = VectorizedGymError<G::Error>;
+    type SpaceError = G::SpaceError;
 
     fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo, Self::Error> {
         let env_count = self.envs.len();
@@ -145,11 +150,11 @@ where
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space> {
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
         self.envs[0].observation_space()
     }
 
-    fn action_space(&self) -> Box<dyn Space> {
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
         self.envs[0].action_space()
     }
 
@@ -439,6 +444,7 @@ mod tests {
 
     impl Gym for DummyEnv {
         type Error = ();
+        type SpaceError = ();
 
         fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
             self.step_count += 1;
@@ -472,7 +478,7 @@ mod tests {
         }
 
         fn action_space(&self) -> Box<dyn Space> {
-            Box::new(crate::spaces::Discrete::new(2, 0))
+            Box::new(crate::spaces::Discrete::new(2))
         }
     }
 

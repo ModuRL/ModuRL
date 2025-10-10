@@ -90,6 +90,18 @@ pub fn tensor_has_nan(t: &Tensor) -> Result<bool, candle_core::Error> {
     }
 }
 
+pub fn gen_range_int_tensor(
+    start: u32,
+    end: u32,
+    device: &candle_core::Device,
+) -> Result<u32, candle_core::Error> {
+    Tensor::rand(start as f32, end as f32 + 1.0, &[], device)?
+        .floor()?
+        .to_dtype(candle_core::DType::U32)?
+        .clamp(start, end)? // This makes sure that it can't land exactly on possible_values
+        .to_vec0::<u32>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

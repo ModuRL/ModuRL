@@ -4,6 +4,9 @@ use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::actors::dqn::DQNActor;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl_gym::classic_control::cartpole::CartPoleV1;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::thread::ThreadId;
 
 use modurl::tensor_operations::tanh;
 use modurl::{
@@ -13,6 +16,21 @@ use modurl::{
     models::{MLP, probabilistic_model::MLPProbabilisticActor},
     spaces::Discrete,
 };
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
+static RNG: OnceLock<Mutex<StdRng>> = OnceLock::new();
+
+fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    let seed = [0u8; 32];
+    RNG.get_or_init(|| Mutex::new(StdRng::from_seed(seed)))
+        .lock()
+        .expect("failed to get RNG lock")
+        .fill(buf);
+    Ok(())
+}
+
+getrandom::register_custom_getrandom!(custom_getrandom);
 
 fn get_average_steps<AE, GE>(actor: &mut dyn Actor<Error = AE, GymError = GE>) -> f32
 where
@@ -97,6 +115,8 @@ fn ppo_cartpole() {
         .finish();
     tracing::subscriber::set_global_default(tracer).unwrap();
 
+    let device = Device::Cpu;
+
     let mut envs = vec![];
     for _ in 0..8 {
         let env = DebugCartpoleV1::new();
@@ -107,7 +127,7 @@ fn ppo_cartpole() {
     let observation_space = vec_env.observation_space();
     let action_space = vec_env.action_space();
     let var_map = VarMap::new();
-    let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &Device::Cpu);
+    let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
@@ -126,7 +146,7 @@ fn ppo_cartpole() {
         Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
     let critic_var_map = VarMap::new();
-    let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &Device::Cpu);
+    let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
@@ -172,7 +192,7 @@ fn ppo_cartpole() {
         // TODO! make a way to make actor deterministic for testing
         let avg_steps = get_average_steps(&mut actor);
         println!(
-            "Average steps over 100 episodes: {} with {} timesteps",
+            "PPO averaged {} steps over 100 episodes with {} timesteps",
             avg_steps,
             (i + 1) * 20000
         );
@@ -183,7 +203,7 @@ fn ppo_cartpole() {
             return;
         }
     }
-    panic!("Failed to solve CartPole-v1 within 100000 timesteps.");
+    panic!("PPO failed to solve CartPole-v1 within 100000 timesteps.");
 }
 
 #[test]
@@ -193,10 +213,13 @@ fn dqn_cartpole() {
         let env = DebugCartpoleV1::new();
         envs.push(env);
     }
+
+    let device = Device::Cpu;
+
     let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
     let observation_space = vec_env.observation_space();
     let var_map = VarMap::new();
-    let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &Device::Cpu);
+    let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
 
     let mlp = MLP::builder()
         .input_size(observation_space.shape().iter().sum())
@@ -211,7 +234,7 @@ fn dqn_cartpole() {
     let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut actor = DQNActor::builder()
-        .action_space(Discrete::new(2, 0)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
+        .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
         .observation_space(observation_space)
         .q_network(Box::new(mlp))
         .epsilon_start(1.0)
@@ -226,20 +249,21 @@ fn dqn_cartpole() {
     // Hopefully it doesn't actually need this many to pass
     for i in 0..10 {
         actor.learn(&mut vec_env, 20000).unwrap();
-        println!("Testing if PPO solved CartPole-v1...");
+        println!("Testing if DQN solved CartPole-v1...");
 
+        // TODO! make a way to make actor deterministic for testing
         let avg_steps = get_average_steps(&mut actor);
         println!(
-            "Average steps over 100 episodes: {} with {} timesteps",
+            "DQN averaged {} steps over 100 episodes with {} timesteps",
             avg_steps,
             (i + 1) * 20000
         );
 
         // Cartpole v1 should be using 475, which we can reach but no need for that here
         if avg_steps >= 195.0 {
-            println!("PPO solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
+            println!("DQN solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
             return;
         }
     }
-    panic!("Failed to solve CartPole-v1 within 100000 timesteps.");
+    panic!("DQN failed to solve CartPole-v1 within 100000 timesteps.");
 }

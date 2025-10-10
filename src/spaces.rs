@@ -1,31 +1,32 @@
-use candle_core::{Device, Tensor, D};
-use rand::{rng, Rng};
+use candle_core::{D, Device, Tensor};
+
+use crate::tensor_operations::gen_range_int_tensor;
 
 pub trait Space {
+    type Error;
+
     /// Returns a random sample from the space.
-    fn sample(&self, device: &Device) -> Tensor;
+    fn sample(&self, device: &Device) -> Result<Tensor, Self::Error>;
     /// Returns true if the input tensor is within the space.
     fn contains(&self, x: &Tensor) -> bool;
     /// returns the shape of the space.
     /// This is the gonna be the shape of the tensor that is inputted into the from_neurons function.
     fn shape(&self) -> Vec<usize>;
     /// "Translates" the output of the neurons (of shape [batch_size, shape]) to the space.
-    fn from_neurons(&self, neurons: &Tensor) -> Tensor;
+    fn from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error>;
 }
 
 #[derive(Clone)]
 pub struct Discrete {
     possible_values: usize,
-    start_value: i32, // inclusive
 }
 
 impl Space for Discrete {
-    fn sample(&self, device: &Device) -> Tensor {
-        let mut rng = rng();
-        let value = rng
-            .random_range(self.start_value..(self.start_value + self.possible_values as i32))
-            as u32;
-        Tensor::from_vec(vec![value], vec![], device).expect("Failed to create tensor.")
+    type Error = candle_core::Error;
+
+    fn sample(&self, device: &Device) -> Result<Tensor, Self::Error> {
+        let value = gen_range_int_tensor(0, self.possible_values as u32 - 1, device)?;
+        Tensor::from_vec(vec![value], vec![], device)
     }
 
     fn contains(&self, x: &Tensor) -> bool {
@@ -33,8 +34,10 @@ impl Space for Discrete {
             return false;
         }
         let value = x.to_vec0::<u32>().expect("Failed to convert to u32.");
-        value >= self.start_value as u32
-            && value < (self.start_value + self.possible_values as i32) as u32
+        if value < self.possible_values as u32 {
+            return true;
+        }
+        false
     }
 
     fn shape(&self) -> Vec<usize> {
@@ -45,18 +48,14 @@ impl Space for Discrete {
         }
     }
 
-    fn from_neurons(&self, neurons: &Tensor) -> Tensor {
-        let neurons = neurons.argmax(D::Minus1).expect("Failed to get argmax.");
-        neurons
+    fn from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error> {
+        neurons.argmax(D::Minus1)
     }
 }
 
 impl Discrete {
-    pub fn new(possible_values: usize, start_value: i32) -> Self {
-        Self {
-            possible_values,
-            start_value,
-        }
+    pub fn new(possible_values: usize) -> Self {
+        Self { possible_values }
     }
 
     pub fn get_possible_values(&self) -> usize {
@@ -75,12 +74,16 @@ pub struct BoxSpace {
 }
 
 impl Space for BoxSpace {
-    fn sample(&self, device: &Device) -> Tensor {
-        let mut rng = rng();
+    type Error = candle_core::Error;
+
+    fn sample(&self, device: &Device) -> Result<Tensor, Self::Error> {
         let mut values = vec![];
+
         // flatten the low and high tensors
         let low = self.low.flatten_all().expect("Failed to flatten tensor.");
         let high = self.high.flatten_all().expect("Failed to flatten tensor.");
+        // we might be losing some precision here, but it's fine for now.
+        let rng_bases = Tensor::rand(0.0, 1.0, low.shape(), device)?;
         for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
             let mut low = low
                 .get(i)
@@ -95,9 +98,17 @@ impl Space for BoxSpace {
             low = finitize(low);
             high = finitize(high);
 
-            values.push(rng.random_range(low..high));
+            let rng_base = rng_bases
+                .get(i)
+                .expect("Failed to get value.")
+                .to_vec0::<f32>()
+                .expect("Failed to convert to f32.");
+            let adjusted_range = high - low;
+            let rand_num = low + adjusted_range * rng_base;
+
+            values.push(rand_num);
         }
-        Tensor::from_vec(values, low.shape(), device).expect("Failed to create tensor.")
+        Tensor::from_vec(values, low.shape(), device)
     }
 
     fn contains(&self, x: &Tensor) -> bool {
@@ -137,9 +148,9 @@ impl Space for BoxSpace {
         self.low.shape().clone().into_dims()
     }
 
-    fn from_neurons(&self, neurons: &Tensor) -> Tensor {
+    fn from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error> {
         // Do not need to do anything here.
-        neurons.clone()
+        Ok(neurons.clone())
     }
 }
 
