@@ -1,4 +1,4 @@
-use crate::tensor_operations::gen_range_int_tensor;
+use crate::tensor_operations::resevoir_sample;
 
 use super::{ExperienceBatch, experience};
 use std::collections::VecDeque;
@@ -46,21 +46,17 @@ where
 
     pub fn sample(&self) -> Result<ExperienceBatch<T>, ExperienceReplayError<T::Error>> {
         // shuffle the buffer
-        let mut buffer = self.buffer.iter().collect::<Vec<_>>();
-
-        // Shuffle using Fisher-Yates algorithm
-        for i in (1..buffer.len()).rev() {
-            let j = gen_range_int_tensor(0, i as u32, &self.device)? as usize;
-            buffer.swap(i, j);
-        }
+        let buffer = self.buffer.iter().collect::<Vec<_>>();
 
         // Slice the buffer to get the batch
         let total_samples = self.buffer.len();
-        let batch = &buffer[0..self.batch_size.min(total_samples)];
+        let size_to_sample = self.batch_size.min(total_samples);
+        let batch = resevoir_sample(&buffer, size_to_sample, &self.device);
+
+        let batch = batch.iter().cloned().cloned().collect();
 
         let experience_sample =
-            ExperienceBatch::new(batch.to_vec().iter().cloned().cloned().collect())
-                .map_err(ExperienceReplayError::ExperienceError)?;
+            ExperienceBatch::new(batch).map_err(ExperienceReplayError::ExperienceError)?;
 
         Ok(experience_sample)
     }

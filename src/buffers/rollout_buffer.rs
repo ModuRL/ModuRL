@@ -1,4 +1,4 @@
-use crate::tensor_operations::gen_range_int_tensor;
+use crate::tensor_operations;
 
 use super::{ExperienceBatch, experience};
 use std::vec;
@@ -65,11 +65,7 @@ where
     pub fn get_all_shuffled(
         &mut self,
     ) -> Result<Vec<ExperienceBatch<T>>, RolloutBufferError<T::Error>> {
-        // Fisher-Yates shuffle
-        for i in (1..self.buffer.len()).rev() {
-            let j = gen_range_int_tensor(0, i as u32, &self.device)? as usize;
-            self.buffer.swap(i, j);
-        }
+        tensor_operations::fisher_yates_shuffle(&mut self.buffer, &self.device);
 
         let samples = self
             .get_all()

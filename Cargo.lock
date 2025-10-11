@@ -960,10 +960,8 @@ dependencies = [
  "candle-nn",
  "candle-optimisers",
  "getrandom 0.2.16",
- "log",
  "modurl_gym",
  "rand",
- "rayon",
  "tracing",
  "tracing-subscriber",
 ]

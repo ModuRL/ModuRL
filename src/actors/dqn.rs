@@ -199,7 +199,7 @@ where
     type SpaceError = SE;
 
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
-        let rand = Tensor::rand(0.0, 1.0, &[], observation.device())?;
+        let rand = Tensor::rand(0.0f32, 1.0, &[], observation.device())?;
 
         if rand.to_vec0::<f32>()? < self.epsilon {
             let mut actions = vec![];

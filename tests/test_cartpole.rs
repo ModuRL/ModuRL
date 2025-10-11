@@ -25,6 +25,7 @@ fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
         .lock()
         .expect("failed to get RNG lock")
         .fill(buf);
+    println!("Custom getrandom called to fill {}", buf);
     Ok(())
 }
 
