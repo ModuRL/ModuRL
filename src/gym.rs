@@ -1,14 +1,25 @@
 use crate::spaces::Space;
-use candle_core::Tensor;
+use burn::{
+    prelude::Backend,
+    tensor::{Tensor, TensorKind},
+};
 
-pub trait Gym {
+/// A trait representing a reinforcement learning environment.
+/// The observation and action ranks do not include the batch dimension.
+pub trait Gym<const OBS_RANK: usize, const ACT_RANK: usize> {
     type Error;
     type SpaceError;
+    type Backend: Backend;
+    type ActType: TensorKind<Self::Backend>;
+    type ObsType: TensorKind<Self::Backend>;
 
     /// Returns the next state, reward, and done flag.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error>;
+    fn step(
+        &mut self,
+        action: Tensor<Self::Backend, ACT_RANK, Self::ActType>,
+    ) -> Result<StepInfo, Self::Error>;
     /// Resets the environment to its initial state. Returns the initial state.
-    fn reset(&mut self) -> Result<Tensor, Self::Error>;
+    fn reset(&mut self) -> Result<Tensor<Self::Backend, OBS_RANK, Self::ObsType>, Self::Error>;
     /// Returns the observation space.
     fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     /// Returns the action space.

@@ -5,6 +5,8 @@ use burn::{
 
 use crate::tensor_operations::gen_range_int_tensor;
 
+/// A trait representing a space.
+/// Note that the INPUT_RANK and OUTPUT_RANK includes the batch dimension.
 pub trait Space<const OUTPUT_RANK: usize, const INPUT_RANK: usize> {
     type Error;
     type Backend: Backend;
@@ -14,9 +16,12 @@ pub trait Space<const OUTPUT_RANK: usize, const INPUT_RANK: usize> {
     fn sample(
         &self,
         device: &Device<Self::Backend>,
-    ) -> Result<Tensor<Self::Backend, OUTPUT_RANK>, Self::Error>;
+    ) -> Result<Tensor<Self::Backend, OUTPUT_RANK, Self::OutputType>, Self::Error>;
     /// Returns true if the input tensor is within the space.
-    fn contains(&self, x: &Tensor<Self::Backend, OUTPUT_RANK>) -> Result<bool, DataError>;
+    fn contains(
+        &self,
+        x: &Tensor<Self::Backend, OUTPUT_RANK, Self::OutputType>,
+    ) -> Result<bool, DataError>;
     /// returns the shape of the space.
     /// This is the gonna be the shape of the tensor that is inputted into the from_neurons function.
     fn shape(&self) -> Vec<usize>;
@@ -33,17 +38,17 @@ pub struct Discrete<B: Backend> {
     _backend: std::marker::PhantomData<B>,
 }
 
-impl<B: Backend> Space<0, 0> for Discrete<B> {
+impl<B: Backend> Space<1, 1> for Discrete<B> {
     type Error = DataError;
     type Backend = B;
     type OutputType = Int;
 
-    fn sample(&self, device: &Device<B>) -> Result<Tensor<B, 0>, Self::Error> {
-        let value = gen_range_int_tensor::<B>(0, self.possible_values as u32 - 1, device)?;
-        Ok(Tensor::from_data([value].as_slice(), device))
+    fn sample(&self, device: &Device<B>) -> Result<Tensor<B, 1, Int>, Self::Error> {
+        let value = gen_range_int_tensor::<B>(1, self.possible_values as u32 - 1, device)?;
+        Ok(Tensor::<B, 1, Int>::from_data([value].as_slice(), device).expand([1]))
     }
 
-    fn contains(&self, x: &Tensor<B, 0>) -> Result<bool, Self::Error> {
+    fn contains(&self, x: &Tensor<B, 1, Int>) -> Result<bool, Self::Error> {
         let value = x.to_data().into_vec::<u32>();
         if value.is_err() {
             return Ok(false);
@@ -65,8 +70,8 @@ impl<B: Backend> Space<0, 0> for Discrete<B> {
 
     fn from_neurons(
         &self,
-        neurons: &Tensor<B, 0>,
-    ) -> Result<Tensor<B, 0, Self::OutputType>, Self::Error> {
+        neurons: &Tensor<B, 1>,
+    ) -> Result<Tensor<B, 1, Self::OutputType>, Self::Error> {
         // We just need to do an argmax here.
         let output = neurons.clone().argmax(0);
         Ok(output)
