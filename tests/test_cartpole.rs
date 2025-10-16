@@ -3,9 +3,6 @@ use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::actors::dqn::DQNActor;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
-use modurl_gym::classic_control::cartpole::CartPoleV1;
-use std::sync::{Mutex, OnceLock};
-
 use modurl::tensor_operations::tanh;
 use modurl::{
     actors::{Actor, ppo::PPOActor},
@@ -14,22 +11,7 @@ use modurl::{
     models::{MLP, probabilistic_model::MLPProbabilisticActor},
     spaces::Discrete,
 };
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-
-static RNG: OnceLock<Mutex<StdRng>> = OnceLock::new();
-
-fn custom_getrandom(buf: &mut [u8]) -> Result<(), getrandom::Error> {
-    let seed = [0u8; 32];
-    RNG.get_or_init(|| Mutex::new(StdRng::from_seed(seed)))
-        .lock()
-        .expect("failed to get RNG lock")
-        .fill(buf);
-    println!("Custom getrandom called to fill {}", buf);
-    Ok(())
-}
-
-getrandom::register_custom_getrandom!(custom_getrandom);
+use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn get_average_steps<AE, GE, SE>(
     actor: &mut dyn Actor<Error = AE, GymError = GE, SpaceError = SE>,
