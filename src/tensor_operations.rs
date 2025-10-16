@@ -90,6 +90,56 @@ pub fn tensor_has_nan(t: &Tensor) -> Result<bool, candle_core::Error> {
     }
 }
 
+pub fn gen_range_int_tensor(
+    start: u32,
+    end: u32,
+    device: &candle_core::Device,
+) -> Result<u32, candle_core::Error> {
+    Ok(Tensor::rand(start as f32, end as f32 + 1.0, &[], device)?
+        .floor()?
+        .to_dtype(candle_core::DType::U32)?
+        .to_vec0::<u32>()?
+        .clamp(start, end)) // ensure within bounds
+}
+
+pub fn fisher_yates_shuffle<T: Clone>(arr: &mut [T], device: &candle_core::Device) {
+    // generate arr.len random floats from 0 to 1
+    let random_floats_tensor = Tensor::rand(0.0f32, 1.0f32, &[arr.len()], device).unwrap();
+    let random_floats_vec = random_floats_tensor.to_vec1::<f32>().unwrap();
+    let n = arr.len();
+    for i in (1..n).rev() {
+        let rand_float = random_floats_vec[i];
+        // now we scale it to 0..=i
+        let mut j = (rand_float * (i as f32 + 1.0)).floor() as usize;
+        // make sure j is in bounds
+        j = j.clamp(0, i);
+        arr.swap(i, j);
+    }
+}
+
+pub fn resevoir_sample<T: Clone>(arr: &[T], size: usize, device: &candle_core::Device) -> Vec<T> {
+    let arr_len = arr.len();
+    if arr_len == 0 {
+        return vec![];
+    }
+    if arr.len() < size {
+        return arr.to_vec();
+    }
+    // fill the reservoir array
+    let mut reservoir: Vec<T> = arr[0..size.min(arr_len)].to_vec();
+    let random_floats_tensor =
+        Tensor::rand(0.0f32, 1.0f32, &[arr_len - reservoir.len()], device).unwrap();
+    let random_floats_vec = random_floats_tensor.to_vec1::<f32>().unwrap();
+    for i in size..arr_len {
+        let rand_float = random_floats_vec[i - size];
+        let j = (rand_float * (i as f32 + 1.0)).floor() as usize;
+        if j < size {
+            reservoir[j] = arr[i].clone();
+        }
+    }
+    reservoir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

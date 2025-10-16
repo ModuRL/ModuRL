@@ -1,6 +1,18 @@
-use super::{experience, ExperienceBatch};
-use rand::seq::SliceRandom;
+use crate::tensor_operations::resevoir_sample;
+
+use super::{ExperienceBatch, experience};
 use std::collections::VecDeque;
+
+pub enum ExperienceReplayError<E> {
+    TensorError(candle_core::Error),
+    ExperienceError(E),
+}
+
+impl<E> From<candle_core::Error> for ExperienceReplayError<E> {
+    fn from(err: candle_core::Error) -> Self {
+        ExperienceReplayError::TensorError(err)
+    }
+}
 
 pub struct ExperienceReplay<T>
 where
@@ -9,17 +21,19 @@ where
     buffer: VecDeque<T>,
     capacity: usize,
     batch_size: usize,
+    device: candle_core::Device,
 }
 
 impl<T> ExperienceReplay<T>
 where
     T: experience::Experience + Clone,
 {
-    pub fn new(capacity: usize, batch_size: usize) -> Self {
+    pub fn new(capacity: usize, batch_size: usize, device: candle_core::Device) -> Self {
         Self {
             buffer: VecDeque::with_capacity(capacity),
             capacity,
             batch_size,
+            device,
         }
     }
 
@@ -30,19 +44,19 @@ where
         self.buffer.push_front(experience);
     }
 
-    pub fn sample(&self) -> Result<ExperienceBatch<T>, T::Error> {
-        let mut rng = rand::rng();
-
+    pub fn sample(&self) -> Result<ExperienceBatch<T>, ExperienceReplayError<T::Error>> {
         // shuffle the buffer
-        let mut buffer = self.buffer.iter().collect::<Vec<_>>();
-        buffer.shuffle(&mut rng);
+        let buffer = self.buffer.iter().collect::<Vec<_>>();
 
         // Slice the buffer to get the batch
         let total_samples = self.buffer.len();
-        let batch = &buffer[0..self.batch_size.min(total_samples)];
+        let size_to_sample = self.batch_size.min(total_samples);
+        let batch = resevoir_sample(&buffer, size_to_sample, &self.device);
+
+        let batch = batch.iter().cloned().cloned().collect();
 
         let experience_sample =
-            ExperienceBatch::new(batch.to_vec().iter().cloned().cloned().collect())?;
+            ExperienceBatch::new(batch).map_err(ExperienceReplayError::ExperienceError)?;
 
         Ok(experience_sample)
     }

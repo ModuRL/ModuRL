@@ -1,10 +1,12 @@
 use bon::bon;
 use candle_core::{Error, IndexOp, Tensor};
 use candle_nn::Optimizer;
-use rand::Rng;
 
 use crate::{
-    buffers::{experience, experience_replay::ExperienceReplay},
+    buffers::{
+        experience,
+        experience_replay::{ExperienceReplay, ExperienceReplayError},
+    },
     gym::{VectorizedGym, VectorizedStepInfo},
     spaces::{Discrete, Space},
     tensor_operations::tensor_has_nan,
@@ -13,17 +15,20 @@ use crate::{
 use super::Actor;
 
 #[derive(Debug)]
-pub enum DQNActorError<GE>
+pub enum DQNActorError<GE, SE>
 where
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     TensorError(candle_core::Error),
     GymError(GE),
+    SpaceError(SE),
 }
 
-impl<GE> From<candle_core::Error> for DQNActorError<GE>
+impl<GE, SE> From<candle_core::Error> for DQNActorError<GE, SE>
 where
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     fn from(err: candle_core::Error) -> Self {
         DQNActorError::TensorError(err)
@@ -68,17 +73,18 @@ impl DQNActorExperience {
 /// The DQN actor uses a neural network to approximate the Q-values of the environment for each action.
 /// The actor then picks the action with the highest Q-value. (Greedy)
 /// The actor also sometimes picks a random action with probability epsilon. (Exploration)
-pub struct DQNActor<O, GE>
+pub struct DQNActor<O, GE, SE>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     q_network: Box<dyn candle_core::Module>,
     optimizer: O,
     epsilon: f32,
     epsilon_decay: f32,
     action_space: Discrete,
-    observation_space: Box<dyn Space>,
+    observation_space: Box<dyn Space<Error = SE>>,
     experience_replay: ExperienceReplay<DQNActorExperience>,
     gamma: f32,
     update_frequency: usize,
@@ -86,15 +92,16 @@ where
 }
 
 #[bon]
-impl<O, GE> DQNActor<O, GE>
+impl<O, GE, SE> DQNActor<O, GE, SE>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     #[builder]
     pub fn new(
         action_space: Discrete,
-        observation_space: Box<dyn Space>,
+        observation_space: Box<dyn Space<Error = SE>>,
         q_network: Box<dyn candle_core::Module>,
         optimizer: O,
         #[builder(default = 0.9)] epsilon_start: f32,
@@ -103,8 +110,9 @@ where
         #[builder(default = 32)] batch_size: usize,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 4)] update_frequency: usize,
+        device: candle_core::Device,
     ) -> Self {
-        let experience_replay = ExperienceReplay::new(replay_capacity, batch_size);
+        let experience_replay = ExperienceReplay::new(replay_capacity, batch_size, device);
         Self {
             q_network,
             optimizer,
@@ -120,16 +128,17 @@ where
     }
 }
 
-impl<O, GE> DQNActor<O, GE>
+impl<O, GE, SE> DQNActor<O, GE, SE>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     pub fn get_action_space(&self) -> &Discrete {
         &self.action_space
     }
 
-    pub fn get_observation_space(&self) -> &Box<dyn Space> {
+    pub fn get_observation_space(&self) -> &Box<dyn Space<Error = SE>> {
         &self.observation_space
     }
 
@@ -138,7 +147,14 @@ where
             return Ok(()); // Not enough samples to train.
         }
 
-        let training_batch = self.experience_replay.sample()?;
+        let training_batch = self.experience_replay.sample();
+        let training_batch = match training_batch {
+            Ok(b) => b,
+            Err(e) => match e {
+                ExperienceReplayError::ExperienceError(ee) => return Err(ee),
+                ExperienceReplayError::TensorError(te) => return Err(te),
+            },
+        };
         let elements = training_batch.get_elements();
         let states = elements[0].clone();
         let next_states = elements[1].clone();
@@ -172,19 +188,24 @@ where
     }
 }
 
-impl<O, GE> Actor for DQNActor<O, GE>
+impl<O, GE, SE> Actor for DQNActor<O, GE, SE>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
-    type Error = DQNActorError<GE>;
+    type Error = DQNActorError<GE, SE>;
     type GymError = GE;
+    type SpaceError = SE;
+
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
-        if rand::rng().random_range(0.0..1.0) < self.epsilon {
+        let rand = Tensor::rand(0.0f32, 1.0, &[], observation.device())?;
+
+        if rand.to_vec0::<f32>()? < self.epsilon {
             let mut actions = vec![];
             let batch_size = observation.shape().dims()[0];
             for _ in 0..batch_size {
-                let sample = self.action_space.sample(observation.device());
+                let sample = self.action_space.sample(observation.device())?;
 
                 actions.push(sample);
             }
@@ -200,7 +221,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<Error = Self::GymError>,
+        env: &mut dyn VectorizedGym<Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         let mut elapsed_timesteps = 0;

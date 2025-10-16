@@ -4,7 +4,10 @@ use candle_nn::{Optimizer, loss};
 use std::marker::PhantomData;
 
 use crate::{
-    buffers::{experience, rollout_buffer::RolloutBuffer},
+    buffers::{
+        experience,
+        rollout_buffer::{RolloutBuffer, RolloutBufferError},
+    },
     gym::{VectorizedGym, VectorizedStepInfo},
     lr_scheduler::LrScheduler,
     models::probabilistic_model::ProbabilisticActor,
@@ -13,20 +16,23 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub enum PPOError<AE, GE>
+pub enum PPOError<AE, GE, SE>
 where
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     ActorError(AE),
     GymError(GE),
     TensorError(candle_core::Error),
+    SpaceError(SE),
 }
 
-impl<AE, GE> From<candle_core::Error> for PPOError<AE, GE>
+impl<AE, GE, SE> From<candle_core::Error> for PPOError<AE, GE, SE>
 where
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     fn from(err: candle_core::Error) -> Self {
         PPOError::TensorError(err)
@@ -122,12 +128,13 @@ enum PPOElement {
     Return = 8,
 }
 
-pub struct PPOActor<O1, O2, AE, GE>
+pub struct PPOActor<O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     clipped: bool,
     gamma: f32,
@@ -138,7 +145,7 @@ where
     ent_coef: f32,
     critic_optimizer: O1,
     actor_optimizer: O2,
-    action_space: Box<dyn spaces::Space>,
+    action_space: Box<dyn spaces::Space<Error = SE>>,
     critic_network: Box<dyn candle_core::Module>,
     actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
     rollout_buffer: RolloutBuffer<PPOExperience>,
@@ -150,16 +157,17 @@ where
 }
 
 #[bon]
-impl<O1, O2, AE, GE> PPOActor<O1, O2, AE, GE>
+impl<O1, O2, AE, GE, SE> PPOActor<O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
     #[builder]
     pub fn new(
-        action_space: Box<dyn spaces::Space>,
+        action_space: Box<dyn spaces::Space<Error = SE>>,
         actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
         critic_network: Box<dyn candle_core::Module>,
         critic_optimizer: O1,
@@ -174,6 +182,7 @@ where
         #[builder(default = 1024)] batch_size: usize,
         #[builder(default = 128)] mini_batch_size: usize,
         #[builder(default = 1)] num_epochs: usize,
+        device: candle_core::Device,
         actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
         critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
     ) -> Self {
@@ -194,7 +203,7 @@ where
             action_space,
             critic_network,
             actor_network,
-            rollout_buffer: RolloutBuffer::new(mini_batch_size),
+            rollout_buffer: RolloutBuffer::new(mini_batch_size, device),
             num_epochs,
             batch_size,
             actor_lr_scheduler,
@@ -204,17 +213,28 @@ where
     }
 }
 
-impl<O1, O2, AE, GE> PPOActor<O1, O2, AE, GE>
+impl<O1, O2, AE, GE, SE> PPOActor<O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
-    fn optimize(&mut self) -> Result<(), PPOError<AE, GE>> {
+    fn optimize(&mut self) -> Result<(), PPOError<AE, GE, SE>> {
         self.add_advantages_and_returns()?;
         for epoch in 0..self.num_epochs {
-            let batches = self.rollout_buffer.get_all_shuffled()?;
+            let batches = self.rollout_buffer.get_all_shuffled();
+            let batches = match batches {
+                Ok(b) => b,
+                Err(e) => match e {
+                    RolloutBufferError::TensorError(te) => return Err(PPOError::TensorError(te)),
+                    RolloutBufferError::ExperienceError(ee) => {
+                        return Err(PPOError::TensorError(ee));
+                    }
+                },
+            };
+
             let mut average_abs_actor_loss = 0.0;
             let mut average_abs_critic_loss = 0.0;
             let mut count = 0;
@@ -293,7 +313,7 @@ where
         Ok(())
     }
 
-    fn add_advantages_and_returns(&mut self) -> Result<(), PPOError<AE, GE>> {
+    fn add_advantages_and_returns(&mut self) -> Result<(), PPOError<AE, GE, SE>> {
         let experiences = self.rollout_buffer.get_raw();
         // For advantage return calculation:
         let mut rewards = vec![];
@@ -413,7 +433,7 @@ where
         old_log_probs: candle_core::Tensor,
         advantages: candle_core::Tensor,
         returns: candle_core::Tensor,
-    ) -> Result<(f64, f64), PPOError<AE, GE>> {
+    ) -> Result<(f64, f64), PPOError<AE, GE, SE>> {
         let advantages = if self.normalize_advantage {
             let advantages_mean = advantages.mean_all()?.to_scalar::<f32>()?;
             let advantage_diff = (advantages.clone() - advantages_mean as f64)?;
@@ -500,34 +520,39 @@ where
     fn act_neurons(
         &mut self,
         observation: &candle_core::Tensor,
-    ) -> Result<candle_core::Tensor, PPOError<AE, GE>> {
+    ) -> Result<candle_core::Tensor, PPOError<AE, GE, SE>> {
         self.actor_network
             .sample(observation)
             .map_err(PPOError::ActorError)
     }
 }
 
-impl<O1, O2, AE, GE> Actor for PPOActor<O1, O2, AE, GE>
+impl<O1, O2, AE, GE, SE> Actor for PPOActor<O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
-    type Error = PPOError<AE, GE>;
+    type Error = PPOError<AE, GE, SE>;
     type GymError = GE;
+    type SpaceError = SE;
 
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
         let neurons = self.act_neurons(observation)?;
-        let actions = self.action_space.from_neurons(&neurons);
+        let actions = self
+            .action_space
+            .from_neurons(&neurons)
+            .map_err(PPOError::SpaceError)?;
         Ok(actions)
     }
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<Error = Self::GymError>,
+        env: &mut dyn VectorizedGym<Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
-    ) -> Result<(), PPOError<AE, GE>> {
+    ) -> Result<(), PPOError<AE, GE, SE>> {
         let mut elapsed_timesteps = 0;
         let mut next_states: Tensor;
         let mut rewards;
@@ -538,7 +563,10 @@ where
             while self.rollout_buffer.len() * env.num_envs() < self.batch_size {
                 let states = next_states.clone();
                 let action = self.act_neurons(&states)?;
-                let actual_action = self.action_space.from_neurons(&action);
+                let actual_action = self
+                    .action_space
+                    .from_neurons(&action)
+                    .map_err(PPOError::SpaceError)?;
 
                 let (log_probs, _) = self
                     .actor_network
