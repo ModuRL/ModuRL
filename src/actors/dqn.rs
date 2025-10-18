@@ -2,6 +2,7 @@ use bon::bon;
 use candle_core::{Error, IndexOp, Tensor};
 use candle_nn::Optimizer;
 
+use super::Actor;
 use crate::{
     buffers::{
         experience,
@@ -12,7 +13,35 @@ use crate::{
     tensor_operations::tensor_has_nan,
 };
 
-use super::Actor;
+struct DQNLoggingInfo<'a> {
+    logger: &'a mut dyn DQNLogger,
+    epoch: usize,
+    timestep: usize,
+}
+
+impl<'a> DQNLoggingInfo<'a> {
+    fn new(logger: &'a mut dyn DQNLogger) -> Self {
+        Self {
+            logger,
+            epoch: 0,
+            timestep: 0,
+        }
+    }
+}
+
+pub struct DQNLogEntry {
+    pub loss: Tensor,
+    pub epsilon: f32,
+    pub learning_rate: f32,
+    pub q_values: Tensor,
+    pub rewards: Tensor,
+    pub epoch: usize,
+    pub timestep: usize,
+}
+
+pub trait DQNLogger {
+    fn log(&mut self, info: &DQNLogEntry);
+}
 
 #[derive(Debug)]
 pub enum DQNActorError<GE, SE>
@@ -73,7 +102,7 @@ impl DQNActorExperience {
 /// The DQN actor uses a neural network to approximate the Q-values of the environment for each action.
 /// The actor then picks the action with the highest Q-value. (Greedy)
 /// The actor also sometimes picks a random action with probability epsilon. (Exploration)
-pub struct DQNActor<O, GE, SE>
+pub struct DQNActor<'a, O, GE, SE>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
@@ -88,11 +117,12 @@ where
     experience_replay: ExperienceReplay<DQNActorExperience>,
     gamma: f32,
     update_frequency: usize,
+    logging_info: Option<DQNLoggingInfo<'a>>,
     _phantom: std::marker::PhantomData<GE>,
 }
 
 #[bon]
-impl<O, GE, SE> DQNActor<O, GE, SE>
+impl<'a, O, GE, SE> DQNActor<'a, O, GE, SE>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
@@ -110,6 +140,7 @@ where
         #[builder(default = 32)] batch_size: usize,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 4)] update_frequency: usize,
+        logger: Option<&'a mut dyn DQNLogger>,
         device: candle_core::Device,
     ) -> Self {
         let experience_replay = ExperienceReplay::new(replay_capacity, batch_size, device);
@@ -123,12 +154,13 @@ where
             experience_replay,
             gamma,
             update_frequency,
+            logging_info: logger.map(|l| DQNLoggingInfo::new(l)),
             _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<O, GE, SE> DQNActor<O, GE, SE>
+impl<'a, O, GE, SE> DQNActor<'a, O, GE, SE>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
@@ -174,12 +206,28 @@ where
         // Compute the target Q-values.
         let gamma_tensor = Tensor::full(self.gamma, next_q_values.shape(), states.device())?;
         let mut target_q_values =
-            (rewards + (next_q_values * ((1.0 - dones)?.mul(&gamma_tensor)?)))?;
+            (rewards.clone() + (next_q_values * ((1.0 - dones)?.mul(&gamma_tensor)?)))?;
 
         target_q_values = target_q_values
             .reshape(&[target_q_values.shape().dims()[0], 1])?
             .detach();
         let loss = candle_nn::loss::mse(&state_action_q_values, &target_q_values)?;
+
+        if let Some(logging_info) = &mut self.logging_info {
+            let log_entry = DQNLogEntry {
+                loss: loss.clone(),
+                epsilon: self.epsilon,
+                learning_rate: self.optimizer.learning_rate() as f32,
+                q_values: state_action_q_values.clone(),
+                rewards: rewards,
+                epoch: logging_info.epoch,
+                timestep: logging_info.timestep,
+            };
+            logging_info.logger.log(&log_entry);
+            logging_info.epoch += 1;
+            logging_info.timestep += 1;
+        }
+
         if !tensor_has_nan(&loss)? {
             self.optimizer.backward_step(&loss)?;
         }
@@ -188,7 +236,7 @@ where
     }
 }
 
-impl<O, GE, SE> Actor for DQNActor<O, GE, SE>
+impl<'a, O, GE, SE> Actor for DQNActor<'a, O, GE, SE>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
