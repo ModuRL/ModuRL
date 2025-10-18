@@ -128,7 +128,45 @@ enum PPOElement {
     Return = 8,
 }
 
-pub struct PPOActor<O1, O2, AE, GE, SE>
+struct PPOLoggingInfo<'a> {
+    logger: &'a mut dyn PPOLogger,
+    epoch: usize,
+    timestep: usize,
+}
+
+impl<'a> PPOLoggingInfo<'a> {
+    fn new(logger: &'a mut dyn PPOLogger) -> Self {
+        Self {
+            logger,
+            epoch: 0,
+            timestep: 0,
+        }
+    }
+}
+
+pub struct PPOLogEntry {
+    pub actor_loss: Tensor,
+    pub critic_loss: Tensor,
+    pub entropy: Tensor,
+    pub kl_divergence: Tensor,
+    pub explained_variance: Tensor,
+    pub learning_rate: f32,
+    pub rewards: Tensor,
+    pub epoch: usize,
+    pub timestep: usize,
+}
+
+pub trait PPOLogger {
+    fn log(&mut self, info: &PPOLogEntry);
+}
+
+#[derive(Clone)]
+struct PPOLosses {
+    actor_loss: Tensor,
+    critic_loss: Tensor,
+}
+
+pub struct PPOActor<'a, O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -153,11 +191,12 @@ where
     batch_size: usize,
     actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
     critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
+    logging_info: Option<PPOLoggingInfo<'a>>,
     _phantom: PhantomData<GE>,
 }
 
 #[bon]
-impl<O1, O2, AE, GE, SE> PPOActor<O1, O2, AE, GE, SE>
+impl<'a, O1, O2, AE, GE, SE> PPOActor<'a, O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -182,6 +221,7 @@ where
         #[builder(default = 1024)] batch_size: usize,
         #[builder(default = 128)] mini_batch_size: usize,
         #[builder(default = 1)] num_epochs: usize,
+        logging_info: Option<&'a mut dyn PPOLogger>,
         device: candle_core::Device,
         actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
         critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
@@ -208,12 +248,13 @@ where
             batch_size,
             actor_lr_scheduler,
             critic_lr_scheduler,
+            logging_info: logging_info.map(|logger| PPOLoggingInfo::new(logger)),
             _phantom: PhantomData,
         }
     }
 }
 
-impl<O1, O2, AE, GE, SE> PPOActor<O1, O2, AE, GE, SE>
+impl<'a, O1, O2, AE, GE, SE> PPOActor<'a, O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -224,6 +265,10 @@ where
     fn optimize(&mut self) -> Result<(), PPOError<AE, GE, SE>> {
         self.add_advantages_and_returns()?;
         for epoch in 0..self.num_epochs {
+            if let Some(logging_info) = &mut self.logging_info {
+                logging_info.epoch = epoch;
+            }
+
             let batches = self.rollout_buffer.get_all_shuffled();
             let batches = match batches {
                 Ok(b) => b,
@@ -235,10 +280,6 @@ where
                 },
             };
 
-            let mut average_abs_actor_loss = 0.0;
-            let mut average_abs_critic_loss = 0.0;
-            let mut count = 0;
-
             for batch in batches.iter() {
                 let elements = batch.get_elements();
 
@@ -247,6 +288,7 @@ where
                 let mut batch_old_log_probs = elements[PPOElement::LogProb as usize].clone();
                 let mut advantages = elements[PPOElement::Advantage as usize].clone();
                 let mut returns = elements[PPOElement::Return as usize].clone();
+                let mut rewards = elements[PPOElement::Reward as usize].clone();
                 // each of these tensors has shape [batch_size, env_count, ...]
 
                 let action_shape = actions.shape().dims();
@@ -258,6 +300,7 @@ where
                     &mut batch_old_log_probs,
                     &mut advantages,
                     &mut returns,
+                    &mut rewards,
                 ] {
                     let mut shape = tensor.shape().dims().to_vec();
                     *tensor = tensor.flatten(0, 1)?;
@@ -272,6 +315,7 @@ where
                 let advantages = advantages.chunk(env_count, 0)?;
                 let returns = returns.chunk(env_count, 0)?;
                 let batch_old_log_probs = batch_old_log_probs.chunk(env_count, 0)?;
+                let rewards = rewards.chunk(env_count, 0)?;
 
                 // right now we have [batch_size, env_count, ...]
                 // we chunk along the env_count dimension
@@ -281,32 +325,21 @@ where
                     let advantages = advantages[env_idx].clone();
                     let returns = returns[env_idx].clone();
                     let batch_old_log_probs = batch_old_log_probs[env_idx].clone();
+                    let batch_rewards = rewards[env_idx].clone();
 
                     // Compute the loss and backpropagate
-                    let (actor_loss, critic_loss) = self.compute_loss(
+                    let ppo_losses = self.compute_loss(
                         &states,
                         &actions.detach(),
                         batch_old_log_probs.detach(),
                         advantages,
                         returns,
+                        batch_rewards,
                     )?;
 
-                    average_abs_actor_loss += actor_loss;
-                    average_abs_critic_loss += critic_loss;
-                    count += 1;
+                    self.backpropagate_loss(ppo_losses.clone())?;
                 }
             }
-
-            // we could calculate this without keeping the count variable but then we need env count
-            // I would rather not pass it around
-            average_abs_actor_loss /= count as f64;
-            average_abs_critic_loss /= count as f64;
-
-            println!("Epoch: {}", epoch + 1);
-            println!(
-                "Average Abs Actor Loss: {}, Average Abs Critic Loss: {}",
-                average_abs_actor_loss, average_abs_critic_loss
-            );
         }
 
         self.rollout_buffer.clear();
@@ -433,7 +466,8 @@ where
         old_log_probs: candle_core::Tensor,
         advantages: candle_core::Tensor,
         returns: candle_core::Tensor,
-    ) -> Result<(f64, f64), PPOError<AE, GE, SE>> {
+        rewards: candle_core::Tensor,
+    ) -> Result<PPOLosses, PPOError<AE, GE, SE>> {
         let advantages = if self.normalize_advantage {
             let advantages_mean = advantages.mean_all()?.to_scalar::<f32>()?;
             let advantage_diff = (advantages.clone() - advantages_mean as f64)?;
@@ -469,7 +503,7 @@ where
                 actor_loss
             }
             false => {
-                let surrogate = (ratio * &advantages)?;
+                let surrogate = (ratio.clone() * &advantages)?;
                 (-1.0 * surrogate.mean_all()?)?
             }
         };
@@ -481,14 +515,6 @@ where
 
         let final_actor_loss =
             (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
-
-        // check for NaNs
-        if !tensor_has_nan(&final_actor_loss)? {
-            // clip the gradients and step the optimizers
-            let actor_grad = &mut final_actor_loss.backward()?;
-            let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 1.0)?;
-            self.actor_optimizer.step(actor_grad)?;
-        }
 
         let returns = returns.detach();
         let returns = {
@@ -505,16 +531,53 @@ where
 
         let critic_loss = loss::mse(&values, &returns)?;
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
-        if !tensor_has_nan(&final_critic_loss)? {
-            // clip the gradients and step the optimizers
-            let critic_grad = &mut final_critic_loss.backward()?;
+
+        if let Some(logging_info) = &mut self.logging_info {
+            let explained_variance = {
+                let var_y = returns.var(D::Minus1)?;
+                let diff = (&returns - &values)?;
+                let var_diff = diff.var(D::Minus1)?;
+
+                1.0 + (-1.0 * (var_diff + 1e-8)? / (var_y + 1e-8)?)?
+            }?;
+
+            let log_entry = PPOLogEntry {
+                actor_loss: final_actor_loss.clone(),
+                critic_loss: final_critic_loss.clone(),
+                entropy: entropy_loss,
+                kl_divergence: ratio,
+                explained_variance,
+                learning_rate: self.actor_optimizer.learning_rate() as f32,
+                rewards: rewards,
+                epoch: logging_info.epoch,
+                timestep: logging_info.timestep,
+            };
+            logging_info.logger.log(&log_entry);
+        }
+
+        Ok(PPOLosses {
+            actor_loss: final_actor_loss,
+            critic_loss: final_critic_loss,
+        })
+    }
+
+    fn backpropagate_loss(&mut self, losses: PPOLosses) -> Result<(), PPOError<AE, GE, SE>> {
+        let actor_loss = losses.actor_loss;
+        let critic_loss = losses.critic_loss;
+
+        if !tensor_has_nan(&actor_loss)? {
+            let actor_grad = &mut actor_loss.backward()?;
+            let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 1.0)?;
+            self.actor_optimizer.step(actor_grad)?;
+        }
+
+        if !tensor_has_nan(&critic_loss)? {
+            let critic_grad = &mut critic_loss.backward()?;
             let _critic_grad_norm = crate::tensor_operations::clip_gradients(critic_grad, 1.0)?;
             self.critic_optimizer.step(critic_grad)?;
         }
 
-        let actor_loss_scalar = actor_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
-        let critic_loss_scalar = critic_loss.abs()?.mean_all()?.to_scalar::<f32>()? as f64;
-        Ok((actor_loss_scalar, critic_loss_scalar))
+        Ok(())
     }
 
     fn act_neurons(
@@ -527,7 +590,7 @@ where
     }
 }
 
-impl<O1, O2, AE, GE, SE> Actor for PPOActor<O1, O2, AE, GE, SE>
+impl<'a, O1, O2, AE, GE, SE> Actor for PPOActor<'a, O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -608,6 +671,10 @@ where
                     ((elapsed_timesteps as f64) / (num_timesteps as f64)).clamp(0.0, 1.0);
                 let new_lr = scheduler.get_lr(progress);
                 self.critic_optimizer.set_learning_rate(new_lr);
+            }
+
+            if let Some(logging_info) = &mut self.logging_info {
+                logging_info.timestep = elapsed_timesteps;
             }
             self.optimize()?;
         }
