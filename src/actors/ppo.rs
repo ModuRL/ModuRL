@@ -374,10 +374,13 @@ where
 
         let values_tensor = self.critic_network.forward(&Tensor::stack(&states, 0)?)?;
 
-        // TODO! there is no need to run everything through the critic again
-        let next_values_tensor = self
+        // the last step for every env is needed for bootstrapping
+        let next_states_tensor = Tensor::stack(&next_states, 0)?;
+        let bootstrapped_states = next_states_tensor.i(next_states_tensor.shape().dims()[0] - 1)?; // shape [env_count, ...]
+        let bootstrapped_values = self
             .critic_network
-            .forward(&Tensor::stack(&next_states, 0)?)?;
+            .forward(&bootstrapped_states)?
+            .flatten_all()?; // shape [env_count]
 
         let device = values_tensor.device();
 
@@ -392,8 +395,8 @@ where
         let advantages = self.compute_gae(
             &rewards_tensor,
             &values_tensor,
-            &next_values_tensor,
             &dones_tensor,
+            &bootstrapped_values,
         )?;
 
         let values_tensor = values_tensor.squeeze(D::Minus1)?;
@@ -415,8 +418,8 @@ where
         &self,
         rewards: &candle_core::Tensor,
         values: &candle_core::Tensor,
-        next_values: &candle_core::Tensor,
         dones: &candle_core::Tensor,
+        bootstrapped_values: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
         let shape = rewards.shape();
         let device = rewards.device();
@@ -424,7 +427,6 @@ where
         let rewards: Vec<Vec<f32>> = rewards.to_vec2()?;
         let dones: Vec<Vec<f32>> = dones.to_vec2()?;
         let values: Vec<Vec<f32>> = values.squeeze(D::Minus1)?.to_vec2()?;
-        let next_values: Vec<Vec<f32>> = next_values.squeeze(D::Minus1)?.to_vec2()?;
 
         let mut advantages = vec![0.0; rewards.len() * rewards[0].len()];
 
@@ -432,23 +434,27 @@ where
             let env_rewards: Vec<f32> = rewards.iter().map(|r| r[env_idx]).collect();
             let env_dones: Vec<f32> = dones.iter().map(|d| d[env_idx]).collect();
             let env_values: Vec<f32> = values.iter().map(|v| v[env_idx]).collect();
-            let env_next_values: Vec<f32> = next_values.iter().map(|nv| nv[env_idx]).collect();
+
+            let mut next_value = if env_dones.last().unwrap_or(&1.0) < &0.5 {
+                // bootstrap from using value function
+                bootstrapped_values.i(env_idx)?.to_scalar::<f32>()?
+            } else {
+                0.0
+            };
 
             let mut gae = 0.0;
             // Compute GAE backwards through the trajectory
             for i in (0..env_rewards.len()).rev() {
                 let done = env_dones[i] > 0.5;
-                let next_non_terminal = if done { 0.0 } else { 1.0 };
-
-                // Use actual next state value (zero for terminal states due to next_non_terminal)
-                let next_value = env_next_values[i] * next_non_terminal;
+                let non_terminal = if done { 0.0 } else { 1.0 };
 
                 // TD error: δ = r + γ * V(s') - V(s)
-                let delta = env_rewards[i] + self.gamma * next_value - env_values[i];
+                let delta = env_rewards[i] + self.gamma * next_value * non_terminal - env_values[i];
 
                 // GAE: A = δ + γ * λ * next_gae * (1 - done)
-                gae = delta + self.gamma * self.gae_lambda * gae * next_non_terminal;
+                gae = delta + self.gamma * self.gae_lambda * gae * non_terminal;
                 advantages[i * rewards[0].len() + env_idx] = gae;
+                next_value = env_values[i];
             }
         }
 
