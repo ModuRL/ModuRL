@@ -1,6 +1,4 @@
-use std::time::Instant;
-
-use candle_core::{Device, Tensor};
+use candle_core::Device;
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
