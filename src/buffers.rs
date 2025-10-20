@@ -17,18 +17,25 @@ where
     T: Experience,
 {
     pub fn new(experiences: Vec<T>) -> Result<Self, T::Error> {
-        let mut tensor_elements = vec![];
+        //let mut tensor_elements = vec![];
+        let mut elements = vec![];
         for experience in experiences.iter() {
             let mut experience_elements = experience.get_elements()?;
             for (i, element) in experience_elements.iter_mut().enumerate() {
-                *element = element.unsqueeze(0).unwrap();
-                if tensor_elements.len() <= i {
-                    tensor_elements.push(element.clone());
+                if elements.len() <= i {
+                    elements.push(vec![element.clone()]);
                 } else {
-                    tensor_elements[i] = Tensor::cat(&[&tensor_elements[i], &element], 0).unwrap();
+                    elements[i].push(element.clone());
                 }
             }
         }
+
+        let mut tensor_elements = vec![];
+        for element_group in elements.iter_mut() {
+            let stacked = Tensor::stack(element_group, 0).unwrap();
+            tensor_elements.push(stacked);
+        }
+
         Ok(Self {
             elements: tensor_elements,
             _phantom: std::marker::PhantomData,

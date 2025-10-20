@@ -1,7 +1,8 @@
-use candle_core::Device;
+use std::time::Instant;
+
+use candle_core::{Device, Tensor};
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
-use modurl::actors::ppo::PPOLogger;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl::tensor_operations::tanh;
 use modurl::{
@@ -16,16 +17,16 @@ fn main() {
 }
 
 fn ppo_cartpole() {
-    let tracer = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(tracer).unwrap();
-
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = Device::Cpu;
+    #[cfg(feature = "cuda")]
+    let device = Device::new_cuda(0).unwrap();
+    #[cfg(feature = "metal")]
+    let device = Device::new_metal(0).unwrap();
 
     let mut envs = vec![];
     for _ in 0..8 {
-        let env = CartPoleV1::builder().build();
+        let env = CartPoleV1::builder().device(&device).build();
         envs.push(env);
     }
     let mut vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
@@ -93,7 +94,7 @@ fn ppo_cartpole() {
         .build();
 
     let start = std::time::Instant::now();
-    for i in 0..10 {
+    for _ in 0..10 {
         actor.learn(&mut vec_env, 100_000).unwrap();
     }
     let duration = start.elapsed();

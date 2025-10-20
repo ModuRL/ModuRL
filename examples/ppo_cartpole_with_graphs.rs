@@ -190,16 +190,19 @@ fn main() {
 }
 
 fn ppo_cartpole() {
-    let tracer = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(tracer).unwrap();
-
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = Device::Cpu;
+    #[cfg(feature = "cuda")]
+    let device = Device::new_cuda(0).unwrap();
+    #[cfg(feature = "metal")]
+    let device = Device::new_metal(0).unwrap();
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    device.set_seed(42).unwrap();
 
     let mut envs = vec![];
     for _ in 0..8 {
-        let env = CartPoleV1::builder().build();
+        let env = CartPoleV1::builder().device(&device).build();
         envs.push(env);
     }
     let mut vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();

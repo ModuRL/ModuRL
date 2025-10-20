@@ -95,11 +95,6 @@ impl Gym for DebugCartpoleV1 {
 
 #[test]
 fn ppo_cartpole() {
-    let tracer = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(tracer).unwrap();
-
     let device = Device::Cpu;
 
     let mut envs = vec![];

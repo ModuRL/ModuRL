@@ -682,6 +682,7 @@ where
             if let Some(logging_info) = &mut self.logging_info {
                 logging_info.timestep = elapsed_timesteps;
             }
+            println!("Elapsed timesteps: {}", elapsed_timesteps);
             self.optimize()?;
         }
         Ok(())

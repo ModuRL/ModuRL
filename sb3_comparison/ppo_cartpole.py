@@ -36,11 +36,12 @@ def main():
         device="cpu",
         verbose=0,
     )
+    print("Using device:", model.device)
 
     model.learn(total_timesteps=100_000)
 
 
 if __name__ == "__main__":
     setup_code = "from __main__ import main"
-    execution_time = timeit.timeit("main()", setup=setup_code, number=10)
-    print(f"Execution time: {execution_time/10} seconds")
+    execution_time = timeit.timeit("main()", setup=setup_code, number=2)
+    print(f"Execution time: {execution_time/2} seconds")
