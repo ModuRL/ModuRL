@@ -22,6 +22,8 @@ fn ppo_cartpole() {
     #[cfg(feature = "metal")]
     let device = Device::new_metal(0).unwrap();
 
+    println!("Using device: {:?}", device);
+
     let mut envs = vec![];
     for _ in 0..8 {
         let env = CartPoleV1::builder().device(&device).build();

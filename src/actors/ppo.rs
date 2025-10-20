@@ -282,7 +282,6 @@ where
 
             for batch in batches.iter() {
                 let elements = batch.get_elements();
-
                 let mut actions = elements[PPOElement::Action as usize].clone();
                 let mut states = elements[PPOElement::State as usize].clone();
                 let mut batch_old_log_probs = elements[PPOElement::LogProb as usize].clone();
@@ -430,12 +429,12 @@ where
         let mut advantages = vec![];
 
         for env_idx in 0..rewards.shape().dims()[1] {
-            let env_rewards = rewards.i((.., env_idx))?;
-            let env_dones = dones.i((.., env_idx))?;
-            let env_values = values.i((.., env_idx))?;
+            let env_rewards = rewards.i((.., env_idx))?.detach();
+            let env_dones = dones.i((.., env_idx))?.detach();
+            let env_values = values.i((.., env_idx))?.detach();
 
             let last_done = env_dones.i(env_dones.shape().dims()[0] - 1)?;
-            let mut next_value = ((1.0 - last_done)? * bootstrapped_values.i(env_idx)?)?;
+            let mut next_value = ((1.0 - last_done)? * bootstrapped_values.i(env_idx)?.detach())?;
             let mut env_advantages = vec![];
 
             let mut gae = Tensor::new(0.0f32, device)?;
