@@ -420,7 +420,6 @@ where
         dones: &candle_core::Tensor,
         bootstrapped_values: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
-        let shape = rewards.shape();
         let device = rewards.device();
         let gamma_tensor = Tensor::new(self.gamma, &device)?.to_dtype(values.dtype())?;
         let gae_lambda_tensor = Tensor::new(self.gae_lambda, &device)?.to_dtype(values.dtype())?;
@@ -453,13 +452,16 @@ where
                 env_advantages.push(gae.clone());
                 next_value = env_values.i(i)?;
             }
-            // reverse env_advantages and add to advantages
-            advantages.push(env_advantages.into_iter().rev().collect::<Vec<Tensor>>());
+
+            // Reverse because our loop went backwards
+            let env_advantages_tensor = Tensor::stack(
+                &env_advantages.into_iter().rev().collect::<Vec<Tensor>>(),
+                0,
+            )?;
+            advantages.push(env_advantages_tensor);
         }
 
-        let mut advantages_tensor =
-            Tensor::stack(&advantages.iter().flatten().collect::<Vec<&Tensor>>(), 0)?;
-        advantages_tensor = advantages_tensor.reshape(shape.dims())?;
+        let advantages_tensor = Tensor::stack(&advantages, 1)?; // shape [time_steps, env_count]
 
         Ok(advantages_tensor)
     }
@@ -664,7 +666,6 @@ where
             if let Some(logging_info) = &mut self.logging_info {
                 logging_info.timestep = elapsed_timesteps;
             }
-            println!("Elapsed timesteps: {}", elapsed_timesteps);
             self.optimize()?;
         }
         Ok(())
