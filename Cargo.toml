@@ -13,6 +13,7 @@ tracing = { version = "0.1.37", optional = true }
 default = []
 multithreading = []
 cuda = ["candle-core/cuda", "modurl_gym/cuda"]
+cudnn = ["candle-core/cudnn"]
 metal = ["candle-core/metal"]
 
 [dev-dependencies]
@@ -29,3 +30,7 @@ candle-core = { git = "https://github.com/huggingface/candle", rev = "d205fb4" }
 
 [patch."https://github.com/ModuRL/ModuRL"]
 modurl = { path = "." }
+
+# For profiler
+[profile.release]
+debug = true
