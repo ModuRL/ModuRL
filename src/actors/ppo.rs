@@ -12,7 +12,7 @@ use crate::{
     lr_scheduler::LrScheduler,
     models::probabilistic_model::ProbabilisticActor,
     spaces,
-    tensor_operations::{tensor_has_nan, torch_like_min},
+    tensor_operations::{normalize_tensor, tensor_has_nan, torch_like_min},
 };
 
 #[derive(Debug)]
@@ -282,7 +282,6 @@ where
 
             for batch in batches.iter() {
                 let elements = batch.get_elements();
-
                 let mut actions = elements[PPOElement::Action as usize].clone();
                 let mut states = elements[PPOElement::State as usize].clone();
                 let mut batch_old_log_probs = elements[PPOElement::LogProb as usize].clone();
@@ -421,44 +420,48 @@ where
         dones: &candle_core::Tensor,
         bootstrapped_values: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
-        let shape = rewards.shape();
         let device = rewards.device();
+        let gamma_tensor = Tensor::new(self.gamma, &device)?.to_dtype(values.dtype())?;
+        let gae_lambda_tensor = Tensor::new(self.gae_lambda, &device)?.to_dtype(values.dtype())?;
 
-        let rewards: Vec<Vec<f32>> = rewards.to_vec2()?;
-        let dones: Vec<Vec<f32>> = dones.to_vec2()?;
-        let values: Vec<Vec<f32>> = values.squeeze(D::Minus1)?.to_vec2()?;
+        let values = values.squeeze(D::Minus1)?;
+        let mut advantages = vec![];
 
-        let mut advantages = vec![0.0; rewards.len() * rewards[0].len()];
+        for env_idx in 0..rewards.shape().dims()[1] {
+            let env_rewards = rewards.i((.., env_idx))?.detach();
+            let env_dones = dones.i((.., env_idx))?.detach();
+            let env_values = values.i((.., env_idx))?.detach();
 
-        for env_idx in 0..rewards[0].len() {
-            let env_rewards: Vec<f32> = rewards.iter().map(|r| r[env_idx]).collect();
-            let env_dones: Vec<f32> = dones.iter().map(|d| d[env_idx]).collect();
-            let env_values: Vec<f32> = values.iter().map(|v| v[env_idx]).collect();
+            let last_done = env_dones.i(env_dones.shape().dims()[0] - 1)?;
+            let mut next_value = ((1.0 - last_done)? * bootstrapped_values.i(env_idx)?.detach())?;
+            let mut env_advantages = vec![];
 
-            let mut next_value = if env_dones.last().unwrap_or(&1.0) < &0.5 {
-                // bootstrap from using value function
-                bootstrapped_values.i(env_idx)?.to_scalar::<f32>()?
-            } else {
-                0.0
-            };
-
-            let mut gae = 0.0;
+            let mut gae = Tensor::new(0.0f32, device)?;
             // Compute GAE backwards through the trajectory
-            for i in (0..env_rewards.len()).rev() {
-                let done = env_dones[i] > 0.5;
-                let non_terminal = if done { 0.0 } else { 1.0 };
+            for i in (0..env_rewards.shape().dims()[0]).rev() {
+                let non_terminal = (1.0 - env_dones.i(i)?)?; // 0 if done, 1 if not done
 
                 // TD error: δ = r + γ * V(s') - V(s)
-                let delta = env_rewards[i] + self.gamma * next_value * non_terminal - env_values[i];
+                let delta = (env_rewards.i(i)?
+                    + next_value * non_terminal.clone() * gamma_tensor.clone()
+                    - env_values.i(i)?)?;
 
                 // GAE: A = δ + γ * λ * next_gae * (1 - done)
-                gae = delta + self.gamma * self.gae_lambda * gae * non_terminal;
-                advantages[i * rewards[0].len() + env_idx] = gae;
-                next_value = env_values[i];
+                gae = (delta
+                    + gamma_tensor.clone() * gae_lambda_tensor.clone() * gae * non_terminal)?;
+                env_advantages.push(gae.clone());
+                next_value = env_values.i(i)?;
             }
+
+            // Reverse because our loop went backwards
+            let env_advantages_tensor = Tensor::stack(
+                &env_advantages.into_iter().rev().collect::<Vec<Tensor>>(),
+                0,
+            )?;
+            advantages.push(env_advantages_tensor);
         }
 
-        let advantages_tensor = candle_core::Tensor::from_vec(advantages, shape, device)?;
+        let advantages_tensor = Tensor::stack(&advantages, 1)?; // shape [time_steps, env_count]
 
         Ok(advantages_tensor)
     }
@@ -475,16 +478,7 @@ where
         rewards: candle_core::Tensor,
     ) -> Result<PPOLosses, PPOError<AE, GE, SE>> {
         let advantages = if self.normalize_advantage {
-            let advantages_mean = advantages.mean_all()?.to_scalar::<f32>()?;
-            let advantage_diff = (advantages.clone() - advantages_mean as f64)?;
-
-            let advantages_std_sqrt = advantage_diff
-                .sqr()?
-                .mean_all()?
-                .to_scalar::<f32>()?
-                .sqrt()
-                .max(1e-6);
-            ((advantages.clone() - advantages_mean.clone() as f64)? / (advantages_std_sqrt as f64))?
+            normalize_tensor(&advantages)?
         } else {
             advantages
         };
@@ -523,17 +517,7 @@ where
             (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
 
         let returns = returns.detach();
-        let returns = {
-            let returns_mean = returns.mean_all()?.to_scalar::<f32>()?;
-            let returns_diff = (returns.clone() - returns_mean as f64)?;
-            let returns_std_sqrt = returns_diff
-                .sqr()?
-                .mean_all()?
-                .to_scalar::<f32>()?
-                .sqrt()
-                .max(1e-6);
-            ((returns.clone() - returns_mean.clone() as f64)? / (returns_std_sqrt as f64))?
-        };
+        let returns = normalize_tensor(&returns)?;
 
         let critic_loss = loss::mse(&values, &returns)?;
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;

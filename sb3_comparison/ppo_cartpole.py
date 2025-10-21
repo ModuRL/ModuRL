@@ -36,6 +36,7 @@ def main():
         device="cpu",
         verbose=0,
     )
+    print("Using device:", model.device)
 
     model.learn(total_timesteps=100_000)
 

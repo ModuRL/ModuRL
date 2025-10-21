@@ -11,9 +11,10 @@ tracing = { version = "0.1.37", optional = true }
 
 [features]
 default = []
-tracing = ["dep:tracing"]
 multithreading = []
 cuda = ["candle-core/cuda", "modurl_gym/cuda"]
+cudnn = ["candle-core/cudnn"]
+metal = ["candle-core/metal"]
 
 [dev-dependencies]
 modurl_gym = { git = "https://github.com/ModuRL/ModuRL_Gym", features = [
@@ -21,10 +22,6 @@ modurl_gym = { git = "https://github.com/ModuRL/ModuRL_Gym", features = [
 ] }
 candle-optimisers = "0.9.0"
 tracing-subscriber = "0.3.20"
-tracing = { version = "0.1.37" }
-getrandom = { version = "0.2.12", default-features = false, features = [
-    "custom",
-] }
 rand = { version = "0.9.2" }
 textplots = "0.8.7"
 
@@ -33,3 +30,7 @@ candle-core = { git = "https://github.com/huggingface/candle", rev = "d205fb4" }
 
 [patch."https://github.com/ModuRL/ModuRL"]
 modurl = { path = "." }
+
+# For profiler
+[profile.release]
+debug = true
