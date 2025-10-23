@@ -168,4 +168,26 @@ mod tests {
             Tensor::from_vec(vec![1.0, f32::NAN, 3.0], &[3], &candle_core::Device::Cpu).unwrap();
         assert!(tensor_has_nan(&c).unwrap());
     }
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[test]
+    fn test_fisher_yates_shuffle_determinism() {
+        #[cfg(feature = "cuda")]
+        let device = candle_core::Device::new_cuda(0).unwrap();
+        #[cfg(feature = "metal")]
+        let device = candle_core::Device::new_metal(0).unwrap();
+
+        let mut arr1: Vec<u32> = (0..100).collect();
+        let mut arr2: Vec<u32> = (0..100).collect();
+
+        device.set_seed(42).unwrap();
+        fisher_yates_shuffle(&mut arr1, &device);
+        fisher_yates_shuffle(&mut arr1, &device);
+
+        device.set_seed(42).unwrap();
+        fisher_yates_shuffle(&mut arr2, &device);
+        fisher_yates_shuffle(&mut arr2, &device);
+
+        assert_eq!(arr1, arr2);
+    }
 }

@@ -318,6 +318,8 @@ where
 
                 // right now we have [batch_size, env_count, ...]
                 // we chunk along the env_count dimension
+                // to be clear this is alternated between envs
+                // env1, env2, env3, ..., envN, env1, env2, ...
                 for env_idx in 0..actions.len() {
                     let actions = actions[env_idx].clone();
                     let states = states[env_idx].clone();
@@ -679,10 +681,7 @@ mod tests {
     use crate::{
         distributions::CategoricalDistribution,
         gym::{Gym, StepInfo, VectorizedGymWrapper},
-        models::{
-            MLP,
-            probabilistic_model::{MLPProbabilisticActor, MLPProbabilisticActorError},
-        },
+        models::{MLP, probabilistic_model::MLPProbabilisticActor},
         spaces::Discrete,
         tensor_operations::tanh,
     };
@@ -713,7 +712,8 @@ mod tests {
             self.step_count += 1;
             let done = self.step_count >= 5;
             Ok(StepInfo {
-                state: Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], &[4], &self.device)?,
+                //state: Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], &[4], &self.device)?,
+                state: Tensor::rand(0.0f32, 1.0, &[4], &self.device)?,
                 reward: 1.0,
                 done,
                 truncated: false,
@@ -722,13 +722,13 @@ mod tests {
 
         fn reset(&mut self) -> Result<Tensor, Self::Error> {
             self.step_count = 0;
-            Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], &[4], &self.device)
+            Tensor::rand(0.0f32, 1.0, &[4], &self.device)
         }
 
         fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
             Box::new(crate::spaces::BoxSpace::new(
-                Tensor::full(-10.0, &[4], &self.device).unwrap(),
-                Tensor::full(10.0, &[4], &self.device).unwrap(),
+                Tensor::full(0.0f32, &[4], &self.device).unwrap(),
+                Tensor::full(1.0f32, &[4], &self.device).unwrap(),
             ))
         }
 
@@ -751,7 +751,10 @@ mod tests {
             device.set_seed(42).unwrap();
 
             // Create fresh PPO actor
-            let mut envs = vec![DummyEnv::new(device.clone())];
+            let mut envs = vec![];
+            for _ in 0..8 {
+                envs.push(DummyEnv::new(device.clone()));
+            }
             let mut vec_env: VectorizedGymWrapper<DummyEnv> = envs.into();
 
             let observation_space = vec_env.observation_space();
@@ -800,7 +803,7 @@ mod tests {
                 .critic_network(Box::new(critic_network))
                 .critic_optimizer(critic_optimizer)
                 .actor_optimizer(actor_optimizer)
-                .batch_size(64)
+                .batch_size(128)
                 .mini_batch_size(32)
                 .normalize_advantage(true)
                 .ent_coef(0.01)
@@ -809,12 +812,14 @@ mod tests {
                 .clip_range(0.2)
                 .clipped(true)
                 .gae_lambda(0.95)
-                .num_epochs(1)
+                .num_epochs(10)
                 .device(device.clone())
                 .build();
 
             // train for some timesteps
-            actor.learn(&mut vec_env, 256).expect("PPO learning failed");
+            actor
+                .learn(&mut vec_env, 1000)
+                .expect("PPO learning failed");
 
             // Get initial state and take one action
             let initial_state = vec_env.reset().unwrap();
@@ -823,17 +828,14 @@ mod tests {
             // Compare with previous iteration
             if let Some(last_action) = &last_action {
                 let max_diff = last_action
-                    .sub(&current_action)
+                    .ne(&current_action)
                     .unwrap()
                     .max_all()
                     .unwrap()
-                    .to_scalar::<u32>()
+                    .to_scalar::<u8>()
                     .unwrap();
 
-                assert!(
-                    max_diff == 0,
-                    "PPO actions differ at iteration {i} by {max_diff}"
-                );
+                assert!(max_diff == 0, "PPO actions differ at iteration {i}");
             }
             last_action = Some(current_action);
         }

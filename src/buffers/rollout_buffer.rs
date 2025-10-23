@@ -61,7 +61,6 @@ where
     }
 
     /// Shuffles the buffer and returns all samples.
-    /// Clears the buffer after returning the samples.
     pub fn get_all_shuffled(
         &mut self,
     ) -> Result<Vec<ExperienceBatch<T>>, RolloutBufferError<T::Error>> {
