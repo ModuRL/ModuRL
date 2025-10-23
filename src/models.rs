@@ -68,18 +68,19 @@ impl candle_nn::Module for MLP {
     }
 }
 
+#[cfg(any(feature = "cuda", feature = "metal"))]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::Device;
     use candle_nn::{Module, VarMap};
 
-    //#[cfg(any(feature = "cuda", feature = "metal"))]
     #[test]
     fn test_mlp_determinism() {
         #[cfg(feature = "cuda")]
-        let mut device = Device::new_cuda(0).unwrap();
+        let device = Device::new_cuda(0).unwrap();
         #[cfg(feature = "metal")]
-        let mut device = Device::new_metal(0).unwrap();
+        let device = Device::new_metal(0).unwrap();
 
         let input = candle_core::Tensor::rand(0.0f32, 1.0, &[1, 4], &device).unwrap();
         let mut last_output: Option<candle_core::Tensor> = None;
