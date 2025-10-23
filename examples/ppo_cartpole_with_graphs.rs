@@ -199,6 +199,7 @@ fn ppo_cartpole() {
 
     #[cfg(any(feature = "cuda", feature = "metal"))]
     device.set_seed(42).unwrap();
+    println!("Using device: {:?}", device);
 
     let mut envs = vec![];
     for _ in 0..8 {

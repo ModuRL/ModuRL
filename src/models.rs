@@ -67,3 +67,52 @@ impl candle_nn::Module for MLP {
         Ok(x)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_nn::{Module, VarMap};
+
+    //#[cfg(any(feature = "cuda", feature = "metal"))]
+    #[test]
+    fn test_mlp_determinism() {
+        #[cfg(feature = "cuda")]
+        let mut device = Device::new_cuda(0).unwrap();
+        #[cfg(feature = "metal")]
+        let mut device = Device::new_metal(0).unwrap();
+
+        let input = candle_core::Tensor::rand(0.0f32, 1.0, &[1, 4], &device).unwrap();
+        let mut last_output: Option<candle_core::Tensor> = None;
+        for i in 0..10 {
+            device.set_seed(42).unwrap();
+            let vm = VarMap::new();
+            let vb = VarBuilder::from_varmap(&vm, candle_core::DType::F32, &device);
+            let mlp1 = MLP::builder()
+                .input_size(4)
+                .output_size(2)
+                .vb(vb.clone())
+                .hidden_layer_sizes(vec![8, 8])
+                .build()
+                .unwrap();
+
+            let current_output = mlp1.forward(&input).unwrap();
+            if let Some(last_output) = &last_output {
+                let max_diff = last_output
+                    .sub(&current_output)
+                    .unwrap()
+                    .abs()
+                    .unwrap()
+                    .max_all()
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap();
+
+                assert!(
+                    max_diff < 1e-6,
+                    "Outputs differ at iteration {i} by {max_diff}"
+                );
+            }
+            last_output = Some(current_output);
+        }
+    }
+}
