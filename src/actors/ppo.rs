@@ -179,6 +179,7 @@ where
     gae_lambda: f32,
     clip_range: f32,
     normalize_advantage: bool,
+    normalize_returns: bool,
     vf_coef: f32,
     ent_coef: f32,
     critic_optimizer: O1,
@@ -216,6 +217,7 @@ where
         #[builder(default = 0.95)] gae_lambda: f32,
         #[builder(default = 0.2)] clip_range: f32,
         #[builder(default = true)] normalize_advantage: bool,
+        #[builder(default = true)] normalize_returns: bool,
         #[builder(default = 0.5)] vf_coef: f32,
         #[builder(default = 0.01)] ent_coef: f32,
         #[builder(default = 1024)] batch_size: usize,
@@ -236,6 +238,7 @@ where
             gae_lambda,
             clip_range,
             normalize_advantage,
+            normalize_returns,
             vf_coef,
             ent_coef,
             critic_optimizer,
@@ -412,6 +415,11 @@ where
             experience.this_returns = Some(returns.i(i)?.clone());
         }
 
+        println!("Advantages: {:?}", advantages.mean_all()?);
+        println!("Returns: {:?}", returns.mean_all()?);
+        println!("States: {:?}", states[0].mean_all()?);
+        println!("Actions: {:?}", actions[0].mean_all()?);
+
         Ok(())
     }
 
@@ -519,7 +527,11 @@ where
             (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
 
         let returns = returns.detach();
-        let returns = normalize_tensor(&returns)?;
+        let returns = if self.normalize_returns {
+            normalize_tensor(&returns)?
+        } else {
+            returns
+        };
 
         let critic_loss = loss::mse(&values, &returns)?;
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
@@ -668,6 +680,7 @@ where
             if let Some(logging_info) = &mut self.logging_info {
                 logging_info.timestep = elapsed_timesteps;
             }
+            println!("Optimizing at timestep {}", elapsed_timesteps);
             self.optimize()?;
         }
         Ok(())
@@ -712,9 +725,8 @@ mod tests {
             self.step_count += 1;
             let done = self.step_count >= 5;
             Ok(StepInfo {
-                //state: Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4], &[4], &self.device)?,
                 state: Tensor::rand(0.0f32, 1.0, &[4], &self.device)?,
-                reward: 1.0,
+                reward: self.step_count as f32,
                 done,
                 truncated: false,
             })
@@ -744,9 +756,12 @@ mod tests {
         #[cfg(feature = "metal")]
         let device = Device::new_metal(0).unwrap();
 
-        let mut last_action: Option<Tensor> = None;
+        const SAMPLE_COUNT: usize = 25;
+        let mut last_actions: Option<Vec<Tensor>> = None;
 
         for i in 0..5 {
+            println!("PPO Determinism Test Iteration {}", i + 1);
+
             // Reset seed before each iteration
             device.set_seed(42).unwrap();
 
@@ -803,14 +818,11 @@ mod tests {
                 .critic_network(Box::new(critic_network))
                 .critic_optimizer(critic_optimizer)
                 .actor_optimizer(actor_optimizer)
-                .batch_size(128)
-                .mini_batch_size(32)
-                .normalize_advantage(true)
+                .batch_size(2048)
+                .mini_batch_size(64)
                 .ent_coef(0.01)
-                .gamma(0.99)
                 .vf_coef(0.5)
                 .clip_range(0.2)
-                .clipped(true)
                 .gae_lambda(0.95)
                 .num_epochs(10)
                 .device(device.clone())
@@ -818,26 +830,34 @@ mod tests {
 
             // train for some timesteps
             actor
-                .learn(&mut vec_env, 1000)
+                .learn(&mut vec_env, 10000)
                 .expect("PPO learning failed");
 
-            // Get initial state and take one action
-            let initial_state = vec_env.reset().unwrap();
-            let current_action = actor.act(&initial_state).unwrap();
+            let mut actions = vec![];
+            let mut state = vec_env.reset().unwrap();
+            for _ in 0..SAMPLE_COUNT {
+                let action_neurons = actor.act_neurons(&state).unwrap();
+                actions.push(action_neurons.clone());
+                let action = actor.action_space.from_neurons(&action_neurons).unwrap();
+                let step_info = vec_env.step(action).unwrap();
+                state = step_info.states;
+            }
 
             // Compare with previous iteration
-            if let Some(last_action) = &last_action {
-                let max_diff = last_action
-                    .ne(&current_action)
-                    .unwrap()
-                    .max_all()
-                    .unwrap()
-                    .to_scalar::<u8>()
-                    .unwrap();
+            if let Some(last_actions) = &last_actions {
+                for (last_action, current_action) in last_actions.iter().zip(actions.iter()) {
+                    let max_diff = last_action
+                        .ne(&*current_action)
+                        .unwrap()
+                        .max_all()
+                        .unwrap()
+                        .to_scalar::<u8>()
+                        .unwrap();
 
-                assert!(max_diff == 0, "PPO actions differ at iteration {i}");
+                    assert!(max_diff == 0, "PPO actions differ at iteration {i}");
+                }
             }
-            last_action = Some(current_action);
+            last_actions = Some(actions);
         }
     }
 }

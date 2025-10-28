@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use candle_core::{DType, Error, Tensor, backprop::GradStore};
 
 pub(crate) fn torch_like_min(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
@@ -19,7 +21,12 @@ pub(crate) fn clip_gradients(
     let mut total_norm_sq: f32 = 0.0;
     let mut grads = vec![];
 
-    for id in grad_store.get_ids() {
+    let mut ids: Vec<&candle_core::TensorId> = grad_store.get_ids().collect();
+    // sort by hash of id to ensure deterministic order
+    ids.sort_by_key(|id| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut hasher);
+        hasher.finish()
         if let Some(grad) = grad_store.get_id(*id) {
             let norm_sq = grad.sqr()?.sum_all()?.to_scalar::<f32>()?;
             total_norm_sq += norm_sq;
@@ -30,10 +37,10 @@ pub(crate) fn clip_gradients(
     let total_norm = total_norm_sq.sqrt();
     if total_norm > max_norm {
         let scale = max_norm / total_norm;
-        for (id, grad) in grads {
-            let scale_t = Tensor::new(scale, &grad.device())?;
+        for (id, grad) in &grads {
+            let scale_t = Tensor::new(scale, grad.device())?;
             let clipped = grad.broadcast_mul(&scale_t)?;
-            grad_store.insert_id(id, clipped);
+            grad_store.insert_id(*id, clipped);
         }
     }
 
@@ -189,5 +196,17 @@ mod tests {
         fisher_yates_shuffle(&mut arr2, &device);
 
         assert_eq!(arr1, arr2);
+    }
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[test]
+    fn test_deterministic_sum_all() {
+        // Test that sum_all is deterministic
+        let device = candle_core::Device::new_cuda(0).unwrap();
+        device.set_seed(42).unwrap();
+        let tensor = candle_core::Tensor::rand(0.0, 1.0, &[1000], &device).unwrap();
+        let sum1 = tensor.sum_all().unwrap().to_scalar::<f32>().unwrap();
+        let sum2 = tensor.sum_all().unwrap().to_scalar::<f32>().unwrap();
+        assert_eq!(sum1, sum2);
     }
 }
