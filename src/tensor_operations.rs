@@ -16,24 +16,35 @@ pub(crate) fn clip_gradients(
     grad_store: &mut GradStore,
     max_norm: f32,
 ) -> Result<f32, candle_core::Error> {
-    let mut total_norm_sq: f32 = 0.0;
     let mut grads = vec![];
+
+    // We will collect all norm squares first
+    // Then sort them to ensure deterministic order since float addition is not associative
+    // Also note that tensor IDs are not determinisitic across runs so we cannot sort by that
+    let mut norm_sqrs: Vec<f32> = vec![];
 
     for id in grad_store.get_ids() {
         if let Some(grad) = grad_store.get_id(*id) {
             let norm_sq = grad.sqr()?.sum_all()?.to_scalar::<f32>()?;
-            total_norm_sq += norm_sq;
+            //total_norm_sq += norm_sq;
+            norm_sqrs.push(norm_sq);
             grads.push((*id, grad.clone()));
         }
+    }
+
+    let mut total_norm_sq: f32 = 0.0;
+    norm_sqrs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    for ns in norm_sqrs {
+        total_norm_sq += ns;
     }
 
     let total_norm = total_norm_sq.sqrt();
     if total_norm > max_norm {
         let scale = max_norm / total_norm;
-        for (id, grad) in grads {
-            let scale_t = Tensor::new(scale, &grad.device())?;
+        for (id, grad) in &grads {
+            let scale_t = Tensor::new(scale, grad.device())?;
             let clipped = grad.broadcast_mul(&scale_t)?;
-            grad_store.insert_id(id, clipped);
+            grad_store.insert_id(*id, clipped);
         }
     }
 
@@ -167,5 +178,27 @@ mod tests {
         let c =
             Tensor::from_vec(vec![1.0, f32::NAN, 3.0], &[3], &candle_core::Device::Cpu).unwrap();
         assert!(tensor_has_nan(&c).unwrap());
+    }
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[test]
+    fn test_fisher_yates_shuffle_determinism() {
+        #[cfg(feature = "cuda")]
+        let device = candle_core::Device::new_cuda(0).unwrap();
+        #[cfg(feature = "metal")]
+        let device = candle_core::Device::new_metal(0).unwrap();
+
+        let mut arr1: Vec<u32> = (0..100).collect();
+        let mut arr2: Vec<u32> = (0..100).collect();
+
+        device.set_seed(42).unwrap();
+        fisher_yates_shuffle(&mut arr1, &device);
+        fisher_yates_shuffle(&mut arr1, &device);
+
+        device.set_seed(42).unwrap();
+        fisher_yates_shuffle(&mut arr2, &device);
+        fisher_yates_shuffle(&mut arr2, &device);
+
+        assert_eq!(arr1, arr2);
     }
 }

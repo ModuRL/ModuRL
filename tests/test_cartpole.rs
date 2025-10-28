@@ -95,7 +95,15 @@ impl Gym for DebugCartpoleV1 {
 
 #[test]
 fn ppo_cartpole() {
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = Device::Cpu;
+    #[cfg(feature = "cuda")]
+    let device = Device::new_cuda(0).unwrap();
+    #[cfg(feature = "metal")]
+    let device = Device::new_metal(0).unwrap();
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    device.set_seed(42).unwrap();
 
     let mut envs = vec![];
     for _ in 0..8 {

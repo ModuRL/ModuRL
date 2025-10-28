@@ -179,6 +179,7 @@ where
     gae_lambda: f32,
     clip_range: f32,
     normalize_advantage: bool,
+    normalize_returns: bool,
     vf_coef: f32,
     ent_coef: f32,
     critic_optimizer: O1,
@@ -216,6 +217,7 @@ where
         #[builder(default = 0.95)] gae_lambda: f32,
         #[builder(default = 0.2)] clip_range: f32,
         #[builder(default = true)] normalize_advantage: bool,
+        #[builder(default = true)] normalize_returns: bool,
         #[builder(default = 0.5)] vf_coef: f32,
         #[builder(default = 0.01)] ent_coef: f32,
         #[builder(default = 1024)] batch_size: usize,
@@ -236,6 +238,7 @@ where
             gae_lambda,
             clip_range,
             normalize_advantage,
+            normalize_returns,
             vf_coef,
             ent_coef,
             critic_optimizer,
@@ -318,6 +321,8 @@ where
 
                 // right now we have [batch_size, env_count, ...]
                 // we chunk along the env_count dimension
+                // to be clear this is alternated between envs
+                // env1, env2, env3, ..., envN, env1, env2, ...
                 for env_idx in 0..actions.len() {
                     let actions = actions[env_idx].clone();
                     let states = states[env_idx].clone();
@@ -517,7 +522,11 @@ where
             (actor_loss.clone() - ((self.ent_coef as f64) * entropy_loss.clone()))?;
 
         let returns = returns.detach();
-        let returns = normalize_tensor(&returns)?;
+        let returns = if self.normalize_returns {
+            normalize_tensor(&returns)?
+        } else {
+            returns
+        };
 
         let critic_loss = loss::mse(&values, &returns)?;
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
@@ -669,5 +678,187 @@ where
             self.optimize()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        distributions::CategoricalDistribution,
+        gym::{Gym, StepInfo, VectorizedGymWrapper},
+        models::{MLP, probabilistic_model::MLPProbabilisticActor},
+        spaces::Discrete,
+        tensor_operations::tanh,
+    };
+    use candle_core::Device;
+    use candle_nn::{VarBuilder, VarMap};
+    use candle_optimisers::adam::{Adam, ParamsAdam};
+
+    // Simple dummy environment for testing
+    struct DummyEnv {
+        step_count: usize,
+        device: Device,
+    }
+
+    impl DummyEnv {
+        fn new(device: Device) -> Self {
+            Self {
+                step_count: 0,
+                device,
+            }
+        }
+    }
+
+    impl Gym for DummyEnv {
+        type Error = candle_core::Error;
+        type SpaceError = candle_core::Error;
+
+        fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
+            self.step_count += 1;
+            let done = self.step_count >= 5;
+            Ok(StepInfo {
+                state: Tensor::rand(0.0f32, 1.0, &[4], &self.device)?,
+                reward: self.step_count as f32,
+                done,
+                truncated: false,
+            })
+        }
+
+        fn reset(&mut self) -> Result<Tensor, Self::Error> {
+            self.step_count = 0;
+            Tensor::rand(0.0f32, 1.0, &[4], &self.device)
+        }
+
+        fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+            Box::new(crate::spaces::BoxSpace::new(
+                Tensor::full(0.0f32, &[4], &self.device).unwrap(),
+                Tensor::full(1.0f32, &[4], &self.device).unwrap(),
+            ))
+        }
+
+        fn action_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+            Box::new(Discrete::new(2))
+        }
+    }
+
+    #[test]
+    fn test_ppo_determinism() {
+        #[cfg(feature = "cuda")]
+        let device = Device::new_cuda(0).unwrap();
+        #[cfg(feature = "metal")]
+        let device = Device::new_metal(0).unwrap();
+
+        const SAMPLE_COUNT: usize = 25;
+        let mut last_actions: Option<Vec<Tensor>> = None;
+
+        for i in 0..5 {
+            println!("PPO Determinism Test Iteration {}", i + 1);
+
+            // Reset seed before each iteration
+            device.set_seed(42).unwrap();
+
+            // Create fresh PPO actor
+            let mut envs = vec![];
+            for _ in 0..8 {
+                envs.push(DummyEnv::new(device.clone()));
+            }
+            let mut vec_env: VectorizedGymWrapper<DummyEnv> = envs.into();
+
+            let observation_space = vec_env.observation_space();
+            let action_space = vec_env.action_space();
+
+            // Actor network
+            let actor_var_map = VarMap::new();
+            let actor_vb =
+                VarBuilder::from_varmap(&actor_var_map, candle_core::DType::F32, &device);
+            let actor_network = MLP::builder()
+                .input_size(observation_space.shape().iter().product())
+                .output_size(action_space.shape().iter().product::<usize>())
+                .vb(actor_vb)
+                .activation(Box::new(tanh))
+                .hidden_layer_sizes(vec![8, 8])
+                .name("actor_network".to_string())
+                .build()
+                .unwrap();
+
+            let mut config = ParamsAdam::default();
+            config.lr = 3e-4;
+            let actor_optimizer = Adam::new(actor_var_map.all_vars(), config.clone()).unwrap();
+
+            // Critic network
+            let critic_var_map = VarMap::new();
+            let critic_vb =
+                VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
+            let critic_network = MLP::builder()
+                .input_size(observation_space.shape().iter().product())
+                .output_size(1)
+                .vb(critic_vb)
+                .activation(Box::new(tanh))
+                .hidden_layer_sizes(vec![8, 8])
+                .name("critic_network".to_string())
+                .build()
+                .unwrap();
+
+            let critic_optimizer = Adam::new(critic_var_map.all_vars(), config.clone()).unwrap();
+
+            // Create PPO actor
+            let mut actor = PPOActor::builder()
+                .action_space(action_space)
+                .actor_network(Box::new(
+                    MLPProbabilisticActor::<CategoricalDistribution>::new(actor_network),
+                ))
+                .critic_network(Box::new(critic_network))
+                .critic_optimizer(critic_optimizer)
+                .actor_optimizer(actor_optimizer)
+                .batch_size(2048)
+                .mini_batch_size(64)
+                .ent_coef(0.01)
+                .vf_coef(0.5)
+                .clip_range(0.2)
+                .gae_lambda(0.95)
+                .num_epochs(10)
+                .device(device.clone())
+                .build();
+
+            // train for some timesteps
+            actor
+                .learn(&mut vec_env, 10000)
+                .expect("PPO learning failed");
+
+            let mut actions = vec![];
+            let mut state = vec_env.reset().unwrap();
+            for _ in 0..SAMPLE_COUNT {
+                let action_neurons = actor.act_neurons(&state).unwrap();
+                actions.push(action_neurons.clone());
+                let action = actor.action_space.from_neurons(&action_neurons).unwrap();
+                let step_info = vec_env.step(action).unwrap();
+                state = step_info.states;
+            }
+
+            // Compare with previous iteration
+            if let Some(last_actions) = &last_actions {
+                for (last_action, current_action) in last_actions.iter().zip(actions.iter()) {
+                    let max_diff = last_action
+                        .sub(current_action)
+                        .unwrap()
+                        .abs()
+                        .unwrap()
+                        .max_all()
+                        .unwrap()
+                        .to_scalar::<f32>()
+                        .unwrap();
+
+                    assert!(
+                        max_diff == 0.0,
+                        "PPO actions differ at iteration {} by {}",
+                        i,
+                        max_diff
+                    );
+                }
+            }
+            last_actions = Some(actions);
+        }
     }
 }
