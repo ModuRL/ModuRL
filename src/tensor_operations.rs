@@ -27,6 +27,9 @@ pub(crate) fn clip_gradients(
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         id.hash(&mut hasher);
         hasher.finish()
+    });
+
+    for id in ids {
         if let Some(grad) = grad_store.get_id(*id) {
             let norm_sq = grad.sqr()?.sum_all()?.to_scalar::<f32>()?;
             total_norm_sq += norm_sq;
