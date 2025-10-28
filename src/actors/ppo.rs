@@ -415,11 +415,6 @@ where
             experience.this_returns = Some(returns.i(i)?.clone());
         }
 
-        println!("Advantages: {:?}", advantages.mean_all()?);
-        println!("Returns: {:?}", returns.mean_all()?);
-        println!("States: {:?}", states[0].mean_all()?);
-        println!("Actions: {:?}", actions[0].mean_all()?);
-
         Ok(())
     }
 
@@ -680,7 +675,6 @@ where
             if let Some(logging_info) = &mut self.logging_info {
                 logging_info.timestep = elapsed_timesteps;
             }
-            println!("Optimizing at timestep {}", elapsed_timesteps);
             self.optimize()?;
         }
         Ok(())
@@ -847,14 +841,21 @@ mod tests {
             if let Some(last_actions) = &last_actions {
                 for (last_action, current_action) in last_actions.iter().zip(actions.iter()) {
                     let max_diff = last_action
-                        .ne(&*current_action)
+                        .sub(current_action)
+                        .unwrap()
+                        .abs()
                         .unwrap()
                         .max_all()
                         .unwrap()
-                        .to_scalar::<u8>()
+                        .to_scalar::<f32>()
                         .unwrap();
 
-                    assert!(max_diff == 0, "PPO actions differ at iteration {i}");
+                    assert!(
+                        max_diff == 0.0,
+                        "PPO actions differ at iteration {} by {}",
+                        i,
+                        max_diff
+                    );
                 }
             }
             last_actions = Some(actions);
