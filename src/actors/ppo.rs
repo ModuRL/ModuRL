@@ -188,6 +188,7 @@ where
     critic_network: Box<dyn candle_core::Module>,
     actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
     rollout_buffer: RolloutBuffer<PPOExperience>,
+    mini_batch_size: usize,
     num_epochs: usize,
     batch_size: usize,
     actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
@@ -246,9 +247,10 @@ where
             action_space,
             critic_network,
             actor_network,
-            rollout_buffer: RolloutBuffer::new(mini_batch_size, device),
+            rollout_buffer: RolloutBuffer::new(0, device), // placeholder, will set when we know num envs
             num_epochs,
             batch_size,
+            mini_batch_size,
             actor_lr_scheduler,
             critic_lr_scheduler,
             logging_info: logging_info.map(|logger| PPOLoggingInfo::new(logger)),
@@ -291,58 +293,32 @@ where
                 let mut advantages = elements[PPOElement::Advantage as usize].clone();
                 let mut returns = elements[PPOElement::Return as usize].clone();
                 let mut rewards = elements[PPOElement::Reward as usize].clone();
-                // each of these tensors has shape [batch_size, env_count, ...]
+                // flatten the env dimension
+                actions = actions.flatten(0, 1)?;
+                states = states.flatten(0, 1)?;
+                batch_old_log_probs = batch_old_log_probs.flatten(0, 1)?;
+                advantages = advantages.flatten(0, 1)?;
+                returns = returns.flatten(0, 1)?;
+                rewards = rewards.flatten(0, 1)?;
 
-                let action_shape = actions.shape().dims();
-                let env_count = action_shape[1];
-                let batch_size = action_shape[0];
-                for tensor in [
-                    &mut actions,
-                    &mut states,
-                    &mut batch_old_log_probs,
-                    &mut advantages,
-                    &mut returns,
-                    &mut rewards,
-                ] {
-                    let mut shape = tensor.shape().dims().to_vec();
-                    *tensor = tensor.flatten(0, 1)?;
-                    // now the envs are interwoven and split so we have proper batch sizes
-                    shape[0] = env_count;
-                    shape[1] = batch_size;
-                    tensor.reshape(shape)?;
-                }
+                let actions = actions.clone();
+                let states = states.clone();
+                let advantages = advantages.clone();
+                let returns = returns.clone();
+                let batch_old_log_probs = batch_old_log_probs.clone();
+                let batch_rewards = rewards.clone();
 
-                let actions = actions.chunk(env_count, 0)?;
-                let states = states.chunk(env_count, 0)?;
-                let advantages = advantages.chunk(env_count, 0)?;
-                let returns = returns.chunk(env_count, 0)?;
-                let batch_old_log_probs = batch_old_log_probs.chunk(env_count, 0)?;
-                let rewards = rewards.chunk(env_count, 0)?;
+                // Compute the loss and backpropagate
+                let ppo_losses = self.compute_loss(
+                    &states,
+                    &actions.detach(),
+                    batch_old_log_probs.detach(),
+                    advantages,
+                    returns,
+                    batch_rewards,
+                )?;
 
-                // right now we have [batch_size, env_count, ...]
-                // we chunk along the env_count dimension
-                // to be clear this is alternated between envs
-                // env1, env2, env3, ..., envN, env1, env2, ...
-                for env_idx in 0..actions.len() {
-                    let actions = actions[env_idx].clone();
-                    let states = states[env_idx].clone();
-                    let advantages = advantages[env_idx].clone();
-                    let returns = returns[env_idx].clone();
-                    let batch_old_log_probs = batch_old_log_probs[env_idx].clone();
-                    let batch_rewards = rewards[env_idx].clone();
-
-                    // Compute the loss and backpropagate
-                    let ppo_losses = self.compute_loss(
-                        &states,
-                        &actions.detach(),
-                        batch_old_log_probs.detach(),
-                        advantages,
-                        returns,
-                        batch_rewards,
-                    )?;
-
-                    self.backpropagate_loss(ppo_losses.clone())?;
-                }
+                self.backpropagate_loss(ppo_losses.clone())?;
             }
         }
 
@@ -620,6 +596,10 @@ where
         let mut rewards;
 
         next_states = env.reset().map_err(PPOError::GymError)?;
+        self.rollout_buffer = RolloutBuffer::new(
+            self.mini_batch_size / env.num_envs(),
+            next_states.device().clone(),
+        );
 
         while elapsed_timesteps < num_timesteps {
             while self.rollout_buffer.len() * env.num_envs() < self.batch_size {
