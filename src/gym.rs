@@ -197,29 +197,32 @@ where
 }
 
 #[cfg(feature = "multithreading")]
-use std::{sync::mpsc, thread};
+use std::{fmt::Debug, sync::mpsc, thread};
 
 #[cfg(feature = "multithreading")]
-pub struct MultithreadedVectorizedGymWrapper<G, O, A>
+pub struct MultithreadedVectorizedGymWrapper<G, O, A, SE>
 where
-    G: Gym,
-    G::Error: Send + Sync,
-    O: Space + Clone + 'static,
-    A: Space + Clone + 'static,
+    G: Gym + 'static,
+    G::Error: Send + Sync + std::fmt::Debug,
+    SE: Debug,
+    A: Space<Error = SE> + Clone + 'static,
+    O: Space<Error = SE> + Clone + 'static,
 {
     envs: Vec<GymHandle<G::Error>>,
     to_reset: Vec<bool>,
     obs_space: O,
     action_space: A,
+    _phantom: std::marker::PhantomData<SE>,
 }
 
 #[cfg(feature = "multithreading")]
-impl<G, O, A> MultithreadedVectorizedGymWrapper<G, O, A>
+impl<G, O, A, SE> MultithreadedVectorizedGymWrapper<G, O, A, SE>
 where
     G: Gym + 'static,
-    G::Error: std::fmt::Debug + Send + Sync,
-    O: Space + Clone + 'static,
-    A: Space + Clone + 'static,
+    G::Error: Send + Sync + std::fmt::Debug,
+    SE: Debug,
+    A: Space<Error = SE> + Clone + 'static,
+    O: Space<Error = SE> + Clone + 'static,
 {
     pub fn new<F>(env_constructors: Vec<F>, obs_space: O, action_space: A) -> Self
     where
@@ -240,19 +243,22 @@ where
             envs,
             obs_space,
             action_space,
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
 #[cfg(feature = "multithreading")]
-impl<G, O, A> VectorizedGym for MultithreadedVectorizedGymWrapper<G, O, A>
+impl<G, O, A, SE> VectorizedGym for MultithreadedVectorizedGymWrapper<G, O, A, SE>
 where
-    G: Gym + Send,
+    G: Gym + 'static,
     G::Error: Send + Sync + std::fmt::Debug,
-    A: Space + Clone + 'static,
-    O: Space + Clone + 'static,
+    SE: Debug,
+    A: Space<Error = SE> + Clone + 'static,
+    O: Space<Error = SE> + Clone + 'static,
 {
     type Error = VectorizedGymError<G::Error>;
+    type SpaceError = SE;
 
     fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo, Self::Error> {
         let batch_size = self.envs.len();
@@ -343,11 +349,11 @@ where
         Ok(states)
     }
 
-    fn observation_space(&self) -> Box<dyn Space> {
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
         Box::new(self.obs_space.clone())
     }
 
-    fn action_space(&self) -> Box<dyn Space> {
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
         Box::new(self.action_space.clone())
     }
 }
@@ -535,7 +541,7 @@ mod tests {
             Tensor::full(-1000.0, &[2], &candle_core::Device::Cpu).unwrap(),
             Tensor::full(1000.0, &[2], &candle_core::Device::Cpu).unwrap(),
         );
-        let action_space = crate::spaces::Discrete::new(2, 0);
+        let action_space = crate::spaces::Discrete::new(2);
 
         let mut vec_env =
             MultithreadedVectorizedGymWrapper::new(env_constructors, obs_space, action_space);
