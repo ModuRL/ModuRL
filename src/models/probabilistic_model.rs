@@ -39,7 +39,7 @@ pub enum ProbabilisticActorModelError<DE>
 where
     DE: std::fmt::Debug,
 {
-    MLPError(candle_core::Error),
+    ModuleError(candle_core::Error),
     DistError(DE),
 }
 
@@ -48,7 +48,7 @@ where
     DE: std::fmt::Debug,
 {
     fn from(error: candle_core::Error) -> Self {
-        ProbabilisticActorModelError::MLPError(error)
+        ProbabilisticActorModelError::ModuleError(error)
     }
 }
 
