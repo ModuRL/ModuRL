@@ -7,7 +7,7 @@ use modurl::tensor_operations::tanh;
 use modurl::{
     actors::{Actor, ppo::PPOActor},
     distributions::CategoricalDistribution,
-    models::{MLP, probabilistic_model::MLPProbabilisticActor},
+    models::{MLP, probabilistic_model::ProbabilisticActorModel},
 };
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 use textplots::{Chart, Plot};
@@ -257,7 +257,7 @@ fn ppo_cartpole() {
     let mut actor = PPOActor::builder()
         .action_space(action_space)
         .actor_network(Box::new(
-            MLPProbabilisticActor::<CategoricalDistribution>::new(actor_network),
+            ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
         ))
         .critic_network(Box::new(critic_network))
         .critic_optimizer(critic_optimizer)

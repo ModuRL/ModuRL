@@ -3,8 +3,6 @@ use candle_nn::Module;
 
 use crate::distributions::Distribution;
 
-use super::MLP;
-
 pub trait ProbabilisticActor {
     type Error;
     fn sample(&self, state: &Tensor) -> Result<Tensor, Self::Error>;
@@ -15,29 +13,29 @@ pub trait ProbabilisticActor {
     ) -> Result<(Tensor, Tensor), Self::Error>;
 }
 
-pub struct MLPProbabilisticActor<D>
+pub struct ProbabilisticActorModel<D>
 where
     D: Distribution,
 {
-    mlp: MLP,
+    module: Box<dyn Module>,
     _marker: std::marker::PhantomData<D>,
 }
 
-impl<D> MLPProbabilisticActor<D>
+impl<D> ProbabilisticActorModel<D>
 where
     D: Distribution,
     <D as Distribution>::Error: std::fmt::Debug,
 {
-    pub fn new(mlp: MLP) -> Self {
+    pub fn new(module: Box<dyn Module>) -> Self {
         Self {
-            mlp,
+            module,
             _marker: std::marker::PhantomData,
         }
     }
 }
 
 #[derive(Debug)]
-pub enum MLPProbabilisticActorError<DE>
+pub enum ProbabilisticActorModelError<DE>
 where
     DE: std::fmt::Debug,
 {
@@ -45,24 +43,24 @@ where
     DistError(DE),
 }
 
-impl<DE> From<candle_core::Error> for MLPProbabilisticActorError<DE>
+impl<DE> From<candle_core::Error> for ProbabilisticActorModelError<DE>
 where
     DE: std::fmt::Debug,
 {
     fn from(error: candle_core::Error) -> Self {
-        MLPProbabilisticActorError::MLPError(error)
+        ProbabilisticActorModelError::MLPError(error)
     }
 }
 
-impl<D> ProbabilisticActor for MLPProbabilisticActor<D>
+impl<D> ProbabilisticActor for ProbabilisticActorModel<D>
 where
     D: Distribution,
     <D as Distribution>::Error: std::fmt::Debug,
 {
-    type Error = MLPProbabilisticActorError<<D as Distribution>::Error>;
+    type Error = ProbabilisticActorModelError<<D as Distribution>::Error>;
 
     fn sample(&self, state: &Tensor) -> Result<Tensor, Self::Error> {
-        let output = self.mlp.forward(state)?;
+        let output = self.module.forward(state)?;
         let dist = D::from_outputs(&output);
         let action = dist.sample();
         Ok(action)
@@ -75,12 +73,12 @@ where
     ) -> Result<(Tensor, Tensor), Self::Error> {
         let state = state.squeeze(1)?;
         let action = action.squeeze(1)?;
-        let output = self.mlp.forward(&state)?;
+        let output = self.module.forward(&state)?;
 
         let dist = D::from_outputs(&output);
         let dist_eval = dist
             .dist_eval(&action)
-            .map_err(|e| MLPProbabilisticActorError::DistError(e))?;
+            .map_err(|e| ProbabilisticActorModelError::DistError(e))?;
 
         let log_prob = dist_eval.log_prob().clone();
         let entropy = dist_eval.entropy().clone();
@@ -99,7 +97,7 @@ mod tests {
         input_size: usize,
         action_size: usize,
         hidden_sizes: Vec<usize>,
-    ) -> Result<MLPProbabilisticActor<GuassianDistribution>, candle_core::Error> {
+    ) -> Result<ProbabilisticActorModel<GuassianDistribution>, candle_core::Error> {
         let device = Device::Cpu;
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F64, &device);
@@ -113,7 +111,7 @@ mod tests {
             .activation(Box::new(Activation::Relu))
             .build()?;
 
-        Ok(MLPProbabilisticActor::new(mlp))
+        Ok(ProbabilisticActorModel::new(Box::new(mlp)))
     }
 
     fn create_test_state(
@@ -305,7 +303,8 @@ mod tests {
             .build()
             .unwrap();
 
-        let actor: MLPProbabilisticActor<GuassianDistribution> = MLPProbabilisticActor::new(mlp);
+        let actor: ProbabilisticActorModel<GuassianDistribution> =
+            ProbabilisticActorModel::new(Box::new(mlp));
         let state = create_test_state(2, 4).unwrap();
 
         // Sample action
