@@ -1,4 +1,4 @@
-use candle_core::{Device, Tensor, D};
+use candle_core::{D, Device, Tensor};
 use candle_nn::ops::softmax;
 
 use crate::distributions::{DistEval, Distribution};
@@ -9,11 +9,11 @@ pub struct CategoricalDistribution {
 }
 
 fn log_softmax(tensor: &Tensor, dim: D) -> Result<Tensor, candle_core::Error> {
-    let max = tensor.max_keepdim(dim.clone())?.expand(tensor.dims())?;
+    let max = tensor.max_keepdim(dim)?.expand(tensor.dims())?;
     let exps = (tensor - &max)?.exp()?;
-    let sum_exps = exps.sum_keepdim(dim.clone())?.expand(tensor.dims())?;
+    let sum_exps = exps.sum_keepdim(dim)?.expand(tensor.dims())?;
     let log_sum_exps = sum_exps.log()?;
-    (tensor - max - log_sum_exps).map_err(Into::into)
+    tensor - max - log_sum_exps
 }
 
 impl CategoricalDistribution {
@@ -29,7 +29,7 @@ impl CategoricalDistribution {
         // sample uniform(0,1), then transform: -log(-log(U))
         let u = Tensor::rand(0f32, 1f32, shape, device)?;
         let gumbel = (-1.0 * (&u.log()?))?.log()?;
-        Ok(gumbel.neg()?) // -log(-log(u))
+        gumbel.neg() // -log(-log(u))
     }
 }
 
@@ -41,10 +41,9 @@ impl Distribution for CategoricalDistribution {
         let device = self.logits.device();
 
         // add Gumbel noise to logits
-        let noise = Self::gumbel_noise(&shape, device).unwrap();
-        let noisy_logits = (&self.logits + noise).unwrap();
+        let noise = Self::gumbel_noise(shape, device).unwrap();
 
-        noisy_logits
+        (&self.logits + noise).unwrap()
     }
 
     fn dist_eval(&self, actions: &Tensor) -> Result<DistEval, Self::Error> {

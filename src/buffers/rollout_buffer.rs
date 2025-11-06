@@ -80,6 +80,10 @@ where
         self.buffer.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
     pub fn get_batch_size(&self) -> usize {
         self.batch_size
     }

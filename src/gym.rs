@@ -107,9 +107,9 @@ where
         let mut dones = Vec::with_capacity(env_count);
         let mut truncateds = Vec::with_capacity(env_count);
 
-        for i in 0..env_count {
+        for (i, mut act) in actions.iter().cloned().enumerate() {
             let env = &mut self.envs[i];
-            let act = actions[i].clone().squeeze(0)?;
+            act = act.squeeze(0)?;
 
             let step_info = if self.to_reset[i] {
                 self.to_reset[i] = false;
@@ -121,7 +121,7 @@ where
                     truncated: false,
                 }
             } else {
-                env.step(act).map_err(VectorizedGymError::Single)?
+                env.step(act.clone()).map_err(VectorizedGymError::Single)?
             };
 
             states.push(step_info.state);

@@ -78,7 +78,7 @@ where
         let dist = D::from_outputs(&output);
         let dist_eval = dist
             .dist_eval(&action)
-            .map_err(|e| ProbabilisticActorModelError::DistError(e))?;
+            .map_err(ProbabilisticActorModelError::DistError)?;
 
         let log_prob = dist_eval.log_prob().clone();
         let entropy = dist_eval.entropy().clone();

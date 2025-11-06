@@ -13,7 +13,7 @@ pub trait Space {
     /// This is the gonna be the shape of the tensor that is inputted into the from_neurons function.
     fn shape(&self) -> Vec<usize>;
     /// "Translates" the output of the neurons (of shape [batch_size, shape]) to the space.
-    fn from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error>;
+    fn tensor_from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error>;
 }
 
 #[derive(Clone)]
@@ -48,7 +48,7 @@ impl Space for Discrete {
         }
     }
 
-    fn from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error> {
+    fn tensor_from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error> {
         neurons.argmax(D::Minus1)
     }
 }
@@ -148,7 +148,7 @@ impl Space for BoxSpace {
         self.low.shape().clone().into_dims()
     }
 
-    fn from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error> {
+    fn tensor_from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error> {
         // Do not need to do anything here.
         Ok(neurons.clone())
     }
