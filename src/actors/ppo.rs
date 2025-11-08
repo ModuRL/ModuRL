@@ -194,6 +194,8 @@ where
     actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
     critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
     logging_info: Option<PPOLoggingInfo<'a>>,
+    gradient_clip: f32,
+    combined_loss: bool,
     _phantom: PhantomData<GE>,
 }
 
@@ -224,6 +226,8 @@ where
         #[builder(default = 1024)] batch_size: usize,
         #[builder(default = 128)] mini_batch_size: usize,
         #[builder(default = 1)] num_epochs: usize,
+        #[builder(default = 0.5)] gradient_clip: f32,
+        #[builder(default = false)] combined_loss: bool,
         logging_info: Option<&'a mut dyn PPOLogger>,
         device: candle_core::Device,
         actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
@@ -254,6 +258,8 @@ where
             actor_lr_scheduler,
             critic_lr_scheduler,
             logging_info: logging_info.map(|logger| PPOLoggingInfo::new(logger)),
+            gradient_clip,
+            combined_loss,
             _phantom: PhantomData,
         }
     }
@@ -540,16 +546,32 @@ where
         let actor_loss = losses.actor_loss;
         let critic_loss = losses.critic_loss;
 
-        if !tensor_has_nan(&actor_loss)? {
-            let actor_grad = &mut actor_loss.backward()?;
-            let _actor_grad_norm = crate::tensor_operations::clip_gradients(actor_grad, 1.0)?;
-            self.actor_optimizer.step(actor_grad)?;
-        }
+        match self.combined_loss {
+            true => {
+                let total_loss = (&actor_loss + &critic_loss)?;
+                if !tensor_has_nan(&total_loss)? {
+                    let total_grad = &mut total_loss.backward()?;
+                    let _total_grad_norm =
+                        crate::tensor_operations::clip_gradients(total_grad, self.gradient_clip)?;
+                    self.actor_optimizer.step(total_grad)?;
+                    self.critic_optimizer.step(total_grad)?;
+                }
+            }
+            false => {
+                if !tensor_has_nan(&actor_loss)? {
+                    let actor_grad = &mut actor_loss.backward()?;
+                    let _actor_grad_norm =
+                        crate::tensor_operations::clip_gradients(actor_grad, self.gradient_clip)?;
+                    self.actor_optimizer.step(actor_grad)?;
+                }
 
-        if !tensor_has_nan(&critic_loss)? {
-            let critic_grad = &mut critic_loss.backward()?;
-            let _critic_grad_norm = crate::tensor_operations::clip_gradients(critic_grad, 1.0)?;
-            self.critic_optimizer.step(critic_grad)?;
+                if !tensor_has_nan(&critic_loss)? {
+                    let critic_grad = &mut critic_loss.backward()?;
+                    let _critic_grad_norm =
+                        crate::tensor_operations::clip_gradients(critic_grad, self.gradient_clip)?;
+                    self.critic_optimizer.step(critic_grad)?;
+                }
+            }
         }
 
         Ok(())
