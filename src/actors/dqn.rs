@@ -154,7 +154,7 @@ where
             experience_replay,
             gamma,
             update_frequency,
-            logging_info: logger.map(|l| DQNLoggingInfo::new(l)),
+            logging_info: logger.map(DQNLoggingInfo::new),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -170,8 +170,8 @@ where
         &self.action_space
     }
 
-    pub fn get_observation_space(&self) -> &Box<dyn Space<Error = SE>> {
-        &self.observation_space
+    pub fn get_observation_space(&self) -> &dyn Space<Error = SE> {
+        &*self.observation_space
     }
 
     fn optimize(&mut self) -> Result<(), Error> {
@@ -219,7 +219,7 @@ where
                 epsilon: self.epsilon,
                 learning_rate: self.optimizer.learning_rate() as f32,
                 q_values: state_action_q_values.clone(),
-                rewards: rewards,
+                rewards,
                 epoch: logging_info.epoch,
                 timestep: logging_info.timestep,
             };

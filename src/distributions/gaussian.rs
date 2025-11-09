@@ -15,14 +15,14 @@ impl Distribution for GuassianDistribution {
             Tensor::randn(0.0, 1.0, self.action_mean.dims(), self.action_mean.device()).unwrap();
         let dtype = self.action_mean.dtype();
         unit_normal = unit_normal.to_dtype(dtype).unwrap();
-        let action_std = (&self.action_log_std).exp().unwrap();
-        let action = (&self.action_mean + unit_normal * action_std).unwrap();
-        action
+        let action_std = self.action_log_std.exp().unwrap();
+        
+        (&self.action_mean + unit_normal * action_std).unwrap()
     }
 
     fn dist_eval(&self, actions: &Tensor) -> Result<DistEval, Self::Error> {
         let action_log_std = self.action_log_std.clamp(-2.0, 2.0)?;
-        let action_std = (&action_log_std).exp()?;
+        let action_std = action_log_std.exp()?;
         let action = actions;
         let action_mean = &self.action_mean;
         // Break down each component

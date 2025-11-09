@@ -54,7 +54,9 @@ struct PPOExperience {
     this_returns: Option<Tensor>,
 }
 
+#[bon]
 impl PPOExperience {
+    #[builder]
     pub fn new(
         states: Tensor,
         next_states: Tensor,
@@ -253,7 +255,7 @@ where
             mini_batch_size,
             actor_lr_scheduler,
             critic_lr_scheduler,
-            logging_info: logging_info.map(|logger| PPOLoggingInfo::new(logger)),
+            logging_info: logging_info.map(PPOLoggingInfo::new),
             _phantom: PhantomData,
         }
     }
@@ -337,7 +339,7 @@ where
         let mut log_probs = vec![];
         let mut actions = vec![];
 
-        for experience in experiences.into_iter() {
+        for experience in experiences.iter() {
             rewards.push(experience.rewards.clone());
             dones.push(
                 experience
@@ -402,8 +404,8 @@ where
         bootstrapped_values: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
         let device = rewards.device();
-        let gamma_tensor = Tensor::new(self.gamma, &device)?.to_dtype(values.dtype())?;
-        let gae_lambda_tensor = Tensor::new(self.gae_lambda, &device)?.to_dtype(values.dtype())?;
+        let gamma_tensor = Tensor::new(self.gamma, device)?.to_dtype(values.dtype())?;
+        let gae_lambda_tensor = Tensor::new(self.gae_lambda, device)?.to_dtype(values.dtype())?;
 
         let values = values.squeeze(D::Minus1)?;
         let mut advantages = vec![];
@@ -479,9 +481,8 @@ where
                 let surrogate1 = (ratio.clone() * advantages.clone())?;
                 let surrogate2 = (clipped_ratio.clone() * advantages.clone())?;
                 let surrogate = torch_like_min(&surrogate1, &surrogate2)?;
-                let actor_loss = (-1.0 * surrogate.mean_all()?)?;
 
-                actor_loss
+                (-1.0 * surrogate.mean_all()?)?
             }
             false => {
                 let surrogate = (ratio.clone() * &advantages)?;
@@ -523,7 +524,7 @@ where
                 kl_divergence: ratio,
                 explained_variance,
                 learning_rate: self.actor_optimizer.learning_rate() as f32,
-                rewards: rewards,
+                rewards,
                 epoch: logging_info.epoch,
                 timestep: logging_info.timestep,
             };
@@ -581,7 +582,7 @@ where
         let neurons = self.act_neurons(observation)?;
         let actions = self
             .action_space
-            .from_neurons(&neurons)
+            .tensor_from_neurons(&neurons)
             .map_err(PPOError::SpaceError)?;
         Ok(actions)
     }
@@ -607,7 +608,7 @@ where
                 let action = self.act_neurons(&states)?;
                 let actual_action = self
                     .action_space
-                    .from_neurons(&action)
+                    .tensor_from_neurons(&action)
                     .map_err(PPOError::SpaceError)?;
 
                 let (log_probs, _) = self
@@ -623,17 +624,16 @@ where
                     dones,
                     truncateds,
                 } = env.step(actual_action).map_err(PPOError::GymError)?;
-                self.rollout_buffer.add(PPOExperience::new(
-                    states.clone(),
-                    next_states.clone(),
-                    action,
-                    rewards.clone(),
-                    dones,
-                    truncateds,
-                    log_probs,
-                    None,
-                    None,
-                ));
+                let ppo_experience = PPOExperience::builder()
+                    .states(states)
+                    .next_states(next_states.clone())
+                    .actions(action)
+                    .rewards(rewards)
+                    .dones(dones)
+                    .truncateds(truncateds)
+                    .log_probs(log_probs)
+                    .build();
+                self.rollout_buffer.add(ppo_experience);
             }
 
             elapsed_timesteps += self.rollout_buffer.len() * env.num_envs();

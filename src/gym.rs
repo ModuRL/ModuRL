@@ -107,9 +107,9 @@ where
         let mut dones = Vec::with_capacity(env_count);
         let mut truncateds = Vec::with_capacity(env_count);
 
-        for i in 0..env_count {
+        for (i, mut act) in actions.iter().cloned().enumerate() {
             let env = &mut self.envs[i];
-            let act = actions[i].clone().squeeze(0)?;
+            act = act.squeeze(0)?;
 
             let step_info = if self.to_reset[i] {
                 self.to_reset[i] = false;
@@ -121,7 +121,7 @@ where
                     truncated: false,
                 }
             } else {
-                env.step(act).map_err(VectorizedGymError::Single)?
+                env.step(act.clone()).map_err(VectorizedGymError::Single)?
             };
 
             states.push(step_info.state);
@@ -289,7 +289,7 @@ where
         for reciever in step_info_recievers {
             let step_info = reciever
                 .recv()
-                .unwrap()
+                .expect("Failed to receive step info, this was probably caused by a panic in the gym thread")
                 .map_err(VectorizedGymError::Single)?;
             states.push(step_info.state);
             rewards.push(step_info.reward);
@@ -331,7 +331,7 @@ where
             .map(|reciever| {
                 reciever
                     .recv()
-                    .unwrap()
+                    .expect("Failed to receive reset info, this was probably caused by a panic in the gym thread")
                     .map_err(VectorizedGymError::Single)
                     // collects only the state if the result is ok
                     .map(|info| info.state)
@@ -409,7 +409,9 @@ where
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 GymCmd::Step(action, resp_tx) => {
-                    resp_tx.send(gym.step(action)).unwrap();
+                    resp_tx.send(gym.step(action)).expect(
+                        "Failed to send step response, this was probably caused by a panic in the gym thread",
+                    );
                 }
                 GymCmd::Reset(resp_tx) => {
                     let reset_info = gym.reset();
@@ -421,9 +423,13 @@ where
                                 done: false,
                                 truncated: false,
                             }))
-                            .unwrap();
+                            .expect(
+                                "Failed to send reset response, this was probably caused by a panic in the gym thread",
+                            );
                     } else {
-                        resp_tx.send(Err(reset_info.err().unwrap())).unwrap();
+                        resp_tx.send(Err(reset_info.err().unwrap())).expect(
+                            "Failed to send reset response, this was probably caused by a panic in the gym thread",
+                        );
                         continue;
                     }
                 }
