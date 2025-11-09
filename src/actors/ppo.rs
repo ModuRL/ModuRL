@@ -150,7 +150,6 @@ pub struct PPOLogEntry {
     pub entropy: Tensor,
     pub kl_divergence: Tensor,
     pub explained_variance: Tensor,
-    pub learning_rate: f32,
     pub rewards: Tensor,
     pub epoch: usize,
     pub timestep: usize,
@@ -164,6 +163,84 @@ pub trait PPOLogger {
 struct PPOLosses {
     actor_loss: Tensor,
     critic_loss: Tensor,
+}
+
+pub enum PPONetworkInfo<O1, E, O2 = ()> {
+    Shared(SharedPPONetwork<O1, E>),
+    Separate(SeparatePPONetwork<O1, O2, E>),
+}
+
+/// Shared network architecture for PPO
+/// The output of the shared network is fed into both the actor and critic heads
+pub struct SharedPPONetwork<O, E> {
+    optimizer: O,
+    shared_network: Box<dyn candle_core::Module>,
+    critic_head: Box<dyn candle_core::Module>,
+    actor_head: Box<dyn ProbabilisticActor<Error = E>>,
+    lr_scheduler: Option<Box<dyn LrScheduler>>,
+}
+
+#[bon]
+impl<O, E> SharedPPONetwork<O, E>
+where
+    O: Optimizer,
+    E: std::fmt::Debug,
+{
+    #[builder]
+    pub fn new(
+        optimizer: O,
+        shared_network: Box<dyn candle_core::Module>,
+        critic_head: Box<dyn candle_core::Module>,
+        actor_head: Box<dyn ProbabilisticActor<Error = E>>,
+        lr_scheduler: Option<Box<dyn LrScheduler>>,
+    ) -> Self {
+        Self {
+            optimizer,
+            shared_network,
+            critic_head,
+            actor_head,
+            lr_scheduler,
+        }
+    }
+}
+
+pub struct SeparatePPONetwork<O1, O2, E> {
+    actor_optimizer: O1,
+    critic_optimizer: O2,
+    actor_network: Box<dyn ProbabilisticActor<Error = E>>,
+    critic_network: Box<dyn candle_core::Module>,
+    actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
+    critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
+    combined_loss: bool,
+}
+
+#[bon]
+impl<O1, O2, E> SeparatePPONetwork<O1, O2, E>
+where
+    O1: Optimizer,
+    O2: Optimizer,
+    E: std::fmt::Debug,
+{
+    #[builder]
+    pub fn new(
+        actor_optimizer: O1,
+        critic_optimizer: O2,
+        actor_network: Box<dyn ProbabilisticActor<Error = E>>,
+        critic_network: Box<dyn candle_core::Module>,
+        actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
+        critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
+        #[builder(default = false)] combined_loss: bool,
+    ) -> Self {
+        Self {
+            actor_optimizer,
+            critic_optimizer,
+            actor_network,
+            critic_network,
+            actor_lr_scheduler,
+            critic_lr_scheduler,
+            combined_loss,
+        }
+    }
 }
 
 pub struct PPOActor<'a, O1, O2, AE, GE, SE>
@@ -182,20 +259,14 @@ where
     normalize_returns: bool,
     vf_coef: f32,
     ent_coef: f32,
-    critic_optimizer: O1,
-    actor_optimizer: O2,
     action_space: Box<dyn spaces::Space<Error = SE>>,
-    critic_network: Box<dyn candle_core::Module>,
-    actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
+    network_info: PPONetworkInfo<O1, AE, O2>,
     rollout_buffer: RolloutBuffer<PPOExperience>,
     mini_batch_size: usize,
     num_epochs: usize,
     batch_size: usize,
-    actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
-    critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
     logging_info: Option<PPOLoggingInfo<'a>>,
     gradient_clip: f32,
-    combined_loss: bool,
     _phantom: PhantomData<GE>,
 }
 
@@ -211,10 +282,7 @@ where
     #[builder]
     pub fn new(
         action_space: Box<dyn spaces::Space<Error = SE>>,
-        actor_network: Box<dyn ProbabilisticActor<Error = AE>>,
-        critic_network: Box<dyn candle_core::Module>,
-        critic_optimizer: O1,
-        actor_optimizer: O2,
+        network_info: PPONetworkInfo<O1, AE, O2>,
         #[builder(default = true)] clipped: bool,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 0.95)] gae_lambda: f32,
@@ -227,11 +295,8 @@ where
         #[builder(default = 128)] mini_batch_size: usize,
         #[builder(default = 1)] num_epochs: usize,
         #[builder(default = 0.5)] gradient_clip: f32,
-        #[builder(default = false)] combined_loss: bool,
         logging_info: Option<&'a mut dyn PPOLogger>,
         device: candle_core::Device,
-        actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
-        critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
     ) -> Self {
         if batch_size > 0 {
             assert!(batch_size > 0);
@@ -246,20 +311,14 @@ where
             normalize_returns,
             vf_coef,
             ent_coef,
-            critic_optimizer,
-            actor_optimizer,
+            network_info,
             action_space,
-            critic_network,
-            actor_network,
             rollout_buffer: RolloutBuffer::new(0, device), // placeholder, will set when we know num envs
             num_epochs,
             batch_size,
             mini_batch_size,
-            actor_lr_scheduler,
-            critic_lr_scheduler,
             logging_info: logging_info.map(|logger| PPOLoggingInfo::new(logger)),
             gradient_clip,
-            combined_loss,
             _phantom: PhantomData,
         }
     }
@@ -358,14 +417,28 @@ where
             actions.push(experience.actions.clone());
         }
 
-        let values_tensor = self.critic_network.forward(&Tensor::stack(&states, 0)?)?;
+        let latent_states = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                let states_tensor = Tensor::stack(&states, 0)?;
+                shared_info.shared_network.forward(&states_tensor)?
+            }
+            PPONetworkInfo::Separate(ref mut _separate_info) => Tensor::stack(&states, 0)?,
+        };
+
+        let values_tensor = self.critic_network_forward(&latent_states)?;
 
         // the last step for every env is needed for bootstrapping
         let next_states_tensor = Tensor::stack(&next_states, 0)?;
         let bootstrapped_states = next_states_tensor.i(next_states_tensor.shape().dims()[0] - 1)?; // shape [env_count, ...]
+        let latent_bootstrapped_states = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                shared_info.shared_network.forward(&bootstrapped_states)?
+            }
+            PPONetworkInfo::Separate(ref mut _separate_info) => bootstrapped_states,
+        };
+
         let bootstrapped_values = self
-            .critic_network
-            .forward(&bootstrapped_states)?
+            .critic_network_forward(&latent_bootstrapped_states)?
             .flatten_all()?; // shape [env_count]
 
         let device = values_tensor.device();
@@ -453,6 +526,49 @@ where
         Ok(advantages_tensor)
     }
 
+    /// Forward pass through the critic network
+    /// Expects states as latent if shared network is used
+    fn critic_network_forward(
+        &mut self,
+        states: &candle_core::Tensor,
+    ) -> Result<candle_core::Tensor, PPOError<AE, GE, SE>> {
+        match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                let values = shared_info.critic_head.forward(&states)?;
+                Ok(values)
+            }
+            PPONetworkInfo::Separate(ref mut separate_info) => {
+                let values = separate_info.critic_network.forward(states)?;
+                Ok(values)
+            }
+        }
+    }
+
+    /// Log prob and entropy from the actor network
+    /// Expects states as latent if shared network is used
+    fn actor_network_log_prob_and_entropy(
+        &mut self,
+        states: &candle_core::Tensor,
+        actions: &candle_core::Tensor,
+    ) -> Result<(candle_core::Tensor, candle_core::Tensor), PPOError<AE, GE, SE>> {
+        match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                let (log_probs, entropy) = shared_info
+                    .actor_head
+                    .log_prob_and_entropy(states, actions)
+                    .map_err(PPOError::ActorError)?;
+                Ok((log_probs, entropy))
+            }
+            PPONetworkInfo::Separate(ref mut separate_info) => {
+                let (log_probs, entropy) = separate_info
+                    .actor_network
+                    .log_prob_and_entropy(states, actions)
+                    .map_err(PPOError::ActorError)?;
+                Ok((log_probs, entropy))
+            }
+        }
+    }
+
     /// Compute the loss for the actor and critic networks
     /// Then backpropagate the loss
     fn compute_loss(
@@ -470,10 +586,17 @@ where
             advantages
         };
 
-        let (log_probs, entropy) = self
-            .actor_network
-            .log_prob_and_entropy(states, actions)
-            .map_err(PPOError::ActorError)?;
+        // if the networks are shared, we need to extract the latent state
+        // if it's seperate we just say this is the state as is
+        let latent_state = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                shared_info.shared_network.forward(states)?
+            }
+            PPONetworkInfo::Separate(ref mut _separate_info) => states.clone(),
+        };
+
+        let (log_probs, entropy) =
+            self.actor_network_log_prob_and_entropy(&latent_state, actions)?;
 
         let ratio = (&log_probs - &old_log_probs)?.clamp(-20.0, 10.0)?.exp()?;
 
@@ -495,7 +618,7 @@ where
             }
         };
 
-        let values = self.critic_network.forward(states)?;
+        let values = self.critic_network_forward(&latent_state)?;
         let values = values.squeeze(D::Minus1)?;
 
         let entropy_loss = entropy.mean_all()?;
@@ -528,7 +651,6 @@ where
                 entropy: entropy_loss,
                 kl_divergence: ratio,
                 explained_variance,
-                learning_rate: self.actor_optimizer.learning_rate() as f32,
                 rewards: rewards,
                 epoch: logging_info.epoch,
                 timestep: logging_info.timestep,
@@ -546,44 +668,86 @@ where
         let actor_loss = losses.actor_loss;
         let critic_loss = losses.critic_loss;
 
-        match self.combined_loss {
-            true => {
+        match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
                 let total_loss = (&actor_loss + &critic_loss)?;
                 if !tensor_has_nan(&total_loss)? {
                     let total_grad = &mut total_loss.backward()?;
                     let _total_grad_norm =
                         crate::tensor_operations::clip_gradients(total_grad, self.gradient_clip)?;
-                    self.actor_optimizer.step(total_grad)?;
-                    self.critic_optimizer.step(total_grad)?;
+                    shared_info.optimizer.step(total_grad)?;
                 }
             }
-            false => {
-                if !tensor_has_nan(&actor_loss)? {
-                    let actor_grad = &mut actor_loss.backward()?;
-                    let _actor_grad_norm =
-                        crate::tensor_operations::clip_gradients(actor_grad, self.gradient_clip)?;
-                    self.actor_optimizer.step(actor_grad)?;
+            PPONetworkInfo::Separate(ref mut separate_info) => match separate_info.combined_loss {
+                true => {
+                    let total_loss = (&actor_loss + &critic_loss)?;
+                    if !tensor_has_nan(&total_loss)? {
+                        let total_grad = &mut total_loss.backward()?;
+                        let _total_grad_norm = crate::tensor_operations::clip_gradients(
+                            total_grad,
+                            self.gradient_clip,
+                        )?;
+                        separate_info.actor_optimizer.step(total_grad)?;
+                        separate_info.critic_optimizer.step(total_grad)?;
+                    }
                 }
+                false => {
+                    if !tensor_has_nan(&actor_loss)? {
+                        let actor_grad = &mut actor_loss.backward()?;
+                        let _actor_grad_norm = crate::tensor_operations::clip_gradients(
+                            actor_grad,
+                            self.gradient_clip,
+                        )?;
+                        separate_info.actor_optimizer.step(actor_grad)?;
+                    }
 
-                if !tensor_has_nan(&critic_loss)? {
-                    let critic_grad = &mut critic_loss.backward()?;
-                    let _critic_grad_norm =
-                        crate::tensor_operations::clip_gradients(critic_grad, self.gradient_clip)?;
-                    self.critic_optimizer.step(critic_grad)?;
+                    if !tensor_has_nan(&critic_loss)? {
+                        let critic_grad = &mut critic_loss.backward()?;
+                        let _critic_grad_norm = crate::tensor_operations::clip_gradients(
+                            critic_grad,
+                            self.gradient_clip,
+                        )?;
+                        separate_info.critic_optimizer.step(critic_grad)?;
+                    }
                 }
-            }
+            },
         }
 
         Ok(())
     }
 
+    /// Expects states as latent
     fn act_neurons(
         &mut self,
-        observation: &candle_core::Tensor,
+        states: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, PPOError<AE, GE, SE>> {
-        self.actor_network
-            .sample(observation)
-            .map_err(PPOError::ActorError)
+        let network = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => &shared_info.actor_head,
+            PPONetworkInfo::Separate(ref mut separate_info) => &separate_info.actor_network,
+        };
+
+        network.sample(&states).map_err(PPOError::ActorError)
+    }
+
+    fn update_learning_rates(&mut self, progress: f64) {
+        match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                if let Some(scheduler) = &shared_info.lr_scheduler {
+                    let new_lr = scheduler.get_lr(progress);
+                    shared_info.optimizer.set_learning_rate(new_lr);
+                }
+            }
+            PPONetworkInfo::Separate(ref mut separate_info) => {
+                if let Some(scheduler) = &separate_info.actor_lr_scheduler {
+                    let new_lr = scheduler.get_lr(progress);
+                    separate_info.actor_optimizer.set_learning_rate(new_lr);
+                }
+                if let Some(scheduler) = &separate_info.critic_lr_scheduler {
+                    let new_lr = scheduler.get_lr(progress);
+                    separate_info.critic_optimizer.set_learning_rate(new_lr);
+                }
+            }
+        }
     }
 }
 
@@ -626,16 +790,21 @@ where
         while elapsed_timesteps < num_timesteps {
             while self.rollout_buffer.len() * env.num_envs() < self.batch_size {
                 let states = next_states.clone();
-                let action = self.act_neurons(&states)?;
+                let latent_states = match self.network_info {
+                    PPONetworkInfo::Shared(ref mut shared_info) => {
+                        shared_info.shared_network.forward(&states)?
+                    }
+                    PPONetworkInfo::Separate(ref mut _separate_info) => states.clone(),
+                };
+
+                let action = self.act_neurons(&latent_states)?;
                 let actual_action = self
                     .action_space
                     .from_neurons(&action)
                     .map_err(PPOError::SpaceError)?;
 
-                let (log_probs, _) = self
-                    .actor_network
-                    .log_prob_and_entropy(&states, &action)
-                    .map_err(PPOError::ActorError)?;
+                let (log_probs, _) =
+                    self.actor_network_log_prob_and_entropy(&latent_states, &action)?;
 
                 let truncateds;
                 let dones;
@@ -660,7 +829,7 @@ where
 
             elapsed_timesteps += self.rollout_buffer.len() * env.num_envs();
 
-            if let Some(scheduler) = &self.actor_lr_scheduler {
+            /*if let Some(scheduler) = &self.actor_lr_scheduler {
                 let progress =
                     ((elapsed_timesteps as f64) / (num_timesteps as f64)).clamp(0.0, 1.0);
 
@@ -672,7 +841,8 @@ where
                     ((elapsed_timesteps as f64) / (num_timesteps as f64)).clamp(0.0, 1.0);
                 let new_lr = scheduler.get_lr(progress);
                 self.critic_optimizer.set_learning_rate(new_lr);
-            }
+            }*/
+            self.update_learning_rates((elapsed_timesteps as f64) / (num_timesteps as f64));
 
             if let Some(logging_info) = &mut self.logging_info {
                 logging_info.timestep = elapsed_timesteps;

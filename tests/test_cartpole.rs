@@ -3,6 +3,7 @@ use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::actors::ddqn::DDQNActor;
 use modurl::actors::dqn::DQNActor;
+use modurl::actors::ppo::SeparatePPONetwork;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl::tensor_operations::tanh;
 use modurl::{
@@ -153,16 +154,22 @@ fn ppo_cartpole() {
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
+    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
+        SeparatePPONetwork::builder()
+            .actor_network(Box::new(
+                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+            ))
+            .critic_network(Box::new(critic_network))
+            .actor_optimizer(actor_optimizer)
+            .critic_optimizer(critic_optimizer)
+            .build(),
+    );
+
     // PPO config
     // Stable baselines3 config:
     let mut actor = PPOActor::builder()
         .action_space(action_space)
-        .actor_network(Box::new(
-            ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
-        ))
-        .critic_network(Box::new(critic_network))
-        .critic_optimizer(critic_optimizer)
-        .actor_optimizer(actor_optimizer)
+        .network_info(ppo_network_info)
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
