@@ -165,7 +165,28 @@ struct PPOLosses {
     critic_loss: Tensor,
 }
 
-pub enum PPONetworkInfo<O1, E, O2 = ()> {
+pub struct FakeOptimizer(());
+
+impl Optimizer for FakeOptimizer {
+    type Config = ();
+    fn new(_vars: Vec<candle_core::Var>, _config: Self::Config) -> candle_core::Result<Self> {
+        panic!("FakeOptimizer should never be used");
+    }
+
+    fn step(&mut self, _grads: &candle_core::backprop::GradStore) -> candle_core::Result<()> {
+        panic!("FakeOptimizer should never be used");
+    }
+
+    fn learning_rate(&self) -> f64 {
+        panic!("FakeOptimizer should never be used");
+    }
+
+    fn set_learning_rate(&mut self, _lr: f64) {
+        panic!("FakeOptimizer should never be used");
+    }
+}
+
+pub enum PPONetworkInfo<O1, E, O2 = FakeOptimizer> {
     Shared(SharedPPONetwork<O1, E>),
     Separate(SeparatePPONetwork<O1, O2, E>),
 }
@@ -376,7 +397,7 @@ where
                 // Compute the loss and backpropagate
                 let ppo_losses = self.compute_loss(
                     &states,
-                    &actions.detach(),
+                    &actions,
                     batch_old_log_probs.detach(),
                     advantages,
                     returns,
@@ -425,7 +446,7 @@ where
             PPONetworkInfo::Separate(ref mut _separate_info) => Tensor::stack(&states, 0)?,
         };
 
-        let values_tensor = self.critic_network_forward(&latent_states)?;
+        let values_tensor = self.critic_network_forward(&latent_states)?.detach();
 
         // the last step for every env is needed for bootstrapping
         let next_states_tensor = Tensor::stack(&next_states, 0)?;
@@ -439,7 +460,8 @@ where
 
         let bootstrapped_values = self
             .critic_network_forward(&latent_bootstrapped_states)?
-            .flatten_all()?; // shape [env_count]
+            .flatten_all()?
+            .detach(); // shape [env_count]
 
         let device = values_tensor.device();
 
@@ -451,23 +473,26 @@ where
             device,
         )?;
 
-        let advantages = self.compute_gae(
-            &rewards_tensor,
-            &values_tensor,
-            &dones_tensor,
-            &bootstrapped_values,
-        )?;
+        let advantages = self
+            .compute_gae(
+                &rewards_tensor,
+                &values_tensor,
+                &dones_tensor,
+                &bootstrapped_values,
+            )?
+            .detach();
 
         let values_tensor = values_tensor.squeeze(D::Minus1)?;
 
         let returns = (&values_tensor + &advantages)?;
-        let returns = returns.clamp(-1e3, 1e3)?;
+        let returns = returns.clamp(-1e5, 1e5)?;
 
         let experiences = self.rollout_buffer.get_raw_mut();
 
         for (i, experience) in experiences.iter_mut().enumerate() {
-            experience.advantages = Some(advantages.i(i)?.clone());
-            experience.this_returns = Some(returns.i(i)?.clone());
+            // The detaches here should be redundant but just to be safe
+            experience.advantages = Some(advantages.i(i)?.clone().detach());
+            experience.this_returns = Some(returns.i(i)?.clone().detach());
         }
 
         Ok(())
@@ -584,7 +609,8 @@ where
             normalize_tensor(&advantages)?
         } else {
             advantages
-        };
+        }
+        .detach();
 
         // if the networks are shared, we need to extract the latent state
         // if it's seperate we just say this is the state as is
@@ -631,7 +657,8 @@ where
             normalize_tensor(&returns)?
         } else {
             returns
-        };
+        }
+        .detach();
 
         let critic_loss = loss::mse(&values, &returns)?;
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
@@ -829,19 +856,6 @@ where
 
             elapsed_timesteps += self.rollout_buffer.len() * env.num_envs();
 
-            /*if let Some(scheduler) = &self.actor_lr_scheduler {
-                let progress =
-                    ((elapsed_timesteps as f64) / (num_timesteps as f64)).clamp(0.0, 1.0);
-
-                let new_lr = scheduler.get_lr(progress);
-                self.actor_optimizer.set_learning_rate(new_lr);
-            }
-            if let Some(scheduler) = &self.critic_lr_scheduler {
-                let progress =
-                    ((elapsed_timesteps as f64) / (num_timesteps as f64)).clamp(0.0, 1.0);
-                let new_lr = scheduler.get_lr(progress);
-                self.critic_optimizer.set_learning_rate(new_lr);
-            }*/
             self.update_learning_rates((elapsed_timesteps as f64) / (num_timesteps as f64));
 
             if let Some(logging_info) = &mut self.logging_info {
