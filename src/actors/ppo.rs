@@ -791,7 +791,13 @@ where
     type SpaceError = SE;
 
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
-        let neurons = self.act_neurons(observation)?;
+        let latent_states = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                shared_info.shared_network.forward(observation)?
+            }
+            PPONetworkInfo::Separate(ref mut _separate_info) => observation.clone(),
+        };
+        let neurons = self.act_neurons(&latent_states)?;
         let actions = self
             .action_space
             .from_neurons(&neurons)
