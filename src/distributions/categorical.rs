@@ -1,4 +1,4 @@
-use candle_core::{Device, Tensor, D};
+use candle_core::{D, Device, Tensor};
 use candle_nn::ops::softmax;
 
 use crate::distributions::{DistEval, Distribution};
@@ -65,6 +65,47 @@ impl Distribution for CategoricalDistribution {
     fn from_outputs(outputs: &Tensor) -> Self {
         Self {
             logits: outputs.clamp(-20.0, 20.0).unwrap(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_softmax() {
+        // Test against PyTorch's F.log_softmax
+        // x = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        // F.log_softmax(x, dim=-1) =
+        // tensor([[-2.4076, -1.4076, -0.4076],
+        //         [-2.4076, -1.4076, -0.4076]])
+
+        let device = Device::Cpu;
+        let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], &device).unwrap();
+
+        let result = log_softmax(&x, D::Minus1).unwrap();
+        let result_vec = result.to_vec2::<f32>().unwrap();
+
+        // Expected values from PyTorch
+        let expected = vec![
+            vec![-2.407606f32, -1.4076059, -0.40760595],
+            vec![-2.407606f32, -1.4076059, -0.40760595],
+        ];
+
+        for i in 0..2 {
+            for j in 0..3 {
+                let diff = (result_vec[i][j] - expected[i][j]).abs();
+                assert!(
+                    diff < 1e-5,
+                    "Mismatch at [{}, {}]: got {}, expected {}, diff {}",
+                    i,
+                    j,
+                    result_vec[i][j],
+                    expected[i][j],
+                    diff
+                );
+            }
         }
     }
 }

@@ -153,6 +153,8 @@ pub struct PPOLogEntry {
     pub rewards: Tensor,
     pub epoch: usize,
     pub timestep: usize,
+    pub returns: Tensor,
+    pub advantages: Tensor,
 }
 
 pub trait PPOLogger {
@@ -273,6 +275,7 @@ where
     SE: std::fmt::Debug,
 {
     clipped: bool,
+    clip_critic: bool,
     gamma: f32,
     gae_lambda: f32,
     clip_range: f32,
@@ -305,6 +308,7 @@ where
         action_space: Box<dyn spaces::Space<Error = SE>>,
         network_info: PPONetworkInfo<O1, AE, O2>,
         #[builder(default = true)] clipped: bool,
+        #[builder(default = false)] clip_critic: bool,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 0.95)] gae_lambda: f32,
         #[builder(default = 0.2)] clip_range: f32,
@@ -325,6 +329,7 @@ where
 
         Self {
             clipped,
+            clip_critic,
             gamma,
             gae_lambda,
             clip_range,
@@ -462,6 +467,7 @@ where
             .critic_network_forward(&latent_bootstrapped_states)?
             .flatten_all()?
             .detach(); // shape [env_count]
+        println!("Bootstrapped values: {:?}", bootstrapped_values);
 
         let device = values_tensor.device();
 
@@ -660,7 +666,17 @@ where
         }
         .detach();
 
-        let critic_loss = loss::mse(&values, &returns)?;
+        let critic_loss = match self.clip_critic {
+            true => {
+                let value_clipped =
+                    (&values + (ratio.clone() - 1.0)?.clamp(-self.clip_range, self.clip_range)?)?;
+                let loss_unclipped = (values.clone() - returns.clone())?.sqr()?;
+                let loss_clipped = (value_clipped - returns.clone())?.sqr()?;
+                let loss = torch_like_min(&loss_unclipped, &loss_clipped)?;
+                loss.mean_all()?
+            }
+            false => loss::mse(&values, &returns)?.mean_all()?,
+        };
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
 
         if let Some(logging_info) = &mut self.logging_info {
@@ -669,7 +685,7 @@ where
                 let diff = (&returns - &values)?;
                 let var_diff = diff.var(D::Minus1)?;
 
-                1.0 + (-1.0 * (var_diff + 1e-8)? / (var_y + 1e-8)?)?
+                1.0 + (-1.0 * var_diff / (var_y + 1e-8)?)?
             }?;
 
             let log_entry = PPOLogEntry {
@@ -681,6 +697,8 @@ where
                 rewards: rewards,
                 epoch: logging_info.epoch,
                 timestep: logging_info.timestep,
+                returns,
+                advantages,
             };
             logging_info.logger.log(&log_entry);
         }
