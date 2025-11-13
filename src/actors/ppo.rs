@@ -275,7 +275,6 @@ where
     SE: std::fmt::Debug,
 {
     clipped: bool,
-    clip_critic: bool,
     gamma: f32,
     gae_lambda: f32,
     clip_range: f32,
@@ -308,7 +307,6 @@ where
         action_space: Box<dyn spaces::Space<Error = SE>>,
         network_info: PPONetworkInfo<O1, AE, O2>,
         #[builder(default = true)] clipped: bool,
-        #[builder(default = false)] clip_critic: bool,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 0.95)] gae_lambda: f32,
         #[builder(default = 0.2)] clip_range: f32,
@@ -329,7 +327,6 @@ where
 
         Self {
             clipped,
-            clip_critic,
             gamma,
             gae_lambda,
             clip_range,
@@ -392,13 +389,6 @@ where
                 returns = returns.flatten(0, 1)?;
                 rewards = rewards.flatten(0, 1)?;
 
-                let actions = actions.clone();
-                let states = states.clone();
-                let advantages = advantages.clone();
-                let returns = returns.clone();
-                let batch_old_log_probs = batch_old_log_probs.clone();
-                let batch_rewards = rewards.clone();
-
                 // Compute the loss and backpropagate
                 let ppo_losses = self.compute_loss(
                     &states,
@@ -406,7 +396,7 @@ where
                     batch_old_log_probs.detach(),
                     advantages,
                     returns,
-                    batch_rewards,
+                    rewards,
                 )?;
 
                 self.backpropagate_loss(ppo_losses.clone())?;
@@ -467,7 +457,6 @@ where
             .critic_network_forward(&latent_bootstrapped_states)?
             .flatten_all()?
             .detach(); // shape [env_count]
-        println!("Bootstrapped values: {:?}", bootstrapped_values);
 
         let device = values_tensor.device();
 
@@ -565,7 +554,7 @@ where
     ) -> Result<candle_core::Tensor, PPOError<AE, GE, SE>> {
         match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
-                let values = shared_info.critic_head.forward(&states)?;
+                let values = shared_info.critic_head.forward(states)?;
                 Ok(values)
             }
             PPONetworkInfo::Separate(ref mut separate_info) => {
@@ -666,17 +655,7 @@ where
         }
         .detach();
 
-        let critic_loss = match self.clip_critic {
-            true => {
-                let value_clipped =
-                    (&values + (ratio.clone() - 1.0)?.clamp(-self.clip_range, self.clip_range)?)?;
-                let loss_unclipped = (values.clone() - returns.clone())?.sqr()?;
-                let loss_clipped = (value_clipped - returns.clone())?.sqr()?;
-                let loss = torch_like_min(&loss_unclipped, &loss_clipped)?;
-                loss.mean_all()?
-            }
-            false => loss::mse(&values, &returns)?.mean_all()?,
-        };
+        let critic_loss = loss::mse(&values, &returns)?;
         let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
 
         if let Some(logging_info) = &mut self.logging_info {
