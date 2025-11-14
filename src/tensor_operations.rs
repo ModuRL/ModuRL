@@ -55,14 +55,10 @@ pub(crate) fn normalize_tensor(t: &Tensor) -> Result<Tensor, candle_core::Error>
     let mean = t.mean_all()?.broadcast_as(t.shape())?;
     let diff = (t.clone() - mean.clone())?;
 
-    let std_sqrt = diff
-        .sqr()?
-        .mean_all()?
-        .sqrt()?
-        .clamp(1e-6, f32::MAX)? // There is no element wise min for scalar tensors
-        .broadcast_as(t.shape());
+    let std = diff.sqr()?.mean_all()?.sqrt()?;
+    let std_with_eps = (std + 1e-8)?.broadcast_as(t.shape())?;
 
-    diff / std_sqrt
+    diff / std_with_eps
 }
 
 // implement the tanh activation function

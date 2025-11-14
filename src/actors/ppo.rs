@@ -884,7 +884,7 @@ mod tests {
     use crate::{
         distributions::CategoricalDistribution,
         gym::{Gym, StepInfo, VectorizedGymWrapper},
-        models::{MLP, probabilistic_model::MLPProbabilisticActor},
+        models::{MLP, probabilistic_model::ProbabilisticActorModel},
         spaces::Discrete,
         tensor_operations::tanh,
     };
@@ -1000,14 +1000,22 @@ mod tests {
             let critic_optimizer = Adam::new(critic_var_map.all_vars(), config.clone()).unwrap();
 
             // Create PPO actor
+            let network_info = PPONetworkInfo::Separate(
+                SeparatePPONetwork::builder()
+                    .actor_optimizer(actor_optimizer)
+                    .critic_optimizer(critic_optimizer)
+                    .actor_network(Box::new(
+                        ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(
+                            actor_network,
+                        )),
+                    ))
+                    .critic_network(Box::new(critic_network))
+                    .build(),
+            );
+
             let mut actor = PPOActor::builder()
                 .action_space(action_space)
-                .actor_network(Box::new(
-                    MLPProbabilisticActor::<CategoricalDistribution>::new(actor_network),
-                ))
-                .critic_network(Box::new(critic_network))
-                .critic_optimizer(critic_optimizer)
-                .actor_optimizer(actor_optimizer)
+                .network_info(network_info)
                 .batch_size(2048)
                 .mini_batch_size(64)
                 .ent_coef(0.01)
