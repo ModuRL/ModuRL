@@ -433,15 +433,22 @@ where
             actions.push(experience.actions.clone());
         }
 
+        let states = Tensor::stack(&states, 0)?; // shape [batch_size, env_count, ...]
+        let (batch_size, env_count) = (states.dims()[0], states.dims()[1]);
+        // Flatten temporally to feed into networks
+        let states = states.flatten(0, 1)?; // shape [batch_size * env_count, ...]
+
         let latent_states = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
-                let states_tensor = Tensor::stack(&states, 0)?;
-                shared_info.shared_network.forward(&states_tensor)?
+                shared_info.shared_network.forward(&states)?
             }
-            PPONetworkInfo::Separate(ref mut _separate_info) => Tensor::stack(&states, 0)?,
+            PPONetworkInfo::Separate(ref mut _separate_info) => states,
         };
 
         let values_tensor = self.critic_network_forward(&latent_states)?.detach();
+
+        // unflatten back to [batch_size, env_count, ...]
+        let values_tensor = values_tensor.reshape((batch_size, env_count, ()))?; // shape [batch_size, env_count, ...]
 
         // the last step for every env is needed for bootstrapping
         let next_states_tensor = Tensor::stack(&next_states, 0)?;
