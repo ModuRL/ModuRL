@@ -780,6 +780,18 @@ where
             }
         }
     }
+
+    pub fn set_learning_rate(&mut self, lr: f64) {
+        match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                shared_info.optimizer.set_learning_rate(lr);
+            }
+            PPONetworkInfo::Separate(ref mut separate_info) => {
+                separate_info.actor_optimizer.set_learning_rate(lr);
+                separate_info.critic_optimizer.set_learning_rate(lr);
+            }
+        }
+    }
 }
 
 impl<'a, O1, O2, AE, GE, SE> Actor for PPOActor<'a, O1, O2, AE, GE, SE>
