@@ -72,7 +72,8 @@ struct DDQNActorExperience {
     next_state: Tensor,
     action: Tensor,
     reward: f32,
-    done: f32,
+    /// Whether the next state is terminal (1.0 if terminal, 0.0 otherwise)
+    next_done: f32,
 }
 
 impl experience::Experience for DDQNActorExperience {
@@ -83,19 +84,19 @@ impl experience::Experience for DDQNActorExperience {
             self.next_state.clone(),
             self.action.clone(),
             Tensor::from_vec(vec![self.reward], [].to_vec(), self.state.device())?,
-            Tensor::from_vec(vec![self.done], [].to_vec(), self.state.device())?,
+            Tensor::from_vec(vec![self.next_done], [].to_vec(), self.state.device())?,
         ])
     }
 }
 
 impl DDQNActorExperience {
-    pub fn new(state: Tensor, next_state: Tensor, action: Tensor, reward: f32, done: f32) -> Self {
+    pub fn new(state: Tensor, next_state: Tensor, action: Tensor, reward: f32, next_done: f32) -> Self {
         Self {
             state,
             next_state,
             action,
             reward,
-            done,
+            next_done,
         }
     }
 }
@@ -218,7 +219,7 @@ where
         let next_states = elements[1].clone();
         let actions = elements[2].clone();
         let rewards = elements[3].clone();
-        let dones = elements[4].clone();
+        let next_dones = elements[4].clone();
 
         let next_actions = self.online_q_network.forward(&next_states)?.argmax(1)?; // argmax over actions
         let next_q_values_target = self.target_q_network.forward(&next_states)?;
@@ -227,7 +228,7 @@ where
             .squeeze(1)?;
         let gamma_tensor = Tensor::new(self.gamma, states.device())?;
         let mut target_q_values = (rewards.clone()
-            + (1.0 - dones)?.mul(&(next_q_values.broadcast_mul(&gamma_tensor)?))?)?;
+            + (1.0 - next_dones)?.mul(&(next_q_values.broadcast_mul(&gamma_tensor)?))?)?;
         target_q_values = target_q_values
             .reshape(&[target_q_values.shape().dims()[0], 1])?
             .detach();
@@ -318,7 +319,7 @@ where
 
             for i in 0..env.num_envs() {
                 let reward = rewards[i].i(0)?.to_scalar::<f32>()?;
-                let done = dones[i];
+                let next_done = dones[i];
                 let next_observation = next_observations[i].clone().squeeze(0)?;
                 let observation = this_observations[i].clone().squeeze(0)?;
                 let action = action[i].clone().squeeze(0)?;
@@ -328,7 +329,7 @@ where
                     next_observation,
                     action,
                     reward,
-                    if done { 1.0 } else { 0.0 },
+                    if next_done { 1.0 } else { 0.0 },
                 ));
             }
 

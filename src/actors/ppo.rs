@@ -47,7 +47,7 @@ struct PPOExperience {
     next_states: Tensor,
     actions: Tensor,
     rewards: Tensor,
-    dones: Vec<bool>,
+    next_dones: Vec<bool>,
     truncateds: Vec<bool>,
     log_probs: Tensor,
     advantages: Option<Tensor>,
@@ -60,7 +60,7 @@ impl PPOExperience {
         next_states: Tensor,
         actions: Tensor,
         rewards: Tensor,
-        dones: Vec<bool>,
+        next_dones: Vec<bool>,
         truncateds: Vec<bool>,
         log_probs: Tensor,
         advantages: Option<Tensor>,
@@ -71,7 +71,7 @@ impl PPOExperience {
             next_states,
             actions,
             rewards,
-            dones,
+            next_dones,
             truncateds,
             log_probs,
             advantages,
@@ -89,11 +89,11 @@ impl experience::Experience for PPOExperience {
             self.actions.clone(),
             self.rewards.clone(),
             Tensor::from_vec(
-                self.dones
+                self.next_dones
                     .iter()
                     .map(|&d| if d { 1.0 } else { 0.0 })
                     .collect::<Vec<f32>>(),
-                &[self.dones.len()],
+                &[self.next_dones.len()],
                 self.states.device(),
             )?,
             Tensor::from_vec(
@@ -121,7 +121,7 @@ enum PPOElement {
     NextState = 1,
     Action = 2,
     Reward = 3,
-    Done = 4,
+    NextDone = 4,
     Truncated = 5,
     LogProb = 6,
     Advantage = 7,
@@ -411,7 +411,7 @@ where
         let experiences = self.rollout_buffer.get_raw();
         // For advantage return calculation:
         let mut rewards = vec![];
-        let mut dones = vec![];
+        let mut next_dones = vec![];
         let mut states = vec![];
         let mut next_states = vec![];
         // For splitting the envs
@@ -420,9 +420,9 @@ where
 
         for experience in experiences.into_iter() {
             rewards.push(experience.rewards.clone());
-            dones.push(
+            next_dones.push(
                 experience
-                    .dones
+                    .next_dones
                     .iter()
                     .map(|&d| if d { 1.0 } else { 0.0 })
                     .collect::<Vec<f32>>(),
@@ -467,11 +467,11 @@ where
 
         let device = values_tensor.device();
 
-        let dones_shape = &[dones.len(), dones[0].len()];
+        let next_dones_shape = &[next_dones.len(), next_dones[0].len()];
         let rewards_tensor = candle_core::Tensor::stack(&rewards, 0)?;
-        let dones_tensor = candle_core::Tensor::from_vec(
-            dones.into_iter().flatten().collect(),
-            dones_shape,
+        let next_dones_tensor = candle_core::Tensor::from_vec(
+            next_dones.into_iter().flatten().collect(),
+            next_dones_shape,
             device,
         )?;
 
@@ -479,7 +479,7 @@ where
             .compute_gae(
                 &rewards_tensor,
                 &values_tensor,
-                &dones_tensor,
+                &next_dones_tensor,
                 &bootstrapped_values,
             )?
             .detach();
@@ -504,7 +504,7 @@ where
         &self,
         rewards: &candle_core::Tensor,
         values: &candle_core::Tensor,
-        dones: &candle_core::Tensor,
+        next_dones: &candle_core::Tensor,
         bootstrapped_values: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
         let device = rewards.device();
@@ -516,24 +516,25 @@ where
 
         for env_idx in 0..rewards.shape().dims()[1] {
             let env_rewards = rewards.i((.., env_idx))?.detach();
-            let env_dones = dones.i((.., env_idx))?.detach();
+            let env_next_dones = next_dones.i((.., env_idx))?.detach();
             let env_values = values.i((.., env_idx))?.detach();
 
-            let last_done = env_dones.i(env_dones.shape().dims()[0] - 1)?;
-            let mut next_value = ((1.0 - last_done)? * bootstrapped_values.i(env_idx)?.detach())?;
+            let last_next_done = env_next_dones.i(env_next_dones.shape().dims()[0] - 1)?;
+            let mut next_value =
+                ((1.0 - last_next_done)? * bootstrapped_values.i(env_idx)?.detach())?;
             let mut env_advantages = vec![];
 
             let mut gae = Tensor::new(0.0f32, device)?;
             // Compute GAE backwards through the trajectory
             for i in (0..env_rewards.shape().dims()[0]).rev() {
-                let non_terminal = (1.0 - env_dones.i(i)?)?; // 0 if done, 1 if not done
+                let non_terminal = (1.0 - env_next_dones.i(i)?)?; // 0 if next done, 1 if not next done
 
                 // TD error: δ = r + γ * V(s') - V(s)
                 let delta = (env_rewards.i(i)?
                     + next_value * non_terminal.clone() * gamma_tensor.clone()
                     - env_values.i(i)?)?;
 
-                // GAE: A = δ + γ * λ * next_gae * (1 - done)
+                // GAE: A = δ + γ * λ * next_gae * (1 - next_done)
                 gae = (delta
                     + gamma_tensor.clone() * gae_lambda_tensor.clone() * gae * non_terminal)?;
                 env_advantages.push(gae.clone());
@@ -829,6 +830,7 @@ where
         let mut elapsed_timesteps = 0;
         let mut next_states: Tensor;
         let mut rewards;
+        let mut next_dones;
 
         next_states = env.reset().map_err(PPOError::GymError)?;
         self.rollout_buffer = RolloutBuffer::new(
@@ -856,11 +858,10 @@ where
                     self.actor_network_log_prob_and_entropy(&latent_states, &action)?;
 
                 let truncateds;
-                let dones;
                 VectorizedStepInfo {
                     states: next_states,
                     rewards,
-                    dones,
+                    dones: next_dones,
                     truncateds,
                 } = env.step(actual_action).map_err(PPOError::GymError)?;
                 self.rollout_buffer.add(PPOExperience::new(
@@ -868,7 +869,7 @@ where
                     next_states.clone(),
                     action,
                     rewards.clone(),
-                    dones,
+                    next_dones,
                     truncateds,
                     log_probs,
                     None,
@@ -925,11 +926,11 @@ mod tests {
 
         fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
             self.step_count += 1;
-            let done = self.step_count >= 5;
+            let next_done = self.step_count >= 5;
             Ok(StepInfo {
                 state: Tensor::rand(0.0f32, 1.0, &[4], &self.device)?,
                 reward: self.step_count as f32,
-                done,
+                done: next_done,
                 truncated: false,
             })
         }
