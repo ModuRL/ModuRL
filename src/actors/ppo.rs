@@ -664,7 +664,8 @@ where
         .detach();
 
         let critic_loss = loss::mse(&values, &returns)?;
-        let final_critic_loss = ((self.vf_coef as f64) * critic_loss.clone())?;
+        // The 0.5 factor is from the original PPO paper
+        let final_critic_loss = (((self.vf_coef * 0.5) as f64) * critic_loss.clone())?;
 
         if let Some(logging_info) = &mut self.logging_info {
             let explained_variance = {
