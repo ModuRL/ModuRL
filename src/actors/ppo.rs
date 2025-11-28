@@ -4,10 +4,7 @@ use candle_nn::{Optimizer, loss};
 use std::marker::PhantomData;
 
 use crate::{
-    buffers::{
-        experience,
-        rollout_buffer::{RolloutBuffer, RolloutBufferError},
-    },
+    buffers::{experience, rollout_buffer::RolloutBuffer},
     gym::{VectorizedGym, VectorizedStepInfo},
     lr_scheduler::LrScheduler,
     models::probabilistic_model::ProbabilisticActor,
@@ -309,14 +306,14 @@ where
         #[builder(default = true)] clipped: bool,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 0.95)] gae_lambda: f32,
-        #[builder(default = 0.2)] clip_range: f32,
+        #[builder(default = 0.1)] clip_range: f32,
         #[builder(default = true)] normalize_advantage: bool,
-        #[builder(default = true)] normalize_returns: bool,
+        #[builder(default = false)] normalize_returns: bool,
         #[builder(default = 0.5)] vf_coef: f32,
         #[builder(default = 0.01)] ent_coef: f32,
         #[builder(default = 1024)] batch_size: usize,
         #[builder(default = 128)] mini_batch_size: usize,
-        #[builder(default = 1)] num_epochs: usize,
+        #[builder(default = 4)] num_epochs: usize,
         #[builder(default = 0.5)] gradient_clip: f32,
         logging_info: Option<&'a mut dyn PPOLogger>,
         device: candle_core::Device,
@@ -357,46 +354,63 @@ where
 {
     fn optimize(&mut self) -> Result<(), PPOError<AE, GE, SE>> {
         self.add_advantages_and_returns()?;
+
+        let experiences = self.rollout_buffer.get_raw();
+        let mut all_states = vec![];
+        let mut all_actions = vec![];
+        let mut all_log_probs = vec![];
+        let mut all_advantages = vec![];
+        let mut all_returns = vec![];
+        let mut all_rewards = vec![];
+
+        for experience in experiences {
+            all_states.push(experience.states.clone());
+            all_actions.push(experience.actions.clone());
+            all_log_probs.push(experience.log_probs.clone());
+            all_advantages.push(experience.advantages.clone().expect("Advantage not set"));
+            all_returns.push(experience.this_returns.clone().expect("Return not set"));
+            all_rewards.push(experience.rewards.clone());
+        }
+
+        let all_states = Tensor::stack(&all_states, 0)?.flatten(0, 1)?;
+        let all_actions = Tensor::stack(&all_actions, 0)?.flatten(0, 1)?;
+        let all_log_probs = Tensor::stack(&all_log_probs, 0)?.flatten(0, 1)?;
+        let all_advantages = Tensor::stack(&all_advantages, 0)?.flatten(0, 1)?;
+        let all_returns = Tensor::stack(&all_returns, 0)?.flatten(0, 1)?;
+        let all_rewards = Tensor::stack(&all_rewards, 0)?.flatten(0, 1)?;
+
+        let total_samples = all_states.dims()[0];
+        let device = all_states.device();
+
         for epoch in 0..self.num_epochs {
             if let Some(logging_info) = &mut self.logging_info {
                 logging_info.epoch = epoch;
             }
 
-            let batches = self.rollout_buffer.get_all_shuffled();
-            let batches = match batches {
-                Ok(b) => b,
-                Err(e) => match e {
-                    RolloutBufferError::TensorError(te) => return Err(PPOError::TensorError(te)),
-                    RolloutBufferError::ExperienceError(ee) => {
-                        return Err(PPOError::TensorError(ee));
-                    }
-                },
-            };
+            let mut indices: Vec<u32> = (0..total_samples as u32).collect();
+            crate::tensor_operations::fisher_yates_shuffle(&mut indices, device);
+            let indices_tensor = Tensor::from_vec(indices, &[total_samples], device)?;
 
-            for batch in batches.iter() {
-                let elements = batch.get_elements();
-                let mut actions = elements[PPOElement::Action as usize].clone();
-                let mut states = elements[PPOElement::State as usize].clone();
-                let mut batch_old_log_probs = elements[PPOElement::LogProb as usize].clone();
-                let mut advantages = elements[PPOElement::Advantage as usize].clone();
-                let mut returns = elements[PPOElement::Return as usize].clone();
-                let mut rewards = elements[PPOElement::Reward as usize].clone();
-                // flatten the env dimension
-                actions = actions.flatten(0, 1)?;
-                states = states.flatten(0, 1)?;
-                batch_old_log_probs = batch_old_log_probs.flatten(0, 1)?;
-                advantages = advantages.flatten(0, 1)?;
-                returns = returns.flatten(0, 1)?;
-                rewards = rewards.flatten(0, 1)?;
+            for start in (0..total_samples).step_by(self.mini_batch_size) {
+                let end = (start + self.mini_batch_size).min(total_samples);
+                let batch_size = end - start;
 
-                // Compute the loss and backpropagate
+                let batch_indices = indices_tensor.narrow(0, start, batch_size)?;
+
+                let batch_states = all_states.index_select(&batch_indices, 0)?;
+                let batch_actions = all_actions.index_select(&batch_indices, 0)?;
+                let batch_log_probs = all_log_probs.index_select(&batch_indices, 0)?;
+                let batch_advantages = all_advantages.index_select(&batch_indices, 0)?;
+                let batch_returns = all_returns.index_select(&batch_indices, 0)?;
+                let batch_rewards = all_rewards.index_select(&batch_indices, 0)?;
+
                 let ppo_losses = self.compute_loss(
-                    &states,
-                    &actions,
-                    batch_old_log_probs.detach(),
-                    advantages,
-                    returns,
-                    rewards,
+                    &batch_states,
+                    &batch_actions,
+                    batch_log_probs.detach(),
+                    batch_advantages,
+                    batch_returns,
+                    batch_rewards,
                 )?;
 
                 self.backpropagate_loss(ppo_losses.clone())?;
@@ -627,6 +641,7 @@ where
         let (log_probs, entropy) =
             self.actor_network_log_prob_and_entropy(&latent_state, actions)?;
 
+        // Clamp to prevent any NaNs or infs
         let ratio = (&log_probs - &old_log_probs)?.clamp(-20.0, 10.0)?.exp()?;
 
         let actor_loss = match self.clipped {

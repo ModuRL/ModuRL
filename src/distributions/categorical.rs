@@ -28,8 +28,8 @@ impl CategoricalDistribution {
     fn gumbel_noise(shape: &[usize], device: &Device) -> Result<Tensor, candle_core::Error> {
         // sample uniform(0,1), then transform: -log(-log(U))
         let u = Tensor::rand(0f32, 1f32, shape, device)?;
-        let gumbel = (-1.0 * (&u.log()?))?.log()?;
-        Ok(gumbel.neg()?) // -log(-log(u))
+        let gumbel = &u.log()?.neg()?.log()?.neg()?;
+        Ok(gumbel.clone()) // -log(-log(u))
     }
 }
 
@@ -64,7 +64,7 @@ impl Distribution for CategoricalDistribution {
 
     fn from_outputs(outputs: &Tensor) -> Self {
         Self {
-            logits: outputs.clamp(-20.0, 20.0).unwrap(),
+            logits: outputs.clone(),
         }
     }
 }
