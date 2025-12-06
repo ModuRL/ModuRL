@@ -343,7 +343,9 @@ where
 
             for _ in 0..env.num_envs() {
                 elapsed_timesteps += 1;
-                if elapsed_timesteps % self.update_frequency == 0 {
+                if elapsed_timesteps % self.update_frequency == 0
+                    && elapsed_timesteps > self.training_start
+                {
                     // Only need to update epsilon before optimization step
                     self.current_epsilon = (self.epsilon_schedule)(
                         (elapsed_timesteps as f32) / (num_timesteps as f32),
