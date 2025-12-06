@@ -224,27 +224,39 @@ fn dqn_cartpole() {
 
     let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
     let observation_space = vec_env.observation_space();
-    let var_map = VarMap::new();
-    let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
+    let online_var_map = VarMap::new();
+    let online_vb = VarBuilder::from_varmap(&online_var_map, candle_core::DType::F32, &device);
 
-    let mlp = MLP::builder()
+    let online_q_network = MLP::builder()
         .input_size(observation_space.shape().iter().sum())
         .output_size(2)
-        .vb(vb)
+        .vb(online_vb)
+        .hidden_layer_sizes(vec![64, 64])
+        .build()
+        .expect("Failed to create MLP");
+
+    let mut target_var_map = VarMap::new();
+    let target_vb = VarBuilder::from_varmap(&target_var_map, candle_core::DType::F32, &device);
+
+    let target_q_network = MLP::builder()
+        .input_size(observation_space.shape().iter().sum())
+        .output_size(2)
+        .vb(target_vb)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("Failed to create MLP");
 
     let mut config = ParamsAdam::default();
     config.lr = 1e-3;
-    let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create AdamW");
+    let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut actor = DQNActor::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
         .observation_space(observation_space)
-        .q_network(Box::new(mlp))
-        .epsilon_start(1.0)
-        .epsilon_decay(0.99)
+        .online_q_network(Box::new(online_q_network))
+        .target_q_network(Box::new(target_q_network))
+        .online_vars(&online_var_map)
+        .target_vars(&mut target_var_map)
         .optimizer(optimizer)
         .replay_capacity(10_000)
         .batch_size(32)
