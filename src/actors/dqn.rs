@@ -1,5 +1,5 @@
 use bon::bon;
-use candle_core::{Error, IndexOp, Tensor};
+use candle_core::{Device, Error, IndexOp, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
 use super::Actor;
@@ -13,6 +13,36 @@ use crate::{
     tensor_operations::tensor_has_nan,
 };
 use std::ops::Deref;
+
+/// Strategy for selecting device for DQN actor computations.
+/// - one Device: Everything runs on one Device.
+/// - Hybrid: Optimization runs on Optimization Device, but experience replay is on Storage Device until sampled for training.
+pub enum DQNDeviceStrategy {
+    OneDevice(Device),
+    Hybrid {
+        optimization_device: Device,
+        storage_device: Device,
+    },
+}
+
+impl DQNDeviceStrategy {
+    fn storage_device(&self) -> Device {
+        match self {
+            DQNDeviceStrategy::OneDevice(device) => device.clone(),
+            DQNDeviceStrategy::Hybrid { storage_device, .. } => storage_device.clone(),
+        }
+    }
+
+    fn optimization_device(&self) -> Device {
+        match self {
+            DQNDeviceStrategy::OneDevice(device) => device.clone(),
+            DQNDeviceStrategy::Hybrid {
+                optimization_device,
+                ..
+            } => optimization_device.clone(),
+        }
+    }
+}
 
 struct DQNLoggingInfo<'a> {
     logger: &'a mut dyn DQNLogger,
@@ -131,6 +161,7 @@ where
     update_frequency: usize,
     training_start: usize,
     logging_info: Option<DQNLoggingInfo<'a>>,
+    device_strategy: DQNDeviceStrategy,
     _phantom: std::marker::PhantomData<GE>,
 }
 
@@ -160,9 +191,14 @@ where
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         logger: Option<&'a mut dyn DQNLogger>,
-        device: candle_core::Device,
+        device_strategy: DQNDeviceStrategy,
     ) -> Self {
-        let experience_replay = ExperienceReplay::new(replay_capacity, batch_size, device);
+        let experience_replay = ExperienceReplay::new(
+            replay_capacity,
+            batch_size,
+            device_strategy.storage_device(),
+        );
+
         Self {
             online_q_network,
             target_q_network,
@@ -180,6 +216,7 @@ where
             update_frequency,
             logging_info: logger.map(|l| DQNLoggingInfo::new(l)),
             _phantom: std::marker::PhantomData,
+            device_strategy,
         }
     }
 }
@@ -211,7 +248,10 @@ where
                 ExperienceReplayError::TensorError(te) => return Err(te),
             },
         };
-        let elements = training_batch.get_elements();
+        let mut elements = training_batch.get_elements();
+        for elements in &mut elements {
+            *elements = elements.to_device(&self.device_strategy.optimization_device())?;
+        }
         let states = elements[0].clone();
         let next_states = elements[1].clone();
         let actions = elements[2].clone();
@@ -224,8 +264,8 @@ where
         // Select the q-values for the actions taken.
         state_action_q_values = state_action_q_values.gather(&actions, 1)?;
 
-        let next_q_values = self.target_q_network.forward(&next_states)?;
-        let next_q_values = next_q_values.max(1)?;
+        let next_q_values = self.target_q_network.forward(&next_states)?.detach();
+        let next_q_values = next_q_values.max(1)?.detach();
 
         // Compute the target Q-values.
         let gamma_tensor = Tensor::full(self.gamma, next_q_values.shape(), states.device())?;
@@ -328,9 +368,14 @@ where
             for i in 0..env.num_envs() {
                 let reward = rewards[i].i(0)?.to_scalar::<f32>()?;
                 let next_done = dones[i];
-                let next_observation = next_observations[i].clone().squeeze(0)?;
-                let observation = this_observations[i].clone().squeeze(0)?;
-                let action = action[i].clone().squeeze(0)?;
+                let mut next_observation = next_observations[i].clone().squeeze(0)?.detach();
+                let mut observation = this_observations[i].clone().squeeze(0)?.detach();
+                let mut action = action[i].clone().squeeze(0)?.detach();
+
+                for element in [&mut observation, &mut next_observation, &mut action] {
+                    *element = element.to_device(&self.device_strategy.storage_device())?;
+                }
+
                 // Add the experience to the replay buffer.
                 self.experience_replay.add(DQNActorExperience::new(
                     observation.clone(),

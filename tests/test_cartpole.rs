@@ -2,7 +2,7 @@ use candle_core::Device;
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::actors::ddqn::DDQNActor;
-use modurl::actors::dqn::DQNActor;
+use modurl::actors::dqn::{DQNActor, DQNDeviceStrategy};
 use modurl::actors::ppo::SeparatePPONetwork;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl::tensor_operations::tanh;
@@ -261,7 +261,7 @@ fn dqn_cartpole() {
         .replay_capacity(10_000)
         .batch_size(32)
         .update_frequency(1)
-        .device(device.clone())
+        .device_strategy(DQNDeviceStrategy::OneDevice(device.clone()))
         .build();
 
     // we'll give dqn more chances since it's more unstable
