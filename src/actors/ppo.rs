@@ -449,7 +449,7 @@ where
 
         let states = Tensor::stack(&states, 0)?; // shape [batch_size, env_count, ...]
         let (batch_size, env_count) = (states.dims()[0], states.dims()[1]);
-        // Flatten temporally to feed into networks
+        // Flatten temporarily to feed into networks
         let states = states.flatten(0, 1)?; // shape [batch_size * env_count, ...]
 
         let latent_states = match self.network_info {
