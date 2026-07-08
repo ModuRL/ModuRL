@@ -64,7 +64,7 @@ fn main() {
     let device = Device::cuda_if_available(0).unwrap();
     let env1 = DebugLunarLander::new(
         LunarLanderV3::builder()
-            .render(true)
+            .render_human(true)
             .device(device.clone())
             .build(),
     );

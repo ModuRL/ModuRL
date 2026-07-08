@@ -352,18 +352,21 @@ where
         let mut observations = env.reset().map_err(DQNActorError::GymError)?;
         while elapsed_timesteps < num_timesteps {
             let action = self.act(&observations)?;
+            let step_info = env.step(action.clone()).map_err(DQNActorError::GymError)?;
+            let training_next_observations = step_info.transition_next_states()?;
             let VectorizedStepInfo {
                 states: next_observations,
                 rewards,
                 dones,
                 truncateds: _,
-            } = env.step(action.clone()).map_err(DQNActorError::GymError)?;
+                terminal_states: _,
+            } = step_info;
 
             let rewards = rewards.chunk(env.num_envs(), 0)?;
             let action = action.chunk(env.num_envs(), 0)?;
             let this_observations = observations.chunk(env.num_envs(), 0)?;
             observations = next_observations.clone();
-            let next_observations = next_observations.chunk(env.num_envs(), 0)?;
+            let next_observations = training_next_observations.chunk(env.num_envs(), 0)?;
 
             for i in 0..env.num_envs() {
                 let reward = rewards[i].i(0)?.to_scalar::<f32>()?;
