@@ -1,15 +1,21 @@
 use candle_core::{DType, Error, Tensor, backprop::GradStore};
 
-pub(crate) fn torch_like_min(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
-    // candle has a min but all it does is takes a tensor and a dim
-    // we add a new dim at the end and then take the min along that dim
-    let original_shape = a.dims().to_vec();
-    let a = a.unsqueeze(original_shape.len()).unwrap();
-    let b = b.unsqueeze(original_shape.len()).unwrap();
-    let merged = Tensor::cat(&[a, b], original_shape.len()).unwrap();
-    let result = merged.min(original_shape.len()).unwrap();
+pub(crate) fn torch_like_max(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
+    // See torch_like_min for why this is a masked select; ties route to `b`.
+    let mask = a.gt(b)?.to_dtype(a.dtype())?;
+    let inv_mask = (1.0 - &mask)?;
+    (a * &mask)? + (b * &inv_mask)?
+}
 
-    Ok(result)
+pub(crate) fn torch_like_min(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
+    // candle's min-reduction backward sends full gradient to every element tied
+    // for the minimum, so a cat+min implementation double-counts gradient when
+    // a == b (e.g. PPO's first minibatch, where ratio == 1 makes both surrogates
+    // equal). Select with a detached mask instead so exactly one branch receives
+    // gradient; ties route to `b`.
+    let mask = a.lt(b)?.to_dtype(a.dtype())?;
+    let inv_mask = (1.0 - &mask)?;
+    (a * &mask)? + (b * &inv_mask)?
 }
 
 pub(crate) fn clip_gradients(
@@ -55,7 +61,9 @@ pub(crate) fn normalize_tensor(t: &Tensor) -> Result<Tensor, candle_core::Error>
     let mean = t.mean_all()?.broadcast_as(t.shape())?;
     let diff = (t.clone() - mean.clone())?;
 
-    let std = diff.sqr()?.mean_all()?.sqrt()?;
+    // Unbiased (n-1) std to match torch .std() / reference PPO implementations.
+    let n = t.elem_count().max(2) as f64;
+    let std = (diff.sqr()?.sum_all()? / (n - 1.0))?.sqrt()?;
     let std_with_eps = (std + 1e-8)?.broadcast_as(t.shape())?;
 
     diff / std_with_eps
