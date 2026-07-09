@@ -6,10 +6,10 @@ use std::marker::PhantomData;
 use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
     gym::{VectorizedGym, VectorizedStepInfo},
-    lr_scheduler::LrScheduler,
     models::probabilistic_model::ProbabilisticActor,
+    parameter_schedule::{ConstantSchedule, ParameterSchedule},
     spaces,
-    tensor_operations::{normalize_tensor, tensor_has_nan, torch_like_min},
+    tensor_operations::{normalize_tensor, tensor_has_nan, torch_like_max, torch_like_min},
 };
 
 #[derive(Debug)]
@@ -49,6 +49,8 @@ struct PPOExperience {
     log_probs: Tensor,
     advantages: Option<Tensor>,
     this_returns: Option<Tensor>,
+    /// V(s) under the rollout-collection network, for PPO2-style value-loss clipping.
+    old_values: Option<Tensor>,
 }
 
 impl PPOExperience {
@@ -73,6 +75,7 @@ impl PPOExperience {
             log_probs,
             advantages,
             this_returns,
+            old_values: None,
         }
     }
 }
@@ -197,7 +200,7 @@ pub struct SharedPPONetwork<O, E> {
     shared_network: Box<dyn candle_core::Module>,
     critic_head: Box<dyn candle_core::Module>,
     actor_head: Box<dyn ProbabilisticActor<Error = E>>,
-    lr_scheduler: Option<Box<dyn LrScheduler>>,
+    lr_scheduler: Option<Box<dyn ParameterSchedule>>,
 }
 
 #[bon]
@@ -212,7 +215,7 @@ where
         shared_network: Box<dyn candle_core::Module>,
         critic_head: Box<dyn candle_core::Module>,
         actor_head: Box<dyn ProbabilisticActor<Error = E>>,
-        lr_scheduler: Option<Box<dyn LrScheduler>>,
+        lr_scheduler: Option<Box<dyn ParameterSchedule>>,
     ) -> Self {
         Self {
             optimizer,
@@ -229,8 +232,8 @@ pub struct SeparatePPONetwork<O1, O2, E> {
     critic_optimizer: O2,
     actor_network: Box<dyn ProbabilisticActor<Error = E>>,
     critic_network: Box<dyn candle_core::Module>,
-    actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
-    critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
+    actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+    critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
     combined_loss: bool,
 }
 
@@ -247,8 +250,8 @@ where
         critic_optimizer: O2,
         actor_network: Box<dyn ProbabilisticActor<Error = E>>,
         critic_network: Box<dyn candle_core::Module>,
-        actor_lr_scheduler: Option<Box<dyn LrScheduler>>,
-        critic_lr_scheduler: Option<Box<dyn LrScheduler>>,
+        actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+        critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
         #[builder(default = false)] combined_loss: bool,
     ) -> Self {
         Self {
@@ -272,9 +275,10 @@ where
     SE: std::fmt::Debug,
 {
     clipped: bool,
+    clip_value_loss: bool,
     gamma: f32,
     gae_lambda: f32,
-    clip_range: f32,
+    clip_range: Box<dyn ParameterSchedule>,
     normalize_advantage: bool,
     normalize_returns: bool,
     vf_coef: f32,
@@ -287,6 +291,7 @@ where
     batch_size: usize,
     logging_info: Option<PPOLoggingInfo<'a>>,
     gradient_clip: f32,
+    current_states: Option<Tensor>,
     _phantom: PhantomData<GE>,
 }
 
@@ -304,9 +309,15 @@ where
         action_space: Box<dyn spaces::Space<Error = SE>>,
         network_info: PPONetworkInfo<O1, AE, O2>,
         #[builder(default = true)] clipped: bool,
+        // PPO2/CleanRL-style value-loss clipping. Disabled by default because
+        // its usefulness is task- and reward-scale-dependent.
+        // research has shown it's often harmful
+        #[builder(default = false)] clip_value_loss: bool,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 0.95)] gae_lambda: f32,
-        #[builder(default = 0.1)] clip_range: f32,
+        #[builder(default = Box::new(ConstantSchedule::new(0.1)))] clip_range: Box<
+            dyn ParameterSchedule,
+        >,
         #[builder(default = true)] normalize_advantage: bool,
         #[builder(default = false)] normalize_returns: bool,
         #[builder(default = 0.5)] vf_coef: f32,
@@ -324,6 +335,7 @@ where
 
         Self {
             clipped,
+            clip_value_loss,
             gamma,
             gae_lambda,
             clip_range,
@@ -339,6 +351,7 @@ where
             mini_batch_size,
             logging_info: logging_info.map(|logger| PPOLoggingInfo::new(logger)),
             gradient_clip,
+            current_states: None,
             _phantom: PhantomData,
         }
     }
@@ -352,7 +365,7 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
-    fn optimize(&mut self) -> Result<(), PPOError<AE, GE, SE>> {
+    fn optimize(&mut self, progress: f64) -> Result<(), PPOError<AE, GE, SE>> {
         self.add_advantages_and_returns()?;
 
         let experiences = self.rollout_buffer.get_raw();
@@ -362,6 +375,7 @@ where
         let mut all_advantages = vec![];
         let mut all_returns = vec![];
         let mut all_rewards = vec![];
+        let mut all_old_values = vec![];
 
         for experience in experiences {
             all_states.push(experience.states.clone());
@@ -370,6 +384,7 @@ where
             all_advantages.push(experience.advantages.clone().expect("Advantage not set"));
             all_returns.push(experience.this_returns.clone().expect("Return not set"));
             all_rewards.push(experience.rewards.clone());
+            all_old_values.push(experience.old_values.clone().expect("Old value not set"));
         }
 
         let all_states = Tensor::stack(&all_states, 0)?.flatten(0, 1)?;
@@ -378,9 +393,11 @@ where
         let all_advantages = Tensor::stack(&all_advantages, 0)?.flatten(0, 1)?;
         let all_returns = Tensor::stack(&all_returns, 0)?.flatten(0, 1)?;
         let all_rewards = Tensor::stack(&all_rewards, 0)?.flatten(0, 1)?;
+        let all_old_values = Tensor::stack(&all_old_values, 0)?.flatten(0, 1)?;
 
         let total_samples = all_states.dims()[0];
         let device = all_states.device();
+        let clip_range = self.clip_range.value(progress) as f32;
 
         for epoch in 0..self.num_epochs {
             if let Some(logging_info) = &mut self.logging_info {
@@ -403,6 +420,7 @@ where
                 let batch_advantages = all_advantages.index_select(&batch_indices, 0)?;
                 let batch_returns = all_returns.index_select(&batch_indices, 0)?;
                 let batch_rewards = all_rewards.index_select(&batch_indices, 0)?;
+                let batch_old_values = all_old_values.index_select(&batch_indices, 0)?;
 
                 let ppo_losses = self.compute_loss(
                     &batch_states,
@@ -411,6 +429,8 @@ where
                     batch_advantages,
                     batch_returns,
                     batch_rewards,
+                    batch_old_values.detach(),
+                    clip_range,
                 )?;
 
                 self.backpropagate_loss(ppo_losses.clone())?;
@@ -426,6 +446,7 @@ where
         // For advantage return calculation:
         let mut rewards = vec![];
         let mut next_dones = vec![];
+        let mut next_truncateds = vec![];
         let mut states = vec![];
         let mut next_states = vec![];
         // For splitting the envs
@@ -437,6 +458,13 @@ where
             next_dones.push(
                 experience
                     .next_dones
+                    .iter()
+                    .map(|&d| if d { 1.0 } else { 0.0 })
+                    .collect::<Vec<f32>>(),
+            );
+            next_truncateds.push(
+                experience
+                    .truncateds
                     .iter()
                     .map(|&d| if d { 1.0 } else { 0.0 })
                     .collect::<Vec<f32>>(),
@@ -482,10 +510,16 @@ where
         let device = values_tensor.device();
 
         let next_dones_shape = &[next_dones.len(), next_dones[0].len()];
+        let next_truncateds_shape = &[next_truncateds.len(), next_truncateds[0].len()];
         let rewards_tensor = candle_core::Tensor::stack(&rewards, 0)?;
         let next_dones_tensor = candle_core::Tensor::from_vec(
             next_dones.into_iter().flatten().collect(),
             next_dones_shape,
+            device,
+        )?;
+        let next_truncateds_tensor = candle_core::Tensor::from_vec(
+            next_truncateds.into_iter().flatten().collect(),
+            next_truncateds_shape,
             device,
         )?;
 
@@ -494,6 +528,7 @@ where
                 &rewards_tensor,
                 &values_tensor,
                 &next_dones_tensor,
+                &next_truncateds_tensor,
                 &bootstrapped_values,
             )?
             .detach();
@@ -509,6 +544,9 @@ where
             // The detaches here should be redundant but just to be safe
             experience.advantages = Some(advantages.i(i)?.clone().detach());
             experience.this_returns = Some(returns.i(i)?.clone().detach());
+            // values_tensor comes from the pre-update network, i.e. the
+            // collection-time values PPO2 clips the new values against.
+            experience.old_values = Some(values_tensor.i(i)?.clone().detach());
         }
 
         Ok(())
@@ -519,6 +557,7 @@ where
         rewards: &candle_core::Tensor,
         values: &candle_core::Tensor,
         next_dones: &candle_core::Tensor,
+        next_truncateds: &candle_core::Tensor,
         bootstrapped_values: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
         let device = rewards.device();
@@ -531,26 +570,25 @@ where
         for env_idx in 0..rewards.shape().dims()[1] {
             let env_rewards = rewards.i((.., env_idx))?.detach();
             let env_next_dones = next_dones.i((.., env_idx))?.detach();
+            let env_next_truncateds = next_truncateds.i((.., env_idx))?.detach();
             let env_values = values.i((.., env_idx))?.detach();
-
-            let last_next_done = env_next_dones.i(env_next_dones.shape().dims()[0] - 1)?;
-            let mut next_value =
-                ((1.0 - last_next_done)? * bootstrapped_values.i(env_idx)?.detach())?;
             let mut env_advantages = vec![];
 
+            let mut next_value = bootstrapped_values.i(env_idx)?.detach();
             let mut gae = Tensor::new(0.0f32, device)?;
             // Compute GAE backwards through the trajectory
             for i in (0..env_rewards.shape().dims()[0]).rev() {
-                let non_terminal = (1.0 - env_next_dones.i(i)?)?; // 0 if next done, 1 if not next done
+                let same_episode =
+                    ((1.0 - env_next_dones.i(i)?)? * (1.0 - env_next_truncateds.i(i)?)?)?;
 
                 // TD error: δ = r + γ * V(s') - V(s)
                 let delta = (env_rewards.i(i)?
-                    + next_value * non_terminal.clone() * gamma_tensor.clone()
+                    + next_value.clone() * same_episode.clone() * gamma_tensor.clone()
                     - env_values.i(i)?)?;
 
                 // GAE: A = δ + γ * λ * next_gae * (1 - next_done)
                 gae = (delta
-                    + gamma_tensor.clone() * gae_lambda_tensor.clone() * gae * non_terminal)?;
+                    + gamma_tensor.clone() * gae_lambda_tensor.clone() * gae * same_episode)?;
                 env_advantages.push(gae.clone());
                 next_value = env_values.i(i)?;
             }
@@ -621,6 +659,8 @@ where
         advantages: candle_core::Tensor,
         returns: candle_core::Tensor,
         rewards: candle_core::Tensor,
+        old_values: candle_core::Tensor,
+        clip_range: f32,
     ) -> Result<PPOLosses, PPOError<AE, GE, SE>> {
         let advantages = if self.normalize_advantage {
             normalize_tensor(&advantages)?
@@ -641,12 +681,12 @@ where
         let (log_probs, entropy) =
             self.actor_network_log_prob_and_entropy(&latent_state, actions)?;
 
-        // Clamp to prevent any NaNs or infs
-        let ratio = (&log_probs - &old_log_probs)?.clamp(-20.0, 10.0)?.exp()?;
+        let log_ratio = (&log_probs - &old_log_probs)?;
+        let ratio = log_ratio.exp()?;
+        let approx_kl = ((&ratio - 1.0)? - &log_ratio)?;
 
         let actor_loss = match self.clipped {
             true => {
-                let clip_range = self.clip_range;
                 let clipped_ratio = ratio.clamp(1.0 - clip_range, 1.0 + clip_range)?;
 
                 let surrogate1 = (ratio.clone() * advantages.clone())?;
@@ -678,7 +718,18 @@ where
         }
         .detach();
 
-        let critic_loss = loss::mse(&values, &returns)?;
+        let critic_loss = if self.clip_value_loss {
+            // PPO2/CleanRL value-loss clipping: bound how far the value estimate
+            // may move from its rollout-time value within one update.
+            let clip_range = clip_range as f64;
+            let value_delta = (&values - &old_values)?.clamp(-clip_range, clip_range)?;
+            let values_clipped = (&old_values + value_delta)?;
+            let loss_unclipped = (&values - &returns)?.sqr()?;
+            let loss_clipped = (&values_clipped - &returns)?.sqr()?;
+            torch_like_max(&loss_unclipped, &loss_clipped)?.mean_all()?
+        } else {
+            loss::mse(&values, &returns)?
+        };
         // The 0.5 factor is from the original PPO paper
         let final_critic_loss = (((self.vf_coef * 0.5) as f64) * critic_loss.clone())?;
 
@@ -695,7 +746,7 @@ where
                 actor_loss: final_actor_loss.clone(),
                 critic_loss: final_critic_loss.clone(),
                 entropy: entropy_loss,
-                kl_divergence: ratio,
+                kl_divergence: approx_kl,
                 explained_variance,
                 rewards: rewards,
                 epoch: logging_info.epoch,
@@ -780,18 +831,18 @@ where
     fn update_learning_rates(&mut self, progress: f64) {
         match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
-                if let Some(scheduler) = &shared_info.lr_scheduler {
-                    let new_lr = scheduler.get_lr(progress);
+                if let Some(lr_scheduler) = &shared_info.lr_scheduler {
+                    let new_lr = lr_scheduler.value(progress);
                     shared_info.optimizer.set_learning_rate(new_lr);
                 }
             }
             PPONetworkInfo::Separate(ref mut separate_info) => {
-                if let Some(scheduler) = &separate_info.actor_lr_scheduler {
-                    let new_lr = scheduler.get_lr(progress);
+                if let Some(actor_lr_scheduler) = &separate_info.actor_lr_scheduler {
+                    let new_lr = actor_lr_scheduler.value(progress);
                     separate_info.actor_optimizer.set_learning_rate(new_lr);
                 }
-                if let Some(scheduler) = &separate_info.critic_lr_scheduler {
-                    let new_lr = scheduler.get_lr(progress);
+                if let Some(critic_lr_scheduler) = &separate_info.critic_lr_scheduler {
+                    let new_lr = critic_lr_scheduler.value(progress);
                     separate_info.critic_optimizer.set_learning_rate(new_lr);
                 }
             }
@@ -808,6 +859,10 @@ where
                 separate_info.critic_optimizer.set_learning_rate(lr);
             }
         }
+    }
+
+    pub fn reset_current_states(&mut self) {
+        self.current_states = None;
     }
 }
 
@@ -844,11 +899,11 @@ where
         num_timesteps: usize,
     ) -> Result<(), PPOError<AE, GE, SE>> {
         let mut elapsed_timesteps = 0;
-        let mut next_states: Tensor;
-        let mut rewards;
-        let mut next_dones;
-
-        next_states = env.reset().map_err(PPOError::GymError)?;
+        let mut next_states = if let Some(states) = self.current_states.take() {
+            states
+        } else {
+            env.reset().map_err(PPOError::GymError)?
+        };
         self.rollout_buffer = RolloutBuffer::new(
             self.mini_batch_size / env.num_envs(),
             next_states.device().clone(),
@@ -872,17 +927,24 @@ where
 
                 let (log_probs, _) =
                     self.actor_network_log_prob_and_entropy(&latent_states, &action)?;
+                // Detach so the rollout buffer does not keep the whole forward
+                // graph (CNN activations) alive for every collected step.
+                let log_probs = log_probs.detach();
 
-                let truncateds;
-                VectorizedStepInfo {
-                    states: next_states,
+                let step_info = env
+                    .step(actual_action.clone())
+                    .map_err(PPOError::GymError)?;
+                let training_next_states = step_info.transition_next_states()?;
+                let VectorizedStepInfo {
+                    states: reset_or_next_states,
                     rewards,
                     dones: next_dones,
                     truncateds,
-                } = env.step(actual_action).map_err(PPOError::GymError)?;
+                    terminal_states: _,
+                } = step_info;
                 self.rollout_buffer.add(PPOExperience::new(
                     states.clone(),
-                    next_states.clone(),
+                    training_next_states,
                     action,
                     rewards.clone(),
                     next_dones,
@@ -891,17 +953,20 @@ where
                     None,
                     None,
                 ));
+                next_states = reset_or_next_states;
             }
 
             elapsed_timesteps += self.rollout_buffer.len() * env.num_envs();
 
-            self.update_learning_rates((elapsed_timesteps as f64) / (num_timesteps as f64));
+            let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
+            self.update_learning_rates(progress);
 
             if let Some(logging_info) = &mut self.logging_info {
                 logging_info.timestep = elapsed_timesteps;
             }
-            self.optimize()?;
+            self.optimize(progress)?;
         }
+        self.current_states = Some(next_states);
         Ok(())
     }
 }
@@ -1049,7 +1114,7 @@ mod tests {
                 .mini_batch_size(64)
                 .ent_coef(0.01)
                 .vf_coef(0.5)
-                .clip_range(0.2)
+                .clip_range(Box::new(ConstantSchedule::new(0.2)))
                 .gae_lambda(0.95)
                 .num_epochs(10)
                 .device(device.clone())

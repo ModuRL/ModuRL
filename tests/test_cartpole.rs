@@ -7,10 +7,10 @@ use modurl::actors::ppo::SeparatePPONetwork;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl::tensor_operations::tanh;
 use modurl::{
-    actors::{Actor, ppo::PPOActor},
+    actors::{ppo::PPOActor, Actor},
     distributions::CategoricalDistribution,
     gym::{Gym, StepInfo},
-    models::{MLP, probabilistic_model::ProbabilisticActorModel},
+    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
     spaces::Discrete,
 };
 use modurl_gym::classic_control::cartpole::CartPoleV1;
@@ -128,7 +128,10 @@ fn ppo_cartpole() {
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
-        .ortho_gains((2.0f64.sqrt(), 0.01))
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 0.01,
+        }))
         .name("actor_network".to_string())
         .build()
         .unwrap();
@@ -148,7 +151,10 @@ fn ppo_cartpole() {
         .vb(critic_vb)
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
-        .ortho_gains((2.0f64.sqrt(), 1.0))
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 1.0,
+        }))
         .name("critic_network".to_string())
         .build()
         .unwrap();
@@ -179,7 +185,9 @@ fn ppo_cartpole() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(0.2)
+        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
+            0.2,
+        )))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
@@ -245,7 +253,10 @@ fn ppo_cartpole_shared() {
         .activation(Box::new(tanh))
         .output_activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64])
-        .ortho_gains((2.0f64.sqrt(), 2.0f64.sqrt()))
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 2.0f64.sqrt(),
+        }))
         .name("shared_trunk".to_string())
         .build()
         .unwrap();
@@ -303,7 +314,9 @@ fn ppo_cartpole_shared() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(vf_coef)
-        .clip_range(0.2)
+        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
+            0.2,
+        )))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
@@ -378,7 +391,10 @@ fn ppo_cartpole_shared_multithreaded() {
         .activation(Box::new(tanh))
         .output_activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64])
-        .ortho_gains((2.0f64.sqrt(), 2.0f64.sqrt()))
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 2.0f64.sqrt(),
+        }))
         .name("shared_trunk_mt".to_string())
         .build()
         .unwrap();
@@ -413,7 +429,9 @@ fn ppo_cartpole_shared_multithreaded() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(0.2)
+        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
+            0.2,
+        )))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
