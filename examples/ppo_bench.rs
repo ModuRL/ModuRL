@@ -32,8 +32,8 @@ fn ppo_cartpole() {
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
-        .output_size(action_space.shape().iter().product::<usize>())
+        .input_size(observation_space.shape()[0])
+        .output_size(action_space.shape()[0])
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
@@ -44,9 +44,11 @@ fn ppo_cartpole() {
         .name("actor_network".to_string())
         .build()
         .unwrap();
-    let mut config = ParamsAdam::default();
     // Optimizers: both with lr=3e-4
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let actor_optimizer =
         Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -55,7 +57,7 @@ fn ppo_cartpole() {
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
+        .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
@@ -68,7 +70,6 @@ fn ppo_cartpole() {
         .build()
         .unwrap();
 
-    config.lr = 3e-4;
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 

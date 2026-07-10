@@ -75,10 +75,10 @@ impl PPOGrapher {
             explained_variance,
             reward,
         ];
-        for (field, new_value) in self_fields.into_iter().zip(new_values.into_iter()) {
+        for (field, new_value) in self_fields.into_iter().zip(new_values) {
             let current_total = field.last().cloned().unwrap_or(0.0);
             let updated_total = current_total + new_value;
-            if field.len() == 0 {
+            if field.is_empty() {
                 field.push(updated_total);
             } else {
                 *field.last_mut().unwrap() = updated_total;
@@ -97,7 +97,7 @@ impl PPOGrapher {
             &mut self.explained_variances,
             &mut self.rewards,
         ];
-        for field in fields.into_iter() {
+        for field in fields {
             field.push(0.0);
         }
         self.add_to_running_total(info);
@@ -112,15 +112,15 @@ impl PPOGrapher {
             &mut self.explained_variances,
             &mut self.rewards,
         ];
-        for field in fields.into_iter() {
-            field.last_mut().map(|last_value| {
+        for field in fields {
+            if let Some(last_value) = field.last_mut() {
                 *last_value /= self.samples_on_this_step as f32;
-            });
+            }
         }
         self.samples_on_this_step = 0;
     }
 
-    fn textplot_graph(data: &Vec<f32>, label: &str) {
+    fn textplot_graph(data: &[f32], label: &str) {
         println!("Graph for {}:", label);
         Chart::new(180, 30, 0.0, data.len() as f32)
             .lineplot(&textplots::Shape::Lines(
@@ -134,7 +134,7 @@ impl PPOGrapher {
     fn display_graphs(&mut self, rolling_window_size: usize) {
         self.divide_last_by_samples();
 
-        let mut variables = vec![
+        let mut variables = [
             self.actor_losses.clone(),
             self.critic_losses.clone(),
             self.entropies.clone(),
@@ -211,8 +211,8 @@ fn ppo_cartpole() {
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
-        .output_size(action_space.shape().iter().product::<usize>())
+        .input_size(observation_space.shape()[0])
+        .output_size(action_space.shape()[0])
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
@@ -223,9 +223,11 @@ fn ppo_cartpole() {
         .name("actor_network".to_string())
         .build()
         .unwrap();
-    let mut config = ParamsAdam::default();
     // Optimizers: both with lr=3e-4
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let actor_optimizer =
         Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -234,7 +236,7 @@ fn ppo_cartpole() {
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
+        .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
@@ -247,7 +249,6 @@ fn ppo_cartpole() {
         .build()
         .unwrap();
 
-    config.lr = 3e-4;
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 

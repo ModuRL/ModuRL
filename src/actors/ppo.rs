@@ -826,7 +826,7 @@ where
             PPONetworkInfo::Separate(ref mut separate_info) => &separate_info.actor_network,
         };
 
-        network.sample(&states).map_err(PPOError::ActorError)
+        network.sample(states).map_err(PPOError::ActorError)
     }
 
     fn update_learning_rates(&mut self, progress: f64) {
@@ -1065,8 +1065,8 @@ mod tests {
             let actor_vb =
                 VarBuilder::from_varmap(&actor_var_map, candle_core::DType::F32, &device);
             let actor_network = MLP::builder()
-                .input_size(observation_space.shape().iter().product())
-                .output_size(action_space.shape().iter().product::<usize>())
+                .input_size(observation_space.shape()[0])
+                .output_size(action_space.shape()[0])
                 .vb(actor_vb)
                 .activation(Box::new(tanh))
                 .hidden_layer_sizes(vec![8, 8])
@@ -1074,8 +1074,10 @@ mod tests {
                 .build()
                 .unwrap();
 
-            let mut config = ParamsAdam::default();
-            config.lr = 3e-4;
+            let config = ParamsAdam {
+                lr: 3e-4,
+                ..Default::default()
+            };
             let actor_optimizer = Adam::new(actor_var_map.all_vars(), config.clone()).unwrap();
 
             // Critic network
@@ -1083,7 +1085,7 @@ mod tests {
             let critic_vb =
                 VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
             let critic_network = MLP::builder()
-                .input_size(observation_space.shape().iter().product())
+                .input_size(observation_space.shape()[0])
                 .output_size(1)
                 .vb(critic_vb)
                 .activation(Box::new(tanh))

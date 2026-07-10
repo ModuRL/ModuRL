@@ -55,8 +55,7 @@ fn qr_decomposition(a: &Tensor) -> Result<Tensor> {
 
     for j in 0..cols {
         let mut v = a.i((.., j))?;
-        for i in 0..j {
-            let q_i = &q_cols[i];
+        for q_i in q_cols.iter().take(j) {
             let dot = (q_i * &v)?.sum_all()?;
             let scaled_q = q_i.broadcast_mul(&dot)?;
             v = (v - scaled_q)?;

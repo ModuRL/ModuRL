@@ -75,8 +75,8 @@ fn main() {
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
-        .output_size(action_space.shape().iter().sum::<usize>())
+        .input_size(observation_space.shape()[0])
+        .output_size(action_space.shape()[0])
         .vb(actor_vb)
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
@@ -88,9 +88,11 @@ fn main() {
         .build()
         .unwrap();
 
-    let mut config = ParamsAdam::default();
     // Learning rate - common range for Lunar Lander is 1e-4 to 5e-4
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let actor_optimizer =
         Adam::new(actor_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -99,7 +101,7 @@ fn main() {
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
@@ -112,7 +114,6 @@ fn main() {
         .build()
         .unwrap();
 
-    config.lr = 3e-4;
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 

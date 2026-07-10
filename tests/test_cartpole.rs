@@ -1,18 +1,7 @@
-use candle_core::Device;
+use candle_core::{Device, Module};
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
-use modurl::actors::ddqn::DDQNActor;
-use modurl::actors::dqn::{DQNActor, DQNDeviceStrategy};
-use modurl::actors::ppo::SeparatePPONetwork;
-use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
-use modurl::tensor_operations::tanh;
-use modurl::{
-    actors::{ppo::PPOActor, Actor},
-    distributions::CategoricalDistribution,
-    gym::{Gym, StepInfo},
-    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
-    spaces::Discrete,
-};
+use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn get_average_steps<AE, GE, SE>(
@@ -123,8 +112,8 @@ fn ppo_cartpole() {
 
     // Actor network: 2x64, tanh activation, CleanRL init (sqrt(2) hidden, 0.01 head)
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
-        .output_size(action_space.shape().iter().product::<usize>())
+        .input_size(observation_space.shape()[0])
+        .output_size(action_space.shape()[0])
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
@@ -135,9 +124,11 @@ fn ppo_cartpole() {
         .name("actor_network".to_string())
         .build()
         .unwrap();
-    let mut config = ParamsAdam::default();
     // Optimizers: both with lr=3e-4
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let actor_optimizer =
         Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -146,7 +137,7 @@ fn ppo_cartpole() {
 
     // Critic network: 2x64, tanh activation, CleanRL init (sqrt(2) hidden, 1.0 head)
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
+        .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
@@ -159,7 +150,6 @@ fn ppo_cartpole() {
         .build()
         .unwrap();
 
-    config.lr = 3e-4;
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -247,7 +237,7 @@ fn ppo_cartpole_shared() {
 
     // Shared trunk: obs -> 64 latent features, CleanRL init (sqrt(2) throughout)
     let shared_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
+        .input_size(observation_space.shape()[0])
         .output_size(64)
         .vb(vb.clone())
         .activation(Box::new(tanh))
@@ -262,17 +252,14 @@ fn ppo_cartpole_shared() {
         .unwrap();
 
     // Linear heads on the shared latent, CleanRL gains (0.01 policy, 1.0 value)
-    let actor_head = modurl::init::linear_ortho(
-        64,
-        action_space.shape().iter().product::<usize>(),
-        0.01,
-        vb.pp("actor_head"),
-    )
-    .unwrap();
+    let actor_head =
+        modurl::init::linear_ortho(64, action_space.shape()[0], 0.01, vb.pp("actor_head")).unwrap();
     let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head")).unwrap();
 
-    let mut config = ParamsAdam::default();
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     // Single optimizer over trunk + both heads, as in the Atari harness
     let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
 
@@ -368,7 +355,7 @@ fn ppo_cartpole_shared_multithreaded() {
         .collect();
 
     let probe_env = CartPoleV1::builder().device(&device).build();
-    let obs_space_shape: usize = probe_env.observation_space().shape().iter().product();
+    let obs_space_shape: usize = probe_env.observation_space().shape()[0];
     let obs_space = modurl::spaces::BoxSpace::new(
         Tensor::full(-1000.0f32, &[obs_space_shape], &device).unwrap(),
         Tensor::full(1000.0f32, &[obs_space_shape], &device).unwrap(),
@@ -401,8 +388,10 @@ fn ppo_cartpole_shared_multithreaded() {
     let actor_head = modurl::init::linear_ortho(64, 2, 0.01, vb.pp("actor_head_mt")).unwrap();
     let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head_mt")).unwrap();
 
-    let mut config = ParamsAdam::default();
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
 
     let ppo_network_info: PPONetworkInfo<
@@ -485,7 +474,7 @@ fn dqn_cartpole() {
     let online_vb = VarBuilder::from_varmap(&online_var_map, candle_core::DType::F32, &device);
 
     let online_q_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(online_vb)
         .hidden_layer_sizes(vec![64, 64])
@@ -496,15 +485,17 @@ fn dqn_cartpole() {
     let target_vb = VarBuilder::from_varmap(&target_var_map, candle_core::DType::F32, &device);
 
     let target_q_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(target_vb)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("Failed to create MLP");
 
-    let mut config = ParamsAdam::default();
-    config.lr = 1e-3;
+    let config = ParamsAdam {
+        lr: 1e-3,
+        ..Default::default()
+    };
     let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut actor = DQNActor::builder()
@@ -569,7 +560,7 @@ fn ddqn_cartpole() {
     let online_var_map = VarMap::new();
     let online_vb = VarBuilder::from_varmap(&online_var_map, candle_core::DType::F32, &device);
     let online_mlp = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(online_vb)
         .hidden_layer_sizes(vec![64, 64])
@@ -579,15 +570,17 @@ fn ddqn_cartpole() {
     let mut target_var_map = VarMap::new();
     let target_vb = VarBuilder::from_varmap(&target_var_map, candle_core::DType::F32, &device);
     let target_mlp = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(target_vb)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("Failed to create MLP");
 
-    let mut config = ParamsAdam::default();
-    config.lr = 1e-3;
+    let config = ParamsAdam {
+        lr: 1e-3,
+        ..Default::default()
+    };
     // Online is the only one being optimized
     let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
