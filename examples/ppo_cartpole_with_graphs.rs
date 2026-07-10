@@ -1,14 +1,7 @@
 use candle_core::Device;
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
-use modurl::actors::ppo::PPOLogger;
-use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
-use modurl::tensor_operations::tanh;
-use modurl::{
-    actors::{ppo::PPOActor, Actor},
-    distributions::CategoricalDistribution,
-    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
-};
+use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 use textplots::{Chart, Plot};
 
@@ -37,7 +30,7 @@ impl PPOGrapher {
         }
     }
 
-    fn add_to_running_total(&mut self, info: &modurl::actors::ppo::PPOLogEntry) {
+    fn add_to_running_total(&mut self, info: &PPOLogEntry) {
         self.samples_on_this_step += 1;
         let policy_loss = info
             .actor_loss
@@ -93,7 +86,7 @@ impl PPOGrapher {
         }
     }
 
-    fn add_new_step(&mut self, info: &modurl::actors::ppo::PPOLogEntry) {
+    fn add_new_step(&mut self, info: &PPOLogEntry) {
         self.divide_last_by_samples();
         self.last_timestep = info.timestep;
         let fields = vec![
@@ -176,7 +169,7 @@ impl PPOGrapher {
 }
 
 impl PPOLogger for PPOGrapher {
-    fn log(&mut self, info: &modurl::actors::ppo::PPOLogEntry) {
+    fn log(&mut self, info: &PPOLogEntry) {
         if info.timestep == self.last_timestep {
             self.add_to_running_total(info);
         } else {
@@ -260,8 +253,8 @@ fn ppo_cartpole() {
 
     let mut logger = PPOGrapher::new();
 
-    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
-        modurl::actors::ppo::SeparatePPONetwork::builder()
+    let ppo_network_info = PPONetworkInfo::Separate(
+        SeparatePPONetwork::builder()
             .actor_network(Box::new(
                 ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
             ))
@@ -282,9 +275,7 @@ fn ppo_cartpole() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
-            0.2,
-        )))
+        .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)

@@ -1,13 +1,7 @@
 use candle_core::Device;
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
-use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
-use modurl::tensor_operations::tanh;
-use modurl::{
-    actors::{ppo::PPOActor, Actor},
-    distributions::CategoricalDistribution,
-    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
-};
+use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn main() {
@@ -78,8 +72,8 @@ fn ppo_cartpole() {
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
-    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
-        modurl::actors::ppo::SeparatePPONetwork::builder()
+    let ppo_network_info = PPONetworkInfo::Separate(
+        SeparatePPONetwork::builder()
             .actor_network(Box::new(
                 ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
             ))
@@ -100,9 +94,7 @@ fn ppo_cartpole() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
-            0.2,
-        )))
+        .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
