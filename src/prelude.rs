@@ -4,12 +4,12 @@
 //! high-use ModuRL types that appear in most examples. External crates such as
 //! Candle and ModuRL Gym are intentionally left explicit.
 
-pub use crate::actors::{
-    Actor,
-    ddqn::{DDQNActor, DDQNActorError, DDQNLogEntry, DDQNLogger},
-    dqn::{DQNActor, DQNActorError, DQNDeviceStrategy, DQNLogEntry, DQNLogger},
+pub use crate::agents::{
+    Agent,
+    ddqn::{DDQNAgent, DDQNAgentError, DDQNLogEntry, DDQNLogger},
+    dqn::{DQNAgent, DQNAgentError, DQNDeviceStrategy, DQNLogEntry, DQNLogger},
     ppo::{
-        PPOActor, PPOError, PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork,
+        PPOAgent, PPOError, PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork,
         SharedPPONetwork,
     },
 };
@@ -21,9 +21,9 @@ pub use crate::gym::MultithreadedVectorizedGymWrapper;
 pub use crate::gym::{Gym, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper};
 pub use crate::models::{
     DefaultMLPInitializer, MLP, MLPArchitecture, MLPInitializedLayers, MLPInitializer,
-    OrthogonalMLPInitializer, probabilistic_model::ProbabilisticActor,
-    probabilistic_model::ProbabilisticActorModel,
-    probabilistic_model::ProbabilisticActorModelError,
+    OrthogonalMLPInitializer, probabilistic_model::ProbabilisticPolicy,
+    probabilistic_model::ProbabilisticPolicyModel,
+    probabilistic_model::ProbabilisticPolicyModelError,
 };
 pub use crate::parameter_schedule::{ConstantSchedule, LinearSchedule, ParameterSchedule};
 pub use crate::spaces::{BoxSpace, Discrete, Space};

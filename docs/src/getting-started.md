@@ -75,10 +75,27 @@ use modurl_gym::classic_control::cartpole::CartPoleV1;
 ```
 
 `modurl::prelude::*` brings the common ModuRL traits and training types into
-scope. `PPOActor` is the training algorithm. `Actor` and `VectorizedGym` are
-traits that make `.learn()`, `.observation_space()`, and `.action_space()`
-available. `CategoricalDistribution` is the right policy distribution for
-CartPole because CartPole has a discrete action space.
+scope. `Agent` and `VectorizedGym` are traits that make `.learn()`,
+`.observation_space()`, and `.action_space()` available.
+
+### A Few Terms
+
+Before we build the program, it is worth separating two similar names.
+
+In ModuRL, an `Agent` is the object that can act in an environment and learn
+from it. For this example, the agent is a `PPOAgent`. It contains the PPO
+rollout logic, loss calculations, optimizers, policy distribution, and neural
+networks.
+
+The actor network is the source of the policy's action scores. It produces
+logits, which are raw scores for each action.
+`ProbabilisticPolicyModel<CategoricalDistribution>` interprets those scores as
+a categorical policy: it can sample an action from them and later compute the
+log probability of that action. PPO needs both operations during training.
+
+You will also see `MLP` below. `MLP` builds a dense feed-forward neural network:
+linear layers with an activation between them. We use one `MLP` for the actor
+network and one `MLP` for the critic network.
 
 ### Choose a Device
 
@@ -105,7 +122,7 @@ environments and wrap them as one vectorized environment:
 ```
 
 Each inner `CartPoleV1` is a single environment. `VectorizedGymWrapper` stacks
-them so the actor can collect multiple transitions per step.
+them so PPO can collect multiple transitions per step.
 
 ### Read the Spaces
 
@@ -117,12 +134,12 @@ networks:
     let action_space = env.action_space();
 ```
 
-The observation space determines the actor and critic input size. The action
-space determines how many action logits the actor must produce.
+The observation space determines the input size for both networks. The action
+space determines how many action logits the actor network must produce.
 
 ### Build the Actor Network
 
-The actor maps observations to action logits:
+The actor network maps observations to action logits:
 
 ```rust
     let actor_var_map = VarMap::new();
@@ -138,9 +155,10 @@ The actor maps observations to action logits:
         .expect("failed to build actor network");
 ```
 
-The actor output size is the number of action logits. For CartPole, this
-produces two logits: one for pushing left and one for pushing right. Those
-logits are interpreted by `CategoricalDistribution`.
+The `MLP` here has two hidden dense layers of width 64. Its output size is the
+number of action logits. For CartPole, that means two logits: one for pushing
+left and one for pushing right. Later, `CategoricalDistribution` will interpret
+those logits as a discrete policy.
 
 ### Build the Critic Network
 
@@ -160,12 +178,13 @@ The critic maps observations to one value estimate:
         .expect("failed to build critic network");
 ```
 
-PPO uses the critic to estimate how good each observed state is. That is why the
-critic has the same input size as the actor, but only one output.
+This is another `MLP` with the same hidden-layer shape. PPO uses the critic to
+estimate how good each observed state is, so the critic network has the same
+input size as the actor network but only one output.
 
 ### Create Optimizers
 
-Give the actor and critic separate Adam optimizers:
+Give the actor network and critic network separate Adam optimizers:
 
 ```rust
     let mut optimizer_config = ParamsAdam::default();
@@ -181,15 +200,16 @@ Each optimizer receives the variables from the matching network's `VarMap`.
 
 ### Assemble PPO
 
-Wrap the actor network in `ProbabilisticActorModel` so PPO can sample actions
-and evaluate their log probabilities:
+Wrap the actor network in `ProbabilisticPolicyModel` so `PPOAgent` can sample
+actions and evaluate their log probabilities:
 
 ```rust
+    let policy =
+        ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
+
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(ProbabilisticActorModel::<CategoricalDistribution>::new(
-                Box::new(actor_network),
-            )))
+            .actor_network(Box::new(policy))
             .critic_network(Box::new(critic_network))
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
@@ -197,15 +217,16 @@ and evaluate their log probabilities:
     );
 ```
 
-`SeparatePPONetwork` means the actor and critic are independent networks with
+`policy` is the probabilistic policy PPO trains. `SeparatePPONetwork` means the
+actor network and critic network are independent neural networks with
 independent optimizers.
 
 ### Train
 
-Finally, build the actor and run learning:
+Finally, build the `PPOAgent` and run learning:
 
 ```rust
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(network_info)
         .batch_size(1024)
@@ -214,7 +235,7 @@ Finally, build the actor and run learning:
         .device(device)
         .build();
 
-    actor.learn(&mut env, 10_000).expect("PPO learning failed");
+    agent.learn(&mut env, 10_000).expect("PPO learning failed");
 }
 ```
 
@@ -282,18 +303,19 @@ fn main() {
     let critic_optimizer = Adam::new(critic_var_map.all_vars(), optimizer_config)
         .expect("failed to build critic optimizer");
 
+    let policy =
+        ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
+
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(ProbabilisticActorModel::<CategoricalDistribution>::new(
-                Box::new(actor_network),
-            )))
+            .actor_network(Box::new(policy))
             .critic_network(Box::new(critic_network))
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
             .build(),
     );
 
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(network_info)
         .batch_size(1024)
@@ -302,7 +324,7 @@ fn main() {
         .device(device)
         .build();
 
-    actor.learn(&mut env, 10_000).expect("PPO learning failed");
+    agent.learn(&mut env, 10_000).expect("PPO learning failed");
 }
 ```
 
@@ -312,13 +334,16 @@ The program has five moving parts:
 
 - `CartPoleV1` creates single environments.
 - `VectorizedGymWrapper` batches multiple environments for training.
-- `MLP` builds the actor and critic networks.
-- `ProbabilisticActorModel<CategoricalDistribution>` turns actor-network logits
+- `MLP` builds dense feed-forward neural networks for the policy and critic.
+- `ProbabilisticPolicyModel<CategoricalDistribution>` turns actor-network logits
   into sampled discrete actions.
-- `PPOActor` collects rollouts and optimizes both networks.
+- `PPOAgent` is the agent: the full training object that collects rollouts,
+  computes PPO losses, and optimizes both networks.
 
-PPO needs both pieces: the actor chooses actions, and the critic estimates the
-value of the states PPO is learning from.
+PPO needs both model roles: the actor network produces policy logits used to
+choose actions, and the critic network estimates the value of the states PPO is
+learning from. The `PPOAgent` ties those networks together with the rest of the
+PPO algorithm.
 
 ## Backend Features
 

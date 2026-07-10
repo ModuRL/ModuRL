@@ -26,7 +26,7 @@ ModuRL is built around a few long-term goals:
   inspectable, seedable where backends support it, and easy to compare across
   examples, algorithms, and benchmarks.
 - **Support serious research-style iteration.** It should be straightforward to
-  implement a new actor, distribution, environment wrapper, schedule, logging
+  implement a new agent, distribution, environment wrapper, schedule, logging
   backend, or algorithm variant without rewriting the whole library.
 
 ## Non-Goals
@@ -88,18 +88,18 @@ cargo run --features metal --example ppo_bench
 
 ModuRL is organized around a few public building blocks:
 
-- `Actor`: an agent that can `act` from observations and `learn` from a
+- `Agent`: an agent that can `act` from observations and `learn` from a
   vectorized environment.
 - `Gym`: a single environment interface.
 - `VectorizedGym`: a batched environment interface used by training loops.
 - `Space`: a contract for sampling, validating, and converting policy outputs
   into environment actions.
-- `Distribution`: a policy distribution used by probabilistic actors.
+- `Distribution`: a policy distribution used by probabilistic policies.
 - `ParameterSchedule`: a scalar schedule for values such as PPO clipping and
   learning rates.
 
 These APIs are intentionally explicit. Users are expected to understand tensor
-shapes, Candle devices, and the model modules they pass into actors.
+shapes, Candle devices, and the model modules they pass into agents.
 
 ## Feature Flags
 

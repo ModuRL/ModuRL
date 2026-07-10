@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
     gym::{VectorizedGym, VectorizedStepInfo},
-    models::probabilistic_model::ProbabilisticActor,
+    models::probabilistic_model::ProbabilisticPolicy,
     parameter_schedule::{ConstantSchedule, ParameterSchedule},
     spaces,
     tensor_operations::{normalize_tensor, tensor_has_nan, torch_like_max, torch_like_min},
@@ -19,7 +19,7 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
-    ActorError(AE),
+    PolicyError(AE),
     GymError(GE),
     TensorError(candle_core::Error),
     SpaceError(SE),
@@ -36,7 +36,7 @@ where
     }
 }
 
-use super::Actor;
+use super::Agent;
 
 #[derive(Debug, Clone)]
 struct PPOExperience {
@@ -201,7 +201,7 @@ pub struct SharedPPONetwork<O, E> {
     optimizer: O,
     shared_network: Box<dyn candle_core::Module>,
     critic_head: Box<dyn candle_core::Module>,
-    actor_head: Box<dyn ProbabilisticActor<Error = E>>,
+    actor_head: Box<dyn ProbabilisticPolicy<Error = E>>,
     lr_scheduler: Option<Box<dyn ParameterSchedule>>,
 }
 
@@ -216,7 +216,7 @@ where
         optimizer: O,
         shared_network: Box<dyn candle_core::Module>,
         critic_head: Box<dyn candle_core::Module>,
-        actor_head: Box<dyn ProbabilisticActor<Error = E>>,
+        actor_head: Box<dyn ProbabilisticPolicy<Error = E>>,
         lr_scheduler: Option<Box<dyn ParameterSchedule>>,
     ) -> Self {
         Self {
@@ -232,7 +232,7 @@ where
 pub struct SeparatePPONetwork<O1, O2, E> {
     actor_optimizer: O1,
     critic_optimizer: O2,
-    actor_network: Box<dyn ProbabilisticActor<Error = E>>,
+    actor_network: Box<dyn ProbabilisticPolicy<Error = E>>,
     critic_network: Box<dyn candle_core::Module>,
     actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
     critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
@@ -250,7 +250,7 @@ where
     pub fn new(
         actor_optimizer: O1,
         critic_optimizer: O2,
-        actor_network: Box<dyn ProbabilisticActor<Error = E>>,
+        actor_network: Box<dyn ProbabilisticPolicy<Error = E>>,
         critic_network: Box<dyn candle_core::Module>,
         actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
         critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
@@ -268,7 +268,7 @@ where
     }
 }
 
-pub struct PPOActor<'a, O1, O2, AE, GE, SE>
+pub struct PPOAgent<'a, O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -298,7 +298,7 @@ where
 }
 
 #[bon]
-impl<'a, O1, O2, AE, GE, SE> PPOActor<'a, O1, O2, AE, GE, SE>
+impl<'a, O1, O2, AE, GE, SE> PPOAgent<'a, O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -359,7 +359,7 @@ where
     }
 }
 
-impl<'a, O1, O2, AE, GE, SE> PPOActor<'a, O1, O2, AE, GE, SE>
+impl<'a, O1, O2, AE, GE, SE> PPOAgent<'a, O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -638,14 +638,14 @@ where
                 let (log_probs, entropy) = shared_info
                     .actor_head
                     .log_prob_and_entropy(states, actions)
-                    .map_err(PPOError::ActorError)?;
+                    .map_err(PPOError::PolicyError)?;
                 Ok((log_probs, entropy))
             }
             PPONetworkInfo::Separate(ref mut separate_info) => {
                 let (log_probs, entropy) = separate_info
                     .actor_network
                     .log_prob_and_entropy(states, actions)
-                    .map_err(PPOError::ActorError)?;
+                    .map_err(PPOError::PolicyError)?;
                 Ok((log_probs, entropy))
             }
         }
@@ -826,7 +826,7 @@ where
             PPONetworkInfo::Separate(ref mut separate_info) => &separate_info.actor_network,
         };
 
-        network.sample(states).map_err(PPOError::ActorError)
+        network.sample(states).map_err(PPOError::PolicyError)
     }
 
     fn update_learning_rates(&mut self, progress: f64) {
@@ -867,7 +867,7 @@ where
     }
 }
 
-impl<'a, O1, O2, AE, GE, SE> Actor for PPOActor<'a, O1, O2, AE, GE, SE>
+impl<'a, O1, O2, AE, GE, SE> Agent for PPOAgent<'a, O1, O2, AE, GE, SE>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -979,7 +979,7 @@ mod tests {
     use crate::{
         distributions::CategoricalDistribution,
         gym::{Gym, StepInfo, VectorizedGymWrapper},
-        models::{MLP, probabilistic_model::ProbabilisticActorModel},
+        models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         spaces::Discrete,
         tensor_operations::tanh,
     };
@@ -1050,7 +1050,7 @@ mod tests {
             // Reset seed before each iteration
             device.set_seed(42).unwrap();
 
-            // Create fresh PPO actor
+            // Create fresh PPO agent
             let mut envs = vec![];
             for _ in 0..8 {
                 envs.push(DummyEnv::new(device.clone()));
@@ -1096,13 +1096,13 @@ mod tests {
 
             let critic_optimizer = Adam::new(critic_var_map.all_vars(), config.clone()).unwrap();
 
-            // Create PPO actor
+            // Create PPO agent
             let network_info = PPONetworkInfo::Separate(
                 SeparatePPONetwork::builder()
                     .actor_optimizer(actor_optimizer)
                     .critic_optimizer(critic_optimizer)
                     .actor_network(Box::new(
-                        ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(
+                        ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(
                             actor_network,
                         )),
                     ))
@@ -1110,7 +1110,7 @@ mod tests {
                     .build(),
             );
 
-            let mut actor = PPOActor::builder()
+            let mut agent = PPOAgent::builder()
                 .action_space(action_space)
                 .network_info(network_info)
                 .batch_size(2048)
@@ -1124,16 +1124,16 @@ mod tests {
                 .build();
 
             // train for some timesteps
-            actor
+            agent
                 .learn(&mut vec_env, 10000)
                 .expect("PPO learning failed");
 
             let mut actions = vec![];
             let mut state = vec_env.reset().unwrap();
             for _ in 0..SAMPLE_COUNT {
-                let action_neurons = actor.act_neurons(&state).unwrap();
+                let action_neurons = agent.act_neurons(&state).unwrap();
                 actions.push(action_neurons.clone());
-                let action = actor
+                let action = agent
                     .action_space
                     .tensor_from_neurons(&action_neurons)
                     .unwrap();

@@ -4,7 +4,7 @@ pub mod ddqn;
 pub mod dqn;
 pub mod ppo;
 
-pub trait Actor {
+pub trait Agent {
     type Error;
     type GymError;
     type SpaceError;

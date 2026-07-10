@@ -1,4 +1,4 @@
-pub mod actors;
+pub mod agents;
 pub mod buffers;
 pub mod distributions;
 pub mod gym;

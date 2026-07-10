@@ -120,7 +120,7 @@ fn main() {
     let ppo_network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
             .actor_network(Box::new(
-                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
             ))
             .critic_network(Box::new(critic_network))
             .actor_optimizer(actor_optimizer)
@@ -131,7 +131,7 @@ fn main() {
     );
 
     // PPO config - Optimized hyperparameters for Lunar Lander
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
@@ -147,7 +147,7 @@ fn main() {
         .device(device)
         .build();
 
-    actor.learn(&mut env, 10_000_000).unwrap();
+    agent.learn(&mut env, 10_000_000).unwrap();
 
     actor_var_map.save("ppo_lunar_lander_actor_vars").unwrap();
     critic_var_map.save("ppo_lunar_lander_critic_vars").unwrap();

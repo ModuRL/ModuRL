@@ -76,7 +76,7 @@ fn ppo_cartpole() {
     let ppo_network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
             .actor_network(Box::new(
-                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
             ))
             .critic_network(Box::new(critic_network))
             .actor_optimizer(actor_optimizer)
@@ -86,7 +86,7 @@ fn ppo_cartpole() {
 
     // PPO config
     // Stable baselines3 config:
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
@@ -104,7 +104,7 @@ fn ppo_cartpole() {
 
     let start = std::time::Instant::now();
     for _ in 0..10 {
-        actor.learn(&mut vec_env, 100_000).unwrap();
+        agent.learn(&mut vec_env, 100_000).unwrap();
     }
     let duration = start.elapsed();
     println!("Training took: {:?} per 100,000 steps", duration / 10);

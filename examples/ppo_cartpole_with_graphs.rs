@@ -257,7 +257,7 @@ fn ppo_cartpole() {
     let ppo_network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
             .actor_network(Box::new(
-                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
             ))
             .critic_network(Box::new(critic_network))
             .actor_optimizer(actor_optimizer)
@@ -267,7 +267,7 @@ fn ppo_cartpole() {
 
     // PPO config
     // Stable baselines3 config:
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
@@ -284,7 +284,7 @@ fn ppo_cartpole() {
         .logging_info(&mut logger)
         .build();
 
-    actor.learn(&mut vec_env, 100_000).unwrap();
+    agent.learn(&mut vec_env, 100_000).unwrap();
 
     logger.display_graphs(5);
 }
