@@ -65,6 +65,24 @@ pub struct VectorizedStepInfo {
     // really wish candle had a bool tensor type
     pub dones: Vec<bool>,
     pub truncateds: Vec<bool>,
+    pub terminal_states: Vec<Option<Tensor>>,
+}
+
+impl VectorizedStepInfo {
+    pub fn transition_next_states(&self) -> candle_core::Result<Tensor> {
+        let env_count = self.dones.len();
+        let state_chunks = self.states.chunk(env_count, 0)?;
+        let mut next_states = Vec::with_capacity(env_count);
+
+        for i in 0..env_count {
+            match &self.terminal_states[i] {
+                Some(state) => next_states.push(state.clone()),
+                None => next_states.push(state_chunks[i].clone().squeeze(0)?),
+            }
+        }
+
+        Tensor::stack(&next_states, 0)
+    }
 }
 
 pub struct VectorizedGymWrapper<G: Gym> {
@@ -106,38 +124,28 @@ where
         let mut rewards = Vec::with_capacity(env_count);
         let mut dones = Vec::with_capacity(env_count);
         let mut truncateds = Vec::with_capacity(env_count);
+        let mut terminal_states = Vec::with_capacity(env_count);
 
         for (i, mut act) in actions.iter().cloned().enumerate() {
             let env = &mut self.envs[i];
             act = act.squeeze(0)?;
 
-            let step_info = if self.to_reset[i] {
-                self.to_reset[i] = false;
-                let state = env.reset().map_err(VectorizedGymError::Single)?;
-                StepInfo {
-                    state,
-                    reward: 0.0,
-                    done: false,
-                    truncated: false,
-                }
+            let mut step_info = env.step(act).map_err(VectorizedGymError::Single)?;
+            let terminal_state = if step_info.done || step_info.truncated {
+                Some(step_info.state.clone())
             } else {
-                env.step(act.clone()).map_err(VectorizedGymError::Single)?
+                None
             };
+            if step_info.done || step_info.truncated {
+                step_info.state = env.reset().map_err(VectorizedGymError::Single)?;
+            }
 
             states.push(step_info.state);
             rewards.push(step_info.reward);
             dones.push(step_info.done);
             truncateds.push(step_info.truncated);
+            terminal_states.push(terminal_state);
         }
-
-        self.to_reset
-            .iter_mut()
-            .zip(dones.iter().zip(truncateds.iter()))
-            .for_each(|(reset_flag, (done, truncated))| {
-                if *done || *truncated {
-                    *reset_flag = true;
-                }
-            });
 
         let states = Tensor::stack(&states, 0)?;
         let rewards = Tensor::from_vec(rewards, &[env_count], states.device())?;
@@ -147,6 +155,7 @@ where
             rewards,
             dones,
             truncateds,
+            terminal_states,
         })
     }
 
@@ -272,12 +281,8 @@ where
             .zip(self.to_reset.iter_mut())
         {
             let act = act.clone().squeeze(0)?;
-            let step_info = if *to_reset {
-                *to_reset = false;
-                env.reset()
-            } else {
-                env.step(act)
-            };
+            *to_reset = false;
+            let step_info = env.step(act);
             step_info_recievers.push(step_info);
         }
 
@@ -285,26 +290,20 @@ where
         let mut rewards = Vec::with_capacity(batch_size);
         let mut dones = Vec::with_capacity(batch_size);
         let mut truncateds = Vec::with_capacity(batch_size);
+        let mut terminal_states = Vec::with_capacity(batch_size);
 
         for reciever in step_info_recievers {
-            let step_info = reciever
+            let thread_step_info = reciever
                 .recv()
                 .expect("Failed to receive step info, this was probably caused by a panic in the gym thread")
                 .map_err(VectorizedGymError::Single)?;
+            let step_info = thread_step_info.step_info;
             states.push(step_info.state);
             rewards.push(step_info.reward);
             dones.push(step_info.done);
             truncateds.push(step_info.truncated);
+            terminal_states.push(thread_step_info.terminal_state);
         }
-
-        self.to_reset
-            .iter_mut()
-            .zip(dones.iter().zip(truncateds.iter()))
-            .for_each(|(reset_flag, (done, truncated))| {
-                if *done || *truncated {
-                    *reset_flag = true;
-                }
-            });
 
         let states = Tensor::stack(&states, 0)?;
         let rewards = Tensor::from_vec(rewards, &[batch_size], states.device())?;
@@ -314,6 +313,7 @@ where
             rewards,
             dones,
             truncateds,
+            terminal_states,
         })
     }
 
@@ -363,8 +363,14 @@ enum GymCmd<E>
 where
     E: Send + Sync,
 {
-    Step(Tensor, mpsc::Sender<Result<StepInfo, E>>),
+    Step(Tensor, mpsc::Sender<Result<ThreadStepInfo, E>>),
     Reset(mpsc::Sender<Result<StepInfo, E>>),
+}
+
+#[cfg(feature = "multithreading")]
+struct ThreadStepInfo {
+    step_info: StepInfo,
+    terminal_state: Option<Tensor>,
 }
 
 #[cfg(feature = "multithreading")]
@@ -380,7 +386,7 @@ impl<E> GymHandle<E>
 where
     E: Send + Sync,
 {
-    fn step(&self, action: Tensor) -> std::sync::mpsc::Receiver<Result<StepInfo, E>> {
+    fn step(&self, action: Tensor) -> std::sync::mpsc::Receiver<Result<ThreadStepInfo, E>> {
         let (resp_tx, resp_rx) = mpsc::channel();
         self.tx.send(GymCmd::Step(action, resp_tx)).unwrap();
         return resp_rx;
@@ -409,9 +415,32 @@ where
         while let Ok(cmd) = rx.recv() {
             match cmd {
                 GymCmd::Step(action, resp_tx) => {
-                    resp_tx.send(gym.step(action)).expect(
-                        "Failed to send step response, this was probably caused by a panic in the gym thread",
-                    );
+                    let mut step_info = gym.step(action);
+                    let mut terminal_state = None;
+                    if let Ok(info) = &mut step_info
+                        && (info.done || info.truncated)
+                    {
+                        terminal_state = Some(info.state.clone());
+                        match gym.reset() {
+                            Ok(state) => {
+                                info.state = state;
+                            }
+                            Err(err) => {
+                                resp_tx.send(Err(err)).expect(
+                                    "Failed to send step response, this was probably caused by a panic in the gym thread",
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    resp_tx
+                        .send(step_info.map(|info| ThreadStepInfo {
+                            step_info: info,
+                            terminal_state,
+                        }))
+                        .expect(
+                            "Failed to send step response, this was probably caused by a panic in the gym thread",
+                        );
                 }
                 GymCmd::Reset(resp_tx) => {
                     let reset_info = gym.reset();
@@ -510,12 +539,10 @@ mod tests {
             let actions = Tensor::full(1.0, &[3, 1], &candle_core::Device::Cpu).unwrap();
             let step_info = vec_env.step(actions).unwrap();
             assert_eq!(step_info.states.shape().dims(), &[3, 2]);
-            if step != 5 {
-                assert_eq!(
-                    step_info.rewards.to_vec1::<f32>().unwrap(),
-                    vec![1.0, 1.0, 1.0]
-                );
-            }
+            assert_eq!(
+                step_info.rewards.to_vec1::<f32>().unwrap(),
+                vec![1.0, 1.0, 1.0]
+            );
 
             for (i, state) in step_info
                 .states
@@ -524,14 +551,29 @@ mod tests {
                 .iter()
                 .enumerate()
             {
-                let expected_step = (step + 1) % 6;
+                let expected_step = match step {
+                    0..=3 => step + 1,
+                    4 => 0,
+                    _ => step - 4,
+                };
                 assert_eq!(*state, vec![i as f32, expected_step as f32]);
             }
 
             if step != 4 {
                 assert_eq!(step_info.dones, vec![false, false, false]);
+                assert!(
+                    step_info
+                        .terminal_states
+                        .iter()
+                        .all(|state| state.is_none())
+                );
             } else {
                 assert_eq!(step_info.dones, vec![true, true, true]);
+                let terminal_states = step_info.transition_next_states().unwrap();
+                assert_eq!(
+                    terminal_states.to_vec2::<f32>().unwrap(),
+                    vec![vec![0.0, 5.0], vec![1.0, 5.0], vec![2.0, 5.0]]
+                );
             }
         }
     }
@@ -563,12 +605,10 @@ mod tests {
             let actions = Tensor::full(1.0, &[3, 1], &candle_core::Device::Cpu).unwrap();
             let step_info = vec_env.step(actions).unwrap();
             assert_eq!(step_info.states.shape().dims(), &[3, 2]);
-            if step != 5 {
-                assert_eq!(
-                    step_info.rewards.to_vec1::<f32>().unwrap(),
-                    vec![1.0, 1.0, 1.0]
-                );
-            }
+            assert_eq!(
+                step_info.rewards.to_vec1::<f32>().unwrap(),
+                vec![1.0, 1.0, 1.0]
+            );
 
             for (i, state) in step_info
                 .states
@@ -577,14 +617,29 @@ mod tests {
                 .iter()
                 .enumerate()
             {
-                let expected_step = (step + 1) % 6;
+                let expected_step = match step {
+                    0..=3 => step + 1,
+                    4 => 0,
+                    _ => step - 4,
+                };
                 assert_eq!(*state, vec![i as f32, expected_step as f32]);
             }
 
             if step != 4 {
                 assert_eq!(step_info.dones, vec![false, false, false]);
+                assert!(
+                    step_info
+                        .terminal_states
+                        .iter()
+                        .all(|state| state.is_none())
+                );
             } else {
                 assert_eq!(step_info.dones, vec![true, true, true]);
+                let terminal_states = step_info.transition_next_states().unwrap();
+                assert_eq!(
+                    terminal_states.to_vec2::<f32>().unwrap(),
+                    vec![vec![0.0, 5.0], vec![1.0, 5.0], vec![2.0, 5.0]]
+                );
             }
         }
     }

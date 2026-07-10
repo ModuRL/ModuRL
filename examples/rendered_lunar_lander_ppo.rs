@@ -5,10 +5,11 @@ use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::gym::{StepInfo, VectorizedGym};
 use modurl::tensor_operations::tanh;
 use modurl::{
-    actors::{Actor, ppo::PPOActor},
+    actors::{ppo::PPOActor, Actor},
     distributions::CategoricalDistribution,
     gym::Gym,
-    models::{MLP, probabilistic_model::ProbabilisticActorModel},
+    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
+    parameter_schedule::LinearSchedule,
 };
 use modurl_gym::box_2d::lunar_lander::LunarLanderV3;
 
@@ -64,7 +65,7 @@ fn main() {
     let device = Device::cuda_if_available(0).unwrap();
     let env1 = DebugLunarLander::new(
         LunarLanderV3::builder()
-            .render(true)
+            .render_human(true)
             .device(device.clone())
             .build(),
     );
@@ -87,6 +88,10 @@ fn main() {
         .vb(actor_vb)
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 0.01,
+        }))
         .name("actor_network".to_string())
         .build()
         .unwrap();
@@ -107,6 +112,10 @@ fn main() {
         .vb(critic_vb)
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 1.0,
+        }))
         .name("critic_network".to_string())
         .build()
         .unwrap();
@@ -115,27 +124,35 @@ fn main() {
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
+    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
+        modurl::actors::ppo::SeparatePPONetwork::builder()
+            .actor_network(Box::new(
+                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+            ))
+            .critic_network(Box::new(critic_network))
+            .actor_optimizer(actor_optimizer)
+            .critic_optimizer(critic_optimizer)
+            .actor_lr_scheduler(Box::new(LinearSchedule::new(3e-4, 3e-5)))
+            .critic_lr_scheduler(Box::new(LinearSchedule::new(3e-4, 3e-5)))
+            .build(),
+    );
+
     // PPO config - Optimized hyperparameters for Lunar Lander
     let mut actor = PPOActor::builder()
         .action_space(action_space)
-        .actor_network(Box::new(
-            ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
-        ))
-        .critic_network(Box::new(critic_network))
-        .critic_optimizer(critic_optimizer)
-        .actor_optimizer(actor_optimizer)
+        .network_info(ppo_network_info)
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
         .ent_coef(0.01)
         .gamma(0.999)
         .vf_coef(0.5)
-        .clip_range(0.2)
+        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
+            0.2,
+        )))
         .clipped(true)
         .gae_lambda(0.98)
         .num_epochs(4)
-        .actor_lr_scheduler(Box::new(|t| (1.0 - t * 0.9) * 3e-4))
-        .critic_lr_scheduler(Box::new(|t| (1.0 - t * 0.9) * 3e-4))
         .device(device)
         .build();
 

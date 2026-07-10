@@ -5,9 +5,9 @@ use modurl::actors::ppo::PPOLogger;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl::tensor_operations::tanh;
 use modurl::{
-    actors::{Actor, ppo::PPOActor},
+    actors::{ppo::PPOActor, Actor},
     distributions::CategoricalDistribution,
-    models::{MLP, probabilistic_model::ProbabilisticActorModel},
+    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
 };
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 use textplots::{Chart, Plot};
@@ -223,6 +223,10 @@ fn ppo_cartpole() {
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 0.01,
+        }))
         .name("actor_network".to_string())
         .build()
         .unwrap();
@@ -242,6 +246,10 @@ fn ppo_cartpole() {
         .vb(critic_vb)
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 1.0,
+        }))
         .name("critic_network".to_string())
         .build()
         .unwrap();
@@ -252,23 +260,31 @@ fn ppo_cartpole() {
 
     let mut logger = PPOGrapher::new();
 
+    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
+        modurl::actors::ppo::SeparatePPONetwork::builder()
+            .actor_network(Box::new(
+                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+            ))
+            .critic_network(Box::new(critic_network))
+            .actor_optimizer(actor_optimizer)
+            .critic_optimizer(critic_optimizer)
+            .build(),
+    );
+
     // PPO config
     // Stable baselines3 config:
     let mut actor = PPOActor::builder()
         .action_space(action_space)
-        .actor_network(Box::new(
-            ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
-        ))
-        .critic_network(Box::new(critic_network))
-        .critic_optimizer(critic_optimizer)
-        .actor_optimizer(actor_optimizer)
+        .network_info(ppo_network_info)
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(0.2)
+        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
+            0.2,
+        )))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)

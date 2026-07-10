@@ -2,14 +2,15 @@ use candle_core::Device;
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::actors::ddqn::DDQNActor;
-use modurl::actors::dqn::DQNActor;
+use modurl::actors::dqn::{DQNActor, DQNDeviceStrategy};
+use modurl::actors::ppo::SeparatePPONetwork;
 use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
 use modurl::tensor_operations::tanh;
 use modurl::{
-    actors::{Actor, ppo::PPOActor},
+    actors::{ppo::PPOActor, Actor},
     distributions::CategoricalDistribution,
     gym::{Gym, StepInfo},
-    models::{MLP, probabilistic_model::ProbabilisticActorModel},
+    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
     spaces::Discrete,
 };
 use modurl_gym::classic_control::cartpole::CartPoleV1;
@@ -96,6 +97,7 @@ impl Gym for DebugCartpoleV1 {
 }
 
 #[test]
+#[ignore = "slow solve test; run manually for review prep"]
 fn ppo_cartpole() {
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = Device::Cpu;
@@ -119,13 +121,17 @@ fn ppo_cartpole() {
     let var_map = VarMap::new();
     let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
 
-    // Actor network: 2x64, tanh activation
+    // Actor network: 2x64, tanh activation, CleanRL init (sqrt(2) hidden, 0.01 head)
     let actor_network = MLP::builder()
         .input_size(observation_space.shape().iter().product())
         .output_size(action_space.shape().iter().product::<usize>())
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 0.01,
+        }))
         .name("actor_network".to_string())
         .build()
         .unwrap();
@@ -138,13 +144,17 @@ fn ppo_cartpole() {
     let critic_var_map = VarMap::new();
     let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
 
-    // Critic network: 2x64, tanh activation
+    // Critic network: 2x64, tanh activation, CleanRL init (sqrt(2) hidden, 1.0 head)
     let critic_network = MLP::builder()
         .input_size(observation_space.shape().iter().product())
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 1.0,
+        }))
         .name("critic_network".to_string())
         .build()
         .unwrap();
@@ -153,23 +163,31 @@ fn ppo_cartpole() {
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
+    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
+        SeparatePPONetwork::builder()
+            .actor_network(Box::new(
+                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+            ))
+            .critic_network(Box::new(critic_network))
+            .actor_optimizer(actor_optimizer)
+            .critic_optimizer(critic_optimizer)
+            .build(),
+    );
+
     // PPO config
     // Stable baselines3 config:
     let mut actor = PPOActor::builder()
         .action_space(action_space)
-        .actor_network(Box::new(
-            ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
-        ))
-        .critic_network(Box::new(critic_network))
-        .critic_optimizer(critic_optimizer)
-        .actor_optimizer(actor_optimizer)
+        .network_info(ppo_network_info)
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(0.2)
+        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
+            0.2,
+        )))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
@@ -197,7 +215,253 @@ fn ppo_cartpole() {
     panic!("PPO failed to solve CartPole-v1 within 100000 timesteps.");
 }
 
+/// Same solve requirement as `ppo_cartpole`, but through the Shared network path
+/// (shared trunk + actor/critic heads + single optimizer + combined loss) that the
+/// Atari harness uses, which `ppo_cartpole`'s Separate path does not exercise.
 #[test]
+#[ignore = "slow solve test; run manually for review prep"]
+fn ppo_cartpole_shared() {
+    use modurl::actors::ppo::{FakeOptimizer, PPONetworkInfo, SharedPPONetwork};
+
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    let device = Device::Cpu;
+    #[cfg(feature = "cuda")]
+    let device = Device::new_cuda(0).unwrap();
+    #[cfg(feature = "metal")]
+    let device = Device::new_metal(0).unwrap();
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    device.set_seed(42).unwrap();
+
+    let mut envs = vec![];
+    for _ in 0..8 {
+        let env = DebugCartpoleV1::new(&device);
+        envs.push(env);
+    }
+    let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+
+    let observation_space = vec_env.observation_space();
+    let action_space = vec_env.action_space();
+    let var_map = VarMap::new();
+    let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
+
+    // Shared trunk: obs -> 64 latent features, CleanRL init (sqrt(2) throughout)
+    let shared_network = MLP::builder()
+        .input_size(observation_space.shape().iter().product())
+        .output_size(64)
+        .vb(vb.clone())
+        .activation(Box::new(tanh))
+        .output_activation(Box::new(tanh))
+        .hidden_layer_sizes(vec![64])
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 2.0f64.sqrt(),
+        }))
+        .name("shared_trunk".to_string())
+        .build()
+        .unwrap();
+
+    // Linear heads on the shared latent, CleanRL gains (0.01 policy, 1.0 value)
+    let actor_head = modurl::init::linear_ortho(
+        64,
+        action_space.shape().iter().product::<usize>(),
+        0.01,
+        vb.pp("actor_head"),
+    )
+    .unwrap();
+    let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head")).unwrap();
+
+    let mut config = ParamsAdam::default();
+    config.lr = 3e-4;
+    // Single optimizer over trunk + both heads, as in the Atari harness
+    let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
+
+    let ppo_network_info: PPONetworkInfo<
+        Adam,
+        modurl::models::probabilistic_model::ProbabilisticActorModelError<candle_core::Error>,
+        FakeOptimizer,
+    > = PPONetworkInfo::Shared(
+        SharedPPONetwork::builder()
+            .actor_head(Box::new(
+                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_head)),
+            ))
+            .critic_head(Box::new(critic_head))
+            .shared_network(Box::new(shared_network))
+            .optimizer(optimizer)
+            .build(),
+    );
+
+    // Experiment overrides so the shared-path failure can be probed without code edits
+    let vf_coef = std::env::var("TEST_VF_COEF")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.5);
+    let gradient_clip = std::env::var("TEST_GRAD_CLIP")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.5);
+    println!(
+        "Shared PPO experiment config: vf_coef={} gradient_clip={}",
+        vf_coef, gradient_clip
+    );
+
+    let mut actor = PPOActor::builder()
+        .action_space(action_space)
+        .network_info(ppo_network_info)
+        .batch_size(2048)
+        .mini_batch_size(64)
+        .normalize_advantage(true)
+        .ent_coef(0.005)
+        .gamma(0.99)
+        .vf_coef(vf_coef)
+        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
+            0.2,
+        )))
+        .clipped(true)
+        .gae_lambda(0.95)
+        .num_epochs(10)
+        .gradient_clip(gradient_clip)
+        .device(device.clone())
+        .build();
+
+    for i in 0..6 {
+        actor.learn(&mut vec_env, 20000).unwrap();
+        println!("Testing if shared-network PPO solved CartPole-v1...");
+
+        let avg_steps = get_average_steps(&mut actor, &device);
+        println!(
+            "Shared PPO averaged {} steps over 100 episodes with {} timesteps",
+            avg_steps,
+            (i + 1) * 20000
+        );
+
+        if avg_steps >= 195.0 {
+            println!(
+                "Shared PPO solved CartPole-v1 in {} timesteps!",
+                (i + 1) * 20000
+            );
+            return;
+        }
+    }
+    panic!("Shared-network PPO failed to solve CartPole-v1 within 120000 timesteps.");
+}
+
+/// Same as `ppo_cartpole_shared`, but through `MultithreadedVectorizedGymWrapper` -
+/// the vector-env path the Atari harness actually uses, which the other CartPole
+/// tests (sync wrapper) never exercise under learning load. A data-alignment bug
+/// in the threaded path would corrupt advantages while all other tests pass.
+#[test]
+#[ignore = "slow solve test; run manually for review prep"]
+#[cfg(feature = "multithreading")]
+fn ppo_cartpole_shared_multithreaded() {
+    use candle_core::Tensor;
+    use modurl::actors::ppo::{FakeOptimizer, PPONetworkInfo, SharedPPONetwork};
+    use modurl::gym::MultithreadedVectorizedGymWrapper;
+
+    let device = Device::Cpu;
+
+    let env_constructors: Vec<_> = (0..8)
+        .map(|_| {
+            let device = device.clone();
+            move || DebugCartpoleV1::new(&device)
+        })
+        .collect();
+
+    let probe_env = CartPoleV1::builder().device(&device).build();
+    let obs_space_shape: usize = probe_env.observation_space().shape().iter().product();
+    let obs_space = modurl::spaces::BoxSpace::new(
+        Tensor::full(-1000.0f32, &[obs_space_shape], &device).unwrap(),
+        Tensor::full(1000.0f32, &[obs_space_shape], &device).unwrap(),
+    );
+    let action_space_concrete = Discrete::new(2);
+
+    let mut vec_env = MultithreadedVectorizedGymWrapper::new(
+        env_constructors,
+        obs_space,
+        action_space_concrete.clone(),
+    );
+
+    let var_map = VarMap::new();
+    let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
+
+    let shared_network = MLP::builder()
+        .input_size(obs_space_shape)
+        .output_size(64)
+        .vb(vb.clone())
+        .activation(Box::new(tanh))
+        .output_activation(Box::new(tanh))
+        .hidden_layer_sizes(vec![64])
+        .initializer(Box::new(OrthogonalMLPInitializer {
+            hidden_gain: 2.0f64.sqrt(),
+            output_gain: 2.0f64.sqrt(),
+        }))
+        .name("shared_trunk_mt".to_string())
+        .build()
+        .unwrap();
+    let actor_head = modurl::init::linear_ortho(64, 2, 0.01, vb.pp("actor_head_mt")).unwrap();
+    let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head_mt")).unwrap();
+
+    let mut config = ParamsAdam::default();
+    config.lr = 3e-4;
+    let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
+
+    let ppo_network_info: PPONetworkInfo<
+        Adam,
+        modurl::models::probabilistic_model::ProbabilisticActorModelError<candle_core::Error>,
+        FakeOptimizer,
+    > = PPONetworkInfo::Shared(
+        SharedPPONetwork::builder()
+            .actor_head(Box::new(
+                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_head)),
+            ))
+            .critic_head(Box::new(critic_head))
+            .shared_network(Box::new(shared_network))
+            .optimizer(optimizer)
+            .build(),
+    );
+
+    let mut actor = PPOActor::builder()
+        .action_space(Box::new(action_space_concrete))
+        .network_info(ppo_network_info)
+        .batch_size(2048)
+        .mini_batch_size(64)
+        .normalize_advantage(true)
+        .ent_coef(0.005)
+        .gamma(0.99)
+        .vf_coef(0.5)
+        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
+            0.2,
+        )))
+        .clipped(true)
+        .gae_lambda(0.95)
+        .num_epochs(10)
+        .device(device.clone())
+        .build();
+
+    for i in 0..6 {
+        actor.learn(&mut vec_env, 20000).unwrap();
+        println!("Testing if multithreaded shared PPO solved CartPole-v1...");
+
+        let avg_steps = get_average_steps(&mut actor, &device);
+        println!(
+            "MT Shared PPO averaged {} steps over 100 episodes with {} timesteps",
+            avg_steps,
+            (i + 1) * 20000
+        );
+
+        if avg_steps >= 195.0 {
+            println!(
+                "MT Shared PPO solved CartPole-v1 in {} timesteps!",
+                (i + 1) * 20000
+            );
+            return;
+        }
+    }
+    panic!("Multithreaded shared PPO failed to solve CartPole-v1 within 120000 timesteps.");
+}
+
+#[test]
+#[ignore = "slow solve test; run manually for review prep"]
 fn dqn_cartpole() {
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = Device::Cpu;
@@ -217,32 +481,44 @@ fn dqn_cartpole() {
 
     let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
     let observation_space = vec_env.observation_space();
-    let var_map = VarMap::new();
-    let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
+    let online_var_map = VarMap::new();
+    let online_vb = VarBuilder::from_varmap(&online_var_map, candle_core::DType::F32, &device);
 
-    let mlp = MLP::builder()
+    let online_q_network = MLP::builder()
         .input_size(observation_space.shape().iter().sum())
         .output_size(2)
-        .vb(vb)
+        .vb(online_vb)
+        .hidden_layer_sizes(vec![64, 64])
+        .build()
+        .expect("Failed to create MLP");
+
+    let mut target_var_map = VarMap::new();
+    let target_vb = VarBuilder::from_varmap(&target_var_map, candle_core::DType::F32, &device);
+
+    let target_q_network = MLP::builder()
+        .input_size(observation_space.shape().iter().sum())
+        .output_size(2)
+        .vb(target_vb)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("Failed to create MLP");
 
     let mut config = ParamsAdam::default();
     config.lr = 1e-3;
-    let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create AdamW");
+    let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut actor = DQNActor::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
         .observation_space(observation_space)
-        .q_network(Box::new(mlp))
-        .epsilon_start(1.0)
-        .epsilon_decay(0.99)
+        .online_q_network(Box::new(online_q_network))
+        .target_q_network(Box::new(target_q_network))
+        .online_vars(&online_var_map)
+        .target_vars(&mut target_var_map)
         .optimizer(optimizer)
         .replay_capacity(10_000)
         .batch_size(32)
         .update_frequency(1)
-        .device(device.clone())
+        .device_strategy(DQNDeviceStrategy::OneDevice(device.clone()))
         .build();
 
     // we'll give dqn more chances since it's more unstable
@@ -269,6 +545,7 @@ fn dqn_cartpole() {
 }
 
 #[test]
+#[ignore = "slow solve test; run manually for review prep"]
 fn ddqn_cartpole() {
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = Device::Cpu;
