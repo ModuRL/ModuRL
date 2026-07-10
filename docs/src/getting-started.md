@@ -1,41 +1,20 @@
 # Getting Started
 
-This page gets you from a fresh project to one working PPO training run.
+This page builds a small PPO training program in a new Cargo binary crate.
+
+## What You Will Build
+
+The program trains PPO on several CartPole environments at once. It uses an
+`MLP` to produce policy logits, a probabilistic policy model to sample actions,
+and another `MLP` to estimate state values.
 
 ## Prerequisites
 
 Install a Rust toolchain that supports edition 2024.
 
-From the `modurl` repository, check that the basic crate builds:
-
-```sh
-cargo check
-```
-
-## Run an Existing Example
-
-The shortest supported path is the PPO CartPole benchmark example:
-
-```sh
-cargo run --example ppo_bench
-```
-
-For terminal plots of PPO metrics, run:
-
-```sh
-cargo run --example ppo_cartpole_with_graphs
-```
-
-For GPU-backed builds, enable the matching feature:
-
-```sh
-cargo run --features cuda --example ppo_bench
-cargo run --features metal --example ppo_bench
-```
-
 ## Create a Small Program
 
-Now build the same shape of program from a blank binary crate:
+Create a new binary crate:
 
 ```sh
 cargo new modurl-hello
@@ -59,14 +38,14 @@ candle-optimisers = "0.9.0"
 ```
 
 The snippets below are consecutive pieces of `src/main.rs`. Add each one in
-order; the file compiles after the final `Train` snippet.
+order; the file compiles after the final `Train` section.
 
 ### Imports
 
 First, bring the Candle types, optimizer, ModuRL traits, and CartPole
 environment into scope:
 
-```rust
+```rust,ignore
 use candle_core::Device;
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
@@ -101,20 +80,19 @@ network and one `MLP` for the critic network.
 
 Start `main` by choosing where tensors and models will live:
 
-```rust
+```rust,ignore
 fn main() {
     let device = Device::Cpu;
 ```
 
-The CPU device is the simplest first run. CUDA and Metal are covered later on
-this page.
+The CPU device is the simplest first run. See [Run on CUDA or Metal](./run-on-cuda-or-metal.md) when the CPU version works.
 
 ### Create Environments
 
 PPO learns from batches of environment steps, so create several CartPole
 environments and wrap them as one vectorized environment:
 
-```rust
+```rust,ignore
     let envs = (0..4)
         .map(|_| CartPoleV1::builder().device(&device).build())
         .collect::<Vec<_>>();
@@ -129,7 +107,7 @@ them so PPO can collect multiple transitions per step.
 Ask the environment for its observation and action spaces before building the
 networks:
 
-```rust
+```rust,ignore
     let observation_space = env.observation_space();
     let action_space = env.action_space();
 ```
@@ -141,7 +119,7 @@ space determines how many action logits the actor network must produce.
 
 The actor network maps observations to action logits:
 
-```rust
+```rust,ignore
     let actor_var_map = VarMap::new();
     let actor_vb = VarBuilder::from_varmap(&actor_var_map, candle_core::DType::F32, &device);
     let actor_network = MLP::builder()
@@ -164,7 +142,7 @@ those logits as a discrete policy.
 
 The critic maps observations to one value estimate:
 
-```rust
+```rust,ignore
     let critic_var_map = VarMap::new();
     let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
     let critic_network = MLP::builder()
@@ -186,7 +164,7 @@ input size as the actor network but only one output.
 
 Give the actor network and critic network separate Adam optimizers:
 
-```rust
+```rust,ignore
     let mut optimizer_config = ParamsAdam::default();
     optimizer_config.lr = 3e-4;
 
@@ -203,7 +181,7 @@ Each optimizer receives the variables from the matching network's `VarMap`.
 Wrap the actor network in `ProbabilisticPolicyModel` so `PPOAgent` can sample
 actions and evaluate their log probabilities:
 
-```rust
+```rust,ignore
     let policy =
         ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
 
@@ -217,15 +195,15 @@ actions and evaluate their log probabilities:
     );
 ```
 
-`policy` is the probabilistic policy PPO trains. `SeparatePPONetwork` means the
-actor network and critic network are independent neural networks with
-independent optimizers.
+`policy` is the probabilistic policy PPO trains. In this configuration, the
+policy model and value model are independent neural networks with independent
+optimizers.
 
 ### Train
 
 Finally, build the `PPOAgent` and run learning:
 
-```rust
+```rust,ignore
     let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(network_info)
@@ -236,6 +214,7 @@ Finally, build the `PPOAgent` and run learning:
         .build();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
+    println!("Training complete.");
 }
 ```
 
@@ -249,11 +228,15 @@ Run the program with:
 cargo run
 ```
 
+When the training loop finishes, the program prints `Training complete.`. The
+default run collects 10,000 environment steps, so it does more than compile the
+program but is smaller than a longer experiment.
+
 ### Complete File
 
 After applying the pieces above, `src/main.rs` should look like this:
 
-```rust
+```rust,ignore
 use candle_core::Device;
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
@@ -325,37 +308,14 @@ fn main() {
         .build();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
+    println!("Training complete.");
 }
 ```
 
-## Recap
+## Where to Go Next
 
-The program has five moving parts:
-
-- `CartPoleV1` creates single environments.
-- `VectorizedGymWrapper` batches multiple environments for training.
-- `MLP` builds dense feed-forward neural networks for the policy and critic.
-- `ProbabilisticPolicyModel<CategoricalDistribution>` turns actor-network logits
-  into sampled discrete actions.
-- `PPOAgent` is the agent: the full training object that collects rollouts,
-  computes PPO losses, and optimizes both networks.
-
-PPO needs both model roles: the actor network produces policy logits used to
-choose actions, and the critic network estimates the value of the states PPO is
-learning from. The `PPOAgent` ties those networks together with the rest of the
-PPO algorithm.
-
-## Backend Features
-
-ModuRL exposes Candle backend features through Cargo:
-
-| Feature | Purpose |
-| --- | --- |
-| `cuda` | Enable Candle CUDA support |
-| `cudnn` | Enable Candle cuDNN support |
-| `metal` | Enable Candle Metal support |
-| `multithreading` | Enable multithreaded vectorized environments |
-
-This example uses `Device::Cpu`. GPU setup depends on your Candle backend, so
-enable the feature here and construct the corresponding Candle device in
-`main`.
+You now have a PPO training program with vectorized CartPole environments, a
+stochastic categorical policy, and a value model. Read [Understand a PPO
+Training Run](./understand-ppo-training.md) to learn what the example's metrics
+show, or [Use Vectorized Environments](./vectorized-environments.md) to work
+directly with batched environments.

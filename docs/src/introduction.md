@@ -1,15 +1,15 @@
 # ModuRL Guide
 
-ModuRL is a Rust-native reinforcement learning library built on Candle. The
-library is early, and PPO is currently the best-supported training path.
+This guide is for Rust developers who want to build reinforcement learning
+programs with ModuRL and Candle. It starts with PPO on CartPole, then explains
+the library types behind that example.
 
-This guide is the long-form documentation home for workflows that need more
-context than the README or API reference can provide. Start with
-[Getting Started](./getting-started.md) to build and run a PPO CartPole example.
+The guide assumes basic Rust and Cargo knowledge. It does not teach
+reinforcement learning or neural networks from first principles.
 
-To render the guide locally, install mdBook and serve the `docs` directory:
+ModuRL is early, and PPO is currently the best-supported training path. Start
+with [Getting Started](./getting-started.md) to run and assemble a PPO CartPole
+program.
 
-```sh
-cargo install mdbook
-mdbook serve docs
-```
+The README provides project status and the shortest repository-based commands.
+Rustdoc provides the precise contracts for public traits, structs, and builders.

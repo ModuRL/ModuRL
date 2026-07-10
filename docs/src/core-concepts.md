@@ -21,36 +21,7 @@ An agent is not just a neural network. It usually owns or receives the pieces it
 needs for training: model modules, optimizers, schedules, buffers,
 distributions, and update logic.
 
-## Policy
-
-A policy is the rule used to choose actions.
-
-Some policies are deterministic. A deterministic policy chooses the same action
-whenever it sees the same observation. Some policies are stochastic. A
-stochastic policy samples an action from a distribution.
-
-PPO uses a stochastic policy during training. That is why the PPO examples do
-not pass a plain neural network directly as the policy. They wrap a model module
-in `ProbabilisticPolicyModel`.
-
-## Probabilistic Policy Model
-
-`ProbabilisticPolicyModel<D>` gives policy meaning to a network's outputs.
-
-The wrapped model is still the source of the scores. The policy model adds the
-distribution math for a particular distribution `D`.
-
-For example, `ProbabilisticPolicyModel<CategoricalDistribution>` treats model
-logits as a categorical policy. That gives PPO the operations it needs:
-
-- sample an action from the logits
-- compute the log probability of an action
-- compute the policy entropy
-
-PPO uses log probabilities to measure how much the policy changed during an
-update. PPO can also use entropy to encourage exploration.
-
-## Environments
+## Environments and Spaces
 
 An environment is the world the agent interacts with.
 
@@ -69,13 +40,6 @@ Vectorized environments auto-reset each inner environment when it returns
 `done` or `truncated`. The `states` field in `VectorizedStepInfo` contains the
 next state to continue training from. If an inner environment ended, that next
 state is already the reset state for the next episode.
-
-The final state of the episode is still kept in `terminal_states`. If training
-code needs the transition's true next state, it can call
-`transition_next_states()`. That method uses the terminal state for environments
-that ended and the normal next state for environments that kept running.
-
-## Spaces
 
 A `Space` describes what observations or actions look like.
 
@@ -100,6 +64,32 @@ networks are `MLP`s with two hidden layers.
 `MLP` does not know about PPO by itself. It just maps input tensors to output
 tensors. The agent and policy model decide what those outputs mean.
 
+## Probabilistic Policies
+
+A policy is the rule used to choose actions.
+
+Some policies are deterministic. A deterministic policy chooses the same action
+whenever it sees the same observation. Some policies are stochastic. A
+stochastic policy samples an action from a distribution.
+
+PPO uses a stochastic policy during training. That is why the PPO examples do
+not pass a plain neural network directly as the policy. They wrap a model module
+in `ProbabilisticPolicyModel`.
+
+`ProbabilisticPolicyModel<D>` gives policy meaning to a network's outputs. The
+wrapped model is still the source of the scores. The policy model adds the
+distribution math for a particular distribution `D`.
+
+For example, `ProbabilisticPolicyModel<CategoricalDistribution>` treats model
+logits as a categorical policy. That gives PPO the operations it needs:
+
+- sample an action from the logits
+- compute the log probability of an action
+- compute the policy entropy
+
+PPO uses log probabilities to measure how much the policy changed during an
+update. PPO can also use entropy to encourage exploration.
+
 ## Tensors and Devices
 
 ModuRL uses Candle tensors.
@@ -110,7 +100,7 @@ or Metal.
 
 Most examples start with:
 
-```rust
+```rust,ignore
 let device = Device::Cpu;
 ```
 
@@ -118,7 +108,7 @@ The important rule is that tensors and models used together should live on the
 same device. If a model is on the CPU, the observations passed to it should also
 be on the CPU.
 
-## Optimizers and Schedules
+## Training Configuration
 
 An optimizer updates model parameters.
 
@@ -129,20 +119,16 @@ A schedule is a value that changes during training. For example,
 `ConstantSchedule` keeps the PPO clip range fixed. `LinearSchedule` can move a
 value from one number to another over training progress.
 
-## How the Pieces Fit Together
+## In the CartPole Example
 
-The CartPole PPO example has this shape:
+The CartPole PPO example configures a probabilistic policy that wraps a model
+which produces policy scores. It also configures a separate model that estimates
+values. `PPOAgent` uses the policy and value model while it collects experience
+and updates their parameters.
 
-1. Build environments.
-2. Read the observation and action spaces.
-3. Build a model module for `actor_network` that outputs action logits.
-4. Wrap that model in a probabilistic policy model.
-5. Build a model module for `critic_network` that outputs one value.
-6. Give the networks optimizers.
-7. Build a `PPOAgent`.
-8. Call `agent.learn(...)`.
+These are roles in the PPO configuration, not separate library architecture
+types. The public types in the example are `MLP`,
+`ProbabilisticPolicyModel<CategoricalDistribution>`, and `PPOAgent`.
 
-The names matter because the pieces have different jobs in the library API. One
-model produces scores for the policy. The probabilistic policy model interprets
-those scores. Another model produces values. The agent owns the training loop
-that uses all of them.
+Read [Understand a PPO Training Run](./understand-ppo-training.md) to inspect
+the results of the example, or [Use Vectorized Environments](./vectorized-environments.md) to work with batched environment steps directly.
