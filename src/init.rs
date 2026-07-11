@@ -3,7 +3,7 @@
 //! 0.01 for policy heads, 1.0 for value heads, zero biases.
 
 use candle_core::{Device, IndexOp, Result, Tensor};
-use candle_nn::{Linear, VarBuilder};
+use candle_nn::{Conv2d, Conv2dConfig, Linear, VarBuilder};
 
 /// Creates a linear layer with orthogonally initialized weights (scaled by
 /// `gain`) and zero-initialized bias, registered in the given VarBuilder.
@@ -17,6 +17,27 @@ pub fn linear_ortho(in_dim: usize, out_dim: usize, gain: f64, vb: VarBuilder) ->
     let bias = vb.get_with_hints(out_dim, "bias", candle_nn::Init::Const(0.0))?;
 
     Ok(Linear::new(weight, Some(bias)))
+}
+
+/// Creates a 2D convolution with orthogonally initialized weights (scaled by
+/// `gain`) and zero-initialized bias, registered in the given VarBuilder.
+pub fn conv2d_ortho(
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: usize,
+    config: Conv2dConfig,
+    gain: f64,
+    vb: VarBuilder,
+) -> Result<Conv2d> {
+    let weight_shape = [out_channels, in_channels, kernel_size, kernel_size];
+    let weight_init = orthogonal_init(&weight_shape, gain, vb.device())?;
+
+    let weight = vb.get(&weight_shape, "weight")?;
+    weight.slice_set(&weight_init, 0, 0)?;
+
+    let bias = vb.get_with_hints(out_channels, "bias", candle_nn::Init::Const(0.0))?;
+
+    Ok(Conv2d::new(weight, Some(bias), config))
 }
 
 /// Generates an orthogonal tensor of `shape` scaled by `gain`, matching

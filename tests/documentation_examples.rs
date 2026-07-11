@@ -50,8 +50,7 @@ fn getting_started_program() {
     let critic_optimizer = Adam::new(critic_var_map.all_vars(), optimizer_config)
         .expect("failed to build critic optimizer");
 
-    let policy =
-        ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
+    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
 
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
