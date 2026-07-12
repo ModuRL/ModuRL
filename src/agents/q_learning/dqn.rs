@@ -3,7 +3,9 @@ use candle_core::{Error, IndexOp, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
 use super::super::Agent;
-use super::QLearningDeviceStrategy;
+use super::{
+    QLearningConfigurationError, QLearningDeviceStrategy, validate_configuration, validate_epsilon,
+};
 use crate::{
     buffers::{
         experience,
@@ -34,7 +36,7 @@ impl<'a> DQNLoggingInfo<'a> {
 
 pub struct DQNLogEntry {
     pub loss: Tensor,
-    pub epsilon: f32,
+    pub epsilon: f64,
     pub learning_rate: f32,
     pub q_values: Tensor,
     pub rewards: Tensor,
@@ -53,6 +55,7 @@ where
     SE: std::fmt::Debug,
 {
     TensorError(candle_core::Error),
+    ConfigurationError(QLearningConfigurationError),
     GymError(GE),
     SpaceError(SE),
 }
@@ -64,6 +67,16 @@ where
 {
     fn from(err: candle_core::Error) -> Self {
         DQNAgentError::TensorError(err)
+    }
+}
+
+impl<GE, SE> From<QLearningConfigurationError> for DQNAgentError<GE, SE>
+where
+    GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
+{
+    fn from(err: QLearningConfigurationError) -> Self {
+        DQNAgentError::ConfigurationError(err)
     }
 }
 
@@ -124,7 +137,7 @@ where
     online_vars: &'a VarMap,
     target_update_interval: usize,
     optimizer: O,
-    current_epsilon: f32,
+    current_epsilon: f64,
     epsilon_schedule: Box<dyn ParameterSchedule>,
     action_space: Discrete,
     observation_space: Box<dyn Space<Error = SE>>,
@@ -164,12 +177,23 @@ where
         #[builder(default = 1000)] training_start: usize,
         logger: Option<&'a mut dyn DQNLogger>,
         device_strategy: QLearningDeviceStrategy,
-    ) -> Self {
+    ) -> Result<Self, DQNAgentError<GE, SE>> {
         let experience_replay = ExperienceReplay::new(
             replay_capacity,
             batch_size,
             device_strategy.storage_device(),
         );
+        let initial_epsilon = epsilon_schedule.value(0.0);
+        let final_epsilon = epsilon_schedule.value(1.0);
+        validate_configuration(
+            replay_capacity,
+            batch_size,
+            gamma,
+            initial_epsilon,
+            final_epsilon,
+            update_frequency,
+            target_update_interval,
+        )?;
 
         let mut agent = Self {
             online_q_network,
@@ -179,7 +203,7 @@ where
             online_vars,
             target_update_interval,
             optimizer,
-            current_epsilon: epsilon_schedule.value(0.0) as f32,
+            current_epsilon: initial_epsilon,
             epsilon_schedule,
             action_space,
             observation_space,
@@ -192,7 +216,7 @@ where
         };
 
         agent.update_target_network();
-        agent
+        Ok(agent)
     }
 }
 
@@ -298,9 +322,9 @@ where
     type SpaceError = SE;
 
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
-        let rand = Tensor::rand(0.0f32, 1.0, &[], observation.device())?;
+        let rand = Tensor::rand(0.0f64, 1.0, &[], observation.device())?;
 
-        if rand.to_vec0::<f32>()? < self.current_epsilon {
+        if rand.to_vec0::<f64>()? < self.current_epsilon {
             let mut actions = vec![];
             let batch_size = observation.shape().dims()[0];
             for _ in 0..batch_size {
@@ -327,7 +351,7 @@ where
         let mut observations = env.reset().map_err(DQNAgentError::GymError)?;
         while elapsed_timesteps < num_timesteps {
             let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
-            self.current_epsilon = self.epsilon_schedule.value(progress) as f32;
+            self.current_epsilon = validate_epsilon(self.epsilon_schedule.value(progress))?;
 
             let action = self.act(&observations)?;
             let step_info = env.step(action.clone()).map_err(DQNAgentError::GymError)?;

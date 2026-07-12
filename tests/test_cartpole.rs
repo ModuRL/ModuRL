@@ -509,7 +509,8 @@ fn dqn_cartpole() {
         .batch_size(32)
         .update_frequency(1)
         .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
-        .build();
+        .build()
+        .expect("DQN configuration should be valid");
 
     // we'll give dqn more chances since it's more unstable
     // Hopefully it doesn't actually need this many to pass
@@ -596,7 +597,8 @@ fn ddqn_cartpole() {
         .batch_size(32)
         .update_frequency(1)
         .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
-        .build();
+        .build()
+        .expect("DDQN configuration should be valid");
 
     // we'll give ddqn more chances since it's more unstable
     // Hopefully it doesn't actually need this many to pass
