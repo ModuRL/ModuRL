@@ -1,13 +1,7 @@
 use candle_core::Device;
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
-use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
-use modurl::tensor_operations::tanh;
-use modurl::{
-    actors::{ppo::PPOActor, Actor},
-    distributions::CategoricalDistribution,
-    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
-};
+use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn main() {
@@ -38,8 +32,8 @@ fn ppo_cartpole() {
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
-        .output_size(action_space.shape().iter().product::<usize>())
+        .input_size(observation_space.shape()[0])
+        .output_size(action_space.shape()[0])
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
@@ -50,9 +44,11 @@ fn ppo_cartpole() {
         .name("actor_network".to_string())
         .build()
         .unwrap();
-    let mut config = ParamsAdam::default();
     // Optimizers: both with lr=3e-4
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let actor_optimizer =
         Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -61,7 +57,7 @@ fn ppo_cartpole() {
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
+        .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
@@ -74,14 +70,13 @@ fn ppo_cartpole() {
         .build()
         .unwrap();
 
-    config.lr = 3e-4;
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
-    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
-        modurl::actors::ppo::SeparatePPONetwork::builder()
+    let ppo_network_info = PPONetworkInfo::Separate(
+        SeparatePPONetwork::builder()
             .actor_network(Box::new(
-                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
             ))
             .critic_network(Box::new(critic_network))
             .actor_optimizer(actor_optimizer)
@@ -91,7 +86,7 @@ fn ppo_cartpole() {
 
     // PPO config
     // Stable baselines3 config:
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
@@ -100,9 +95,7 @@ fn ppo_cartpole() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
-            0.2,
-        )))
+        .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
@@ -111,7 +104,7 @@ fn ppo_cartpole() {
 
     let start = std::time::Instant::now();
     for _ in 0..10 {
-        actor.learn(&mut vec_env, 100_000).unwrap();
+        agent.learn(&mut vec_env, 100_000).unwrap();
     }
     let duration = start.elapsed();
     println!("Training took: {:?} per 100,000 steps", duration / 10);

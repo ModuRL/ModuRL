@@ -3,7 +3,7 @@ use candle_nn::Module;
 
 use crate::distributions::Distribution;
 
-pub trait ProbabilisticActor {
+pub trait ProbabilisticPolicy {
     type Error;
     fn sample(&self, state: &Tensor) -> Result<Tensor, Self::Error>;
     fn log_prob_and_entropy(
@@ -13,7 +13,7 @@ pub trait ProbabilisticActor {
     ) -> Result<(Tensor, Tensor), Self::Error>;
 }
 
-pub struct ProbabilisticActorModel<D>
+pub struct ProbabilisticPolicyModel<D>
 where
     D: Distribution,
 {
@@ -21,7 +21,7 @@ where
     _marker: std::marker::PhantomData<D>,
 }
 
-impl<D> ProbabilisticActorModel<D>
+impl<D> ProbabilisticPolicyModel<D>
 where
     D: Distribution,
     <D as Distribution>::Error: std::fmt::Debug,
@@ -35,7 +35,7 @@ where
 }
 
 #[derive(Debug)]
-pub enum ProbabilisticActorModelError<DE>
+pub enum ProbabilisticPolicyModelError<DE>
 where
     DE: std::fmt::Debug,
 {
@@ -43,21 +43,21 @@ where
     DistError(DE),
 }
 
-impl<DE> From<candle_core::Error> for ProbabilisticActorModelError<DE>
+impl<DE> From<candle_core::Error> for ProbabilisticPolicyModelError<DE>
 where
     DE: std::fmt::Debug,
 {
     fn from(error: candle_core::Error) -> Self {
-        ProbabilisticActorModelError::ModuleError(error)
+        ProbabilisticPolicyModelError::ModuleError(error)
     }
 }
 
-impl<D> ProbabilisticActor for ProbabilisticActorModel<D>
+impl<D> ProbabilisticPolicy for ProbabilisticPolicyModel<D>
 where
     D: Distribution,
     <D as Distribution>::Error: std::fmt::Debug,
 {
-    type Error = ProbabilisticActorModelError<<D as Distribution>::Error>;
+    type Error = ProbabilisticPolicyModelError<<D as Distribution>::Error>;
 
     fn sample(&self, state: &Tensor) -> Result<Tensor, Self::Error> {
         let output = self.module.forward(state)?;
@@ -78,7 +78,7 @@ where
         let dist = D::from_outputs(&output);
         let dist_eval = dist
             .dist_eval(&action)
-            .map_err(ProbabilisticActorModelError::DistError)?;
+            .map_err(ProbabilisticPolicyModelError::DistError)?;
 
         let log_prob = dist_eval.log_prob().clone();
         let entropy = dist_eval.entropy().clone();
@@ -93,11 +93,11 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Activation, VarBuilder, VarMap};
 
-    fn create_test_actor(
+    fn create_test_policy(
         input_size: usize,
         action_size: usize,
         hidden_sizes: Vec<usize>,
-    ) -> Result<ProbabilisticActorModel<GuassianDistribution>, candle_core::Error> {
+    ) -> Result<ProbabilisticPolicyModel<GuassianDistribution>, candle_core::Error> {
         let device = Device::Cpu;
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F64, &device);
@@ -111,7 +111,7 @@ mod tests {
             .activation(Box::new(Activation::Relu))
             .build()?;
 
-        Ok(ProbabilisticActorModel::new(Box::new(mlp)))
+        Ok(ProbabilisticPolicyModel::new(Box::new(mlp)))
     }
 
     fn create_test_state(
@@ -122,17 +122,17 @@ mod tests {
     }
 
     #[test]
-    fn test_actor_creation() {
-        let actor = create_test_actor(4, 2, vec![32, 32]);
-        assert!(actor.is_ok(), "Failed to create probabilistic actor");
+    fn test_policy_creation() {
+        let policy = create_test_policy(4, 2, vec![32, 32]);
+        assert!(policy.is_ok(), "Failed to create probabilistic policy");
     }
 
     #[test]
     fn test_sample_action_shape() {
-        let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
+        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
         let state = create_test_state(1, 4).unwrap();
 
-        let action = actor.sample(&state).unwrap();
+        let action = policy.sample(&state).unwrap();
 
         // Action should have shape [batch_size, action_dim]
         assert_eq!(action.dims(), &[1, 2]);
@@ -140,12 +140,12 @@ mod tests {
 
     #[test]
     fn test_sample_batch_consistency() {
-        let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
+        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
         let batch_sizes = vec![1, 5, 10];
 
         for batch_size in batch_sizes {
             let state = create_test_state(batch_size, 4).unwrap();
-            let action = actor.sample(&state).unwrap();
+            let action = policy.sample(&state).unwrap();
 
             assert_eq!(
                 action.dims(),
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_log_prob_and_entropy_shape() {
-        let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
+        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
         let batch_size = 5;
         let state = create_test_state(batch_size, 4).unwrap();
         let action = create_test_state(batch_size, 2).unwrap();
@@ -167,7 +167,7 @@ mod tests {
         let state = state.unsqueeze(1).unwrap();
         let action = action.unsqueeze(1).unwrap();
 
-        let (log_prob, entropy) = actor.log_prob_and_entropy(&state, &action).unwrap();
+        let (log_prob, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
 
         // Both should have shape [batch_size]
         assert_eq!(log_prob.dims(), &[batch_size]);
@@ -176,14 +176,14 @@ mod tests {
 
     #[test]
     fn test_entropy_is_positive() {
-        let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
+        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
         let state = create_test_state(1, 4).unwrap();
         let action = create_test_state(1, 2).unwrap();
 
         let state = state.unsqueeze(1).unwrap();
         let action = action.unsqueeze(1).unwrap();
 
-        let (_, entropy) = actor.log_prob_and_entropy(&state, &action).unwrap();
+        let (_, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
         let entropy_val = entropy.to_vec1::<f64>().unwrap()[0];
 
         // Entropy should generally be positive for continuous distributions
@@ -202,14 +202,14 @@ mod tests {
 
     #[test]
     fn test_log_prob_is_finite() {
-        let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
+        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
         let state = create_test_state(3, 4).unwrap();
         let action = create_test_state(3, 2).unwrap();
 
         let state = state.unsqueeze(1).unwrap();
         let action = action.unsqueeze(1).unwrap();
 
-        let (log_prob, _) = actor.log_prob_and_entropy(&state, &action).unwrap();
+        let (log_prob, _) = policy.log_prob_and_entropy(&state, &action).unwrap();
         let log_prob_vals = log_prob.to_vec1::<f64>().unwrap();
 
         for (i, val) in log_prob_vals.iter().enumerate() {
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_with_same_state() {
-        let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
+        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
         let state = Tensor::zeros((1, 4), candle_core::DType::F64, &Device::Cpu).unwrap();
         let action = Tensor::zeros((1, 2), candle_core::DType::F64, &Device::Cpu).unwrap();
 
@@ -232,8 +232,8 @@ mod tests {
         let action = action.unsqueeze(1).unwrap();
 
         // Multiple calls with same input should give same log_prob and entropy
-        let (log_prob1, entropy1) = actor.log_prob_and_entropy(&state, &action).unwrap();
-        let (log_prob2, entropy2) = actor.log_prob_and_entropy(&state, &action).unwrap();
+        let (log_prob1, entropy1) = policy.log_prob_and_entropy(&state, &action).unwrap();
+        let (log_prob2, entropy2) = policy.log_prob_and_entropy(&state, &action).unwrap();
 
         let log_prob1_val = log_prob1.to_vec1::<f64>().unwrap()[0];
         let log_prob2_val = log_prob2.to_vec1::<f64>().unwrap()[0];
@@ -255,9 +255,9 @@ mod tests {
         let action_sizes = vec![1, 2, 4, 8];
 
         for action_size in action_sizes {
-            let actor = create_test_actor(4, action_size, vec![32, 32]).unwrap();
+            let policy = create_test_policy(4, action_size, vec![32, 32]).unwrap();
             let state = create_test_state(1, 4).unwrap();
-            let action = actor.sample(&state).unwrap();
+            let action = policy.sample(&state).unwrap();
 
             assert_eq!(
                 action.dims(),
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn test_log_std_clamping() {
         // This test verifies that log_std is properly clamped between -5.0 and 2.0
-        let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
+        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
         let state = create_test_state(1, 4).unwrap();
         let action = create_test_state(1, 2).unwrap();
 
@@ -279,7 +279,7 @@ mod tests {
         let action = action.unsqueeze(1).unwrap();
 
         // This should not crash due to numerical issues
-        let result = actor.log_prob_and_entropy(&state, &action);
+        let result = policy.log_prob_and_entropy(&state, &action);
         assert!(
             result.is_ok(),
             "Log prob calculation failed: {:?}",
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_gradient_flow() {
-        // Test that the actor can be used in a gradient computation context
+        // Test that the policy can be used in a gradient computation context
         let device = Device::Cpu;
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F64, &device);
@@ -303,17 +303,17 @@ mod tests {
             .build()
             .unwrap();
 
-        let actor: ProbabilisticActorModel<GuassianDistribution> =
-            ProbabilisticActorModel::new(Box::new(mlp));
+        let policy: ProbabilisticPolicyModel<GuassianDistribution> =
+            ProbabilisticPolicyModel::new(Box::new(mlp));
         let state = create_test_state(2, 4).unwrap();
 
         // Sample action
-        let action = actor.sample(&state).unwrap();
+        let action = policy.sample(&state).unwrap();
 
         // Compute log probability
         let state = state.unsqueeze(1).unwrap();
         let action = action.unsqueeze(1).unwrap();
-        let (log_prob, entropy) = actor.log_prob_and_entropy(&state, &action).unwrap();
+        let (log_prob, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
 
         // This should work without errors - just verify no panic occurs
         let _ = (log_prob.mean(0).unwrap(), entropy.mean(0).unwrap());
@@ -328,14 +328,14 @@ mod tests {
             let action_dim = 1 + (i % 5); // 1-5
             let batch_size = 1 + (i % 15); // 1-15
 
-            let actor = create_test_actor(state_dim, action_dim, vec![32, 32]).unwrap();
+            let policy = create_test_policy(state_dim, action_dim, vec![32, 32]).unwrap();
             let state = create_test_state(batch_size, state_dim).unwrap();
             let action = create_test_state(batch_size, action_dim).unwrap();
 
             let state = state.unsqueeze(1).unwrap();
             let action = action.unsqueeze(1).unwrap();
 
-            let (log_prob, entropy) = actor.log_prob_and_entropy(&state, &action).unwrap();
+            let (log_prob, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
 
             // Verify shapes
             assert_eq!(
@@ -400,11 +400,11 @@ mod tests {
                 _ => vec![128, 64],
             };
 
-            let actor = create_test_actor(state_dim, action_dim, hidden_layers).unwrap();
+            let policy = create_test_policy(state_dim, action_dim, hidden_layers).unwrap();
             let state = create_test_state(5, state_dim).unwrap();
 
             // Test sampling
-            let action = actor.sample(&state).unwrap();
+            let action = policy.sample(&state).unwrap();
             assert_eq!(
                 action.dims(),
                 &[5, action_dim],
@@ -415,7 +415,7 @@ mod tests {
             // Test log prob computation
             let state_expanded = state.unsqueeze(1).unwrap();
             let action_expanded = action.unsqueeze(1).unwrap();
-            let result = actor.log_prob_and_entropy(&state_expanded, &action_expanded);
+            let result = policy.log_prob_and_entropy(&state_expanded, &action_expanded);
             assert!(
                 result.is_ok(),
                 "Iteration {}: Log prob computation failed: {:?}",
@@ -430,7 +430,7 @@ mod tests {
         const FUZZ_ITERATIONS: usize = 40;
 
         for i in 0..FUZZ_ITERATIONS {
-            let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
+            let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
 
             // Create states with varying magnitudes to test numerical stability
             let scale = match i % 4 {
@@ -450,7 +450,7 @@ mod tests {
             let action = action.unsqueeze(1).unwrap();
 
             // This should not crash or produce NaN/Inf values
-            let result = actor.log_prob_and_entropy(&state, &action);
+            let result = policy.log_prob_and_entropy(&state, &action);
             assert!(
                 result.is_ok(),
                 "Iteration {} (scale={}): Computation failed: {:?}",
@@ -501,11 +501,11 @@ mod tests {
                 _ => 100,
             };
 
-            let actor = create_test_actor(4, 2, vec![32, 32]).unwrap();
+            let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
             let state = create_test_state(batch_size, 4).unwrap();
 
             // Test sampling with large batches
-            let action = actor.sample(&state).unwrap();
+            let action = policy.sample(&state).unwrap();
             assert_eq!(
                 action.dims(),
                 &[batch_size, 2],
@@ -517,7 +517,7 @@ mod tests {
             // Test log prob computation
             let state_expanded = state.unsqueeze(1).unwrap();
             let action_expanded = action.unsqueeze(1).unwrap();
-            let (log_prob, entropy) = actor
+            let (log_prob, entropy) = policy
                 .log_prob_and_entropy(&state_expanded, &action_expanded)
                 .unwrap();
 

@@ -16,7 +16,7 @@ impl Distribution for GuassianDistribution {
         let dtype = self.action_mean.dtype();
         unit_normal = unit_normal.to_dtype(dtype).unwrap();
         let action_std = self.action_log_std.exp().unwrap();
-        
+
         (&self.action_mean + unit_normal * action_std).unwrap()
     }
 

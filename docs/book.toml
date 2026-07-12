@@ -1,0 +1,8 @@
+[book]
+title = "ModuRL Guide"
+authors = ["ModuRL Contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/ModuRL/ModuRL"

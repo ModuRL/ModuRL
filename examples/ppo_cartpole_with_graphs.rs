@@ -1,14 +1,7 @@
 use candle_core::Device;
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
-use modurl::actors::ppo::PPOLogger;
-use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
-use modurl::tensor_operations::tanh;
-use modurl::{
-    actors::{ppo::PPOActor, Actor},
-    distributions::CategoricalDistribution,
-    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
-};
+use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 use textplots::{Chart, Plot};
 
@@ -37,7 +30,7 @@ impl PPOGrapher {
         }
     }
 
-    fn add_to_running_total(&mut self, info: &modurl::actors::ppo::PPOLogEntry) {
+    fn add_to_running_total(&mut self, info: &PPOLogEntry) {
         self.samples_on_this_step += 1;
         let policy_loss = info
             .actor_loss
@@ -82,10 +75,10 @@ impl PPOGrapher {
             explained_variance,
             reward,
         ];
-        for (field, new_value) in self_fields.into_iter().zip(new_values.into_iter()) {
+        for (field, new_value) in self_fields.into_iter().zip(new_values) {
             let current_total = field.last().cloned().unwrap_or(0.0);
             let updated_total = current_total + new_value;
-            if field.len() == 0 {
+            if field.is_empty() {
                 field.push(updated_total);
             } else {
                 *field.last_mut().unwrap() = updated_total;
@@ -93,7 +86,7 @@ impl PPOGrapher {
         }
     }
 
-    fn add_new_step(&mut self, info: &modurl::actors::ppo::PPOLogEntry) {
+    fn add_new_step(&mut self, info: &PPOLogEntry) {
         self.divide_last_by_samples();
         self.last_timestep = info.timestep;
         let fields = vec![
@@ -104,7 +97,7 @@ impl PPOGrapher {
             &mut self.explained_variances,
             &mut self.rewards,
         ];
-        for field in fields.into_iter() {
+        for field in fields {
             field.push(0.0);
         }
         self.add_to_running_total(info);
@@ -119,15 +112,15 @@ impl PPOGrapher {
             &mut self.explained_variances,
             &mut self.rewards,
         ];
-        for field in fields.into_iter() {
-            field.last_mut().map(|last_value| {
+        for field in fields {
+            if let Some(last_value) = field.last_mut() {
                 *last_value /= self.samples_on_this_step as f32;
-            });
+            }
         }
         self.samples_on_this_step = 0;
     }
 
-    fn textplot_graph(data: &Vec<f32>, label: &str) {
+    fn textplot_graph(data: &[f32], label: &str) {
         println!("Graph for {}:", label);
         Chart::new(180, 30, 0.0, data.len() as f32)
             .lineplot(&textplots::Shape::Lines(
@@ -141,7 +134,7 @@ impl PPOGrapher {
     fn display_graphs(&mut self, rolling_window_size: usize) {
         self.divide_last_by_samples();
 
-        let mut variables = vec![
+        let mut variables = [
             self.actor_losses.clone(),
             self.critic_losses.clone(),
             self.entropies.clone(),
@@ -176,7 +169,7 @@ impl PPOGrapher {
 }
 
 impl PPOLogger for PPOGrapher {
-    fn log(&mut self, info: &modurl::actors::ppo::PPOLogEntry) {
+    fn log(&mut self, info: &PPOLogEntry) {
         if info.timestep == self.last_timestep {
             self.add_to_running_total(info);
         } else {
@@ -218,8 +211,8 @@ fn ppo_cartpole() {
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
-        .output_size(action_space.shape().iter().product::<usize>())
+        .input_size(observation_space.shape()[0])
+        .output_size(action_space.shape()[0])
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
@@ -230,9 +223,11 @@ fn ppo_cartpole() {
         .name("actor_network".to_string())
         .build()
         .unwrap();
-    let mut config = ParamsAdam::default();
     // Optimizers: both with lr=3e-4
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let actor_optimizer =
         Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -241,7 +236,7 @@ fn ppo_cartpole() {
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
+        .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
@@ -254,16 +249,15 @@ fn ppo_cartpole() {
         .build()
         .unwrap();
 
-    config.lr = 3e-4;
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
     let mut logger = PPOGrapher::new();
 
-    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
-        modurl::actors::ppo::SeparatePPONetwork::builder()
+    let ppo_network_info = PPONetworkInfo::Separate(
+        SeparatePPONetwork::builder()
             .actor_network(Box::new(
-                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
             ))
             .critic_network(Box::new(critic_network))
             .actor_optimizer(actor_optimizer)
@@ -273,7 +267,7 @@ fn ppo_cartpole() {
 
     // PPO config
     // Stable baselines3 config:
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
@@ -282,9 +276,7 @@ fn ppo_cartpole() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
-            0.2,
-        )))
+        .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
@@ -292,7 +284,7 @@ fn ppo_cartpole() {
         .logging_info(&mut logger)
         .build();
 
-    actor.learn(&mut vec_env, 100_000).unwrap();
+    agent.learn(&mut vec_env, 100_000).unwrap();
 
     logger.display_graphs(5);
 }

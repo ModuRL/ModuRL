@@ -87,7 +87,7 @@ mod tests {
         let result_vec = result.to_vec2::<f32>().unwrap();
 
         // Expected values from PyTorch
-        let expected = vec![
+        let expected = [
             vec![-2.407606f32, -1.4076059, -0.40760595],
             vec![-2.407606f32, -1.4076059, -0.40760595],
         ];

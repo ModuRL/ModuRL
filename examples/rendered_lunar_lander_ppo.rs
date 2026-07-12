@@ -2,15 +2,7 @@ use candle_core::{Device, Tensor};
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 
-use modurl::gym::{StepInfo, VectorizedGym};
-use modurl::tensor_operations::tanh;
-use modurl::{
-    actors::{ppo::PPOActor, Actor},
-    distributions::CategoricalDistribution,
-    gym::Gym,
-    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
-    parameter_schedule::LinearSchedule,
-};
+use modurl::prelude::*;
 use modurl_gym::box_2d::lunar_lander::LunarLanderV3;
 
 struct DebugLunarLander {
@@ -33,11 +25,11 @@ impl Gym for DebugLunarLander {
     type Error = <LunarLanderV3 as Gym>::Error;
     type SpaceError = <LunarLanderV3 as Gym>::SpaceError;
 
-    fn action_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
         self.env.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
         self.env.observation_space()
     }
 
@@ -75,7 +67,7 @@ fn main() {
         envs.push(env);
     }
 
-    let mut env = modurl::gym::VectorizedGymWrapper::from(envs);
+    let mut env = VectorizedGymWrapper::from(envs);
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let actor_var_map = VarMap::new();
@@ -83,8 +75,8 @@ fn main() {
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
-        .output_size(action_space.shape().iter().sum::<usize>())
+        .input_size(observation_space.shape()[0])
+        .output_size(action_space.shape()[0])
         .vb(actor_vb)
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
@@ -96,9 +88,11 @@ fn main() {
         .build()
         .unwrap();
 
-    let mut config = ParamsAdam::default();
     // Learning rate - common range for Lunar Lander is 1e-4 to 5e-4
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let actor_optimizer =
         Adam::new(actor_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -107,7 +101,7 @@ fn main() {
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
@@ -120,14 +114,13 @@ fn main() {
         .build()
         .unwrap();
 
-    config.lr = 3e-4;
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
-    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
-        modurl::actors::ppo::SeparatePPONetwork::builder()
+    let ppo_network_info = PPONetworkInfo::Separate(
+        SeparatePPONetwork::builder()
             .actor_network(Box::new(
-                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
             ))
             .critic_network(Box::new(critic_network))
             .actor_optimizer(actor_optimizer)
@@ -138,7 +131,7 @@ fn main() {
     );
 
     // PPO config - Optimized hyperparameters for Lunar Lander
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
@@ -147,16 +140,14 @@ fn main() {
         .ent_coef(0.01)
         .gamma(0.999)
         .vf_coef(0.5)
-        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
-            0.2,
-        )))
+        .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .clipped(true)
         .gae_lambda(0.98)
         .num_epochs(4)
         .device(device)
         .build();
 
-    actor.learn(&mut env, 10_000_000).unwrap();
+    agent.learn(&mut env, 10_000_000).unwrap();
 
     actor_var_map.save("ppo_lunar_lander_actor_vars").unwrap();
     critic_var_map.save("ppo_lunar_lander_critic_vars").unwrap();

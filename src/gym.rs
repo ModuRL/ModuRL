@@ -74,10 +74,10 @@ impl VectorizedStepInfo {
         let state_chunks = self.states.chunk(env_count, 0)?;
         let mut next_states = Vec::with_capacity(env_count);
 
-        for i in 0..env_count {
+        for (i, state_chunk) in state_chunks.iter().enumerate().take(env_count) {
             match &self.terminal_states[i] {
                 Some(state) => next_states.push(state.clone()),
-                None => next_states.push(state_chunks[i].clone().squeeze(0)?),
+                None => next_states.push(state_chunk.clone().squeeze(0)?),
             }
         }
 

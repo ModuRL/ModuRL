@@ -1,22 +1,11 @@
-use candle_core::Device;
+use candle_core::{Device, Module};
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
-use modurl::actors::ddqn::DDQNActor;
-use modurl::actors::dqn::{DQNActor, DQNDeviceStrategy};
-use modurl::actors::ppo::SeparatePPONetwork;
-use modurl::gym::{VectorizedGym, VectorizedGymWrapper};
-use modurl::tensor_operations::tanh;
-use modurl::{
-    actors::{ppo::PPOActor, Actor},
-    distributions::CategoricalDistribution,
-    gym::{Gym, StepInfo},
-    models::{probabilistic_model::ProbabilisticActorModel, OrthogonalMLPInitializer, MLP},
-    spaces::Discrete,
-};
+use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn get_average_steps<AE, GE, SE>(
-    actor: &mut dyn Actor<Error = AE, GymError = GE, SpaceError = SE>,
+    agent: &mut dyn Agent<Error = AE, GymError = GE, SpaceError = SE>,
     device: &Device,
 ) -> f32
 where
@@ -32,7 +21,7 @@ where
     let target_episodes = 100;
     let mut states = vec_env.reset().unwrap();
     while total_done_count < target_episodes {
-        let action = actor.act(&states).unwrap();
+        let action = agent.act(&states).unwrap();
         let step_info = vec_env.step(action).unwrap();
         states = step_info.states;
         let step_dones = step_info.dones;
@@ -123,8 +112,8 @@ fn ppo_cartpole() {
 
     // Actor network: 2x64, tanh activation, CleanRL init (sqrt(2) hidden, 0.01 head)
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
-        .output_size(action_space.shape().iter().product::<usize>())
+        .input_size(observation_space.shape()[0])
+        .output_size(action_space.shape()[0])
         .vb(vb.clone())
         .activation(Box::new(tanh))
         .hidden_layer_sizes(vec![64, 64])
@@ -135,9 +124,11 @@ fn ppo_cartpole() {
         .name("actor_network".to_string())
         .build()
         .unwrap();
-    let mut config = ParamsAdam::default();
     // Optimizers: both with lr=3e-4
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let actor_optimizer =
         Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
@@ -146,7 +137,7 @@ fn ppo_cartpole() {
 
     // Critic network: 2x64, tanh activation, CleanRL init (sqrt(2) hidden, 1.0 head)
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
+        .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
         .activation(Box::new(tanh))
@@ -159,14 +150,13 @@ fn ppo_cartpole() {
         .build()
         .unwrap();
 
-    config.lr = 3e-4;
     let critic_optimizer =
         Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
 
-    let ppo_network_info = modurl::actors::ppo::PPONetworkInfo::Separate(
+    let ppo_network_info = modurl::agents::ppo::PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
             .actor_network(Box::new(
-                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
             ))
             .critic_network(Box::new(critic_network))
             .actor_optimizer(actor_optimizer)
@@ -176,7 +166,7 @@ fn ppo_cartpole() {
 
     // PPO config
     // Stable baselines3 config:
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
@@ -195,11 +185,11 @@ fn ppo_cartpole() {
         .build();
 
     for i in 0..6 {
-        actor.learn(&mut vec_env, 20000).unwrap();
+        agent.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if PPO solved CartPole-v1...");
 
-        // TODO! make a way to make actor deterministic for testing
-        let avg_steps = get_average_steps(&mut actor, &device);
+        // TODO! make a way to make agent deterministic for testing
+        let avg_steps = get_average_steps(&mut agent, &device);
         println!(
             "PPO averaged {} steps over 100 episodes with {} timesteps",
             avg_steps,
@@ -221,7 +211,7 @@ fn ppo_cartpole() {
 #[test]
 #[ignore = "slow solve test; run manually for review prep"]
 fn ppo_cartpole_shared() {
-    use modurl::actors::ppo::{FakeOptimizer, PPONetworkInfo, SharedPPONetwork};
+    use modurl::agents::ppo::{FakeOptimizer, PPONetworkInfo, SharedPPONetwork};
 
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = Device::Cpu;
@@ -247,7 +237,7 @@ fn ppo_cartpole_shared() {
 
     // Shared trunk: obs -> 64 latent features, CleanRL init (sqrt(2) throughout)
     let shared_network = MLP::builder()
-        .input_size(observation_space.shape().iter().product())
+        .input_size(observation_space.shape()[0])
         .output_size(64)
         .vb(vb.clone())
         .activation(Box::new(tanh))
@@ -262,28 +252,25 @@ fn ppo_cartpole_shared() {
         .unwrap();
 
     // Linear heads on the shared latent, CleanRL gains (0.01 policy, 1.0 value)
-    let actor_head = modurl::init::linear_ortho(
-        64,
-        action_space.shape().iter().product::<usize>(),
-        0.01,
-        vb.pp("actor_head"),
-    )
-    .unwrap();
+    let actor_head =
+        modurl::init::linear_ortho(64, action_space.shape()[0], 0.01, vb.pp("actor_head")).unwrap();
     let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head")).unwrap();
 
-    let mut config = ParamsAdam::default();
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     // Single optimizer over trunk + both heads, as in the Atari harness
     let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
 
     let ppo_network_info: PPONetworkInfo<
         Adam,
-        modurl::models::probabilistic_model::ProbabilisticActorModelError<candle_core::Error>,
+        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
             .actor_head(Box::new(
-                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_head)),
+                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_head)),
             ))
             .critic_head(Box::new(critic_head))
             .shared_network(Box::new(shared_network))
@@ -305,7 +292,7 @@ fn ppo_cartpole_shared() {
         vf_coef, gradient_clip
     );
 
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
@@ -325,10 +312,10 @@ fn ppo_cartpole_shared() {
         .build();
 
     for i in 0..6 {
-        actor.learn(&mut vec_env, 20000).unwrap();
+        agent.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if shared-network PPO solved CartPole-v1...");
 
-        let avg_steps = get_average_steps(&mut actor, &device);
+        let avg_steps = get_average_steps(&mut agent, &device);
         println!(
             "Shared PPO averaged {} steps over 100 episodes with {} timesteps",
             avg_steps,
@@ -355,7 +342,7 @@ fn ppo_cartpole_shared() {
 #[cfg(feature = "multithreading")]
 fn ppo_cartpole_shared_multithreaded() {
     use candle_core::Tensor;
-    use modurl::actors::ppo::{FakeOptimizer, PPONetworkInfo, SharedPPONetwork};
+    use modurl::agents::ppo::{FakeOptimizer, PPONetworkInfo, SharedPPONetwork};
     use modurl::gym::MultithreadedVectorizedGymWrapper;
 
     let device = Device::Cpu;
@@ -368,7 +355,7 @@ fn ppo_cartpole_shared_multithreaded() {
         .collect();
 
     let probe_env = CartPoleV1::builder().device(&device).build();
-    let obs_space_shape: usize = probe_env.observation_space().shape().iter().product();
+    let obs_space_shape: usize = probe_env.observation_space().shape()[0];
     let obs_space = modurl::spaces::BoxSpace::new(
         Tensor::full(-1000.0f32, &[obs_space_shape], &device).unwrap(),
         Tensor::full(1000.0f32, &[obs_space_shape], &device).unwrap(),
@@ -401,18 +388,20 @@ fn ppo_cartpole_shared_multithreaded() {
     let actor_head = modurl::init::linear_ortho(64, 2, 0.01, vb.pp("actor_head_mt")).unwrap();
     let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head_mt")).unwrap();
 
-    let mut config = ParamsAdam::default();
-    config.lr = 3e-4;
+    let config = ParamsAdam {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
 
     let ppo_network_info: PPONetworkInfo<
         Adam,
-        modurl::models::probabilistic_model::ProbabilisticActorModelError<candle_core::Error>,
+        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
             .actor_head(Box::new(
-                ProbabilisticActorModel::<CategoricalDistribution>::new(Box::new(actor_head)),
+                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_head)),
             ))
             .critic_head(Box::new(critic_head))
             .shared_network(Box::new(shared_network))
@@ -420,7 +409,7 @@ fn ppo_cartpole_shared_multithreaded() {
             .build(),
     );
 
-    let mut actor = PPOActor::builder()
+    let mut agent = PPOAgent::builder()
         .action_space(Box::new(action_space_concrete))
         .network_info(ppo_network_info)
         .batch_size(2048)
@@ -439,10 +428,10 @@ fn ppo_cartpole_shared_multithreaded() {
         .build();
 
     for i in 0..6 {
-        actor.learn(&mut vec_env, 20000).unwrap();
+        agent.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if multithreaded shared PPO solved CartPole-v1...");
 
-        let avg_steps = get_average_steps(&mut actor, &device);
+        let avg_steps = get_average_steps(&mut agent, &device);
         println!(
             "MT Shared PPO averaged {} steps over 100 episodes with {} timesteps",
             avg_steps,
@@ -485,7 +474,7 @@ fn dqn_cartpole() {
     let online_vb = VarBuilder::from_varmap(&online_var_map, candle_core::DType::F32, &device);
 
     let online_q_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(online_vb)
         .hidden_layer_sizes(vec![64, 64])
@@ -496,18 +485,20 @@ fn dqn_cartpole() {
     let target_vb = VarBuilder::from_varmap(&target_var_map, candle_core::DType::F32, &device);
 
     let target_q_network = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(target_vb)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("Failed to create MLP");
 
-    let mut config = ParamsAdam::default();
-    config.lr = 1e-3;
+    let config = ParamsAdam {
+        lr: 1e-3,
+        ..Default::default()
+    };
     let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
-    let mut actor = DQNActor::builder()
+    let mut agent = DQNAgent::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
         .observation_space(observation_space)
         .online_q_network(Box::new(online_q_network))
@@ -524,11 +515,11 @@ fn dqn_cartpole() {
     // we'll give dqn more chances since it's more unstable
     // Hopefully it doesn't actually need this many to pass
     for i in 0..10 {
-        actor.learn(&mut vec_env, 20000).unwrap();
+        agent.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if DQN solved CartPole-v1...");
 
-        // TODO! make a way to make actor deterministic for testing
-        let avg_steps = get_average_steps(&mut actor, &device);
+        // TODO! make a way to make agent deterministic for testing
+        let avg_steps = get_average_steps(&mut agent, &device);
         println!(
             "DQN averaged {} steps over 100 episodes with {} timesteps",
             avg_steps,
@@ -569,7 +560,7 @@ fn ddqn_cartpole() {
     let online_var_map = VarMap::new();
     let online_vb = VarBuilder::from_varmap(&online_var_map, candle_core::DType::F32, &device);
     let online_mlp = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(online_vb)
         .hidden_layer_sizes(vec![64, 64])
@@ -579,19 +570,21 @@ fn ddqn_cartpole() {
     let mut target_var_map = VarMap::new();
     let target_vb = VarBuilder::from_varmap(&target_var_map, candle_core::DType::F32, &device);
     let target_mlp = MLP::builder()
-        .input_size(observation_space.shape().iter().sum())
+        .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(target_vb)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("Failed to create MLP");
 
-    let mut config = ParamsAdam::default();
-    config.lr = 1e-3;
+    let config = ParamsAdam {
+        lr: 1e-3,
+        ..Default::default()
+    };
     // Online is the only one being optimized
     let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
-    let mut actor = DDQNActor::builder()
+    let mut agent = DDQNAgent::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
         .observation_space(observation_space)
         .online_q_network(Box::new(online_mlp))
@@ -610,11 +603,11 @@ fn ddqn_cartpole() {
     // we'll give ddqn more chances since it's more unstable
     // Hopefully it doesn't actually need this many to pass
     for i in 0..10 {
-        actor.learn(&mut vec_env, 20000).unwrap();
+        agent.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if DDQN solved CartPole-v1...");
 
-        // TODO! make a way to make actor deterministic for testing
-        let avg_steps = get_average_steps(&mut actor, &device);
+        // TODO! make a way to make agent deterministic for testing
+        let avg_steps = get_average_steps(&mut agent, &device);
         println!(
             "DDQN averaged {} steps over 100 episodes with {} timesteps",
             avg_steps,
