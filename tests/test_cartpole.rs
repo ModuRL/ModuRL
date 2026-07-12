@@ -1,6 +1,5 @@
-use candle_core::{Device, Module};
-use candle_nn::{Optimizer, VarBuilder, VarMap};
-use candle_optimisers::adam::{Adam, ParamsAdam};
+use candle_core::Device;
+use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
@@ -125,12 +124,12 @@ fn ppo_cartpole() {
         .build()
         .unwrap();
     // Optimizers: both with lr=3e-4
-    let config = ParamsAdam {
+    let config = ParamsAdamW {
         lr: 3e-4,
         ..Default::default()
     };
     let actor_optimizer =
-        Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
+        AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
     let critic_var_map = VarMap::new();
     let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
@@ -151,7 +150,7 @@ fn ppo_cartpole() {
         .unwrap();
 
     let critic_optimizer =
-        Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
+        AdamW::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
     let ppo_network_info = modurl::agents::ppo::PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
@@ -256,15 +255,15 @@ fn ppo_cartpole_shared() {
         modurl::init::linear_ortho(64, action_space.shape()[0], 0.01, vb.pp("actor_head")).unwrap();
     let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head")).unwrap();
 
-    let config = ParamsAdam {
+    let config = ParamsAdamW {
         lr: 3e-4,
         ..Default::default()
     };
     // Single optimizer over trunk + both heads, as in the Atari harness
-    let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
+    let optimizer = AdamW::new(var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let ppo_network_info: PPONetworkInfo<
-        Adam,
+        AdamW,
         modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
@@ -388,14 +387,14 @@ fn ppo_cartpole_shared_multithreaded() {
     let actor_head = modurl::init::linear_ortho(64, 2, 0.01, vb.pp("actor_head_mt")).unwrap();
     let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head_mt")).unwrap();
 
-    let config = ParamsAdam {
+    let config = ParamsAdamW {
         lr: 3e-4,
         ..Default::default()
     };
-    let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
+    let optimizer = AdamW::new(var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let ppo_network_info: PPONetworkInfo<
-        Adam,
+        AdamW,
         modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
@@ -492,11 +491,11 @@ fn dqn_cartpole() {
         .build()
         .expect("Failed to create MLP");
 
-    let config = ParamsAdam {
+    let config = ParamsAdamW {
         lr: 1e-3,
         ..Default::default()
     };
-    let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
+    let optimizer = AdamW::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut agent = DQNAgent::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
@@ -577,12 +576,12 @@ fn ddqn_cartpole() {
         .build()
         .expect("Failed to create MLP");
 
-    let config = ParamsAdam {
+    let config = ParamsAdamW {
         lr: 1e-3,
         ..Default::default()
     };
     // Online is the only one being optimized
-    let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
+    let optimizer = AdamW::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut agent = DDQNAgent::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete

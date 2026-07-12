@@ -984,8 +984,7 @@ mod tests {
         tensor_operations::tanh,
     };
     use candle_core::Device;
-    use candle_nn::{VarBuilder, VarMap};
-    use candle_optimisers::adam::{Adam, ParamsAdam};
+    use candle_nn::{AdamW, ParamsAdamW, VarBuilder, VarMap};
 
     // Simple dummy environment for testing
     struct DummyEnv {
@@ -1074,11 +1073,11 @@ mod tests {
                 .build()
                 .unwrap();
 
-            let config = ParamsAdam {
+            let config = ParamsAdamW {
                 lr: 3e-4,
                 ..Default::default()
             };
-            let actor_optimizer = Adam::new(actor_var_map.all_vars(), config.clone()).unwrap();
+            let actor_optimizer = AdamW::new(actor_var_map.all_vars(), config.clone()).unwrap();
 
             // Critic network
             let critic_var_map = VarMap::new();
@@ -1094,7 +1093,7 @@ mod tests {
                 .build()
                 .unwrap();
 
-            let critic_optimizer = Adam::new(critic_var_map.all_vars(), config.clone()).unwrap();
+            let critic_optimizer = AdamW::new(critic_var_map.all_vars(), config.clone()).unwrap();
 
             // Create PPO agent
             let network_info = PPONetworkInfo::Separate(

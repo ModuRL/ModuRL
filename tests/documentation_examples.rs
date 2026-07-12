@@ -1,6 +1,5 @@
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{Optimizer, VarBuilder, VarMap};
-use candle_optimisers::adam::{Adam, ParamsAdam};
+use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
@@ -42,12 +41,12 @@ fn getting_started_program() {
         .build()
         .expect("failed to build critic network");
 
-    let mut optimizer_config = ParamsAdam::default();
+    let mut optimizer_config = ParamsAdamW::default();
     optimizer_config.lr = 3e-4;
 
-    let actor_optimizer = Adam::new(actor_var_map.all_vars(), optimizer_config.clone())
+    let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
         .expect("failed to build actor optimizer");
-    let critic_optimizer = Adam::new(critic_var_map.all_vars(), optimizer_config)
+    let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
         .expect("failed to build critic optimizer");
 
     let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));

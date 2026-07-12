@@ -161,7 +161,7 @@ where
         device: candle_core::Device,
     ) -> Self {
         let experience_replay = ExperienceReplay::new(replay_capacity, batch_size, device);
-        Self {
+        let mut agent = Self {
             target_q_network,
             online_q_network,
             target_vars,
@@ -177,7 +177,10 @@ where
             target_update_interval,
             logging_info: logger.map(DDQNLoggingInfo::new),
             _phantom: std::marker::PhantomData,
-        }
+        };
+
+        agent.update_target_network();
+        agent
     }
 
     // I don't LOVE the way we do this but sadly with the structure of candle I don't see a better way
@@ -349,10 +352,9 @@ where
                 if elapsed_timesteps % self.update_frequency == 0 {
                     self.optimize()?;
                 }
-            }
-
-            if elapsed_timesteps % self.target_update_interval == 0 {
-                self.update_target_network();
+                if elapsed_timesteps % self.target_update_interval == 0 {
+                    self.update_target_network();
+                }
             }
         }
 

@@ -199,7 +199,7 @@ where
             device_strategy.storage_device(),
         );
 
-        Self {
+        let mut agent = Self {
             online_q_network,
             target_q_network,
             training_start,
@@ -217,7 +217,10 @@ where
             logging_info: logger.map(DQNLoggingInfo::new),
             _phantom: std::marker::PhantomData,
             device_strategy,
-        }
+        };
+
+        agent.update_target_network();
+        agent
     }
 }
 
