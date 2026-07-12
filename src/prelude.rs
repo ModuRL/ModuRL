@@ -6,11 +6,14 @@
 
 pub use crate::agents::{
     Agent,
-    ddqn::{DDQNAgent, DDQNAgentError, DDQNLogEntry, DDQNLogger},
-    dqn::{DQNAgent, DQNAgentError, DQNDeviceStrategy, DQNLogEntry, DQNLogger},
     ppo::{
         PPOAgent, PPOError, PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork,
         SharedPPONetwork,
+    },
+    q_learning::{
+        QLearningDeviceStrategy,
+        ddqn::{DDQNAgent, DDQNAgentError, DDQNLogEntry, DDQNLogger},
+        dqn::{DQNAgent, DQNAgentError, DQNLogEntry, DQNLogger},
     },
 };
 pub use crate::distributions::{

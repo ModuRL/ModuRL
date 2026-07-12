@@ -1,8 +1,9 @@
 use bon::bon;
-use candle_core::{Device, Error, IndexOp, Tensor};
+use candle_core::{Error, IndexOp, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
-use super::Agent;
+use super::super::Agent;
+use super::QLearningDeviceStrategy;
 use crate::{
     buffers::{
         experience,
@@ -14,36 +15,6 @@ use crate::{
     tensor_operations::tensor_has_nan,
 };
 use std::ops::Deref;
-
-/// Strategy for selecting device for DQN agent computations.
-/// - one Device: Everything runs on one Device.
-/// - Hybrid: Optimization runs on Optimization Device, but experience replay is on Storage Device until sampled for training.
-pub enum DQNDeviceStrategy {
-    OneDevice(Device),
-    Hybrid {
-        optimization_device: Device,
-        storage_device: Device,
-    },
-}
-
-impl DQNDeviceStrategy {
-    fn storage_device(&self) -> Device {
-        match self {
-            DQNDeviceStrategy::OneDevice(device) => device.clone(),
-            DQNDeviceStrategy::Hybrid { storage_device, .. } => storage_device.clone(),
-        }
-    }
-
-    fn optimization_device(&self) -> Device {
-        match self {
-            DQNDeviceStrategy::OneDevice(device) => device.clone(),
-            DQNDeviceStrategy::Hybrid {
-                optimization_device,
-                ..
-            } => optimization_device.clone(),
-        }
-    }
-}
 
 struct DQNLoggingInfo<'a> {
     logger: &'a mut dyn DQNLogger,
@@ -162,7 +133,7 @@ where
     update_frequency: usize,
     training_start: usize,
     logging_info: Option<DQNLoggingInfo<'a>>,
-    device_strategy: DQNDeviceStrategy,
+    device_strategy: QLearningDeviceStrategy,
     _phantom: std::marker::PhantomData<GE>,
 }
 
@@ -192,7 +163,7 @@ where
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         logger: Option<&'a mut dyn DQNLogger>,
-        device_strategy: DQNDeviceStrategy,
+        device_strategy: QLearningDeviceStrategy,
     ) -> Self {
         let experience_replay = ExperienceReplay::new(
             replay_capacity,
@@ -399,7 +370,7 @@ where
             for _ in 0..env.num_envs() {
                 elapsed_timesteps += 1;
                 if elapsed_timesteps % self.update_frequency == 0
-                    && elapsed_timesteps > self.training_start
+                    && elapsed_timesteps >= self.training_start
                 {
                     self.optimize()?;
                 }

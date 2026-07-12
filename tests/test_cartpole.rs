@@ -508,7 +508,7 @@ fn dqn_cartpole() {
         .replay_capacity(10_000)
         .batch_size(32)
         .update_frequency(1)
-        .device_strategy(DQNDeviceStrategy::OneDevice(device.clone()))
+        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
         .build();
 
     // we'll give dqn more chances since it's more unstable
@@ -595,7 +595,7 @@ fn ddqn_cartpole() {
         .replay_capacity(10_000)
         .batch_size(32)
         .update_frequency(1)
-        .device(device.clone())
+        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
         .build();
 
     // we'll give ddqn more chances since it's more unstable

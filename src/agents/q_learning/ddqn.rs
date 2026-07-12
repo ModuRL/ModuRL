@@ -4,7 +4,8 @@ use bon::bon;
 use candle_core::{Error, IndexOp, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
-use super::Agent;
+use super::super::Agent;
+use super::QLearningDeviceStrategy;
 use crate::{
     buffers::{
         experience,
@@ -131,7 +132,9 @@ where
     experience_replay: ExperienceReplay<DDQNAgentExperience>,
     gamma: f32,
     update_frequency: usize,
+    training_start: usize,
     logging_info: Option<DDQNLoggingInfo<'a>>,
+    device_strategy: QLearningDeviceStrategy,
     _phantom: std::marker::PhantomData<GE>,
 }
 
@@ -158,11 +161,16 @@ where
         #[builder(default = 32)] batch_size: usize,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 4)] update_frequency: usize,
+        #[builder(default = 1000)] training_start: usize,
         #[builder(default = 1000)] target_update_interval: usize,
         logger: Option<&'a mut dyn DDQNLogger>,
-        device: candle_core::Device,
+        device_strategy: QLearningDeviceStrategy,
     ) -> Self {
-        let experience_replay = ExperienceReplay::new(replay_capacity, batch_size, device);
+        let experience_replay = ExperienceReplay::new(
+            replay_capacity,
+            batch_size,
+            device_strategy.storage_device(),
+        );
         let mut agent = Self {
             target_q_network,
             online_q_network,
@@ -176,8 +184,10 @@ where
             experience_replay,
             gamma,
             update_frequency,
+            training_start,
             target_update_interval,
             logging_info: logger.map(DDQNLoggingInfo::new),
+            device_strategy,
             _phantom: std::marker::PhantomData,
         };
 
@@ -225,7 +235,10 @@ where
                 ExperienceReplayError::TensorError(te) => return Err(te),
             },
         };
-        let elements = training_batch.get_elements();
+        let mut elements = training_batch.get_elements();
+        for element in &mut elements {
+            *element = element.to_device(&self.device_strategy.optimization_device())?;
+        }
         let states = elements[0].clone();
         let next_states = elements[1].clone();
         let actions = elements[2].clone();
@@ -337,12 +350,15 @@ where
             for i in 0..env.num_envs() {
                 let reward = rewards[i].i(0)?.to_scalar::<f32>()?;
                 let next_done = dones[i];
-                let next_observation = next_observations[i].clone().squeeze(0)?;
-                let observation = this_observations[i].clone().squeeze(0)?;
-                let action = action[i].clone().squeeze(0)?;
+                let mut next_observation = next_observations[i].clone().squeeze(0)?.detach();
+                let mut observation = this_observations[i].clone().squeeze(0)?.detach();
+                let mut action = action[i].clone().squeeze(0)?.detach();
+                for element in [&mut observation, &mut next_observation, &mut action] {
+                    *element = element.to_device(&self.device_strategy.storage_device())?;
+                }
                 // Add the experience to the replay buffer.
                 self.experience_replay.add(DDQNAgentExperience::new(
-                    observation.clone(),
+                    observation,
                     next_observation,
                     action,
                     reward,
@@ -352,7 +368,9 @@ where
 
             for _ in 0..env.num_envs() {
                 elapsed_timesteps += 1;
-                if elapsed_timesteps % self.update_frequency == 0 {
+                if elapsed_timesteps % self.update_frequency == 0
+                    && elapsed_timesteps >= self.training_start
+                {
                     self.optimize()?;
                 }
                 if elapsed_timesteps % self.target_update_interval == 0 {

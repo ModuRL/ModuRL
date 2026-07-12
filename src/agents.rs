@@ -1,8 +1,7 @@
 use crate::gym::VectorizedGym;
 use candle_core::Tensor;
-pub mod ddqn;
-pub mod dqn;
 pub mod ppo;
+pub mod q_learning;
 
 pub trait Agent {
     type Error;
