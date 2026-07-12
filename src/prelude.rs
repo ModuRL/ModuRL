@@ -25,6 +25,8 @@ pub use crate::models::{
     probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
-pub use crate::parameter_schedule::{ConstantSchedule, LinearSchedule, ParameterSchedule};
+pub use crate::parameter_schedule::{
+    ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule,
+};
 pub use crate::spaces::{BoxSpace, Discrete, Space};
 pub use crate::tensor_operations::tanh;

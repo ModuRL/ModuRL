@@ -9,6 +9,7 @@ use crate::{
         experience_replay::{ExperienceReplay, ExperienceReplayError},
     },
     gym::{VectorizedGym, VectorizedStepInfo},
+    parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, Space},
     tensor_operations::tensor_has_nan,
 };
@@ -153,7 +154,7 @@ where
     target_update_interval: usize,
     optimizer: O,
     current_epsilon: f32,
-    epsilon_schedule: Box<dyn Fn(f32) -> f32>,
+    epsilon_schedule: Box<dyn ParameterSchedule>,
     action_space: Discrete,
     observation_space: Box<dyn Space<Error = SE>>,
     experience_replay: ExperienceReplay<DQNAgentExperience>,
@@ -182,8 +183,8 @@ where
         online_vars: &'a VarMap,
         optimizer: O,
         #[builder(default = 1000)] target_update_interval: usize,
-        #[builder(default = Box::new(|t| (1.0 - t) * 0.9 + 0.1))] epsilon_schedule: Box<
-            dyn Fn(f32) -> f32,
+        #[builder(default = Box::new(LinearSchedule::new(1.0, 0.1)))] epsilon_schedule: Box<
+            dyn ParameterSchedule,
         >,
         #[builder(default = 10000)] replay_capacity: usize,
         #[builder(default = 32)] batch_size: usize,
@@ -207,7 +208,7 @@ where
             online_vars,
             target_update_interval,
             optimizer,
-            current_epsilon: epsilon_schedule(0.0),
+            current_epsilon: epsilon_schedule.value(0.0) as f32,
             epsilon_schedule,
             action_space,
             observation_space,
@@ -354,6 +355,9 @@ where
         let mut elapsed_timesteps = 0;
         let mut observations = env.reset().map_err(DQNAgentError::GymError)?;
         while elapsed_timesteps < num_timesteps {
+            let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
+            self.current_epsilon = self.epsilon_schedule.value(progress) as f32;
+
             let action = self.act(&observations)?;
             let step_info = env.step(action.clone()).map_err(DQNAgentError::GymError)?;
             let training_next_observations = step_info.transition_next_states()?;
@@ -397,11 +401,6 @@ where
                 if elapsed_timesteps % self.update_frequency == 0
                     && elapsed_timesteps > self.training_start
                 {
-                    // Only need to update epsilon before optimization step
-                    self.current_epsilon = (self.epsilon_schedule)(
-                        (elapsed_timesteps as f32) / (num_timesteps as f32),
-                    );
-
                     self.optimize()?;
                 }
                 if elapsed_timesteps % self.target_update_interval == 0 {

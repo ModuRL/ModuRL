@@ -11,6 +11,7 @@ use crate::{
         experience_replay::{ExperienceReplay, ExperienceReplayError},
     },
     gym::{VectorizedGym, VectorizedStepInfo},
+    parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, Space},
     tensor_operations::tensor_has_nan,
 };
@@ -124,7 +125,7 @@ where
     target_update_interval: usize,
     optimizer: O,
     epsilon: f32,
-    epsilon_decay: f32,
+    epsilon_schedule: Box<dyn ParameterSchedule>,
     action_space: Discrete,
     observation_space: Box<dyn Space<Error = SE>>,
     experience_replay: ExperienceReplay<DDQNAgentExperience>,
@@ -150,8 +151,9 @@ where
         action_space: Discrete,
         observation_space: Box<dyn Space<Error = SE>>,
         optimizer: O,
-        #[builder(default = 0.9)] epsilon_start: f32,
-        #[builder(default = 0.99)] epsilon_decay: f32,
+        #[builder(default = Box::new(LinearSchedule::new(1.0, 0.1)))] epsilon_schedule: Box<
+            dyn ParameterSchedule,
+        >,
         #[builder(default = 10000)] replay_capacity: usize,
         #[builder(default = 32)] batch_size: usize,
         #[builder(default = 0.99)] gamma: f32,
@@ -167,8 +169,8 @@ where
             target_vars,
             online_vars,
             optimizer,
-            epsilon: epsilon_start,
-            epsilon_decay,
+            epsilon: epsilon_schedule.value(0.0) as f32,
+            epsilon_schedule,
             action_space,
             observation_space,
             experience_replay,
@@ -312,6 +314,9 @@ where
         let mut elapsed_timesteps = 0;
         let mut observations = env.reset().map_err(DDQNAgentError::GymError)?;
         while elapsed_timesteps < num_timesteps {
+            let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
+            self.epsilon = self.epsilon_schedule.value(progress) as f32;
+
             let action = self.act(&observations)?;
             let step_info = env.step(action.clone()).map_err(DDQNAgentError::GymError)?;
             let training_next_observations = step_info.transition_next_states()?;
@@ -344,8 +349,6 @@ where
                     if next_done { 1.0 } else { 0.0 },
                 ));
             }
-
-            self.epsilon *= self.epsilon_decay;
 
             for _ in 0..env.num_envs() {
                 elapsed_timesteps += 1;
