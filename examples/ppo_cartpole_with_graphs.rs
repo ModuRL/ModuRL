@@ -1,6 +1,5 @@
 use candle_core::Device;
-use candle_nn::{Optimizer, VarBuilder, VarMap};
-use candle_optimisers::adam::{Adam, ParamsAdam};
+use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 use textplots::{Chart, Plot};
@@ -224,12 +223,12 @@ fn ppo_cartpole() {
         .build()
         .unwrap();
     // Optimizers: both with lr=3e-4
-    let config = ParamsAdam {
+    let config = ParamsAdamW {
         lr: 3e-4,
         ..Default::default()
     };
     let actor_optimizer =
-        Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
+        AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
     let critic_var_map = VarMap::new();
     let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
@@ -250,7 +249,7 @@ fn ppo_cartpole() {
         .unwrap();
 
     let critic_optimizer =
-        Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
+        AdamW::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
     let mut logger = PPOGrapher::new();
 
@@ -280,6 +279,7 @@ fn ppo_cartpole() {
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
+        .training_horizon(100_000)
         .device(device)
         .logging_info(&mut logger)
         .build();

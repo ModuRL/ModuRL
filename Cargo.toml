@@ -17,21 +17,14 @@ cudnn = ["candle-core/cudnn"]
 metal = ["candle-core/metal"]
 
 [dev-dependencies]
-modurl_gym = { path = "../modurl_gym", features = [
+modurl_gym = { git = "https://github.com/ModuRL/ModuRL_Gym", features = [
     "rendering",
 ] }
-candle-optimisers = "0.10.2"
 tracing-subscriber = "0.3.20"
 textplots = "0.8.7"
 
-[patch.crates-io]
-ale = { path = "../modurl_gym/vendor/ale" }
-
 [patch."https://github.com/ModuRL/ModuRL"]
 modurl = { path = "." }
-
-[patch."https://github.com/ModuRL/ModuRL_Gym"]
-modurl_gym = { path = "../modurl_gym" }
 
 # For profiler
 [profile.release]

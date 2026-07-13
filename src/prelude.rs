@@ -6,11 +6,15 @@
 
 pub use crate::agents::{
     Agent,
-    ddqn::{DDQNAgent, DDQNAgentError, DDQNLogEntry, DDQNLogger},
-    dqn::{DQNAgent, DQNAgentError, DQNDeviceStrategy, DQNLogEntry, DQNLogger},
     ppo::{
         PPOAgent, PPOError, PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork,
         SharedPPONetwork,
+    },
+    q_learning::{
+        QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError,
+        QLearningDeviceStrategy, QLogEntry,
+        ddqn::{DDQNAgent, DDQNLogger},
+        dqn::{DQNAgent, DQNLogger},
     },
 };
 pub use crate::distributions::{
@@ -25,6 +29,8 @@ pub use crate::models::{
     probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
-pub use crate::parameter_schedule::{ConstantSchedule, LinearSchedule, ParameterSchedule};
+pub use crate::parameter_schedule::{
+    ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
+};
 pub use crate::spaces::{BoxSpace, Discrete, Space};
 pub use crate::tensor_operations::tanh;

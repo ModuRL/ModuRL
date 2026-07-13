@@ -5,9 +5,7 @@ ModuRL is a Rust-native reinforcement learning library built on
 composable training components for users who want explicit control over
 agents, environments, models, distributions, schedules, logging, and devices.
 
-The project is currently early and API stability is not guaranteed. PPO is the
-best-supported path today; DQN and DDQN are implemented but need stronger docs,
-examples, and benchmarks.
+The project is currently early and API stability is not guaranteed.
 
 ## Goals
 
@@ -46,9 +44,9 @@ ModuRL intentionally does not try to be everything:
 
 | Area | Status |
 | --- | --- |
-| PPO | Implemented with separate and shared-network paths |
-| DQN | Implemented, needs public guide/example coverage |
-| DDQN | Implemented, needs public guide/example coverage |
+| PPO | Implemented |
+| DQN | Implemented |
+| DDQN | Implemented |
 | Vectorized environments | Implemented |
 | Multithreaded vectorized environments | Available behind the `multithreading` feature |
 | Candle CPU backend | Supported |
@@ -56,8 +54,7 @@ ModuRL intentionally does not try to be everything:
 
 ## Running an Example
 
-The examples currently use `modurl_gym` environments and the local development
-dependency layout from this repository.
+The examples use `modurl_gym` environments.
 
 ```sh
 cargo run --example ppo_bench
@@ -68,6 +65,17 @@ For a PPO example with logging and terminal plots:
 ```sh
 cargo run --example ppo_cartpole_with_graphs
 ```
+
+For DQN training with terminal plots for loss, exploration, Q-values, and
+episode performance:
+
+```sh
+cargo run --example dqn_cartpole_with_graphs
+```
+
+For value-based CartPole programs, read the [DQN guide](docs/src/dqn.md) or
+[Double DQN guide](docs/src/ddqn.md). Both pages include a complete program and
+explain the required replay, exploration, and target-network configuration.
 
 For GPU-backed builds, enable the matching Candle backend feature:
 
@@ -82,6 +90,7 @@ cargo run --features metal --example ppo_bench
 | --- | --- |
 | `examples/ppo_bench.rs` | PPO on CartPole with separate actor and critic networks |
 | `examples/ppo_cartpole_with_graphs.rs` | PPO training metrics through `PPOLogger` |
+| `examples/dqn_cartpole_with_graphs.rs` | DQN training metrics and episode graphs through `DQNLogger` |
 | `examples/rendered_lunar_lander_ppo.rs` | PPO on LunarLander with rendering and learning-rate schedules |
 
 ## Core Concepts
@@ -110,16 +119,13 @@ shapes, Candle devices, and the model modules they pass into agents.
 | `metal` | Enable Candle Metal support |
 | `multithreading` | Enable multithreaded vectorized environment support |
 
-## Documentation Status
+## Documentation
 
-The current README and examples are not the final documentation surface. The
-planned direction is:
+The documentation surface is organized as follows:
 
 - README: short project overview, status, and first successful path.
 - mdBook: user guide, concepts, examples, and tensor/device contracts.
 - rustdoc: precise API contracts for public traits, structs, and builders.
-
-Known documentation gaps are tracked in [`Doc_Holes.md`](Doc_Holes.md).
 
 ## License
 

@@ -210,6 +210,7 @@ Finally, build the `PPOAgent` and run learning:
         .batch_size(1024)
         .mini_batch_size(64)
         .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .training_horizon(10_000)
         .device(device)
         .build();
 
@@ -221,6 +222,8 @@ Finally, build the `PPOAgent` and run learning:
 `batch_size` controls how many transitions PPO collects before an update.
 `mini_batch_size` controls how those transitions are split during optimization.
 The clip range is the PPO policy-update bound.
+`training_horizon` defines the total number of environment transitions over
+which parameter schedules progress. This way, the schedules can span multiple `learn` calls.
 
 Run the program with:
 
@@ -304,6 +307,7 @@ fn main() {
         .batch_size(1024)
         .mini_batch_size(64)
         .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .training_horizon(10_000)
         .device(device)
         .build();
 

@@ -1,6 +1,5 @@
-use candle_core::{Device, Module};
-use candle_nn::{Optimizer, VarBuilder, VarMap};
-use candle_optimisers::adam::{Adam, ParamsAdam};
+use candle_core::Device;
+use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
@@ -98,11 +97,7 @@ fn ppo_cartpole() {
     #[cfg(any(feature = "cuda", feature = "metal"))]
     device.set_seed(42).unwrap();
 
-    let mut envs = vec![];
-    for _ in 0..8 {
-        let env = DebugCartpoleV1::new(&device);
-        envs.push(env);
-    }
+    let envs = vec![DebugCartpoleV1::new(&device)];
     let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
 
     let observation_space = vec_env.observation_space();
@@ -125,12 +120,12 @@ fn ppo_cartpole() {
         .build()
         .unwrap();
     // Optimizers: both with lr=3e-4
-    let config = ParamsAdam {
+    let config = ParamsAdamW {
         lr: 3e-4,
         ..Default::default()
     };
     let actor_optimizer =
-        Adam::new(var_map.all_vars(), config.clone()).expect("Failed to create Adam");
+        AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
     let critic_var_map = VarMap::new();
     let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
@@ -151,7 +146,7 @@ fn ppo_cartpole() {
         .unwrap();
 
     let critic_optimizer =
-        Adam::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create Adam");
+        AdamW::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
     let ppo_network_info = modurl::agents::ppo::PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
@@ -181,6 +176,7 @@ fn ppo_cartpole() {
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
+        .training_horizon(120_000)
         .device(device.clone())
         .build();
 
@@ -188,7 +184,6 @@ fn ppo_cartpole() {
         agent.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if PPO solved CartPole-v1...");
 
-        // TODO! make a way to make agent deterministic for testing
         let avg_steps = get_average_steps(&mut agent, &device);
         println!(
             "PPO averaged {} steps over 100 episodes with {} timesteps",
@@ -256,15 +251,15 @@ fn ppo_cartpole_shared() {
         modurl::init::linear_ortho(64, action_space.shape()[0], 0.01, vb.pp("actor_head")).unwrap();
     let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head")).unwrap();
 
-    let config = ParamsAdam {
+    let config = ParamsAdamW {
         lr: 3e-4,
         ..Default::default()
     };
     // Single optimizer over trunk + both heads, as in the Atari harness
-    let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
+    let optimizer = AdamW::new(var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let ppo_network_info: PPONetworkInfo<
-        Adam,
+        AdamW,
         modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
@@ -308,6 +303,7 @@ fn ppo_cartpole_shared() {
         .gae_lambda(0.95)
         .num_epochs(10)
         .gradient_clip(gradient_clip)
+        .training_horizon(120_000)
         .device(device.clone())
         .build();
 
@@ -388,14 +384,14 @@ fn ppo_cartpole_shared_multithreaded() {
     let actor_head = modurl::init::linear_ortho(64, 2, 0.01, vb.pp("actor_head_mt")).unwrap();
     let critic_head = modurl::init::linear_ortho(64, 1, 1.0, vb.pp("critic_head_mt")).unwrap();
 
-    let config = ParamsAdam {
+    let config = ParamsAdamW {
         lr: 3e-4,
         ..Default::default()
     };
-    let optimizer = Adam::new(var_map.all_vars(), config).expect("Failed to create Adam");
+    let optimizer = AdamW::new(var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let ppo_network_info: PPONetworkInfo<
-        Adam,
+        AdamW,
         modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
@@ -424,6 +420,7 @@ fn ppo_cartpole_shared_multithreaded() {
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
+        .training_horizon(120_000)
         .device(device.clone())
         .build();
 
@@ -462,11 +459,7 @@ fn dqn_cartpole() {
     #[cfg(any(feature = "cuda", feature = "metal"))]
     device.set_seed(42).unwrap();
 
-    let mut envs = vec![];
-    for _ in 0..8 {
-        let env = DebugCartpoleV1::new(&device);
-        envs.push(env);
-    }
+    let envs = vec![DebugCartpoleV1::new(&device)];
 
     let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
     let observation_space = vec_env.observation_space();
@@ -492,11 +485,11 @@ fn dqn_cartpole() {
         .build()
         .expect("Failed to create MLP");
 
-    let config = ParamsAdam {
-        lr: 1e-3,
+    let config = ParamsAdamW {
+        lr: 2.5e-4,
         ..Default::default()
     };
-    let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
+    let optimizer = AdamW::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut agent = DQNAgent::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
@@ -507,32 +500,39 @@ fn dqn_cartpole() {
         .target_vars(&mut target_var_map)
         .optimizer(optimizer)
         .replay_capacity(10_000)
-        .batch_size(32)
-        .update_frequency(1)
-        .device_strategy(DQNDeviceStrategy::OneDevice(device.clone()))
-        .build();
+        .batch_size(128)
+        .training_start(10_000)
+        .update_frequency(10)
+        .target_update_interval(500)
+        .training_horizon(500_000)
+        .epsilon_schedule(Box::new(|progress: f64| {
+            let exploration_progress = (progress / 0.5).min(1.0);
+            1.0 + (0.05 - 1.0) * exploration_progress
+        }))
+        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .build()
+        .expect("DQN configuration should be valid");
 
-    // we'll give dqn more chances since it's more unstable
-    // Hopefully it doesn't actually need this many to pass
-    for i in 0..10 {
-        agent.learn(&mut vec_env, 20000).unwrap();
-        println!("Testing if DQN solved CartPole-v1...");
+    // CleanRL's published CartPole-v1 DQN configuration uses 500k transitions,
+    // 10k replay warm-up transitions, and epsilon decay over the first half.
+    const TRAINING_TIMESTEPS: usize = 500_000;
 
-        // TODO! make a way to make agent deterministic for testing
-        let avg_steps = get_average_steps(&mut agent, &device);
-        println!(
-            "DQN averaged {} steps over 100 episodes with {} timesteps",
-            avg_steps,
-            (i + 1) * 20000
-        );
+    agent.learn(&mut vec_env, TRAINING_TIMESTEPS).unwrap();
 
-        // Cartpole v1 should be using 475, which we can reach but no need for that here
-        if avg_steps >= 195.0 {
-            println!("DQN solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
-            return;
-        }
+    println!("Testing if DQN solved CartPole-v1...");
+
+    let avg_steps = get_average_steps(&mut agent, &device);
+    println!(
+        "DQN averaged {} steps over 100 episodes with {} timesteps",
+        avg_steps, TRAINING_TIMESTEPS
+    );
+
+    // Cartpole v1 should be using 475, which we can reach but no need for that here
+    if avg_steps >= 195.0 {
+        println!("DQN solved CartPole-v1 in {TRAINING_TIMESTEPS} timesteps!");
+        return;
     }
-    panic!("DQN failed to solve CartPole-v1 within 100000 timesteps.");
+    panic!("DQN failed to solve CartPole-v1 within {TRAINING_TIMESTEPS} timesteps.");
 }
 
 #[test]
@@ -548,12 +548,7 @@ fn ddqn_cartpole() {
     #[cfg(any(feature = "cuda", feature = "metal"))]
     device.set_seed(42).unwrap();
 
-    let mut envs = vec![];
-    for _ in 0..8 {
-        let env = DebugCartpoleV1::new(&device);
-        envs.push(env);
-    }
-
+    let envs = vec![DebugCartpoleV1::new(&device)];
     let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
     let observation_space = vec_env.observation_space();
 
@@ -577,12 +572,12 @@ fn ddqn_cartpole() {
         .build()
         .expect("Failed to create MLP");
 
-    let config = ParamsAdam {
-        lr: 1e-3,
+    let config = ParamsAdamW {
+        lr: 2.5e-4,
         ..Default::default()
     };
     // Online is the only one being optimized
-    let optimizer = Adam::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
+    let optimizer = AdamW::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
 
     let mut agent = DDQNAgent::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
@@ -591,34 +586,35 @@ fn ddqn_cartpole() {
         .target_q_network(Box::new(target_mlp))
         .online_vars(&online_var_map)
         .target_vars(&mut target_var_map)
-        .epsilon_start(1.0)
-        .epsilon_decay(0.99)
+        .epsilon_schedule(Box::new(|progress: f64| {
+            let exploration_progress = (progress / 0.5).min(1.0);
+            1.0 + (0.05 - 1.0) * exploration_progress
+        }))
         .optimizer(optimizer)
         .replay_capacity(10_000)
-        .batch_size(32)
-        .update_frequency(1)
-        .device(device.clone())
-        .build();
+        .batch_size(128)
+        .training_start(10_000)
+        .update_frequency(10)
+        .target_update_interval(500)
+        .training_horizon(500_000)
+        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .build()
+        .expect("DDQN configuration should be valid");
 
-    // we'll give ddqn more chances since it's more unstable
-    // Hopefully it doesn't actually need this many to pass
-    for i in 0..10 {
-        agent.learn(&mut vec_env, 20000).unwrap();
-        println!("Testing if DDQN solved CartPole-v1...");
+    const TRAINING_TIMESTEPS: usize = 500_000;
+    agent.learn(&mut vec_env, TRAINING_TIMESTEPS).unwrap();
 
-        // TODO! make a way to make agent deterministic for testing
-        let avg_steps = get_average_steps(&mut agent, &device);
-        println!(
-            "DDQN averaged {} steps over 100 episodes with {} timesteps",
-            avg_steps,
-            (i + 1) * 20000
-        );
+    println!("Testing if DDQN solved CartPole-v1...");
+    let avg_steps = get_average_steps(&mut agent, &device);
+    println!(
+        "DDQN averaged {} steps over 100 episodes with {} timesteps",
+        avg_steps, TRAINING_TIMESTEPS
+    );
 
-        // Cartpole v1 should be using 475, which we can reach but no need for that here
-        if avg_steps >= 195.0 {
-            println!("DDQN solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
-            return;
-        }
+    // Cartpole v1 should be using 475, which we can reach but no need for that here
+    if avg_steps >= 195.0 {
+        println!("DDQN solved CartPole-v1 in {TRAINING_TIMESTEPS} timesteps!");
+        return;
     }
-    panic!("DDQN failed to solve CartPole-v1 within 100000 timesteps.");
+    panic!("DDQN failed to solve CartPole-v1 within {TRAINING_TIMESTEPS} timesteps.");
 }

@@ -1,8 +1,8 @@
 # PPO
 
-Proximal Policy Optimization, or PPO, is the best-supported ModuRL training
-path. `PPOAgent` collects transitions from a `VectorizedGym`, then updates a
-stochastic policy and a value model from that experience.
+`PPOAgent` is a ModuRL agent that implements Proximal Policy Optimization
+(PPO). It collects transitions from a `VectorizedGym`, then updates a stochastic
+policy and a value model from that experience.
 
 The getting-started program uses the separate-network PPO configuration. It
 gives the policy model and the value model their own `MLP`, `VarMap`, and Adam
@@ -12,3 +12,6 @@ one shared model followed by separate policy and value heads.
 Start with [Getting Started](./getting-started.md) for the complete CartPole
 program. Then read [Understand a PPO Training Run](./understand-ppo-training.md)
 before changing its configuration.
+
+For value-based agents in discrete action spaces, read [Value-Based
+Training](./q-learning.md).
