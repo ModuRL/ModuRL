@@ -6,7 +6,8 @@ use candle_nn::{Optimizer, VarMap};
 
 use super::super::Agent;
 use super::{
-    QLearningConfigurationError, QLearningDeviceStrategy, validate_configuration, validate_epsilon,
+    bellman_targets, epsilon_greedy_actions, selected_action_q_values, validate_configuration,
+    validate_epsilon, QLearningConfigurationError, QLearningDeviceStrategy,
 };
 use crate::{
     buffers::{
@@ -138,7 +139,7 @@ where
     online_vars: &'a VarMap,
     target_update_interval: usize,
     optimizer: O,
-    epsilon: f64,
+    current_epsilon: f64,
     epsilon_schedule: Box<dyn ParameterSchedule>,
     action_space: Discrete,
     observation_space: Box<dyn Space<Error = SE>>,
@@ -201,7 +202,7 @@ where
             target_vars,
             online_vars,
             optimizer,
-            epsilon: initial_epsilon,
+            current_epsilon: initial_epsilon,
             epsilon_schedule,
             action_space,
             observation_space,
@@ -246,6 +247,20 @@ where
         &*self.observation_space
     }
 
+    fn target_q_values(
+        rewards: &Tensor,
+        next_dones: &Tensor,
+        online_next_q_values: &Tensor,
+        target_next_q_values: &Tensor,
+        gamma: f32,
+    ) -> Result<Tensor, Error> {
+        let next_actions = online_next_q_values.argmax(1)?;
+        let next_q_values = selected_action_q_values(target_next_q_values, &next_actions)?
+            .squeeze(1)?
+            .detach();
+        bellman_targets(rewards, next_dones, &next_q_values, gamma)
+    }
+
     fn optimize(&mut self) -> Result<(), Error> {
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(()); // Not enough samples to train.
@@ -269,30 +284,29 @@ where
         let rewards = elements[3].clone();
         let next_dones = elements[4].clone();
 
-        let next_actions = self.online_q_network.forward(&next_states)?.argmax(1)?; // argmax over actions
-        let next_q_values_target = self.target_q_network.forward(&next_states)?;
-        let next_q_values = next_q_values_target
-            .gather(&next_actions.unsqueeze(1)?, 1)?
-            .squeeze(1)?;
-        let gamma_tensor = Tensor::new(self.gamma, states.device())?;
-        let mut target_q_values = (rewards.clone()
-            + (1.0 - next_dones)?.mul(&(next_q_values.broadcast_mul(&gamma_tensor)?))?)?;
+        let online_next_q_values = self.online_q_network.forward(&next_states)?;
+        let target_next_q_values = self.target_q_network.forward(&next_states)?;
+        let mut target_q_values = Self::target_q_values(
+            &rewards,
+            &next_dones,
+            &online_next_q_values,
+            &target_next_q_values,
+            self.gamma,
+        )?;
         target_q_values = target_q_values
             .reshape(&[target_q_values.shape().dims()[0], 1])?
             .detach();
 
         let mut state_action_q_values = self.online_q_network.forward(&states)?;
         state_action_q_values = state_action_q_values.squeeze(1)?;
-        let actions = actions.reshape(&[actions.shape().dims()[0], 1])?.clone();
-        // Select the q-values for the actions taken.
-        state_action_q_values = state_action_q_values.gather(&actions, 1)?;
+        state_action_q_values = selected_action_q_values(&state_action_q_values, &actions)?;
 
         let loss = candle_nn::loss::mse(&state_action_q_values, &target_q_values.detach())?;
 
         if let Some(logging_info) = &mut self.logging_info {
             let log_entry = DDQNLogEntry {
                 loss: loss.clone(),
-                epsilon: self.epsilon,
+                epsilon: self.current_epsilon,
                 learning_rate: self.optimizer.learning_rate() as f32,
                 q_values: state_action_q_values.clone(),
                 rewards,
@@ -323,24 +337,12 @@ where
     type SpaceError = SE;
 
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
-        let rand = Tensor::rand(0.0f64, 1.0, &[], observation.device())?;
-
-        if rand.to_vec0::<f64>()? < self.epsilon {
-            let mut actions = vec![];
-            let batch_size = observation.shape().dims()[0];
-            for _ in 0..batch_size {
-                let sample = self.action_space.sample(observation.device())?;
-
-                actions.push(sample);
-            }
-            // turn that into a
-            let actions = Tensor::stack(&actions, 0)?;
-            Ok(actions)
-        } else {
-            let q_values = self.online_q_network.forward(observation)?;
-            let actions = q_values.argmax(1)?;
-            Ok(actions)
-        }
+        Ok(epsilon_greedy_actions(
+            observation,
+            self.current_epsilon,
+            &self.action_space,
+            |observations| self.online_q_network.forward(observations),
+        )?)
     }
 
     fn learn(
@@ -352,7 +354,7 @@ where
         let mut observations = env.reset().map_err(DDQNAgentError::GymError)?;
         while elapsed_timesteps < num_timesteps {
             let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
-            self.epsilon = validate_epsilon(self.epsilon_schedule.value(progress))?;
+            self.current_epsilon = validate_epsilon(self.epsilon_schedule.value(progress))?;
 
             let action = self.act(&observations)?;
             let step_info = env.step(action.clone()).map_err(DDQNAgentError::GymError)?;
@@ -404,5 +406,47 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use candle_core::{Device, Tensor};
+    use candle_nn::AdamW;
+
+    use super::DDQNAgent;
+
+    type TestDDQNAgent = DDQNAgent<'static, AdamW, (), ()>;
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn targets_select_online_actions_and_evaluate_with_target_values() {
+        let device = Device::Cpu;
+        let rewards = Tensor::from_vec(vec![1.0f32, 2.0], 2, &device).unwrap();
+        let next_dones = Tensor::from_vec(vec![0.0f32, 1.0], 2, &device).unwrap();
+        let online_next_q_values =
+            Tensor::from_vec(vec![3.0f32, 100.0, 0.0, 10.0, 2.0, 1.0], (2, 3), &device).unwrap();
+        let target_next_q_values =
+            Tensor::from_vec(vec![5.0f32, 7.0, 9.0, 4.0, 8.0, 6.0], (2, 3), &device).unwrap();
+
+        let targets = TestDDQNAgent::target_q_values(
+            &rewards,
+            &next_dones,
+            &online_next_q_values,
+            &target_next_q_values,
+            0.9,
+        )
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap();
+
+        assert_close(targets[0], 7.3);
+        assert_close(targets[1], 2.0);
     }
 }

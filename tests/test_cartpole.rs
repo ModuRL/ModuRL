@@ -97,11 +97,7 @@ fn ppo_cartpole() {
     #[cfg(any(feature = "cuda", feature = "metal"))]
     device.set_seed(42).unwrap();
 
-    let mut envs = vec![];
-    for _ in 0..8 {
-        let env = DebugCartpoleV1::new(&device);
-        envs.push(env);
-    }
+    let envs = vec![DebugCartpoleV1::new(&device)];
     let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
 
     let observation_space = vec_env.observation_space();
@@ -461,11 +457,7 @@ fn dqn_cartpole() {
     #[cfg(any(feature = "cuda", feature = "metal"))]
     device.set_seed(42).unwrap();
 
-    let mut envs = vec![];
-    for _ in 0..8 {
-        let env = DebugCartpoleV1::new(&device);
-        envs.push(env);
-    }
+    let envs = vec![DebugCartpoleV1::new(&device)];
 
     let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
     let observation_space = vec_env.observation_space();
@@ -492,7 +484,7 @@ fn dqn_cartpole() {
         .expect("Failed to create MLP");
 
     let config = ParamsAdamW {
-        lr: 1e-3,
+        lr: 2.5e-4,
         ..Default::default()
     };
     let optimizer = AdamW::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
@@ -506,33 +498,37 @@ fn dqn_cartpole() {
         .target_vars(&mut target_var_map)
         .optimizer(optimizer)
         .replay_capacity(10_000)
-        .batch_size(32)
-        .update_frequency(1)
+        .batch_size(128)
+        .training_start(10_000)
+        .update_frequency(10)
+        .target_update_interval(500)
+        .epsilon_schedule(Box::new(|progress: f64| {
+            let exploration_progress = (progress / 0.5).min(1.0);
+            1.0 + (0.05 - 1.0) * exploration_progress
+        }))
         .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DQN configuration should be valid");
 
-    // we'll give dqn more chances since it's more unstable
-    // Hopefully it doesn't actually need this many to pass
-    for i in 0..10 {
-        agent.learn(&mut vec_env, 20000).unwrap();
-        println!("Testing if DQN solved CartPole-v1...");
+    // CleanRL's published CartPole-v1 DQN configuration uses 500k transitions,
+    // 10k replay warm-up transitions, and epsilon decay over the first half.
+    const TRAINING_TIMESTEPS: usize = 500_000;
+    agent.learn(&mut vec_env, TRAINING_TIMESTEPS).unwrap();
+    println!("Testing if DQN solved CartPole-v1...");
 
-        // TODO! make a way to make agent deterministic for testing
-        let avg_steps = get_average_steps(&mut agent, &device);
-        println!(
-            "DQN averaged {} steps over 100 episodes with {} timesteps",
-            avg_steps,
-            (i + 1) * 20000
-        );
+    // TODO! make a way to make agent deterministic for testing
+    let avg_steps = get_average_steps(&mut agent, &device);
+    println!(
+        "DQN averaged {} steps over 100 episodes with {} timesteps",
+        avg_steps, TRAINING_TIMESTEPS
+    );
 
-        // Cartpole v1 should be using 475, which we can reach but no need for that here
-        if avg_steps >= 195.0 {
-            println!("DQN solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
-            return;
-        }
+    // Cartpole v1 should be using 475, which we can reach but no need for that here
+    if avg_steps >= 195.0 {
+        println!("DQN solved CartPole-v1 in {TRAINING_TIMESTEPS} timesteps!");
+        return;
     }
-    panic!("DQN failed to solve CartPole-v1 within 100000 timesteps.");
+    panic!("DQN failed to solve CartPole-v1 within {TRAINING_TIMESTEPS} timesteps.");
 }
 
 #[test]
