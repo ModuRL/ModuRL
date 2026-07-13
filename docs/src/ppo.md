@@ -1,8 +1,8 @@
 # PPO
 
-Proximal Policy Optimization, or PPO, is a ModuRL training path. `PPOAgent`
-collects transitions from a `VectorizedGym`, then updates a stochastic policy
-and a value model from that experience.
+`PPOAgent` is a ModuRL agent that implements Proximal Policy Optimization
+(PPO). It collects transitions from a `VectorizedGym`, then updates a stochastic
+policy and a value model from that experience.
 
 The getting-started program uses the separate-network PPO configuration. It
 gives the policy model and the value model their own `MLP`, `VarMap`, and Adam

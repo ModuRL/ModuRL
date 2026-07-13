@@ -184,7 +184,6 @@ fn ppo_cartpole() {
         agent.learn(&mut vec_env, 20000).unwrap();
         println!("Testing if PPO solved CartPole-v1...");
 
-        // TODO! make a way to make agent deterministic for testing
         let avg_steps = get_average_steps(&mut agent, &device);
         println!(
             "PPO averaged {} steps over 100 episodes with {} timesteps",
@@ -522,7 +521,6 @@ fn dqn_cartpole() {
 
     println!("Testing if DQN solved CartPole-v1...");
 
-    // TODO! make a way to make agent deterministic for testing
     let avg_steps = get_average_steps(&mut agent, &device);
     println!(
         "DQN averaged {} steps over 100 episodes with {} timesteps",
@@ -607,7 +605,6 @@ fn ddqn_cartpole() {
     agent.learn(&mut vec_env, TRAINING_TIMESTEPS).unwrap();
 
     println!("Testing if DDQN solved CartPole-v1...");
-    // TODO! make a way to make agent deterministic for testing
     let avg_steps = get_average_steps(&mut agent, &device);
     println!(
         "DDQN averaged {} steps over 100 episodes with {} timesteps",
