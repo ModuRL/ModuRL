@@ -3,6 +3,39 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
+// This is the logger shape shown in docs/src/understand-q-learning-training.md.
+#[allow(dead_code)]
+struct DocumentationDQNLogger;
+
+impl DQNLogger for DocumentationDQNLogger {
+    fn log(&mut self, entry: &QLogEntry) {
+        let _ = (entry.update_index, &entry.loss);
+    }
+
+    fn log_collection(&mut self, entry: &QCollectionLogEntry) {
+        for episode in &entry.completed_episodes {
+            let _ = (
+                episode.environment_index,
+                episode.episode_return,
+                episode.episode_length,
+                episode.terminated,
+                episode.truncated,
+                episode.collection_timestep,
+            );
+        }
+    }
+}
+
+// DDQN has the same logger entry types, and collection logging remains optional.
+#[allow(dead_code)]
+struct DocumentationDDQNLogger;
+
+impl DDQNLogger for DocumentationDDQNLogger {
+    fn log(&mut self, entry: &QLogEntry) {
+        let _ = (&entry.replay_rewards, entry.collection_timestep);
+    }
+}
+
 // This is the complete program shown in docs/src/getting-started.md. Keep this
 // test compile-only: running it would turn a documentation check into training.
 #[allow(dead_code)]
@@ -71,6 +104,148 @@ fn getting_started_program() {
         .build();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
+    println!("Training complete.");
+}
+
+// This is the complete DQN program shown in docs/src/dqn.md. Keep this test
+// compile-only: running it would turn a documentation check into training.
+#[allow(dead_code)]
+fn dqn_program() {
+    let device = Device::Cpu;
+    let envs = vec![CartPoleV1::builder().device(&device).build()];
+    let mut env = VectorizedGymWrapper::from(envs);
+    let observation_space = env.observation_space();
+
+    let online_var_map = VarMap::new();
+    let online_q_network = MLP::builder()
+        .input_size(observation_space.shape()[0])
+        .output_size(2)
+        .vb(VarBuilder::from_varmap(
+            &online_var_map,
+            DType::F32,
+            &device,
+        ))
+        .hidden_layer_sizes(vec![64, 64])
+        .build()
+        .expect("failed to build the online Q-network");
+
+    let mut target_var_map = VarMap::new();
+    let target_q_network = MLP::builder()
+        .input_size(observation_space.shape()[0])
+        .output_size(2)
+        .vb(VarBuilder::from_varmap(
+            &target_var_map,
+            DType::F32,
+            &device,
+        ))
+        .hidden_layer_sizes(vec![64, 64])
+        .build()
+        .expect("failed to build the target Q-network");
+
+    let optimizer = AdamW::new(
+        online_var_map.all_vars(),
+        ParamsAdamW {
+            lr: 2.5e-4,
+            ..Default::default()
+        },
+    )
+    .expect("failed to build the optimizer");
+
+    let mut agent = DQNAgent::builder()
+        .action_space(Discrete::new(2))
+        .observation_space(observation_space)
+        .online_q_network(Box::new(online_q_network))
+        .target_q_network(Box::new(target_q_network))
+        .online_vars(&online_var_map)
+        .target_vars(&mut target_var_map)
+        .optimizer(optimizer)
+        .replay_capacity(10_000)
+        .batch_size(128)
+        .training_start(10_000)
+        .update_frequency(10)
+        .target_update_interval(500)
+        .training_horizon(500_000)
+        .epsilon_schedule(Box::new(|progress: f64| {
+            let exploration_progress = (progress / 0.5).min(1.0);
+            1.0 + (0.05 - 1.0) * exploration_progress
+        }))
+        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .build()
+        .expect("DQN configuration should be valid");
+
+    agent.learn(&mut env, 500_000).expect("DQN learning failed");
+    println!("Training complete.");
+}
+
+// This is the DQN program with the DDQN-specific construction shown in
+// docs/src/ddqn.md. Keep this test compile-only for the same reason.
+#[allow(dead_code)]
+fn ddqn_program() {
+    let device = Device::Cpu;
+    let envs = vec![CartPoleV1::builder().device(&device).build()];
+    let mut env = VectorizedGymWrapper::from(envs);
+    let observation_space = env.observation_space();
+
+    let online_var_map = VarMap::new();
+    let online_q_network = MLP::builder()
+        .input_size(observation_space.shape()[0])
+        .output_size(2)
+        .vb(VarBuilder::from_varmap(
+            &online_var_map,
+            DType::F32,
+            &device,
+        ))
+        .hidden_layer_sizes(vec![64, 64])
+        .build()
+        .expect("failed to build the online Q-network");
+
+    let mut target_var_map = VarMap::new();
+    let target_q_network = MLP::builder()
+        .input_size(observation_space.shape()[0])
+        .output_size(2)
+        .vb(VarBuilder::from_varmap(
+            &target_var_map,
+            DType::F32,
+            &device,
+        ))
+        .hidden_layer_sizes(vec![64, 64])
+        .build()
+        .expect("failed to build the target Q-network");
+
+    let optimizer = AdamW::new(
+        online_var_map.all_vars(),
+        ParamsAdamW {
+            lr: 2.5e-4,
+            ..Default::default()
+        },
+    )
+    .expect("failed to build the optimizer");
+
+    let mut agent = DDQNAgent::builder()
+        .action_space(Discrete::new(2))
+        .observation_space(observation_space)
+        .online_q_network(Box::new(online_q_network))
+        .target_q_network(Box::new(target_q_network))
+        .online_vars(&online_var_map)
+        .target_vars(&mut target_var_map)
+        .optimizer(optimizer)
+        .replay_capacity(10_000)
+        .batch_size(128)
+        .training_start(10_000)
+        .update_frequency(10)
+        .target_update_interval(500)
+        .training_horizon(500_000)
+        .epsilon_schedule(Box::new(|progress: f64| {
+            let exploration_progress = (progress / 0.5).min(1.0);
+            1.0 + (0.05 - 1.0) * exploration_progress
+        }))
+        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .build()
+        .expect("DDQN configuration should be valid");
+
+    agent
+        .learn(&mut env, 500_000)
+        .expect("DDQN learning failed");
     println!("Training complete.");
 }
 

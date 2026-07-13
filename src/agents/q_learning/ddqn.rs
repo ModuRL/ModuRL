@@ -3,8 +3,8 @@ use candle_core::{Error, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
 use super::{
-    QAgentError, QLearningAgent, QLearningDeviceStrategy, QLearningTarget, QLogEntry,
-    bellman_targets, selected_action_q_values,
+    QAgentError, QCollectionLogEntry, QLearningAgent, QLearningDeviceStrategy, QLearningLogger,
+    QLearningTarget, QLogEntry, bellman_targets, selected_action_q_values,
 };
 use crate::{
     agents::Agent,
@@ -15,12 +15,26 @@ use crate::{
 
 pub trait DDQNLogger {
     fn log(&mut self, info: &QLogEntry);
+
+    fn log_collection(&mut self, _info: &QCollectionLogEntry) {}
 }
 
 struct DDQNLoggingInfo<'a> {
     logger: &'a mut dyn DDQNLogger,
-    epoch: usize,
-    timestep: usize,
+}
+
+impl QLearningLogger for Option<DDQNLoggingInfo<'_>> {
+    fn log_update(&mut self, entry: &QLogEntry) {
+        if let Some(info) = self {
+            info.logger.log(entry);
+        }
+    }
+
+    fn log_collection(&mut self, entry: &QCollectionLogEntry) {
+        if let Some(info) = self {
+            info.logger.log_collection(entry);
+        }
+    }
 }
 
 struct DDQNTarget;
@@ -107,11 +121,7 @@ where
             .build()?;
         Ok(Self {
             inner,
-            logging_info: logger.map(|logger| DDQNLoggingInfo {
-                logger,
-                epoch: 0,
-                timestep: 0,
-            }),
+            logging_info: logger.map(|logger| DDQNLoggingInfo { logger }),
         })
     }
 
@@ -143,16 +153,7 @@ where
         env: &mut dyn VectorizedGym<Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
-        let logging_info = &mut self.logging_info;
-        self.inner.learn(env, num_timesteps, |entry| {
-            if let Some(info) = logging_info {
-                entry.epoch = info.epoch;
-                entry.timestep = info.timestep;
-                info.logger.log(entry);
-                info.epoch += 1;
-                info.timestep += 1;
-            }
-        })
+        self.inner.learn(env, num_timesteps, &mut self.logging_info)
     }
 }
 

@@ -11,7 +11,8 @@ pub use crate::agents::{
         SharedPPONetwork,
     },
     q_learning::{
-        QAgentError, QLearningConfigurationError, QLearningDeviceStrategy, QLogEntry,
+        QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError,
+        QLearningDeviceStrategy, QLogEntry,
         ddqn::{DDQNAgent, DDQNLogger},
         dqn::{DQNAgent, DQNLogger},
     },

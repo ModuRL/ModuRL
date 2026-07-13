@@ -13,9 +13,9 @@ In ModuRL, an agent can do two things:
 - `act` from observations
 - `learn` from a vectorized environment
 
-Concrete agents are named after the algorithm they implement. For example,
-`PPOAgent` implements PPO, `DQNAgent` implements DQN, and `DDQNAgent` implements
-Double DQN.
+Concrete agents are named after the algorithm they implement. `PPOAgent`
+implements PPO, `DQNAgent` implements DQN, and `DDQNAgent` implements Double
+DQN.
 
 An agent is not just a neural network. It usually owns or receives the pieces it
 needs for training: model modules, optimizers, schedules, buffers,
@@ -63,6 +63,12 @@ networks are `MLP`s with two hidden layers.
 
 `MLP` does not know about PPO by itself. It just maps input tensors to output
 tensors. The agent and policy model decide what those outputs mean.
+
+For DQN and DDQN, an `MLP` is a *Q-network*. Its output has one value for each
+discrete action, rather than policy logits or a single state value. The agent
+selects an action from those values with epsilon-greedy exploration. Read
+[Value-Based Training](./q-learning.md) for the two-network setup these agents
+use.
 
 ## Probabilistic Policies
 
