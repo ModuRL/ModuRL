@@ -1,6 +1,6 @@
 use bon::bon;
-use candle_core::{IndexOp, Tensor, D};
-use candle_nn::{loss, Optimizer};
+use candle_core::{D, IndexOp, Tensor};
+use candle_nn::{Optimizer, loss};
 use std::marker::PhantomData;
 
 use crate::{
@@ -982,7 +982,7 @@ mod tests {
     use crate::{
         distributions::CategoricalDistribution,
         gym::{Gym, StepInfo, VectorizedGym, VectorizedGymWrapper},
-        models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
+        models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         spaces::Discrete,
         tensor_operations::tanh,
     };
@@ -1178,12 +1178,12 @@ mod schedule_tests {
     use super::*;
     use crate::{
         agents::{
-            test_support::{CountingOptimizer, FixedEnv},
             Agent,
+            test_support::{CountingOptimizer, FixedEnv},
         },
         distributions::CategoricalDistribution,
         gym::{VectorizedGym, VectorizedGymWrapper},
-        models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
+        models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         parameter_schedule::LinearSchedule,
         tensor_operations::tanh,
     };

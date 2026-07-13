@@ -550,12 +550,7 @@ fn ddqn_cartpole() {
     #[cfg(any(feature = "cuda", feature = "metal"))]
     device.set_seed(42).unwrap();
 
-    let mut envs = vec![];
-    for _ in 0..8 {
-        let env = DebugCartpoleV1::new(&device);
-        envs.push(env);
-    }
-
+    let envs = vec![DebugCartpoleV1::new(&device)];
     let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
     let observation_space = vec_env.observation_space();
 
@@ -580,7 +575,7 @@ fn ddqn_cartpole() {
         .expect("Failed to create MLP");
 
     let config = ParamsAdamW {
-        lr: 1e-3,
+        lr: 2.5e-4,
         ..Default::default()
     };
     // Online is the only one being optimized
@@ -593,35 +588,36 @@ fn ddqn_cartpole() {
         .target_q_network(Box::new(target_mlp))
         .online_vars(&online_var_map)
         .target_vars(&mut target_var_map)
-        .epsilon_schedule(Box::new(LinearSchedule::new(1.0, 0.1)))
+        .epsilon_schedule(Box::new(|progress: f64| {
+            let exploration_progress = (progress / 0.5).min(1.0);
+            1.0 + (0.05 - 1.0) * exploration_progress
+        }))
         .optimizer(optimizer)
         .replay_capacity(10_000)
-        .batch_size(32)
-        .update_frequency(1)
-        .training_horizon(200_000)
+        .batch_size(128)
+        .training_start(10_000)
+        .update_frequency(10)
+        .target_update_interval(500)
+        .training_horizon(500_000)
         .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DDQN configuration should be valid");
 
-    // we'll give ddqn more chances since it's more unstable
-    // Hopefully it doesn't actually need this many to pass
-    for i in 0..10 {
-        agent.learn(&mut vec_env, 20000).unwrap();
-        println!("Testing if DDQN solved CartPole-v1...");
+    const TRAINING_TIMESTEPS: usize = 500_000;
+    agent.learn(&mut vec_env, TRAINING_TIMESTEPS).unwrap();
 
-        // TODO! make a way to make agent deterministic for testing
-        let avg_steps = get_average_steps(&mut agent, &device);
-        println!(
-            "DDQN averaged {} steps over 100 episodes with {} timesteps",
-            avg_steps,
-            (i + 1) * 20000
-        );
+    println!("Testing if DDQN solved CartPole-v1...");
+    // TODO! make a way to make agent deterministic for testing
+    let avg_steps = get_average_steps(&mut agent, &device);
+    println!(
+        "DDQN averaged {} steps over 100 episodes with {} timesteps",
+        avg_steps, TRAINING_TIMESTEPS
+    );
 
-        // Cartpole v1 should be using 475, which we can reach but no need for that here
-        if avg_steps >= 195.0 {
-            println!("DDQN solved CartPole-v1 in {} timesteps!", (i + 1) * 20000);
-            return;
-        }
+    // Cartpole v1 should be using 475, which we can reach but no need for that here
+    if avg_steps >= 195.0 {
+        println!("DDQN solved CartPole-v1 in {TRAINING_TIMESTEPS} timesteps!");
+        return;
     }
-    panic!("DDQN failed to solve CartPole-v1 within 100000 timesteps.");
+    panic!("DDQN failed to solve CartPole-v1 within {TRAINING_TIMESTEPS} timesteps.");
 }
