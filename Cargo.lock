@@ -1376,6 +1376,7 @@ dependencies = [
 [[package]]
 name = "modurl_gym"
 version = "0.1.0"
+source = "git+https://github.com/ModuRL/ModuRL_Gym#5dafbcd52125f490a467bf255aa9201858d42661"
 dependencies = [
  "bon",
  "box2d-rs",

@@ -54,8 +54,7 @@ ModuRL intentionally does not try to be everything:
 
 ## Running an Example
 
-The examples currently use `modurl_gym` environments and the local development
-dependency layout from this repository.
+The examples use `modurl_gym` environments.
 
 ```sh
 cargo run --example ppo_bench
