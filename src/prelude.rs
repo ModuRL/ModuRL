@@ -5,16 +5,16 @@
 //! Candle and ModuRL Gym are intentionally left explicit.
 
 pub use crate::agents::{
-    Agent,
     ppo::{
         PPOAgent, PPOError, PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork,
         SharedPPONetwork,
     },
     q_learning::{
-        QLearningConfigurationError, QLearningDeviceStrategy,
         ddqn::{DDQNAgent, DDQNAgentError, DDQNLogEntry, DDQNLogger},
         dqn::{DQNAgent, DQNAgentError, DQNLogEntry, DQNLogger},
+        QLearningConfigurationError, QLearningDeviceStrategy,
     },
+    Agent,
 };
 pub use crate::distributions::{
     CategoricalDistribution, DistEval, Distribution, GuassianDistribution,
@@ -23,13 +23,12 @@ pub use crate::distributions::{
 pub use crate::gym::MultithreadedVectorizedGymWrapper;
 pub use crate::gym::{Gym, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper};
 pub use crate::models::{
-    DefaultMLPInitializer, MLP, MLPArchitecture, MLPInitializedLayers, MLPInitializer,
-    OrthogonalMLPInitializer, probabilistic_model::ProbabilisticPolicy,
-    probabilistic_model::ProbabilisticPolicyModel,
-    probabilistic_model::ProbabilisticPolicyModelError,
+    probabilistic_model::ProbabilisticPolicy, probabilistic_model::ProbabilisticPolicyModel,
+    probabilistic_model::ProbabilisticPolicyModelError, DefaultMLPInitializer, MLPArchitecture,
+    MLPInitializedLayers, MLPInitializer, OrthogonalMLPInitializer, MLP,
 };
 pub use crate::parameter_schedule::{
-    ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule,
+    ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
 };
 pub use crate::spaces::{BoxSpace, Discrete, Space};
 pub use crate::tensor_operations::tanh;

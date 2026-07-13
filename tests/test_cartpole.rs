@@ -176,6 +176,7 @@ fn ppo_cartpole() {
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
+        .training_horizon(120_000)
         .device(device.clone())
         .build();
 
@@ -303,6 +304,7 @@ fn ppo_cartpole_shared() {
         .gae_lambda(0.95)
         .num_epochs(10)
         .gradient_clip(gradient_clip)
+        .training_horizon(120_000)
         .device(device.clone())
         .build();
 
@@ -419,6 +421,7 @@ fn ppo_cartpole_shared_multithreaded() {
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
+        .training_horizon(120_000)
         .device(device.clone())
         .build();
 
@@ -502,6 +505,7 @@ fn dqn_cartpole() {
         .training_start(10_000)
         .update_frequency(10)
         .target_update_interval(500)
+        .training_horizon(500_000)
         .epsilon_schedule(Box::new(|progress: f64| {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
@@ -513,7 +517,9 @@ fn dqn_cartpole() {
     // CleanRL's published CartPole-v1 DQN configuration uses 500k transitions,
     // 10k replay warm-up transitions, and epsilon decay over the first half.
     const TRAINING_TIMESTEPS: usize = 500_000;
+
     agent.learn(&mut vec_env, TRAINING_TIMESTEPS).unwrap();
+
     println!("Testing if DQN solved CartPole-v1...");
 
     // TODO! make a way to make agent deterministic for testing
@@ -592,6 +598,7 @@ fn ddqn_cartpole() {
         .replay_capacity(10_000)
         .batch_size(32)
         .update_frequency(1)
+        .training_horizon(200_000)
         .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DDQN configuration should be valid");

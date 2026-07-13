@@ -66,11 +66,81 @@ fn getting_started_program() {
         .batch_size(1024)
         .mini_batch_size(64)
         .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .training_horizon(10_000)
         .device(device)
         .build();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
     println!("Training complete.");
+}
+
+// This is the PPO builder configuration shown in docs/src/understand-ppo-training.md.
+#[allow(dead_code)]
+fn understand_ppo_training_configuration() {
+    let device = Device::Cpu;
+
+    let envs = (0..4)
+        .map(|_| CartPoleV1::builder().device(&device).build())
+        .collect::<Vec<_>>();
+    let mut env = VectorizedGymWrapper::from(envs);
+
+    let observation_space = env.observation_space();
+    let action_space = env.action_space();
+
+    let actor_var_map = VarMap::new();
+    let actor_vb = VarBuilder::from_varmap(&actor_var_map, DType::F32, &device);
+    let actor_network = MLP::builder()
+        .input_size(observation_space.shape()[0])
+        .output_size(action_space.shape()[0])
+        .vb(actor_vb)
+        .activation(Box::new(tanh))
+        .hidden_layer_sizes(vec![64, 64])
+        .name("actor".to_string())
+        .build()
+        .expect("failed to build actor network");
+
+    let critic_var_map = VarMap::new();
+    let critic_vb = VarBuilder::from_varmap(&critic_var_map, DType::F32, &device);
+    let critic_network = MLP::builder()
+        .input_size(observation_space.shape()[0])
+        .output_size(1)
+        .vb(critic_vb)
+        .activation(Box::new(tanh))
+        .hidden_layer_sizes(vec![64, 64])
+        .name("critic".to_string())
+        .build()
+        .expect("failed to build critic network");
+
+    let mut optimizer_config = ParamsAdamW::default();
+    optimizer_config.lr = 3e-4;
+    let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
+        .expect("failed to build actor optimizer");
+    let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
+        .expect("failed to build critic optimizer");
+
+    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
+    let network_info = PPONetworkInfo::Separate(
+        SeparatePPONetwork::builder()
+            .actor_network(Box::new(policy))
+            .critic_network(Box::new(critic_network))
+            .actor_optimizer(actor_optimizer)
+            .critic_optimizer(critic_optimizer)
+            .build(),
+    );
+
+    let mut agent = PPOAgent::builder()
+        .action_space(action_space)
+        .network_info(network_info)
+        .batch_size(2048)
+        .mini_batch_size(64)
+        .ent_coef(0.005)
+        .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .num_epochs(10)
+        .training_horizon(120_000)
+        .device(device)
+        .build();
+
+    agent.learn(&mut env, 120_000).expect("PPO learning failed");
 }
 
 struct CounterEnv {

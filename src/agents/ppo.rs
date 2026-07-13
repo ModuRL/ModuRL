@@ -1,13 +1,13 @@
 use bon::bon;
-use candle_core::{D, IndexOp, Tensor};
-use candle_nn::{Optimizer, loss};
+use candle_core::{IndexOp, Tensor, D};
+use candle_nn::{loss, Optimizer};
 use std::marker::PhantomData;
 
 use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
     gym::{VectorizedGym, VectorizedStepInfo},
     models::probabilistic_model::ProbabilisticPolicy,
-    parameter_schedule::{ConstantSchedule, ParameterSchedule},
+    parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
     spaces,
     tensor_operations::{normalize_tensor, tensor_has_nan, torch_like_max, torch_like_min},
 };
@@ -291,6 +291,7 @@ where
     mini_batch_size: usize,
     num_epochs: usize,
     batch_size: usize,
+    schedule_progress: ScheduleProgress,
     logging_info: Option<PPOLoggingInfo<'a>>,
     gradient_clip: f32,
     current_states: Option<Tensor>,
@@ -328,6 +329,7 @@ where
         #[builder(default = 128)] mini_batch_size: usize,
         #[builder(default = 4)] num_epochs: usize,
         #[builder(default = 0.5)] gradient_clip: f32,
+        training_horizon: usize,
         logging_info: Option<&'a mut dyn PPOLogger>,
         device: candle_core::Device,
     ) -> Self {
@@ -350,6 +352,7 @@ where
             rollout_buffer: RolloutBuffer::new(0, device), // placeholder, will set when we know num envs
             num_epochs,
             batch_size,
+            schedule_progress: ScheduleProgress::new(training_horizon),
             mini_batch_size,
             logging_info: logging_info.map(PPOLoggingInfo::new),
             gradient_clip,
@@ -367,7 +370,7 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
-    fn optimize(&mut self, progress: f64) -> Result<(), PPOError<AE, GE, SE>> {
+    fn optimize(&mut self) -> Result<(), PPOError<AE, GE, SE>> {
         self.add_advantages_and_returns()?;
 
         let experiences = self.rollout_buffer.get_raw();
@@ -399,7 +402,7 @@ where
 
         let total_samples = all_states.dims()[0];
         let device = all_states.device();
-        let clip_range = self.clip_range.value(progress) as f32;
+        let clip_range = self.schedule_progress.parameter(&*self.clip_range) as f32;
 
         for epoch in 0..self.num_epochs {
             if let Some(logging_info) = &mut self.logging_info {
@@ -829,21 +832,21 @@ where
         network.sample(states).map_err(PPOError::PolicyError)
     }
 
-    fn update_learning_rates(&mut self, progress: f64) {
+    fn update_learning_rates(&mut self) {
         match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
                 if let Some(lr_scheduler) = &shared_info.lr_scheduler {
-                    let new_lr = lr_scheduler.value(progress);
+                    let new_lr = self.schedule_progress.parameter(&**lr_scheduler);
                     shared_info.optimizer.set_learning_rate(new_lr);
                 }
             }
             PPONetworkInfo::Separate(ref mut separate_info) => {
                 if let Some(actor_lr_scheduler) = &separate_info.actor_lr_scheduler {
-                    let new_lr = actor_lr_scheduler.value(progress);
+                    let new_lr = self.schedule_progress.parameter(&**actor_lr_scheduler);
                     separate_info.actor_optimizer.set_learning_rate(new_lr);
                 }
                 if let Some(critic_lr_scheduler) = &separate_info.critic_lr_scheduler {
-                    let new_lr = critic_lr_scheduler.value(progress);
+                    let new_lr = self.schedule_progress.parameter(&**critic_lr_scheduler);
                     separate_info.critic_optimizer.set_learning_rate(new_lr);
                 }
             }
@@ -957,15 +960,15 @@ where
                 next_states = reset_or_next_states;
             }
 
-            elapsed_timesteps += self.rollout_buffer.len() * env.num_envs();
-
-            let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
-            self.update_learning_rates(progress);
+            let collected_timesteps = self.rollout_buffer.len() * env.num_envs();
+            elapsed_timesteps += collected_timesteps;
+            self.schedule_progress.advance_steps(collected_timesteps);
+            self.update_learning_rates();
 
             if let Some(logging_info) = &mut self.logging_info {
                 logging_info.timestep = elapsed_timesteps;
             }
-            self.optimize(progress)?;
+            self.optimize()?;
         }
         self.current_states = Some(next_states);
         Ok(())
@@ -978,8 +981,8 @@ mod tests {
     use super::*;
     use crate::{
         distributions::CategoricalDistribution,
-        gym::{Gym, StepInfo, VectorizedGymWrapper},
-        models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
+        gym::{Gym, StepInfo, VectorizedGym, VectorizedGymWrapper},
+        models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
         spaces::Discrete,
         tensor_operations::tanh,
     };
@@ -1119,6 +1122,7 @@ mod tests {
                 .clip_range(Box::new(ConstantSchedule::new(0.2)))
                 .gae_lambda(0.95)
                 .num_epochs(10)
+                .training_horizon(10_000)
                 .device(device.clone())
                 .build();
 
@@ -1163,5 +1167,106 @@ mod tests {
             }
             last_actions = Some(actions);
         }
+    }
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use candle_core::{DType, Device};
+    use candle_nn::{Optimizer, VarBuilder, VarMap};
+
+    use super::*;
+    use crate::{
+        agents::{
+            test_support::{CountingOptimizer, FixedEnv},
+            Agent,
+        },
+        distributions::CategoricalDistribution,
+        gym::{VectorizedGym, VectorizedGymWrapper},
+        models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
+        parameter_schedule::LinearSchedule,
+        tensor_operations::tanh,
+    };
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn schedules_continue_across_learn_calls() {
+        let device = Device::Cpu;
+        let mut env: VectorizedGymWrapper<FixedEnv> =
+            vec![FixedEnv::new(device.clone()), FixedEnv::new(device.clone())].into();
+        let actor_var_map = VarMap::new();
+        let critic_var_map = VarMap::new();
+        let actor_network = MLP::builder()
+            .input_size(4)
+            .output_size(2)
+            .vb(VarBuilder::from_varmap(&actor_var_map, DType::F32, &device))
+            .activation(Box::new(tanh))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let critic_network = MLP::builder()
+            .input_size(4)
+            .output_size(1)
+            .vb(VarBuilder::from_varmap(
+                &critic_var_map,
+                DType::F32,
+                &device,
+            ))
+            .activation(Box::new(tanh))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let network_info = PPONetworkInfo::Separate(
+            SeparatePPONetwork::builder()
+                .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                .actor_network(Box::new(
+                    ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(
+                        actor_network,
+                    )),
+                ))
+                .critic_network(Box::new(critic_network))
+                .actor_lr_scheduler(Box::new(LinearSchedule::new(1e-3, 1e-4)))
+                .critic_lr_scheduler(Box::new(LinearSchedule::new(1e-3, 1e-4)))
+                .build(),
+        );
+        let mut agent = PPOAgent::builder()
+            .action_space(env.action_space())
+            .network_info(network_info)
+            .batch_size(2)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .clip_range(Box::new(LinearSchedule::new(0.2, 0.1)))
+            .training_horizon(10)
+            .device(device)
+            .build();
+
+        agent.learn(&mut env, 2).unwrap();
+        assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+        assert_close(agent.schedule_progress.parameter(&*agent.clip_range), 0.18);
+        let PPONetworkInfo::Separate(network) = &agent.network_info else {
+            panic!("expected separate PPO network");
+        };
+        assert_close(network.actor_optimizer.learning_rate(), 0.00082);
+        assert_close(network.critic_optimizer.learning_rate(), 0.00082);
+        assert_eq!(network.actor_optimizer.steps, 1);
+        assert_eq!(network.critic_optimizer.steps, 1);
+        agent.learn(&mut env, 2).unwrap();
+
+        assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
+        assert_close(agent.schedule_progress.parameter(&*agent.clip_range), 0.16);
+        let PPONetworkInfo::Separate(network) = &agent.network_info else {
+            panic!("expected separate PPO network");
+        };
+        assert_close(network.actor_optimizer.learning_rate(), 0.00064);
+        assert_close(network.critic_optimizer.learning_rate(), 0.00064);
+        assert_eq!(network.actor_optimizer.steps, 2);
+        assert_eq!(network.critic_optimizer.steps, 2);
     }
 }

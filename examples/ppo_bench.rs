@@ -98,6 +98,7 @@ fn ppo_cartpole() {
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
+        .training_horizon(1_000_000)
         .device(device)
         .build();
 

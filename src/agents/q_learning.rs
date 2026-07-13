@@ -11,6 +11,7 @@ pub enum QLearningConfigurationError {
     ZeroBatchSize,
     ZeroTargetUpdateInterval,
     ZeroUpdateFrequency,
+    ZeroTrainingHorizon,
     ReplayCapacityBelowBatchSize,
     InvalidGamma,
     InvalidEpsilon,
@@ -24,6 +25,7 @@ pub(crate) fn validate_configuration(
     final_epsilon: f64,
     update_frequency: usize,
     target_update_interval: usize,
+    training_horizon: usize,
 ) -> Result<(), QLearningConfigurationError> {
     if replay_capacity == 0 {
         return Err(QLearningConfigurationError::ZeroReplayCapacity);
@@ -36,6 +38,9 @@ pub(crate) fn validate_configuration(
     }
     if update_frequency == 0 {
         return Err(QLearningConfigurationError::ZeroUpdateFrequency);
+    }
+    if training_horizon == 0 {
+        return Err(QLearningConfigurationError::ZeroTrainingHorizon);
     }
     if replay_capacity < batch_size {
         return Err(QLearningConfigurationError::ReplayCapacityBelowBatchSize);
@@ -164,7 +169,7 @@ mod tests {
     #[test]
     fn accepts_valid_configuration() {
         assert_eq!(
-            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 4, 1_000),
+            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 4, 1_000, 10_000),
             Ok(())
         );
     }
@@ -172,28 +177,32 @@ mod tests {
     #[test]
     fn rejects_invalid_configuration_values() {
         assert_eq!(
-            validate_configuration(0, 32, 0.99, 1.0, 0.1, 4, 1_000),
+            validate_configuration(0, 32, 0.99, 1.0, 0.1, 4, 1_000, 10_000),
             Err(QLearningConfigurationError::ZeroReplayCapacity)
         );
         assert_eq!(
-            validate_configuration(1_000, 0, 0.99, 1.0, 0.1, 4, 1_000),
+            validate_configuration(1_000, 0, 0.99, 1.0, 0.1, 4, 1_000, 10_000),
             Err(QLearningConfigurationError::ZeroBatchSize)
         );
         assert_eq!(
-            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 4, 0),
+            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 4, 0, 10_000),
             Err(QLearningConfigurationError::ZeroTargetUpdateInterval)
         );
         assert_eq!(
-            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 0, 1_000),
+            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 0, 1_000, 10_000),
             Err(QLearningConfigurationError::ZeroUpdateFrequency)
         );
         assert_eq!(
-            validate_configuration(31, 32, 0.99, 1.0, 0.1, 4, 1_000),
+            validate_configuration(31, 32, 0.99, 1.0, 0.1, 4, 1_000, 10_000),
             Err(QLearningConfigurationError::ReplayCapacityBelowBatchSize)
         );
         assert_eq!(
-            validate_configuration(1_000, 32, 1.01, 1.0, 0.1, 4, 1_000),
+            validate_configuration(1_000, 32, 1.01, 1.0, 0.1, 4, 1_000, 10_000),
             Err(QLearningConfigurationError::InvalidGamma)
+        );
+        assert_eq!(
+            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 4, 1_000, 0),
+            Err(QLearningConfigurationError::ZeroTrainingHorizon)
         );
         assert_eq!(
             validate_epsilon(1.01),

@@ -279,6 +279,7 @@ fn ppo_cartpole() {
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
+        .training_horizon(100_000)
         .device(device)
         .logging_info(&mut logger)
         .build();

@@ -15,7 +15,7 @@ use crate::{
         experience_replay::{ExperienceReplay, ExperienceReplayError},
     },
     gym::{VectorizedGym, VectorizedStepInfo},
-    parameter_schedule::{LinearSchedule, ParameterSchedule},
+    parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
     spaces::{Discrete, Space},
     tensor_operations::tensor_has_nan,
 };
@@ -141,6 +141,7 @@ where
     optimizer: O,
     current_epsilon: f64,
     epsilon_schedule: Box<dyn ParameterSchedule>,
+    schedule_progress: ScheduleProgress,
     action_space: Discrete,
     observation_space: Box<dyn Space<Error = SE>>,
     experience_replay: ExperienceReplay<DDQNAgentExperience>,
@@ -177,6 +178,7 @@ where
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         #[builder(default = 1000)] target_update_interval: usize,
+        training_horizon: usize,
         logger: Option<&'a mut dyn DDQNLogger>,
         device_strategy: QLearningDeviceStrategy,
     ) -> Result<Self, DDQNAgentError<GE, SE>> {
@@ -195,6 +197,7 @@ where
             final_epsilon,
             update_frequency,
             target_update_interval,
+            training_horizon,
         )?;
         let mut agent = Self {
             target_q_network,
@@ -204,6 +207,7 @@ where
             optimizer,
             current_epsilon: initial_epsilon,
             epsilon_schedule,
+            schedule_progress: ScheduleProgress::new(training_horizon),
             action_space,
             observation_space,
             experience_replay,
@@ -353,8 +357,10 @@ where
         let mut elapsed_timesteps = 0;
         let mut observations = env.reset().map_err(DDQNAgentError::GymError)?;
         while elapsed_timesteps < num_timesteps {
-            let progress = (elapsed_timesteps as f64) / (num_timesteps as f64);
-            self.current_epsilon = validate_epsilon(self.epsilon_schedule.value(progress))?;
+            self.current_epsilon = validate_epsilon(
+                self.schedule_progress
+                    .parameter(self.epsilon_schedule.as_ref()),
+            )?;
 
             let action = self.act(&observations)?;
             let step_info = env.step(action.clone()).map_err(DDQNAgentError::GymError)?;
@@ -392,17 +398,20 @@ where
                 ));
             }
 
-            for _ in 0..env.num_envs() {
+            let first_training_timestep = self.schedule_progress.elapsed_steps();
+            for timestep_offset in 1..=env.num_envs() {
                 elapsed_timesteps += 1;
-                if elapsed_timesteps % self.update_frequency == 0
-                    && elapsed_timesteps >= self.training_start
+                let training_timestep = first_training_timestep.saturating_add(timestep_offset);
+                if training_timestep % self.update_frequency == 0
+                    && training_timestep >= self.training_start
                 {
                     self.optimize()?;
                 }
-                if elapsed_timesteps % self.target_update_interval == 0 {
+                if training_timestep % self.target_update_interval == 0 {
                     self.update_target_network();
                 }
             }
+            self.schedule_progress.advance_steps(env.num_envs());
         }
 
         Ok(())
@@ -411,10 +420,22 @@ where
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, Tensor};
-    use candle_nn::AdamW;
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::{AdamW, VarBuilder, VarMap};
 
+    use super::super::QLearningDeviceStrategy;
     use super::DDQNAgent;
+    use crate::{
+        agents::{
+            test_support::{CountingOptimizer, FixedEnv},
+            Agent,
+        },
+        gym::{VectorizedGym, VectorizedGymWrapper},
+        models::MLP,
+        parameter_schedule::LinearSchedule,
+        spaces::Discrete,
+        tensor_operations::tanh,
+    };
 
     type TestDDQNAgent = DDQNAgent<'static, AdamW, (), ()>;
 
@@ -448,5 +469,82 @@ mod tests {
 
         assert_close(targets[0], 7.3);
         assert_close(targets[1], 2.0);
+    }
+
+    fn q_network(var_map: &VarMap, device: &Device) -> MLP {
+        MLP::builder()
+            .input_size(4)
+            .output_size(2)
+            .vb(VarBuilder::from_varmap(var_map, DType::F32, device))
+            .activation(Box::new(tanh))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn cadence_and_epsilon_progress_continue_across_learn_calls() {
+        let device = Device::Cpu;
+        let mut env: VectorizedGymWrapper<FixedEnv> =
+            vec![FixedEnv::new(device.clone()), FixedEnv::new(device.clone())].into();
+        let online_var_map = VarMap::new();
+        let mut target_var_map = VarMap::new();
+        let online_network = q_network(&online_var_map, &device);
+        let target_network = q_network(&target_var_map, &device);
+        let variable_name = online_var_map
+            .data()
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let online_variable = online_var_map.data().lock().unwrap()[&variable_name].clone();
+        let target_variable = target_var_map.data().lock().unwrap()[&variable_name].clone();
+        let mut agent = DDQNAgent::builder()
+            .action_space(Discrete::new(2))
+            .observation_space(env.observation_space())
+            .online_q_network(Box::new(online_network))
+            .target_q_network(Box::new(target_network))
+            .online_vars(&online_var_map)
+            .target_vars(&mut target_var_map)
+            .optimizer(CountingOptimizer::with_learning_rate(1e-3))
+            .epsilon_schedule(Box::new(LinearSchedule::new(1.0, 0.0)))
+            .replay_capacity(8)
+            .batch_size(1)
+            .training_start(3)
+            .update_frequency(2)
+            .target_update_interval(4)
+            .training_horizon(10)
+            .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+            .build()
+            .unwrap();
+
+        agent.learn(&mut env, 2).unwrap();
+        assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+        assert_close(agent.current_epsilon as f32, 1.0);
+        assert_eq!(agent.optimizer.steps, 0);
+
+        let changed = Tensor::full(5.0f32, online_variable.as_tensor().shape(), &device).unwrap();
+        online_variable.set(&changed).unwrap();
+        agent.learn(&mut env, 2).unwrap();
+
+        assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
+        assert_close(agent.current_epsilon as f32, 0.8);
+        assert_eq!(agent.optimizer.steps, 1);
+        assert_eq!(
+            online_variable
+                .as_tensor()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            target_variable
+                .as_tensor()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()
+        );
     }
 }

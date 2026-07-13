@@ -51,6 +51,7 @@ The CartPole example sets these PPO builder values:
 .ent_coef(0.005)
 .clip_range(Box::new(ConstantSchedule::new(0.2)))
 .num_epochs(10)
+.training_horizon(120_000)
 ```
 
 Use one changed value per experiment. Keep the device, environment count, model
