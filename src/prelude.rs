@@ -36,3 +36,7 @@ pub use crate::parameter_schedule::{
 };
 pub use crate::spaces::{BoxSpace, Discrete, Space};
 pub use crate::tensor_operations::tanh;
+pub use crate::wrappers::{
+    ClipRewardGym, ClipRewardGymError, FrameStackGym, FrameStackGymError, MaxAndSkipGym,
+    MaxAndSkipGymError, TimeLimitGym,
+};
