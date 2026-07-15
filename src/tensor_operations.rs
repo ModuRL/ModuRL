@@ -1,4 +1,4 @@
-use candle_core::{DType, Error, Tensor, backprop::GradStore};
+use candle_core::{backprop::GradStore, DType, Error, Tensor};
 
 pub(crate) fn torch_like_max(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
     // See torch_like_min for why this is a masked select; ties route to `b`.
@@ -19,6 +19,7 @@ pub(crate) fn torch_like_min(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
 }
 
 pub(crate) fn clip_gradients(
+    loss: &Tensor,
     grad_store: &mut GradStore,
     max_norm: f32,
 ) -> Result<f32, candle_core::Error> {
@@ -27,26 +28,35 @@ pub(crate) fn clip_gradients(
     // We will collect all norm squares first
     // Then sort them to ensure deterministic order since float addition is not associative
     // Also note that tensor IDs are not determinisitic across runs so we cannot sort by that
+    // Candle's GradStore can retain local gradients for non-variable operands.
+    // CleanRL/PyTorch clips registered parameters only, so select the variable
+    // nodes reachable from this loss rather than every GradStore entry.
+    let variable_ids = loss
+        .sorted_nodes()
+        .into_iter()
+        .filter(|node| node.is_variable())
+        .map(Tensor::id);
+
+    // Sort the scalar norm contributions before summing because floating-point
+    // addition is not associative. Tensor IDs are allocation-dependent and
+    // therefore are not a deterministic ordering across runs.
     let mut norm_sqrs: Vec<f32> = vec![];
 
-    for id in grad_store.get_ids() {
-        if let Some(grad) = grad_store.get_id(*id) {
+    for id in variable_ids {
+        if let Some(grad) = grad_store.get_id(id) {
             let norm_sq = grad.sqr()?.sum_all()?.to_scalar::<f32>()?;
-            //total_norm_sq += norm_sq;
             norm_sqrs.push(norm_sq);
-            grads.push((*id, grad.clone()));
+            grads.push((id, grad.clone()));
         }
     }
 
-    let mut total_norm_sq: f32 = 0.0;
-    norm_sqrs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    for ns in norm_sqrs {
-        total_norm_sq += ns;
-    }
+    norm_sqrs.sort_by(f32::total_cmp);
+    let total_norm_sq = norm_sqrs.into_iter().sum::<f32>();
 
     let total_norm = total_norm_sq.sqrt();
     if total_norm > max_norm {
-        let scale = max_norm / total_norm;
+        // Match PyTorch's clip_grad_norm_ denominator, including its epsilon.
+        let scale = max_norm / (total_norm + 1e-6);
         for (id, grad) in &grads {
             let scale_t = Tensor::new(scale, grad.device())?;
             let clipped = grad.broadcast_mul(&scale_t)?;
@@ -67,15 +77,6 @@ pub(crate) fn normalize_tensor(t: &Tensor) -> Result<Tensor, candle_core::Error>
     let std_with_eps = (std + 1e-8)?.broadcast_as(t.shape())?;
 
     diff / std_with_eps
-}
-
-// implement the tanh activation function
-pub fn tanh(x: &Tensor) -> Result<Tensor, Error> {
-    let e_pos = x.exp()?;
-    let e_neg = (-1.0 * x)?.exp()?;
-    let numerator = (&e_pos - &e_neg)?;
-    let denominator = (&e_pos + &e_neg)?;
-    numerator.broadcast_div(&denominator)
 }
 
 /// Check if a tensor contains any NaN values.
@@ -172,6 +173,55 @@ pub fn resevoir_sample<T: Clone>(arr: &[T], size: usize, device: &candle_core::D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradient_clipping_matches_pytorch_epsilon() {
+        let device = candle_core::Device::Cpu;
+        let variable = candle_core::Var::from_vec(vec![3.0f32, 4.0], 2, &device).unwrap();
+        let loss = variable.sqr().unwrap().sum_all().unwrap();
+        let mut gradients = loss.backward().unwrap();
+
+        let original_norm = clip_gradients(&loss, &mut gradients, 5.0).unwrap();
+        let clipped = gradients
+            .get(variable.as_tensor())
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let expected_scale = 5.0 / (10.0 + 1e-6);
+
+        assert!((original_norm - 10.0).abs() < 1e-6);
+        assert!((clipped[0] - 6.0 * expected_scale).abs() < 1e-6);
+        assert!((clipped[1] - 8.0 * expected_scale).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gradient_clipping_ignores_detached_operand_gradients() {
+        let device = candle_core::Device::Cpu;
+        let parameter = candle_core::Var::from_vec(vec![1_000.0f32, 1_000.0], 2, &device).unwrap();
+        let detached_operand = candle_core::Var::from_vec(vec![1.0f32, 1.0], 2, &device).unwrap();
+        let detached_operand = detached_operand.detach();
+        let loss = (parameter.as_tensor() * detached_operand)
+            .unwrap()
+            .sum_all()
+            .unwrap();
+        let mut gradients = loss.backward().unwrap();
+
+        // The parameter gradient is [1, 1], while Candle also retains the
+        // detached operand's much larger local gradient [1000, 1000]. Only the
+        // parameter gradient belongs in the clipping norm.
+        let original_norm = clip_gradients(&loss, &mut gradients, 1.0).unwrap();
+        let clipped = gradients
+            .get(parameter.as_tensor())
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let expected_norm = 2.0f32.sqrt();
+        let expected_scale = 1.0 / (expected_norm + 1e-6);
+
+        assert!((original_norm - expected_norm).abs() < 1e-6);
+        assert!((clipped[0] - expected_scale).abs() < 1e-6);
+        assert!((clipped[1] - expected_scale).abs() < 1e-6);
+    }
 
     #[test]
     fn test_contains_nan() {

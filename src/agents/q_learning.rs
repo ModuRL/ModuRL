@@ -554,9 +554,9 @@ impl QLearningDeviceStrategy {
 #[cfg(test)]
 mod tests {
     use super::{
+        bellman_targets, selected_action_q_values, validate_configuration, validate_epsilon,
         QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningDeviceStrategy,
-        QLearningLogger, QLearningTarget, bellman_targets, selected_action_q_values,
-        validate_configuration, validate_epsilon,
+        QLearningLogger, QLearningTarget,
     };
     use crate::{
         agents::test_support::{CountingOptimizer, FixedEnv},
@@ -564,7 +564,6 @@ mod tests {
         models::MLP,
         parameter_schedule::LinearSchedule,
         spaces::{BoxSpace, Discrete},
-        tensor_operations::tanh,
     };
     use candle_core::{DType, Device, Error, Tensor};
     use candle_nn::{VarBuilder, VarMap};
@@ -663,7 +662,7 @@ mod tests {
             .input_size(4)
             .output_size(2)
             .vb(VarBuilder::from_varmap(var_map, DType::F32, device))
-            .activation(Box::new(tanh))
+            .activation(Box::new(Tensor::tanh))
             .hidden_layer_sizes(vec![2])
             .build()
             .unwrap()

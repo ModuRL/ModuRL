@@ -1,4 +1,4 @@
-use candle_core::Device;
+use candle_core::{Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
@@ -110,7 +110,7 @@ fn ppo_cartpole() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(vb.clone())
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .initializer(Box::new(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
@@ -135,7 +135,7 @@ fn ppo_cartpole() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .initializer(Box::new(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
@@ -235,8 +235,8 @@ fn ppo_cartpole_shared() {
         .input_size(observation_space.shape()[0])
         .output_size(64)
         .vb(vb.clone())
-        .activation(Box::new(tanh))
-        .output_activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
+        .output_activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64])
         .initializer(Box::new(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
@@ -371,8 +371,8 @@ fn ppo_cartpole_shared_multithreaded() {
         .input_size(obs_space_shape)
         .output_size(64)
         .vb(vb.clone())
-        .activation(Box::new(tanh))
-        .output_activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
+        .output_activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64])
         .initializer(Box::new(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),

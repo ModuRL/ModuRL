@@ -26,6 +26,8 @@ impl DistEval {
 pub trait Distribution {
     type Error;
     fn sample(&self) -> Tensor;
+    /// Returns the most likely action representation without sampling.
+    fn mode(&self) -> Tensor;
     fn dist_eval(&self, actions: &Tensor) -> Result<DistEval, Self::Error>;
     fn from_outputs(outputs: &Tensor) -> Self;
 }

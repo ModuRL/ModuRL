@@ -1,4 +1,4 @@
-use candle_core::{D, Device, Tensor};
+use candle_core::{Device, Tensor, D};
 use candle_nn::ops::softmax;
 
 use crate::distributions::{DistEval, Distribution};
@@ -44,6 +44,10 @@ impl Distribution for CategoricalDistribution {
         let noise = Self::gumbel_noise(shape, device).unwrap();
 
         (&self.logits + noise).unwrap()
+    }
+
+    fn mode(&self) -> Tensor {
+        self.logits.clone()
     }
 
     fn dist_eval(&self, actions: &Tensor) -> Result<DistEval, Self::Error> {

@@ -1,6 +1,6 @@
 use bon::bon;
-use candle_core::{D, IndexOp, Tensor};
-use candle_nn::{Optimizer, loss};
+use candle_core::{IndexOp, Tensor, D};
+use candle_nn::{loss, Optimizer};
 use std::marker::PhantomData;
 
 use crate::{
@@ -167,6 +167,27 @@ pub trait PPOLogger {
 struct PPOLosses {
     actor_loss: Tensor,
     critic_loss: Tensor,
+}
+
+fn population_variance(values: &Tensor) -> candle_core::Result<Tensor> {
+    let mean = values.mean_all()?.broadcast_as(values.shape())?;
+    (values - mean)?.sqr()?.mean_all()
+}
+
+fn compute_explained_variance(
+    returns: &Tensor,
+    rollout_values: &Tensor,
+) -> candle_core::Result<Tensor> {
+    let return_variance = population_variance(returns)?;
+    let residuals = (returns - rollout_values)?;
+    let residual_variance = population_variance(&residuals)?;
+    let explained_variance = (1.0 - residual_variance.broadcast_div(&return_variance)?)?;
+
+    let zero = return_variance.zeros_like()?;
+    let nan = zero.affine(f64::NAN, f64::NAN)?;
+    return_variance
+        .eq(&zero)?
+        .where_cond(&nan, &explained_variance)
 }
 
 pub struct FakeOptimizer(());
@@ -400,6 +421,7 @@ where
         let all_rewards = Tensor::stack(&all_rewards, 0)?.flatten(0, 1)?;
         let all_old_values = Tensor::stack(&all_old_values, 0)?.flatten(0, 1)?;
 
+
         let total_samples = all_states.dims()[0];
         let device = all_states.device();
         let clip_range = self.schedule_progress.parameter(&*self.clip_range) as f32;
@@ -435,6 +457,7 @@ where
                     batch_returns,
                     batch_rewards,
                     batch_old_values.detach(),
+                    rollout_explained_variance.clone(),
                     clip_range,
                 )?;
 
@@ -541,7 +564,6 @@ where
         let values_tensor = values_tensor.squeeze(D::Minus1)?;
 
         let returns = (&values_tensor + &advantages)?;
-        let returns = returns.clamp(-1e5, 1e5)?;
 
         let experiences = self.rollout_buffer.get_raw_mut();
 
@@ -665,6 +687,7 @@ where
         returns: candle_core::Tensor,
         rewards: candle_core::Tensor,
         old_values: candle_core::Tensor,
+        explained_variance: candle_core::Tensor,
         clip_range: f32,
     ) -> Result<PPOLosses, PPOError<AE, GE, SE>> {
         let advantages = if self.normalize_advantage {
@@ -738,14 +761,6 @@ where
         let final_critic_loss = (((self.vf_coef * 0.5) as f64) * critic_loss.clone())?;
 
         if let Some(logging_info) = &mut self.logging_info {
-            let explained_variance = {
-                let var_y = returns.var(D::Minus1)?;
-                let diff = (&returns - &values)?;
-                let var_diff = diff.var(D::Minus1)?;
-
-                1.0 + (-1.0 * var_diff / (var_y + 1e-8)?)?
-            }?;
-
             let log_entry = PPOLogEntry {
                 actor_loss: final_actor_loss.clone(),
                 critic_loss: final_critic_loss.clone(),
@@ -776,8 +791,11 @@ where
                 let total_loss = (&actor_loss + &critic_loss)?;
                 if !tensor_has_nan(&total_loss)? {
                     let total_grad = &mut total_loss.backward()?;
-                    let _total_grad_norm =
-                        crate::tensor_operations::clip_gradients(total_grad, self.gradient_clip)?;
+                    let _total_grad_norm = crate::tensor_operations::clip_gradients(
+                        &total_loss,
+                        total_grad,
+                        self.gradient_clip,
+                    )?;
                     shared_info.optimizer.step(total_grad)?;
                 }
             }
@@ -787,6 +805,7 @@ where
                     if !tensor_has_nan(&total_loss)? {
                         let total_grad = &mut total_loss.backward()?;
                         let _total_grad_norm = crate::tensor_operations::clip_gradients(
+                            &total_loss,
                             total_grad,
                             self.gradient_clip,
                         )?;
@@ -798,6 +817,7 @@ where
                     if !tensor_has_nan(&actor_loss)? {
                         let actor_grad = &mut actor_loss.backward()?;
                         let _actor_grad_norm = crate::tensor_operations::clip_gradients(
+                            &actor_loss,
                             actor_grad,
                             self.gradient_clip,
                         )?;
@@ -807,6 +827,7 @@ where
                     if !tensor_has_nan(&critic_loss)? {
                         let critic_grad = &mut critic_loss.backward()?;
                         let _critic_grad_norm = crate::tensor_operations::clip_gradients(
+                            &critic_loss,
                             critic_grad,
                             self.gradient_clip,
                         )?;
@@ -863,6 +884,32 @@ where
                 separate_info.critic_optimizer.set_learning_rate(lr);
             }
         }
+    }
+
+    /// Selects the policy distribution's mode without sampling.
+    ///
+    /// This is intended for deterministic evaluation. PPO rollouts remain
+    /// stochastic and continue to use [`Agent::act`].
+    pub fn act_deterministic(
+        &mut self,
+        observation: &Tensor,
+    ) -> Result<Tensor, PPOError<AE, GE, SE>> {
+        let latent_states = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                shared_info.shared_network.forward(observation)?
+            }
+            PPONetworkInfo::Separate(_) => observation.clone(),
+        };
+        let network = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => &shared_info.actor_head,
+            PPONetworkInfo::Separate(ref mut separate_info) => &separate_info.actor_network,
+        };
+        let neurons = network
+            .mode(&latent_states)
+            .map_err(PPOError::PolicyError)?;
+        self.action_space
+            .tensor_from_neurons(&neurons)
+            .map_err(PPOError::SpaceError)
     }
 
     pub fn reset_current_states(&mut self) {
@@ -950,7 +997,7 @@ where
                     PPOExperience::builder()
                         .states(states.clone())
                         .next_states(training_next_states)
-                        .actions(action)
+                        .actions(action.detach())
                         .rewards(rewards.clone())
                         .next_dones(next_dones)
                         .truncateds(truncateds)
@@ -982,9 +1029,8 @@ mod tests {
     use crate::{
         distributions::CategoricalDistribution,
         gym::{Gym, StepInfo, VectorizedGym, VectorizedGymWrapper},
-        models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
+        models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
         spaces::Discrete,
-        tensor_operations::tanh,
     };
     use candle_core::Device;
     use candle_nn::{AdamW, ParamsAdamW, VarBuilder, VarMap};
@@ -1070,7 +1116,7 @@ mod tests {
                 .input_size(observation_space.shape()[0])
                 .output_size(action_space.shape()[0])
                 .vb(actor_vb)
-                .activation(Box::new(tanh))
+                .activation(Box::new(Tensor::tanh))
                 .hidden_layer_sizes(vec![8, 8])
                 .name("actor_network".to_string())
                 .build()
@@ -1090,7 +1136,7 @@ mod tests {
                 .input_size(observation_space.shape()[0])
                 .output_size(1)
                 .vb(critic_vb)
-                .activation(Box::new(tanh))
+                .activation(Box::new(Tensor::tanh))
                 .hidden_layer_sizes(vec![8, 8])
                 .name("critic_network".to_string())
                 .build()
@@ -1172,20 +1218,25 @@ mod tests {
 
 #[cfg(test)]
 mod schedule_tests {
-    use candle_core::{DType, Device};
+    use std::collections::HashSet;
+
+    use candle_core::{DType, Device, TensorId, Var};
     use candle_nn::{Optimizer, VarBuilder, VarMap};
 
     use super::*;
     use crate::{
         agents::{
-            Agent,
             test_support::{CountingOptimizer, FixedEnv},
+            Agent,
         },
-        distributions::CategoricalDistribution,
+        distributions::{CategoricalDistribution, GuassianDistribution},
         gym::{VectorizedGym, VectorizedGymWrapper},
-        models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
+        models::{
+            probabilistic_model::{ProbabilisticPolicyModel, ProbabilisticPolicyModelError},
+            MLP,
+        },
         parameter_schedule::LinearSchedule,
-        tensor_operations::tanh,
+        spaces::BoxSpace,
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -1193,6 +1244,177 @@ mod schedule_tests {
             (actual - expected).abs() < 1e-12,
             "expected {expected}, got {actual}"
         );
+    }
+
+    #[test]
+    fn explained_variance_uses_population_variance() {
+        let device = Device::Cpu;
+        let returns = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], 3, &device).unwrap();
+        let rollout_values = Tensor::from_vec(vec![1.0f32, 2.0, 2.0], 3, &device).unwrap();
+
+        let actual = compute_explained_variance(&returns, &rollout_values)
+            .unwrap()
+            .to_vec0::<f32>()
+            .unwrap();
+
+        assert!((actual - 2.0 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn explained_variance_is_nan_for_constant_returns() {
+        let device = Device::Cpu;
+        let returns = Tensor::from_vec(vec![1.0f32, 1.0, 1.0], 3, &device).unwrap();
+        let rollout_values = Tensor::from_vec(vec![0.0f32, 1.0, 2.0], 3, &device).unwrap();
+
+        let actual = compute_explained_variance(&returns, &rollout_values)
+            .unwrap()
+            .to_vec0::<f32>()
+            .unwrap();
+
+        assert!(actual.is_nan());
+    }
+
+    #[test]
+    fn separate_ppo_losses_only_reach_their_parameters() {
+        fn parameter_ids(vars: &[Var]) -> HashSet<TensorId> {
+            vars.iter().map(|var| var.as_tensor().id()).collect()
+        }
+
+        fn gradient_ids(gradients: &candle_core::backprop::GradStore) -> HashSet<TensorId> {
+            gradients.get_ids().copied().collect()
+        }
+
+        let device = Device::Cpu;
+        let actor_var_map = VarMap::new();
+        let critic_var_map = VarMap::new();
+        let actor_network = MLP::builder()
+            .input_size(4)
+            .output_size(6)
+            .vb(VarBuilder::from_varmap(&actor_var_map, DType::F32, &device))
+            .activation(Box::new(Tensor::tanh))
+            .hidden_layer_sizes(vec![8])
+            .build()
+            .unwrap();
+        let critic_network = MLP::builder()
+            .input_size(4)
+            .output_size(1)
+            .vb(VarBuilder::from_varmap(
+                &critic_var_map,
+                DType::F32,
+                &device,
+            ))
+            .activation(Box::new(Tensor::tanh))
+            .hidden_layer_sizes(vec![8])
+            .build()
+            .unwrap();
+        let actor_parameters = actor_var_map.all_vars();
+        let critic_parameters = critic_var_map.all_vars();
+        let actor_ids = parameter_ids(&actor_parameters);
+        let critic_ids = parameter_ids(&critic_parameters);
+        let expected_combined_ids = actor_ids
+            .union(&critic_ids)
+            .copied()
+            .collect::<HashSet<_>>();
+
+        let network_info = PPONetworkInfo::Separate(
+            SeparatePPONetwork::builder()
+                .actor_optimizer(CountingOptimizer::with_learning_rate(3e-4))
+                .critic_optimizer(CountingOptimizer::with_learning_rate(3e-4))
+                .actor_network(Box::new(
+                    ProbabilisticPolicyModel::<GuassianDistribution>::new(Box::new(actor_network)),
+                ))
+                .critic_network(Box::new(critic_network))
+                .combined_loss(true)
+                .build(),
+        );
+        let mut agent: PPOAgent<
+            '_,
+            CountingOptimizer,
+            CountingOptimizer,
+            ProbabilisticPolicyModelError<candle_core::Error>,
+            candle_core::Error,
+            candle_core::Error,
+        > = PPOAgent::builder()
+            .action_space(Box::new(BoxSpace::new_with_universal_bounds(
+                vec![3],
+                -1.0,
+                1.0,
+                &device,
+            )))
+            .network_info(network_info)
+            .batch_size(4)
+            .mini_batch_size(4)
+            .ent_coef(0.001)
+            .clip_value_loss(true)
+            .training_horizon(4)
+            .device(device.clone())
+            .build();
+
+        // Model rollout data as variables, then detach every field at the same
+        // boundaries used by optimize(). None of these IDs may survive in the
+        // loss gradient store.
+        let rollout_states = Var::from_vec(
+            vec![
+                0.1f32, 0.2, 0.3, 0.4, -0.1, 0.3, -0.2, 0.5, 0.7, -0.4, 0.2, -0.3, -0.5, -0.2, 0.6,
+                0.1,
+            ],
+            (4, 4),
+            &device,
+        )
+        .unwrap();
+        let rollout_actions = Var::from_vec(vec![0.1f32; 12], (4, 3), &device).unwrap();
+        let rollout_log_probs = Var::from_vec(vec![-1.0f32; 4], 4, &device).unwrap();
+        let rollout_advantages = Var::from_vec(vec![1.0f32, -1.0, 0.5, -0.5], 4, &device).unwrap();
+        let rollout_returns = Var::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], 4, &device).unwrap();
+        let rollout_rewards = Var::from_vec(vec![0.1f32; 4], 4, &device).unwrap();
+        let rollout_old_values = Var::from_vec(vec![0.0f32; 4], 4, &device).unwrap();
+        let rollout_ids = parameter_ids(&[
+            rollout_states.clone(),
+            rollout_actions.clone(),
+            rollout_log_probs.clone(),
+            rollout_advantages.clone(),
+            rollout_returns.clone(),
+            rollout_rewards.clone(),
+            rollout_old_values.clone(),
+        ]);
+
+        let losses = agent
+            .compute_loss(
+                &rollout_states.detach(),
+                &rollout_actions.detach(),
+                rollout_log_probs.detach(),
+                rollout_advantages.detach(),
+                rollout_returns.detach(),
+                rollout_rewards.detach(),
+                rollout_old_values.detach(),
+                Tensor::new(0.0f32, &device).unwrap(),
+                0.2,
+            )
+            .unwrap();
+
+        let actor_gradients = losses.actor_loss.backward().unwrap();
+        let critic_gradients = losses.critic_loss.backward().unwrap();
+        let combined_gradients = (&losses.actor_loss + &losses.critic_loss)
+            .unwrap()
+            .backward()
+            .unwrap();
+
+        let actor_gradient_ids = gradient_ids(&actor_gradients);
+        let critic_gradient_ids = gradient_ids(&critic_gradients);
+        let combined_gradient_ids = gradient_ids(&combined_gradients);
+
+        // Candle also retains local gradients for some non-variable operands.
+        // Optimizers only query registered variable IDs, so audit the variable
+        // boundaries rather than requiring the GradStore to contain only
+        // parameter entries.
+        assert!(actor_ids.is_subset(&actor_gradient_ids));
+        assert!(actor_gradient_ids.is_disjoint(&critic_ids));
+        assert!(actor_gradient_ids.is_disjoint(&rollout_ids));
+        assert!(critic_ids.is_subset(&critic_gradient_ids));
+        assert!(critic_gradient_ids.is_disjoint(&actor_ids));
+        assert!(critic_gradient_ids.is_disjoint(&rollout_ids));
+        assert!(expected_combined_ids.is_subset(&combined_gradient_ids));
+        assert!(combined_gradient_ids.is_disjoint(&rollout_ids));
     }
 
     #[test]
@@ -1206,7 +1428,7 @@ mod schedule_tests {
             .input_size(4)
             .output_size(2)
             .vb(VarBuilder::from_varmap(&actor_var_map, DType::F32, &device))
-            .activation(Box::new(tanh))
+            .activation(Box::new(Tensor::tanh))
             .hidden_layer_sizes(vec![2])
             .build()
             .unwrap();
@@ -1218,7 +1440,7 @@ mod schedule_tests {
                 DType::F32,
                 &device,
             ))
-            .activation(Box::new(tanh))
+            .activation(Box::new(Tensor::tanh))
             .hidden_layer_sizes(vec![2])
             .build()
             .unwrap();

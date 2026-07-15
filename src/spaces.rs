@@ -149,8 +149,13 @@ impl Space for BoxSpace {
     }
 
     fn tensor_from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error> {
-        // Do not need to do anything here.
-        Ok(neurons.clone())
+        // Continuous policies (for example, an unsquashed Gaussian) may
+        // produce values outside the environment's bounds. Keep the latent
+        // action unchanged for probability calculations, but clip the action
+        // that is actually sent to the environment.
+        neurons
+            .broadcast_maximum(&self.low)
+            .and_then(|values| values.broadcast_minimum(&self.high))
     }
 }
 
@@ -195,4 +200,27 @@ fn finitize(value: f32) -> f32 {
         return f32::MIN / 2.0;
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_space_clips_batched_policy_outputs_to_bounds() {
+        let space = BoxSpace::new_with_universal_bounds(vec![3], -1.0, 1.0, &Device::Cpu);
+        let neurons = Tensor::from_vec(
+            vec![-2.0_f32, -0.5, 0.25, 0.75, 1.5, 3.0],
+            (2, 3),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let actions = space.tensor_from_neurons(&neurons).unwrap();
+
+        assert_eq!(
+            actions.to_vec2::<f32>().unwrap(),
+            vec![vec![-1.0, -0.5, 0.25], vec![0.75, 1.0, 1.0]]
+        );
+    }
 }

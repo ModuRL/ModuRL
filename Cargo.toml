@@ -20,11 +20,16 @@ metal = ["candle-core/metal"]
 modurl_gym = { git = "https://github.com/ModuRL/ModuRL_Gym", features = [
     "rendering",
 ] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tracing-subscriber = "0.3.20"
 textplots = "0.8.7"
 
 [patch."https://github.com/ModuRL/ModuRL"]
 modurl = { path = "." }
+
+[patch."https://github.com/ModuRL/ModuRL_Gym"]
+modurl_gym = { path = "../modurl_gym" }
 
 # For profiler
 [profile.release]

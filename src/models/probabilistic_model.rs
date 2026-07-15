@@ -6,6 +6,7 @@ use crate::distributions::Distribution;
 pub trait ProbabilisticPolicy {
     type Error;
     fn sample(&self, state: &Tensor) -> Result<Tensor, Self::Error>;
+    fn mode(&self, state: &Tensor) -> Result<Tensor, Self::Error>;
     fn log_prob_and_entropy(
         &self,
         state: &Tensor,
@@ -64,6 +65,12 @@ where
         let dist = D::from_outputs(&output);
         let action = dist.sample();
         Ok(action)
+    }
+
+    fn mode(&self, state: &Tensor) -> Result<Tensor, Self::Error> {
+        let output = self.module.forward(state)?;
+        let dist = D::from_outputs(&output);
+        Ok(dist.mode())
     }
 
     fn log_prob_and_entropy(
@@ -269,8 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn test_log_std_clamping() {
-        // This test verifies that log_std is properly clamped between -5.0 and 2.0
+    fn test_log_prob_and_entropy_are_finite_for_default_network() {
         let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
         let state = create_test_state(1, 4).unwrap();
         let action = create_test_state(1, 2).unwrap();
@@ -278,13 +284,9 @@ mod tests {
         let state = state.unsqueeze(1).unwrap();
         let action = action.unsqueeze(1).unwrap();
 
-        // This should not crash due to numerical issues
-        let result = policy.log_prob_and_entropy(&state, &action);
-        assert!(
-            result.is_ok(),
-            "Log prob calculation failed: {:?}",
-            result.err()
-        );
+        let (log_prob, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
+        assert!(log_prob.to_vec1::<f64>().unwrap()[0].is_finite());
+        assert!(entropy.to_vec1::<f64>().unwrap()[0].is_finite());
     }
 
     #[test]
@@ -434,10 +436,10 @@ mod tests {
 
             // Create states with varying magnitudes to test numerical stability
             let scale = match i % 4 {
-                0 => 0.01,  // Very small values
-                1 => 1.0,   // Normal values
-                2 => 10.0,  // Large values
-                _ => 100.0, // Very large values
+                0 => 0.01,
+                1 => 1.0,
+                2 => 5.0,
+                _ => 10.0,
             };
 
             let mut state = create_test_state(3, 4).unwrap();

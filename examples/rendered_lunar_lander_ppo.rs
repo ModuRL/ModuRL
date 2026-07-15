@@ -77,7 +77,7 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(actor_vb)
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .initializer(Box::new(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
@@ -103,7 +103,7 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .initializer(Box::new(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
