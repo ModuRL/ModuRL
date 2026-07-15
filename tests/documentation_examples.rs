@@ -337,9 +337,12 @@ impl Gym for CounterEnv {
     type Error = candle_core::Error;
     type SpaceError = candle_core::Error;
 
-    fn reset(&mut self) -> Result<Tensor, Self::Error> {
+    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.state = 0;
-        self.observation()
+        Ok(ResetInfo {
+            state: self.observation()?,
+            info: (),
+        })
     }
 
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
@@ -355,6 +358,7 @@ impl Gym for CounterEnv {
             reward: 1.0,
             done,
             truncated: false,
+            info: (),
         })
     }
 

@@ -23,7 +23,7 @@ pub(crate) mod test_support {
     use candle_nn::Optimizer;
 
     use crate::{
-        gym::{Gym, StepInfo},
+        gym::{Gym, ResetInfo, StepInfo},
         spaces::{BoxSpace, Discrete, Space},
     };
 
@@ -47,11 +47,15 @@ pub(crate) mod test_support {
                 reward: 1.0,
                 done: false,
                 truncated: false,
+                info: (),
             })
         }
 
-        fn reset(&mut self) -> Result<Tensor, Self::Error> {
-            Tensor::zeros(&[4], DType::F32, &self.device)
+        fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+            Ok(ResetInfo {
+                state: Tensor::zeros(&[4], DType::F32, &self.device)?,
+                info: (),
+            })
         }
 
         fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {

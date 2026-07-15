@@ -62,7 +62,7 @@ impl Gym for DebugCartpoleV1 {
         self.env.step(action)
     }
 
-    fn reset(&mut self) -> Result<candle_core::Tensor, Self::Error> {
+    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.episodes_since_print += 1;
         if self.episodes_since_print >= 10 {
             println!(

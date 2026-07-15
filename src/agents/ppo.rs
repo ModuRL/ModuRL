@@ -981,7 +981,7 @@ mod tests {
     use super::*;
     use crate::{
         distributions::CategoricalDistribution,
-        gym::{Gym, StepInfo, VectorizedGym, VectorizedGymWrapper},
+        gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         spaces::Discrete,
         tensor_operations::tanh,
@@ -1016,12 +1016,16 @@ mod tests {
                 reward: self.step_count as f32,
                 done: next_done,
                 truncated: false,
+                info: (),
             })
         }
 
-        fn reset(&mut self) -> Result<Tensor, Self::Error> {
+        fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
             self.step_count = 0;
-            Tensor::rand(0.0f32, 1.0, &[4], &self.device)
+            Ok(ResetInfo {
+                state: Tensor::rand(0.0f32, 1.0, &[4], &self.device)?,
+                info: (),
+            })
         }
 
         fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
