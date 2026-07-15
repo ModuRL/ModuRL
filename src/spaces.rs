@@ -83,7 +83,7 @@ impl Space for BoxSpace {
         let low = self.low.flatten_all().expect("Failed to flatten tensor.");
         let high = self.high.flatten_all().expect("Failed to flatten tensor.");
         // we might be losing some precision here, but it's fine for now.
-        let rng_bases = Tensor::rand(0.0, 1.0, low.shape(), device)?;
+        let rng_bases = Tensor::rand(0.0_f32, 1.0_f32, low.shape(), device)?;
         for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
             let mut low = low
                 .get(i)
@@ -195,4 +195,18 @@ fn finitize(value: f32) -> f32 {
         return f32::MIN / 2.0;
     }
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_space_samples_are_f32() {
+        let space = BoxSpace::new_with_universal_bounds(vec![3], -1.0, 1.0, &Device::Cpu);
+        let sample = space.sample(&Device::Cpu).unwrap();
+
+        assert_eq!(sample.dtype(), candle_core::DType::F32);
+        assert!(space.contains(&sample));
+    }
 }

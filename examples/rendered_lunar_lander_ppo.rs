@@ -32,7 +32,7 @@ impl Gym for DebugLunarLander {
         self.env.observation_space()
     }
 
-    fn reset(&mut self) -> Result<Tensor, Self::Error> {
+    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.episodes_since_print += 1;
         if self.episodes_since_print >= 10 {
             println!(

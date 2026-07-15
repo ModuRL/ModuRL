@@ -34,9 +34,12 @@ impl Gym for CounterEnv {
     type Error = candle_core::Error;
     type SpaceError = candle_core::Error;
 
-    fn reset(&mut self) -> Result<Tensor, Self::Error> {
+    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.state = 0;
-        self.observation()
+        Ok(ResetInfo {
+            state: self.observation()?,
+            info: (),
+        })
     }
 
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
@@ -52,6 +55,7 @@ impl Gym for CounterEnv {
             reward: 1.0,
             done,
             truncated: false,
+            info: (),
         })
     }
 
@@ -70,8 +74,11 @@ impl Gym for CounterEnv {
 }
 ```
 
-`reset` returns the initial observation. `step` consumes one action and returns
-the observation that follows it, its reward, and the episode flags.
+`reset` returns the initial observation and `step` consumes one action and
+returns the observation that follows it, its reward, and the episode flags.
+The default `Gym` information type is `()`, so ordinary environments use
+`ResetInfo` and `StepInfo` without an explicit type parameter. Environments
+with additional typed metadata can instead implement `Gym<MyInfo>`.
 
 In `src/main.rs`, declare the module and bring the environment into scope:
 

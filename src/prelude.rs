@@ -22,7 +22,9 @@ pub use crate::distributions::{
 };
 #[cfg(feature = "multithreading")]
 pub use crate::gym::MultithreadedVectorizedGymWrapper;
-pub use crate::gym::{Gym, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper};
+pub use crate::gym::{
+    Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper,
+};
 pub use crate::models::{
     DefaultMLPInitializer, MLP, MLPArchitecture, MLPInitializedLayers, MLPInitializer,
     OrthogonalMLPInitializer, probabilistic_model::ProbabilisticPolicy,
@@ -34,3 +36,7 @@ pub use crate::parameter_schedule::{
 };
 pub use crate::spaces::{BoxSpace, Discrete, Space};
 pub use crate::tensor_operations::tanh;
+pub use crate::wrappers::{
+    ClipRewardGym, ClipRewardGymError, FrameStackGym, FrameStackGymError, MaxAndSkipGym,
+    MaxAndSkipGymError, TimeLimitGym,
+};

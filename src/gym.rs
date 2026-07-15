@@ -1,14 +1,19 @@
 use crate::spaces::Space;
 use candle_core::Tensor;
 
-pub trait Gym {
+/// A single reinforcement-learning environment.
+///
+/// `I` is typed environment metadata returned by resets and transitions. It
+/// defaults to `()`, so environments without extra metadata can simply write
+/// `impl Gym for MyEnvironment`.
+pub trait Gym<I = ()> {
     type Error;
     type SpaceError;
 
     /// Returns the next state, reward, and done flag.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error>;
-    /// Resets the environment to its initial state. Returns the initial state.
-    fn reset(&mut self) -> Result<Tensor, Self::Error>;
+    fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error>;
+    /// Resets the environment to its initial state.
+    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error>;
     /// Returns the observation space.
     fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     /// Returns the action space.
@@ -51,11 +56,20 @@ where
 }
 
 #[derive(Debug, Clone)]
-pub struct StepInfo {
+/// The initial observation and environment-specific metadata from a reset.
+pub struct ResetInfo<I = ()> {
+    pub state: Tensor,
+    pub info: I,
+}
+
+#[derive(Debug, Clone)]
+/// The result of one environment transition.
+pub struct StepInfo<I = ()> {
     pub state: Tensor,
     pub reward: f32,
     pub done: bool,
     pub truncated: bool,
+    pub info: I,
 }
 
 #[derive(Debug, Clone)]
@@ -85,16 +99,24 @@ impl VectorizedStepInfo {
     }
 }
 
-pub struct VectorizedGymWrapper<G: Gym> {
+pub struct VectorizedGymWrapper<G, I = ()>
+where
+    G: Gym<I>,
+{
     envs: Vec<G>,
     to_reset: Vec<bool>,
+    _info: std::marker::PhantomData<fn() -> I>,
 }
 
-impl<G: Gym> VectorizedGymWrapper<G> {
+impl<G, I> VectorizedGymWrapper<G, I>
+where
+    G: Gym<I>,
+{
     pub fn new(envs: Vec<G>) -> Self {
         Self {
             to_reset: vec![true; envs.len()],
             envs,
+            _info: std::marker::PhantomData,
         }
     }
 
@@ -107,9 +129,9 @@ impl<G: Gym> VectorizedGymWrapper<G> {
     }
 }
 
-impl<G> VectorizedGym for VectorizedGymWrapper<G>
+impl<G, I> VectorizedGym for VectorizedGymWrapper<G, I>
 where
-    G: Gym,
+    G: Gym<I>,
     G::Error: std::fmt::Debug,
 {
     type Error = VectorizedGymError<G::Error>;
@@ -137,7 +159,7 @@ where
                 None
             };
             if step_info.done || step_info.truncated {
-                step_info.state = env.reset().map_err(VectorizedGymError::Single)?;
+                step_info.state = env.reset().map_err(VectorizedGymError::Single)?.state;
             }
 
             states.push(step_info.state);
@@ -173,8 +195,8 @@ where
 
         for i in 0..batch_size {
             let env = &mut self.envs[i];
-            let state = env.reset().map_err(VectorizedGymError::Single)?;
-            states.push(state);
+            let reset = env.reset().map_err(VectorizedGymError::Single)?;
+            states.push(reset.state);
             self.to_reset[i] = false;
         }
 
@@ -187,18 +209,18 @@ where
     }
 }
 
-impl<G> From<G> for VectorizedGymWrapper<G>
+impl<G, I> From<G> for VectorizedGymWrapper<G, I>
 where
-    G: Gym + Clone,
+    G: Gym<I> + Clone,
 {
     fn from(env: G) -> Self {
         VectorizedGymWrapper::new(vec![env])
     }
 }
 
-impl<G> From<Vec<G>> for VectorizedGymWrapper<G>
+impl<G, I> From<Vec<G>> for VectorizedGymWrapper<G, I>
 where
-    G: Gym,
+    G: Gym<I>,
 {
     fn from(envs: Vec<G>) -> Self {
         VectorizedGymWrapper::new(envs)
@@ -209,29 +231,31 @@ where
 use std::{fmt::Debug, sync::mpsc, thread};
 
 #[cfg(feature = "multithreading")]
-pub struct MultithreadedVectorizedGymWrapper<G, O, A, SE>
+pub struct MultithreadedVectorizedGymWrapper<G, O, A, SE, I = ()>
 where
-    G: Gym + 'static,
+    G: Gym<I> + 'static,
     G::Error: Send + Sync + std::fmt::Debug,
     SE: Debug,
     A: Space<Error = SE> + Clone + 'static,
     O: Space<Error = SE> + Clone + 'static,
+    I: Send + 'static,
 {
-    envs: Vec<GymHandle<G::Error>>,
+    envs: Vec<GymHandle<G::Error, I>>,
     to_reset: Vec<bool>,
     obs_space: O,
     action_space: A,
-    _phantom: std::marker::PhantomData<SE>,
+    _phantom: std::marker::PhantomData<(SE, fn() -> I)>,
 }
 
 #[cfg(feature = "multithreading")]
-impl<G, O, A, SE> MultithreadedVectorizedGymWrapper<G, O, A, SE>
+impl<G, O, A, SE, I> MultithreadedVectorizedGymWrapper<G, O, A, SE, I>
 where
-    G: Gym + 'static,
+    G: Gym<I> + 'static,
     G::Error: Send + Sync + std::fmt::Debug,
     SE: Debug,
     A: Space<Error = SE> + Clone + 'static,
     O: Space<Error = SE> + Clone + 'static,
+    I: Send + 'static,
 {
     pub fn new<F>(env_constructors: Vec<F>, obs_space: O, action_space: A) -> Self
     where
@@ -242,7 +266,7 @@ where
             "Must provide at least one environment constructor"
         );
 
-        let envs: Vec<GymHandle<<G as Gym>::Error>> = env_constructors
+        let envs: Vec<GymHandle<<G as Gym<I>>::Error, I>> = env_constructors
             .into_iter()
             .map(|constructor| start_gym_thread(constructor))
             .collect();
@@ -258,13 +282,14 @@ where
 }
 
 #[cfg(feature = "multithreading")]
-impl<G, O, A, SE> VectorizedGym for MultithreadedVectorizedGymWrapper<G, O, A, SE>
+impl<G, O, A, SE, I> VectorizedGym for MultithreadedVectorizedGymWrapper<G, O, A, SE, I>
 where
-    G: Gym + 'static,
+    G: Gym<I> + 'static,
     G::Error: Send + Sync + std::fmt::Debug,
     SE: Debug,
     A: Space<Error = SE> + Clone + 'static,
     O: Space<Error = SE> + Clone + 'static,
+    I: Send + 'static,
 {
     type Error = VectorizedGymError<G::Error>;
     type SpaceError = SE;
@@ -324,7 +349,7 @@ where
     fn reset(&mut self) -> Result<Tensor, Self::Error> {
         let batch_size = self.envs.len();
 
-        let states: Vec<std::sync::mpsc::Receiver<Result<StepInfo, <G as Gym>::Error>>> =
+        let states: Vec<std::sync::mpsc::Receiver<Result<ResetInfo<I>, <G as Gym<I>>::Error>>> =
             self.envs.iter().map(|env| env.reset()).collect();
         let states: Vec<Result<Tensor, VectorizedGymError<G::Error>>> = states
             .into_iter()
@@ -359,40 +384,40 @@ where
 }
 
 #[cfg(feature = "multithreading")]
-enum GymCmd<E>
+enum GymCmd<E, I>
 where
     E: Send + Sync,
 {
-    Step(Tensor, mpsc::Sender<Result<ThreadStepInfo, E>>),
-    Reset(mpsc::Sender<Result<StepInfo, E>>),
+    Step(Tensor, mpsc::Sender<Result<ThreadStepInfo<I>, E>>),
+    Reset(mpsc::Sender<Result<ResetInfo<I>, E>>),
 }
 
 #[cfg(feature = "multithreading")]
-struct ThreadStepInfo {
-    step_info: StepInfo,
+struct ThreadStepInfo<I> {
+    step_info: StepInfo<I>,
     terminal_state: Option<Tensor>,
 }
 
 #[cfg(feature = "multithreading")]
-struct GymHandle<E>
+struct GymHandle<E, I>
 where
     E: Send + Sync,
 {
-    tx: mpsc::Sender<GymCmd<E>>,
+    tx: mpsc::Sender<GymCmd<E, I>>,
 }
 
 #[cfg(feature = "multithreading")]
-impl<E> GymHandle<E>
+impl<E, I> GymHandle<E, I>
 where
     E: Send + Sync,
 {
-    fn step(&self, action: Tensor) -> std::sync::mpsc::Receiver<Result<ThreadStepInfo, E>> {
+    fn step(&self, action: Tensor) -> std::sync::mpsc::Receiver<Result<ThreadStepInfo<I>, E>> {
         let (resp_tx, resp_rx) = mpsc::channel();
         self.tx.send(GymCmd::Step(action, resp_tx)).unwrap();
         return resp_rx;
     }
 
-    fn reset(&self) -> std::sync::mpsc::Receiver<Result<StepInfo, E>> {
+    fn reset(&self) -> std::sync::mpsc::Receiver<Result<ResetInfo<I>, E>> {
         let (resp_tx, resp_rx) = mpsc::channel();
         self.tx.send(GymCmd::Reset(resp_tx)).unwrap();
         return resp_rx;
@@ -402,13 +427,14 @@ where
 #[cfg(feature = "multithreading")]
 /// Spawns a persistent thread that constructs and owns the gym.
 /// The closure is executed inside that thread to build the gym.
-fn start_gym_thread<G, F>(make_gym: F) -> GymHandle<G::Error>
+fn start_gym_thread<G, F, I>(make_gym: F) -> GymHandle<G::Error, I>
 where
     F: FnOnce() -> G + Send + 'static,
-    G: Gym + 'static,
+    G: Gym<I> + 'static,
     G::Error: Send + Sync + 'static,
+    I: Send + 'static,
 {
-    let (tx, rx) = mpsc::channel::<GymCmd<G::Error>>();
+    let (tx, rx) = mpsc::channel::<GymCmd<G::Error, I>>();
 
     thread::spawn(move || {
         let mut gym = make_gym(); // constructed *inside* the thread
@@ -422,8 +448,8 @@ where
                     {
                         terminal_state = Some(info.state.clone());
                         match gym.reset() {
-                            Ok(state) => {
-                                info.state = state;
+                            Ok(reset) => {
+                                info.state = reset.state;
                             }
                             Err(err) => {
                                 resp_tx.send(Err(err)).expect(
@@ -444,23 +470,9 @@ where
                 }
                 GymCmd::Reset(resp_tx) => {
                     let reset_info = gym.reset();
-                    if let Some(state) = reset_info.as_ref().ok() {
-                        resp_tx
-                            .send(Ok(StepInfo {
-                                state: state.clone(),
-                                reward: 0.0,
-                                done: false,
-                                truncated: false,
-                            }))
-                            .expect(
-                                "Failed to send reset response, this was probably caused by a panic in the gym thread",
-                            );
-                    } else {
-                        resp_tx.send(Err(reset_info.err().unwrap())).expect(
-                            "Failed to send reset response, this was probably caused by a panic in the gym thread",
-                        );
-                        continue;
-                    }
+                    resp_tx.send(reset_info).expect(
+                        "Failed to send reset response, this was probably caused by a panic in the gym thread",
+                    );
                 }
             }
         }
@@ -472,6 +484,49 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct TestInfo {
+        value: usize,
+    }
+
+    struct InfoEnv;
+
+    impl Gym<TestInfo> for InfoEnv {
+        type Error = candle_core::Error;
+        type SpaceError = candle_core::Error;
+
+        fn step(&mut self, _action: Tensor) -> Result<StepInfo<TestInfo>, Self::Error> {
+            Ok(StepInfo {
+                state: Tensor::zeros(1, candle_core::DType::F32, &candle_core::Device::Cpu)?,
+                reward: 0.0,
+                done: false,
+                truncated: false,
+                info: TestInfo { value: 2 },
+            })
+        }
+
+        fn reset(&mut self) -> Result<ResetInfo<TestInfo>, Self::Error> {
+            Ok(ResetInfo {
+                state: Tensor::zeros(1, candle_core::DType::F32, &candle_core::Device::Cpu)?,
+                info: TestInfo { value: 1 },
+            })
+        }
+
+        fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(crate::spaces::BoxSpace::new_with_universal_bounds(
+                vec![1],
+                -1.0,
+                1.0,
+                &candle_core::Device::Cpu,
+            ))
+        }
+
+        fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(crate::spaces::Discrete::new(2))
+        }
+    }
+
     struct DummyEnv {
         step_count: usize,
         id: usize,
@@ -500,15 +555,17 @@ mod tests {
                 reward: 1.0,
                 done,
                 truncated: false,
+                info: (),
             })
         }
 
-        fn reset(&mut self) -> Result<Tensor, Self::Error> {
+        fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
             self.step_count = 0;
-            Ok(
-                Tensor::from_vec(vec![self.id as f32, 0.0], &[2], &candle_core::Device::Cpu)
+            Ok(ResetInfo {
+                state: Tensor::from_vec(vec![self.id as f32, 0.0], &[2], &candle_core::Device::Cpu)
                     .unwrap(),
-            )
+                info: (),
+            })
         }
 
         fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
@@ -576,6 +633,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn vectorized_wrapper_infers_and_erases_non_unit_info() {
+        let mut vec_env = VectorizedGymWrapper::from(vec![InfoEnv]);
+        assert_eq!(vec_env.reset().unwrap().dims(), &[1, 1]);
+
+        let actions =
+            Tensor::zeros((1, 1), candle_core::DType::U32, &candle_core::Device::Cpu).unwrap();
+        assert_eq!(vec_env.step(actions).unwrap().states.dims(), &[1, 1]);
     }
 
     #[cfg(feature = "multithreading")]
