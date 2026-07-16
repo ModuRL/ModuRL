@@ -154,11 +154,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Configure ALE C flags on macOS
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          printf 'CFLAGS=-include unistd.h%s\n' "${CFLAGS:+ $CFLAGS}" >> "$GITHUB_ENV"
       - name: Check ALE formatting
         run: cargo fmt -p modurl_ale --check
       - name: ALE library tests

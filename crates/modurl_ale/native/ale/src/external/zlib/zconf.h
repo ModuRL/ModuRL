@@ -9,7 +9,7 @@
 #define ZCONF_H
 
 /* Added by SA: 2018-12-18 */
-#if defined(BSPF_UNIX) || defined(BSPF_MACOS)
+#if defined(BSPF_UNIX) || defined(BSPF_MACOS) || defined(__APPLE__)
   #define HAVE_UNISTD_H
 #endif
 #define HAVE_STDARG_H
