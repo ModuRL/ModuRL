@@ -113,7 +113,7 @@ jobs:
           PY
 
   core-and-gym:
-    name: Core + Gym + workspace tests (${{ matrix.os }}, ${{ matrix.toolchain }})
+    name: Core + Gym + examples (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -124,18 +124,27 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
-      - name: Build core, Gym, and workspace tests
+      - name: Build core, Gym, and examples
         run: >-
           cargo build --locked --verbose --all-targets
           -p modurl -p modurl_gym -p examples
-      - name: Test core, Gym, and workspace tests
+      - name: Test core and Gym
         run: >-
-          cargo test --locked --verbose --all-targets
-          -p modurl -p modurl_gym -p examples
+          cargo test --locked --verbose
+          -p modurl -p modurl_gym
+      - name: Test examples
+        run: cargo test --locked --verbose --all-targets -p examples
+      - name: Test Gym rendering
+        if: runner.os == 'Windows'
+        run: >-
+          cargo test --locked --verbose
+          -p modurl_gym --lib --features rendering
 
   ale:
     name: ALE (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     strategy:
       fail-fast: false
       matrix:
@@ -234,6 +243,13 @@ jobs:
           printf 'MUJOCO_DYNAMIC_LINK_DIR=%s\n' "$install_dir" >> "$GITHUB_ENV"
           printf 'DYLD_LIBRARY_PATH=%s\n' \
             "$install_dir:$framework_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+            >> "$GITHUB_ENV"
+      - name: Configure MuJoCo runtime library path on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          printf 'LD_LIBRARY_PATH=%s\n' \
+            "$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
             >> "$GITHUB_ENV"
       - name: Test MuJoCo default package
         run: cargo test --locked -p modurl_mojoco
