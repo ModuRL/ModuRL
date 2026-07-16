@@ -15,7 +15,7 @@ jobs:
     name: Workspace hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -124,7 +124,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install latest stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -199,8 +199,10 @@ jobs:
         run: >-
           cargo test --locked --verbose
           -p modurl_gym --lib --features rendering
-      - name: Test ALE
-        run: cargo test --locked -p modurl_ale
+      - name: Test ALE library
+        run: cargo test --locked -p modurl_ale --lib
+      - name: Test ALE documentation
+        run: cargo test --locked -p modurl_ale --doc
       - name: Build ALE without default features
         run: cargo build --locked -p modurl_ale --no-default-features
       - name: Build ALE rendering feature
@@ -218,7 +220,7 @@ jobs:
     name: Package validation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: List package contents
         shell: bash
