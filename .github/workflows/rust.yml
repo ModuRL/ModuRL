@@ -1,21 +1,122 @@
-name: Cargo Build & Test
+name: Workspace CI
 
 on:
   push:
-    branches:
-      - master
   pull_request:
-    branches:
-      - master
 
-env: 
+permissions:
+  contents: read
+
+env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build_and_test:
-    name: ModuRL - latest
+  workspace-hygiene:
+    name: Workspace hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Validate workspace metadata
+        shell: bash
+        run: |
+          mkdir -p target
+          cargo metadata --locked --format-version 1 > target/workspace-metadata.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          publishable = {"modurl", "modurl_gym", "modurl_ale", "modurl_mojoco"}
+          test_package = "examples"
+          expected = publishable | {test_package}
+          metadata = json.loads(Path("target/workspace-metadata.json").read_text())
+          members = set(metadata["workspace_members"])
+          packages = {package["id"]: package for package in metadata["packages"]}
+          names = {packages[member]["name"] for member in members}
+          if names != expected:
+              raise SystemExit(
+                  f"expected workspace packages {sorted(expected)}, found {sorted(names)}"
+              )
+
+          for member in members:
+              package = packages[member]
+              if package["source"] is not None:
+                  raise SystemExit(
+                      f"workspace package {package['name']} has source {package['source']}"
+                  )
+              for dependency in package["dependencies"]:
+                  if dependency["name"] not in expected:
+                      continue
+                  if dependency["source"] is not None or dependency["path"] is None:
+                      raise SystemExit(
+                          f"{package['name']} dependency {dependency['name']} is not local: "
+                          f"source={dependency['source']!r}, path={dependency['path']!r}"
+                      )
+
+          by_name = {packages[member]["name"]: packages[member] for member in members}
+          if by_name[test_package]["publish"] != []:
+              raise SystemExit(f"{test_package} must set publish = false")
+          for name in publishable:
+              if by_name[name]["publish"] == []:
+                  raise SystemExit(f"publishable workspace package {name} has publishing disabled")
+          PY
+      - name: Reject unauthorized Git dependencies
+        shell: bash
+        run: |
+          if grep -Eiq 'github\.com/ModuRL/' Cargo.lock; then
+            grep -Ein 'github\.com/ModuRL/' Cargo.lock
+            exit 1
+          fi
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          manifests = [Path("Cargo.toml"), *sorted(Path("crates").glob("*/Cargo.toml"))]
+          offenders = []
+          allowed_glutin = {
+              "trail": ("Cargo.toml", "patch", "crates-io", "glutin"),
+              "source": "https://github.com/davidhozic/glutin",
+              "rev": "e95fe97f1857c0498ed2236c0e8d60e5a30a2854",
+          }
+
+          def find_git_keys(value, trail):
+              if isinstance(value, dict):
+                  if "git" in value:
+                      source = str(value["git"])
+                      dependency = str(trail[-1]).lower()
+                      is_internal = dependency.startswith("modurl")
+                      is_modurl_source = "github.com/modurl/" in source.lower()
+                      is_allowed_glutin = (
+                          trail == allowed_glutin["trail"]
+                          and source == allowed_glutin["source"]
+                          and value.get("rev") == allowed_glutin["rev"]
+                      )
+                      if is_internal or is_modurl_source or not is_allowed_glutin:
+                          offenders.append((trail, source))
+                  for key, child in value.items():
+                      find_git_keys(child, (*trail, key))
+              elif isinstance(value, list):
+                  for index, child in enumerate(value):
+                      find_git_keys(child, (*trail, str(index)))
+
+          for manifest in manifests:
+              find_git_keys(tomllib.loads(manifest.read_text()), (str(manifest),))
+
+          if offenders:
+              for trail, source in offenders:
+                  print(f"Unauthorized Git dependency at {'.'.join(trail)}: {source}")
+              raise SystemExit(1)
+          PY
+
+  core-and-gym:
+    name: Core + Gym + examples (${{ matrix.os }}, ${{ matrix.toolchain }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         toolchain: [stable, beta, nightly]
@@ -23,7 +124,248 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
-      - name: Build
-        run: cargo build --verbose
-      - name: Test
-        run: cargo test --verbose
+      - name: Build core, Gym, and examples
+        run: >-
+          cargo build --locked --verbose --all-targets
+          -p modurl -p modurl_gym -p examples
+      - name: Test core and Gym
+        run: >-
+          cargo test --locked --verbose
+          -p modurl -p modurl_gym
+      - name: Test examples
+        run: cargo test --locked --verbose --all-targets -p examples
+      - name: Test Gym rendering
+        if: runner.os == 'Windows'
+        run: >-
+          cargo test --locked --verbose
+          -p modurl_gym --lib --features rendering
+
+  ale:
+    name: ALE (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check ALE formatting
+        run: cargo fmt -p modurl_ale --check
+      - name: ALE library tests
+        run: cargo test --locked -p modurl_ale --lib
+      - name: ALE documentation tests
+        run: cargo test --locked -p modurl_ale --doc
+      - name: ALE default build
+        run: cargo build --locked -p modurl_ale --no-default-features
+      - name: ALE rendering build
+        run: cargo build --locked -p modurl_ale --features rendering
+      - name: Clippy ALE
+        run: >-
+          cargo clippy --locked -p modurl_ale --all-targets --features rendering
+          --no-deps -- -D warnings
+      - name: List ALE package contents
+        run: cargo package --locked --allow-dirty -p modurl_ale --list
+      - name: Validate ALE package archive
+        run: >-
+          cargo package --locked --allow-dirty --no-verify -p modurl_ale
+          --config "patch.crates-io.modurl.path='.'"
+      - name: Reject packaged ROMs
+        shell: bash
+        run: |
+          files="$(cargo package --locked --allow-dirty -p modurl_ale --list)"
+          if printf '%s\n' "$files" | grep -Eiq '(^|/)(roms?/|[^/]+\.(bin|a26|rom)$)'; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
+
+  mujoco:
+    name: MuJoCo (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      # Cargo does not discover a member's nested .cargo/config.toml from the workspace root.
+      MUJOCO_DOWNLOAD_DIR: ${{ github.workspace }}/target/mujoco
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install MuJoCo 3.9.0 on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg="$RUNNER_TEMP/mujoco-3.9.0-macos-universal2.dmg"
+          mount_point="$RUNNER_TEMP/mujoco-3.9.0-mount"
+          install_dir="$RUNNER_TEMP/mujoco-3.9.0-manual"
+          expected_sha256="a1229a5d068f52272a329c0962090b9cd0639eff04db48d08ecd2deaaf4a8780"
+
+          curl --fail --location --retry 3 \
+            --output "$dmg" \
+            "https://github.com/google-deepmind/mujoco/releases/download/3.9.0/mujoco-3.9.0-macos-universal2.dmg"
+          (
+            cd "$RUNNER_TEMP"
+            printf '%s  %s\n' "$expected_sha256" "$(basename "$dmg")" | shasum -a 256 -c -
+          )
+
+          mkdir -p "$mount_point" "$install_dir"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point"
+          cleanup() {
+            hdiutil detach "$mount_point"
+          }
+          trap cleanup EXIT
+
+          framework_source="$(find "$mount_point" -type d -name mujoco.framework -print -quit)"
+          if [[ -z "$framework_source" ]]; then
+            echo "mujoco.framework was not found in the mounted image" >&2
+            exit 1
+          fi
+          cp -R "$framework_source" "$install_dir/mujoco.framework"
+
+          framework_dir="$install_dir/mujoco.framework/Versions/Current"
+          framework_library="$framework_dir/libmujoco.3.9.0.dylib"
+          if [[ ! -f "$framework_library" ]]; then
+            echo "MuJoCo framework library was not found at $framework_library" >&2
+            exit 1
+          fi
+          ln -s "$framework_library" "$install_dir/libmujoco.dylib"
+
+          cleanup
+          trap - EXIT
+
+          printf 'MUJOCO_DYNAMIC_LINK_DIR=%s\n' "$install_dir" >> "$GITHUB_ENV"
+          printf 'DYLD_LIBRARY_PATH=%s\n' \
+            "$install_dir:$framework_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
+            >> "$GITHUB_ENV"
+      - name: Configure MuJoCo runtime library path on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          printf 'LD_LIBRARY_PATH=%s\n' \
+            "$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            >> "$GITHUB_ENV"
+      - name: Test MuJoCo default package
+        run: cargo test --locked -p modurl_mojoco
+      - name: Run MuJoCo parity and API tests
+        run: cargo test --locked -p modurl_mojoco --test parity --test api
+      - name: Build MuJoCo rendering feature
+        run: cargo build --locked -p modurl_mojoco --features rendering
+
+  packaging:
+    name: Package validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: List package contents
+        shell: bash
+        run: |
+          for package in modurl modurl_gym modurl_ale modurl_mojoco; do
+            files="$(cargo package --locked --allow-dirty --list -p "$package")"
+            printf '%s\n' "$files"
+            if printf '%s\n' "$files" | grep -Eiq \
+              '(^|/)(\.git|target)(/|$)|(^|/)crates/examples(/|$)'; then
+              printf 'forbidden path packaged by %s\n' "$package"
+              exit 1
+            fi
+          done
+      - name: Build package archives
+        shell: bash
+        run: |
+          # The initial 0.1.0 internal crates are not yet available from crates.io.
+          # CLI-only patches let Cargo normalize every archive without changing manifests.
+          for package in modurl modurl_gym modurl_ale modurl_mojoco; do
+            cargo package --locked --allow-dirty --no-verify -p "$package" \
+              --config "patch.crates-io.modurl.path='.'" \
+              --config "patch.crates-io.modurl_gym.path='crates/modurl_gym'"
+          done
+      - name: Validate packaged internal dependencies
+        shell: bash
+        run: |
+          mkdir -p target
+          cargo metadata --locked --format-version 1 > target/package-metadata.json
+          python - <<'PY'
+          import json
+          import tarfile
+          import tomllib
+          from pathlib import Path
+
+          publishable = {"modurl", "modurl_gym", "modurl_ale", "modurl_mojoco"}
+          test_package = "examples"
+          workspace_packages = publishable | {test_package}
+          expected_dependencies = {
+              "modurl": set(),
+              "modurl_gym": {"modurl"},
+              "modurl_ale": {"modurl"},
+              "modurl_mojoco": {"modurl"},
+          }
+          metadata = json.loads(Path("target/package-metadata.json").read_text())
+          members = set(metadata["workspace_members"])
+          packages = {
+              package["name"]: package
+              for package in metadata["packages"]
+              if package["id"] in members
+          }
+          if packages[test_package]["publish"] != []:
+              raise SystemExit(f"{test_package} must set publish = false")
+          test_archives = list(
+              Path("target/package").glob(f"{test_package}-*.crate")
+          )
+          if test_archives:
+              raise SystemExit(
+                  f"non-publishable {test_package} was packaged: {test_archives}"
+              )
+
+          def dependency_tables(manifest):
+              for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+                  yield manifest.get(key, {})
+              for target in manifest.get("target", {}).values():
+                  for key in ("dependencies", "dev-dependencies", "build-dependencies"):
+                      yield target.get(key, {})
+
+          for name in sorted(publishable):
+              version = packages[name]["version"]
+              crate = Path("target/package") / f"{name}-{version}.crate"
+              member = f"{name}-{version}/Cargo.toml"
+              with tarfile.open(crate, "r:gz") as archive:
+                  extracted = archive.extractfile(member)
+                  if extracted is None:
+                      raise SystemExit(f"{crate} does not contain {member}")
+                  manifest = tomllib.loads(extracted.read().decode())
+
+              found_dependencies = set()
+              for table in dependency_tables(manifest):
+                  for dependency_name, specification in table.items():
+                      if isinstance(specification, str):
+                          dependency_package = dependency_name
+                          version_requirement = specification
+                          forbidden = set()
+                      else:
+                          dependency_package = specification.get("package", dependency_name)
+                          version_requirement = specification.get("version")
+                          forbidden = {"path", "git"} & specification.keys()
+                      if dependency_package not in workspace_packages:
+                          continue
+                      found_dependencies.add(dependency_package)
+                      if forbidden:
+                          raise SystemExit(
+                              f"packaged {name} dependency {dependency_name} retains {sorted(forbidden)}"
+                          )
+                      if not version_requirement:
+                          raise SystemExit(
+                              f"packaged {name} dependency {dependency_name} has no registry version"
+                          )
+              if found_dependencies != expected_dependencies[name]:
+                  raise SystemExit(
+                      f"packaged {name} internal dependencies are "
+                      f"{sorted(found_dependencies)}, expected "
+                      f"{sorted(expected_dependencies[name])}"
+                  )
+          PY

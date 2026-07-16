@@ -1,0 +1,902 @@
+[
+  {
+    "observation": [
+      -0.0024999999441206455,
+      -0.0024999999441206455
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.007499929517507553,
+      -0.004999929573386908
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.01599922589957714,
+      -0.008499297313392162
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.027995644137263298,
+      -0.011996417306363583
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.043483249843120575,
+      -0.015487605705857277
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.0624496154487133,
+      -0.01896636374294758
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.08487223088741302,
+      -0.02242261730134487
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.10971424728631973,
+      -0.024842018261551857
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.13792206346988678,
+      -0.028207818046212196
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.16741891205310822,
+      -0.029496850445866585
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.20010700821876526,
+      -0.03268809616565704
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.23385798931121826,
+      -0.033750981092453
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.26951855421066284,
+      -0.035660549998283386
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.3079054653644562,
+      -0.038386911153793335
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.34879952669143677,
+      -0.04089405760169029
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.3919453024864197,
+      -0.043145786970853806
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.43705302476882935,
+      -0.04510771483182907
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.48380255699157715,
+      -0.0467495396733284
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.5298498868942261,
+      -0.04604730382561684
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.5758503079414368,
+      -0.04600042477250099
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.6204604506492615,
+      -0.04461013898253441
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.6643542647361755,
+      -0.043893858790397644
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.7062235474586487,
+      -0.04186928644776344
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.7477906942367554,
+      -0.04156710207462311
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.7868002653121948,
+      -0.039009593427181244
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.8230347037315369,
+      -0.03623440861701965
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.8573133945465088,
+      -0.03427872434258461
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.8904868960380554,
+      -0.03317350149154663
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.9214316010475159,
+      -0.03094473108649254
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.9500522017478943,
+      -0.02862057089805603
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.9772781729698181,
+      -0.02722599171102047
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0030590295791626,
+      -0.02578078769147396
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0263617038726807,
+      -0.023302672430872917
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0481692552566528,
+      -0.021807555109262466
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0684767961502075,
+      -0.020307566970586777
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.085289478302002,
+      -0.016812657937407494
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0986183881759644,
+      -0.013328964821994305
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.1094770431518555,
+      -0.010858651250600815
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.1168792247772217,
+      -0.007402160670608282
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.1228357553482056,
+      -0.005956586915999651
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.1253564357757568,
+      -0.0025206739082932472
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.1254456043243408,
+      -8.908377640182152e-05
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.1231032609939575,
+      0.0023423510137945414
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.1173254251480103,
+      0.005777811631560326
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.1081026792526245,
+      0.00922268908470869
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0964215993881226,
+      0.011681074276566505
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0812677145004272,
+      0.015153864398598671
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.064626932144165,
+      0.016640817746520042
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0464895963668823,
+      0.018137400969862938
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0258522033691406,
+      0.02063739486038685
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -1.0017198324203491,
+      0.024132270365953445
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.9761108160018921,
+      0.025609038770198822
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.9490584135055542,
+      0.02705240435898304
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.918613612651825,
+      0.030444832518696785
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.886852502822876,
+      0.03176112100481987
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.8528750538825989,
+      0.03397741541266441
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.8158105611801147,
+      0.03706449642777443
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.7758246064186096,
+      0.03998597338795662
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.7341223359107971,
+      0.04170224443078041
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.6919440627098083,
+      0.04217827692627907
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.6485561728477478,
+      0.04338787496089935
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.6032529473304749,
+      0.045303259044885635
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.5563579201698303,
+      0.046894997358322144
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.5092176198959351,
+      0.047140296548604965
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.46318519115448,
+      0.04603246971964836
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.41660332679748535,
+      0.04658184573054314
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.37081024050712585,
+      0.045793090015649796
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.32612335681915283,
+      0.044686879962682724
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.2838324308395386,
+      0.04229094088077545
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.24218861758708954,
+      0.04164379835128784
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.20141348242759705,
+      0.04077514633536339
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.16269566118717194,
+      0.03871781378984451
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.12518592178821564,
+      0.037509735673666
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.08900195360183716,
+      0.036183975636959076
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.054229386150836945,
+      0.034772563725709915
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.021923812106251717,
+      0.03230557590723038
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.007887167856097221,
+      0.029810979962348938
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.03519884869456291,
+      0.02731168083846569
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.05902445316314697,
+      0.02382560446858406
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.07938914746046066,
+      0.02036469615995884
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.09632441401481628,
+      0.01693526655435562
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.10986334085464478,
+      0.013538924977183342
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.12203682959079742,
+      0.0121734868735075
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.13187599182128906,
+      0.009839169681072235
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.13940827548503876,
+      0.00753228273242712
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.14465603232383728,
+      0.005247754510492086
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.1476355344057083,
+      0.0029794934671372175
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.14935624599456787,
+      0.001720719039440155
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.14882375299930573,
+      -0.0005324946250766516
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.1460363119840622,
+      -0.0027874356601387262
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.13998499512672424,
+      -0.006051324307918549
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.1316508948802948,
+      -0.008334092795848846
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.12000927329063416,
+      -0.011641629040241241
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.10702792555093765,
+      -0.012981346808373928
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.09267434477806091,
+      -0.014353581704199314
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.07491675764322281,
+      -0.017757581546902657
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.05572205409407616,
+      -0.0191947054117918
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.03406219929456711,
+      -0.021659856662154198
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      0.00891538243740797,
+      -0.025146815925836563
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  },
+  {
+    "observation": [
+      -0.01773053966462612,
+      -0.026645921170711517
+    ],
+    "reward": -1.0,
+    "done": false,
+    "truncated": false
+  }
+]

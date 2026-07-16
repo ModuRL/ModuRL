@@ -3,6 +3,16 @@ name = "modurl"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [
+    ".",
+    "crates/modurl_gym",
+    "crates/modurl_ale",
+    "crates/modurl_mojoco",
+    "crates/examples",
+]
+resolver = "3"
+
 [dependencies]
 bon = "3.7.2"
 candle-core = "0.11.0"
@@ -12,24 +22,12 @@ tracing = { version = "0.1.37", optional = true }
 [features]
 default = []
 multithreading = []
-cuda = ["candle-core/cuda", "modurl_gym/cuda"]
+cuda = ["candle-core/cuda"]
 cudnn = ["candle-core/cudnn"]
 metal = ["candle-core/metal"]
 
-[dev-dependencies]
-modurl_gym = { git = "https://github.com/ModuRL/ModuRL_Gym", features = [
-    "rendering",
-] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tracing-subscriber = "0.3.20"
-textplots = "0.8.7"
-
-[patch."https://github.com/ModuRL/ModuRL"]
-modurl = { path = "." }
-
-[patch."https://github.com/ModuRL/ModuRL_Gym"]
-modurl_gym = { path = "../modurl_gym" }
+[patch.crates-io]
+glutin = { git = "https://github.com/davidhozic/glutin", rev = "e95fe97f1857c0498ed2236c0e8d60e5a30a2854" }
 
 # For profiler
 [profile.release]

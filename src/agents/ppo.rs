@@ -1,6 +1,6 @@
 use bon::bon;
-use candle_core::{IndexOp, Tensor, D};
-use candle_nn::{loss, Optimizer};
+use candle_core::{D, IndexOp, Tensor};
+use candle_nn::{Optimizer, loss};
 use std::marker::PhantomData;
 
 use crate::{
@@ -420,7 +420,7 @@ where
         let all_returns = Tensor::stack(&all_returns, 0)?.flatten(0, 1)?;
         let all_rewards = Tensor::stack(&all_rewards, 0)?.flatten(0, 1)?;
         let all_old_values = Tensor::stack(&all_old_values, 0)?.flatten(0, 1)?;
-
+        let rollout_explained_variance = compute_explained_variance(&all_returns, &all_old_values)?;
 
         let total_samples = all_states.dims()[0];
         let device = all_states.device();
@@ -1028,8 +1028,8 @@ mod tests {
     use super::*;
     use crate::{
         distributions::CategoricalDistribution,
-        gym::{Gym, StepInfo, VectorizedGym, VectorizedGymWrapper},
-        models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
+        gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
+        models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         spaces::Discrete,
     };
     use candle_core::Device;
@@ -1062,12 +1062,16 @@ mod tests {
                 reward: self.step_count as f32,
                 done: next_done,
                 truncated: false,
+                info: (),
             })
         }
 
-        fn reset(&mut self) -> Result<Tensor, Self::Error> {
+        fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
             self.step_count = 0;
-            Tensor::rand(0.0f32, 1.0, &[4], &self.device)
+            Ok(ResetInfo {
+                state: Tensor::rand(0.0f32, 1.0, &[4], &self.device)?,
+                info: (),
+            })
         }
 
         fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
@@ -1226,14 +1230,14 @@ mod schedule_tests {
     use super::*;
     use crate::{
         agents::{
-            test_support::{CountingOptimizer, FixedEnv},
             Agent,
+            test_support::{CountingOptimizer, FixedEnv},
         },
         distributions::{CategoricalDistribution, GuassianDistribution},
         gym::{VectorizedGym, VectorizedGymWrapper},
         models::{
-            probabilistic_model::{ProbabilisticPolicyModel, ProbabilisticPolicyModelError},
             MLP,
+            probabilistic_model::{ProbabilisticPolicyModel, ProbabilisticPolicyModelError},
         },
         parameter_schedule::LinearSchedule,
         spaces::BoxSpace,

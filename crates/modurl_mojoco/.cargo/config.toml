@@ -1,0 +1,4 @@
+# mujoco-rs requires an absolute download path at dependency build time.
+# `relative = true` makes Cargo resolve this repository-relative value first.
+[env]
+MUJOCO_DOWNLOAD_DIR = { value = "target/mujoco", relative = true, force = false }

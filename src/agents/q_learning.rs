@@ -554,13 +554,13 @@ impl QLearningDeviceStrategy {
 #[cfg(test)]
 mod tests {
     use super::{
-        bellman_targets, selected_action_q_values, validate_configuration, validate_epsilon,
         QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningDeviceStrategy,
-        QLearningLogger, QLearningTarget,
+        QLearningLogger, QLearningTarget, bellman_targets, selected_action_q_values,
+        validate_configuration, validate_epsilon,
     };
     use crate::{
         agents::test_support::{CountingOptimizer, FixedEnv},
-        gym::{Gym, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper},
+        gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper},
         models::MLP,
         parameter_schedule::LinearSchedule,
         spaces::{BoxSpace, Discrete},
@@ -690,12 +690,16 @@ mod tests {
                 reward: 1.0,
                 done: self.steps == 2,
                 truncated: false,
+                info: (),
             })
         }
 
-        fn reset(&mut self) -> Result<Tensor, Self::Error> {
+        fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
             self.steps = 0;
-            Tensor::zeros(&[4], DType::F32, &self.device)
+            Ok(ResetInfo {
+                state: Tensor::zeros(&[4], DType::F32, &self.device)?,
+                info: (),
+            })
         }
 
         fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {

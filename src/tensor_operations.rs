@@ -1,4 +1,4 @@
-use candle_core::{backprop::GradStore, DType, Error, Tensor};
+use candle_core::{DType, Error, Tensor, backprop::GradStore};
 
 pub(crate) fn torch_like_max(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
     // See torch_like_min for why this is a masked select; ties route to `b`.

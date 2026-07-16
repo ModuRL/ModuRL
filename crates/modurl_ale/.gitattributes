@@ -1,0 +1,3 @@
+# The ALE native source is bundled third-party code; do not include it in
+# GitHub's repository language statistics.
+native/ale/** linguist-vendored
