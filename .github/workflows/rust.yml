@@ -15,7 +15,7 @@ jobs:
     name: Workspace hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -112,81 +112,11 @@ jobs:
               raise SystemExit(1)
           PY
 
-  core-and-gym:
-    name: Core + Gym + examples (${{ matrix.os }}, ${{ matrix.toolchain }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        toolchain: [stable, beta, nightly]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
-      - name: Build core, Gym, and examples
-        run: >-
-          cargo build --locked --verbose --all-targets
-          -p modurl -p modurl_gym -p examples
-      - name: Test core and Gym
-        run: >-
-          cargo test --locked --verbose
-          -p modurl -p modurl_gym
-      - name: Test examples
-        run: cargo test --locked --verbose --all-targets -p examples
-      - name: Test Gym rendering
-        if: runner.os == 'Windows'
-        run: >-
-          cargo test --locked --verbose
-          -p modurl_gym --lib --features rendering
-
-  ale:
-    name: ALE (${{ matrix.os }})
+  platform-tests:
+    name: Workspace tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Check ALE formatting
-        run: cargo fmt -p modurl_ale --check
-      - name: ALE library tests
-        run: cargo test --locked -p modurl_ale --lib
-      - name: ALE documentation tests
-        run: cargo test --locked -p modurl_ale --doc
-      - name: ALE default build
-        run: cargo build --locked -p modurl_ale --no-default-features
-      - name: ALE rendering build
-        run: cargo build --locked -p modurl_ale --features rendering
-      - name: Clippy ALE
-        run: >-
-          cargo clippy --locked -p modurl_ale --all-targets --features rendering
-          --no-deps -- -D warnings
-      - name: List ALE package contents
-        run: cargo package --locked --allow-dirty -p modurl_ale --list
-      - name: Validate ALE package archive
-        run: >-
-          cargo package --locked --allow-dirty --no-verify -p modurl_ale
-          --config "patch.crates-io.modurl.path='.'"
-      - name: Reject packaged ROMs
-        shell: bash
-        run: |
-          files="$(cargo package --locked --allow-dirty -p modurl_ale --list)"
-          if printf '%s\n' "$files" | grep -Eiq '(^|/)(roms?/|[^/]+\.(bin|a26|rom)$)'; then
-            printf '%s\n' "$files"
-            exit 1
-          fi
-
-  mujoco:
-    name: MuJoCo (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    env:
       # Cargo does not discover a member's nested .cargo/config.toml from the workspace root.
       MUJOCO_DOWNLOAD_DIR: ${{ github.workspace }}/target/mujoco
     strategy:
@@ -194,8 +124,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v6
+      - name: Install latest stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - name: Install MuJoCo 3.9.0 on macOS
         if: runner.os == 'macOS'
         shell: bash
@@ -251,10 +184,35 @@ jobs:
           printf 'LD_LIBRARY_PATH=%s\n' \
             "$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
             >> "$GITHUB_ENV"
+      - name: Build core, Gym, and examples
+        run: >-
+          cargo build --locked --verbose --all-targets
+          -p modurl -p modurl_gym -p examples
+      - name: Test core and Gym
+        run: >-
+          cargo test --locked --verbose
+          -p modurl -p modurl_gym
+      - name: Test examples
+        run: cargo test --locked --verbose --all-targets -p examples
+      - name: Test Gym rendering
+        if: runner.os == 'Windows'
+        run: >-
+          cargo test --locked --verbose
+          -p modurl_gym --lib --features rendering
+      - name: Test ALE library
+        run: cargo test --locked -p modurl_ale --lib
+      - name: Test ALE documentation
+        run: cargo test --locked -p modurl_ale --doc
+      - name: Build ALE without default features
+        run: cargo build --locked -p modurl_ale --no-default-features
+      - name: Build ALE rendering feature
+        run: cargo build --locked -p modurl_ale --features rendering
+      - name: Clippy ALE
+        run: >-
+          cargo clippy --locked -p modurl_ale --all-targets --features rendering
+          --no-deps -- -D warnings
       - name: Test MuJoCo default package
         run: cargo test --locked -p modurl_mojoco
-      - name: Run MuJoCo parity and API tests
-        run: cargo test --locked -p modurl_mojoco --test parity --test api
       - name: Build MuJoCo rendering feature
         run: cargo build --locked -p modurl_mojoco --features rendering
 
@@ -262,7 +220,7 @@ jobs:
     name: Package validation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: List package contents
         shell: bash
@@ -273,6 +231,11 @@ jobs:
             if printf '%s\n' "$files" | grep -Eiq \
               '(^|/)(\.git|target)(/|$)|(^|/)crates/examples(/|$)'; then
               printf 'forbidden path packaged by %s\n' "$package"
+              exit 1
+            fi
+            if [[ "$package" == modurl_ale ]] && printf '%s\n' "$files" | grep -Eiq \
+              '(^|/)(roms?/|[^/]+\.(bin|a26|rom)$)'; then
+              printf 'ROM-like file packaged by %s\n' "$package"
               exit 1
             fi
           done
