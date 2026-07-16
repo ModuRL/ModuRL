@@ -1,4 +1,4 @@
-use candle_core::{DType, Device};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
@@ -110,7 +110,7 @@ fn main() {
             DType::F32,
             &device,
         ))
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("failed to build the online Q-network");
@@ -124,7 +124,7 @@ fn main() {
             DType::F32,
             &device,
         ))
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("failed to build the target Q-network");

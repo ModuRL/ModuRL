@@ -46,7 +46,7 @@ First, bring the Candle types, optimizer, ModuRL traits, and CartPole
 environment into scope:
 
 ```rust,ignore
-use candle_core::Device;
+use candle_core::{Device, Tensor};
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::prelude::*;
@@ -126,7 +126,7 @@ The actor network maps observations to action logits:
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(actor_vb)
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .name("actor".to_string())
         .build()
@@ -149,7 +149,7 @@ The critic maps observations to one value estimate:
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .name("critic".to_string())
         .build()
@@ -240,7 +240,7 @@ program but is smaller than a longer experiment.
 After applying the pieces above, `src/main.rs` should look like this:
 
 ```rust,ignore
-use candle_core::Device;
+use candle_core::{Device, Tensor};
 use candle_nn::{Optimizer, VarBuilder, VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 use modurl::prelude::*;
@@ -263,7 +263,7 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(actor_vb)
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .name("actor".to_string())
         .build()
@@ -275,7 +275,7 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(tanh))
+        .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .name("critic".to_string())
         .build()

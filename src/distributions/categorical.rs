@@ -46,6 +46,10 @@ impl Distribution for CategoricalDistribution {
         (&self.logits + noise).unwrap()
     }
 
+    fn mode(&self) -> Tensor {
+        self.logits.clone()
+    }
+
     fn dist_eval(&self, actions: &Tensor) -> Result<DistEval, Self::Error> {
         let log_probs = self.log_probs()?; // [batch, num_classes]
 
