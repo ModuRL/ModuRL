@@ -1,33 +1,131 @@
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use candle_core::{Module, Tensor};
 use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
-use modurl_mojoco::HalfCheetahV5;
+use modurl_mojoco::{HalfCheetahV5, HopperV5, MujocoError, Walker2dV5};
 use textplots::{Chart, Plot};
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
-const LOG_STD_PRINT_EVERY: usize = 100_000;
+
+#[derive(Clone, Copy)]
+enum EnvironmentId {
+    HalfCheetah,
+    Hopper,
+    Walker2d,
+}
+
+impl EnvironmentId {
+    fn from_args() -> Self {
+        let args = std::env::args().skip(1).collect::<Vec<_>>();
+        let name = match args.as_slice() {
+            [arg] if matches!(arg.as_str(), "-h" | "--help") => {
+                Self::print_usage();
+                std::process::exit(0);
+            }
+            [flag, name] if flag == "--env" => name,
+            _ => {
+                Self::print_usage();
+                std::process::exit(2);
+            }
+        };
+
+        match name.to_ascii_lowercase().as_str() {
+            "halfcheetah" | "halfcheetah-v5" | "half-cheetah" | "half-cheetah-v5" => {
+                Self::HalfCheetah
+            }
+            "hopper" | "hopper-v5" => Self::Hopper,
+            "walker2d" | "walker2d-v5" | "walker-2d" | "walker-2d-v5" => Self::Walker2d,
+            _ => {
+                eprintln!("Unknown environment: {name}\n");
+                Self::print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    fn print_usage() {
+        eprintln!(
+            "Usage: ppo_mujoco_with_graphs --env \
+             <HalfCheetah-v5|Hopper-v5|Walker2d-v5>"
+        );
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::HalfCheetah => "HalfCheetah-v5",
+            Self::Hopper => "Hopper-v5",
+            Self::Walker2d => "Walker2d-v5",
+        }
+    }
+
+    fn build(self, device: &candle_core::Device) -> Result<MujocoEnvironment, MujocoError> {
+        match self {
+            Self::HalfCheetah => Ok(MujocoEnvironment::HalfCheetah(
+                HalfCheetahV5::builder().device(device).build()?,
+            )),
+            Self::Hopper => Ok(MujocoEnvironment::Hopper(
+                HopperV5::builder().device(device).build()?,
+            )),
+            Self::Walker2d => Ok(MujocoEnvironment::Walker2d(
+                Walker2dV5::builder().device(device).build()?,
+            )),
+        }
+    }
+}
+
+enum MujocoEnvironment {
+    HalfCheetah(HalfCheetahV5),
+    Hopper(HopperV5),
+    Walker2d(Walker2dV5),
+}
+
+impl Gym for MujocoEnvironment {
+    type Error = MujocoError;
+    type SpaceError = candle_core::Error;
+
+    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
+        match self {
+            Self::HalfCheetah(environment) => environment.step(action),
+            Self::Hopper(environment) => environment.step(action),
+            Self::Walker2d(environment) => environment.step(action),
+        }
+    }
+
+    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+        match self {
+            Self::HalfCheetah(environment) => environment.reset(),
+            Self::Hopper(environment) => environment.reset(),
+            Self::Walker2d(environment) => environment.reset(),
+        }
+    }
+
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        match self {
+            Self::HalfCheetah(environment) => environment.observation_space(),
+            Self::Hopper(environment) => environment.observation_space(),
+            Self::Walker2d(environment) => environment.observation_space(),
+        }
+    }
+
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        match self {
+            Self::HalfCheetah(environment) => environment.action_space(),
+            Self::Hopper(environment) => environment.action_space(),
+            Self::Walker2d(environment) => environment.action_space(),
+        }
+    }
+}
 
 /// CleanRL's observation-independent Gaussian log standard deviation plus a
 /// state-dependent mean network.
 struct GaussianParameterModule {
     mean: MLP,
     log_std: Tensor,
-    forward_calls: AtomicUsize,
 }
 
 impl Module for GaussianParameterModule {
     fn forward(&self, observations: &Tensor) -> candle_core::Result<Tensor> {
-        if self.forward_calls.fetch_add(1, Ordering::Relaxed) % LOG_STD_PRINT_EVERY == 0 {
-            let log_std = self
-                .log_std
-                .flatten_all()?
-                .to_device(&candle_core::Device::Cpu)?
-                .to_vec1::<f32>()?;
-            println!("\nlog_std: {log_std:?}");
-        }
         let mean = self.mean.forward(observations)?;
         let log_std = self.log_std.broadcast_as(mean.shape())?;
         Tensor::cat(&[mean, log_std], 1)
@@ -166,12 +264,14 @@ impl PPOLogger<RawRewardInfo<()>> for Grapher {
 }
 
 fn main() {
+    let environment_id = EnvironmentId::from_args();
     let device = candle_core::Device::cuda_if_available(0).unwrap();
+    println!("Environment: {}", environment_id.name());
     println!("Using device: {device:?}");
 
     let env = NormalizeRewardGym::new(
         NormalizeObservationGym::new(RecordRawRewardGym::new(TimeLimitGym::new(
-            HalfCheetahV5::builder().device(&device).build().unwrap(),
+            environment_id.build(&device).unwrap(),
             1_000,
         )))
         .with_clip(10.0),
@@ -201,7 +301,6 @@ fn main() {
         log_std: actor_vb
             .get_with_hints((1, action_size), "log_std", Init::Const(0.0))
             .unwrap(),
-        forward_calls: AtomicUsize::new(0),
     };
 
     let critic_vars = VarMap::new();

@@ -64,7 +64,9 @@ For a PPO example with logging and terminal plots:
 
 ```sh
 cargo run --example ppo_cartpole_with_graphs
-cargo run --release --example ppo_half_cheetah_with_graphs
+cargo run --release --example ppo_mujoco_with_graphs -- --env HalfCheetah-v5
+cargo run --release --example ppo_mujoco_with_graphs -- --env Hopper-v5
+cargo run --release --example ppo_mujoco_with_graphs -- --env Walker2d-v5
 ```
 
 For DQN training with terminal plots for loss, exploration, Q-values, and
@@ -91,7 +93,7 @@ cargo run --features metal --example ppo_bench
 | --- | --- |
 | `examples/ppo_bench.rs` | PPO on CartPole with separate actor and critic networks |
 | `examples/ppo_cartpole_with_graphs.rs` | PPO training metrics through `PPOLogger` |
-| `examples/ppo_half_cheetah_with_graphs.rs` | CleanRL-style continuous PPO on HalfCheetah with progress and terminal plots |
+| `examples/ppo_mujoco_with_graphs.rs` | CleanRL-style continuous PPO on selectable MuJoCo environments with progress and terminal plots |
 | `examples/dqn_cartpole_with_graphs.rs` | DQN training metrics and episode graphs through `DQNLogger` |
 | `examples/rendered_lunar_lander_ppo.rs` | PPO on LunarLander with rendering and learning-rate schedules |
 
