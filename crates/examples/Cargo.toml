@@ -1,0 +1,21 @@
+[package]
+name = "examples"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+modurl = { version = "0.1.0", path = "../.." }
+modurl_gym = { version = "0.1.0", path = "../modurl_gym", features = [
+    "rendering",
+] }
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+textplots = "0.8.7"
+
+[features]
+default = []
+cuda = ["modurl/cuda", "modurl_gym/cuda", "candle-core/cuda"]
+cudnn = ["modurl/cudnn", "modurl_gym/cudnn", "candle-core/cudnn"]
+metal = ["modurl/metal", "modurl_gym/metal", "candle-core/metal"]
+multithreading = ["modurl/multithreading"]
