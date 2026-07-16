@@ -130,14 +130,14 @@ enum PPOElement {
     Return = 8,
 }
 
-struct PPOLoggingInfo<'a> {
-    logger: &'a mut dyn PPOLogger,
+struct PPOLoggingInfo<'a, I> {
+    logger: &'a mut dyn PPOLogger<I>,
     epoch: usize,
     timestep: usize,
 }
 
-impl<'a> PPOLoggingInfo<'a> {
-    fn new(logger: &'a mut dyn PPOLogger) -> Self {
+impl<'a, I> PPOLoggingInfo<'a, I> {
+    fn new(logger: &'a mut dyn PPOLogger<I>) -> Self {
         Self {
             logger,
             epoch: 0,
@@ -159,8 +159,26 @@ pub struct PPOLogEntry {
     pub advantages: Tensor,
 }
 
-pub trait PPOLogger {
+pub struct PPOCollectionLogEntry<I = ()> {
+    pub collection_rewards: Tensor,
+    pub infos: Vec<I>,
+    pub collection_timestep: usize,
+    pub completed_episodes: Vec<PPOEpisodeLogEntry>,
+}
+
+pub struct PPOEpisodeLogEntry {
+    pub environment_index: usize,
+    pub episode_return: f32,
+    pub episode_length: usize,
+    pub terminated: bool,
+    pub truncated: bool,
+    pub collection_timestep: usize,
+}
+
+pub trait PPOLogger<I = ()> {
     fn log(&mut self, info: &PPOLogEntry);
+
+    fn log_collection(&mut self, _info: &PPOCollectionLogEntry<I>) {}
 }
 
 #[derive(Clone)]
@@ -289,7 +307,7 @@ where
     }
 }
 
-pub struct PPOAgent<'a, O1, O2, AE, GE, SE>
+pub struct PPOAgent<'a, O1, O2, AE, GE, SE, I = ()>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -313,14 +331,16 @@ where
     num_epochs: usize,
     batch_size: usize,
     schedule_progress: ScheduleProgress,
-    logging_info: Option<PPOLoggingInfo<'a>>,
+    logging_info: Option<PPOLoggingInfo<'a, I>>,
     gradient_clip: f32,
     current_states: Option<Tensor>,
+    episode_returns: Vec<f32>,
+    episode_lengths: Vec<usize>,
     _phantom: PhantomData<GE>,
 }
 
 #[bon]
-impl<'a, O1, O2, AE, GE, SE> PPOAgent<'a, O1, O2, AE, GE, SE>
+impl<'a, O1, O2, AE, GE, SE, I> PPOAgent<'a, O1, O2, AE, GE, SE, I>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -351,7 +371,7 @@ where
         #[builder(default = 4)] num_epochs: usize,
         #[builder(default = 0.5)] gradient_clip: f32,
         training_horizon: usize,
-        logging_info: Option<&'a mut dyn PPOLogger>,
+        logging_info: Option<&'a mut dyn PPOLogger<I>>,
         device: candle_core::Device,
     ) -> Self {
         if batch_size > 0 {
@@ -378,12 +398,14 @@ where
             logging_info: logging_info.map(PPOLoggingInfo::new),
             gradient_clip,
             current_states: None,
+            episode_returns: Vec::new(),
+            episode_lengths: Vec::new(),
             _phantom: PhantomData,
         }
     }
 }
 
-impl<'a, O1, O2, AE, GE, SE> PPOAgent<'a, O1, O2, AE, GE, SE>
+impl<'a, O1, O2, AE, GE, SE, I> PPOAgent<'a, O1, O2, AE, GE, SE, I>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -874,6 +896,48 @@ where
         }
     }
 
+    fn log_collection(
+        &mut self,
+        rewards: &Tensor,
+        infos: Vec<I>,
+        dones: &[bool],
+        truncateds: &[bool],
+        first_collection_timestep: usize,
+    ) -> Result<(), candle_core::Error> {
+        let Some(logging_info) = &mut self.logging_info else {
+            return Ok(());
+        };
+
+        let rewards_vec = rewards.to_vec1::<f32>()?;
+        let mut completed_episodes = Vec::new();
+        for (environment_index, reward) in rewards_vec.iter().copied().enumerate() {
+            self.episode_returns[environment_index] += reward;
+            self.episode_lengths[environment_index] += 1;
+            let collection_timestep =
+                first_collection_timestep.saturating_add(environment_index + 1);
+            if dones[environment_index] || truncateds[environment_index] {
+                completed_episodes.push(PPOEpisodeLogEntry {
+                    environment_index,
+                    episode_return: self.episode_returns[environment_index],
+                    episode_length: self.episode_lengths[environment_index],
+                    terminated: dones[environment_index],
+                    truncated: truncateds[environment_index],
+                    collection_timestep,
+                });
+                self.episode_returns[environment_index] = 0.0;
+                self.episode_lengths[environment_index] = 0;
+            }
+        }
+
+        logging_info.logger.log_collection(&PPOCollectionLogEntry {
+            collection_rewards: rewards.clone(),
+            infos,
+            collection_timestep: first_collection_timestep.saturating_add(rewards_vec.len()),
+            completed_episodes,
+        });
+        Ok(())
+    }
+
     pub fn set_learning_rate(&mut self, lr: f64) {
         match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
@@ -914,10 +978,12 @@ where
 
     pub fn reset_current_states(&mut self) {
         self.current_states = None;
+        self.episode_returns.clear();
+        self.episode_lengths.clear();
     }
 }
 
-impl<'a, O1, O2, AE, GE, SE> Agent for PPOAgent<'a, O1, O2, AE, GE, SE>
+impl<'a, O1, O2, AE, GE, SE, I> Agent<I> for PPOAgent<'a, O1, O2, AE, GE, SE, I>
 where
     O1: Optimizer,
     O2: Optimizer,
@@ -946,7 +1012,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<Error = Self::GymError, SpaceError = Self::SpaceError>,
+        env: &mut dyn VectorizedGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
     ) -> Result<(), PPOError<AE, GE, SE>> {
         let mut elapsed_timesteps = 0;
@@ -959,6 +1025,10 @@ where
             self.mini_batch_size / env.num_envs(),
             next_states.device().clone(),
         );
+        if self.logging_info.is_some() && self.episode_returns.len() != env.num_envs() {
+            self.episode_returns = vec![0.0; env.num_envs()];
+            self.episode_lengths = vec![0; env.num_envs()];
+        }
 
         while elapsed_timesteps < num_timesteps {
             while self.rollout_buffer.len() * env.num_envs() < self.batch_size {
@@ -989,10 +1059,22 @@ where
                 let VectorizedStepInfo {
                     states: reset_or_next_states,
                     rewards,
+                    infos,
                     dones: next_dones,
                     truncateds,
                     terminal_states: _,
                 } = step_info;
+                let first_collection_timestep = self
+                    .schedule_progress
+                    .elapsed_steps()
+                    .saturating_add(self.rollout_buffer.len() * env.num_envs());
+                self.log_collection(
+                    &rewards,
+                    infos,
+                    &next_dones,
+                    &truncateds,
+                    first_collection_timestep,
+                )?;
                 self.rollout_buffer.add(
                     PPOExperience::builder()
                         .states(states.clone())
@@ -1013,7 +1095,7 @@ where
             self.update_learning_rates();
 
             if let Some(logging_info) = &mut self.logging_info {
-                logging_info.timestep = elapsed_timesteps;
+                logging_info.timestep = self.schedule_progress.elapsed_steps();
             }
             self.optimize()?;
         }
@@ -1234,13 +1316,13 @@ mod schedule_tests {
             test_support::{CountingOptimizer, FixedEnv},
         },
         distributions::{CategoricalDistribution, GuassianDistribution},
-        gym::{VectorizedGym, VectorizedGymWrapper},
+        gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
         models::{
             MLP,
             probabilistic_model::{ProbabilisticPolicyModel, ProbabilisticPolicyModelError},
         },
         parameter_schedule::LinearSchedule,
-        spaces::BoxSpace,
+        spaces::{BoxSpace, Discrete, Space},
     };
 
     fn assert_close(actual: f64, expected: f64) {
@@ -1248,6 +1330,59 @@ mod schedule_tests {
             (actual - expected).abs() < 1e-12,
             "expected {expected}, got {actual}"
         );
+    }
+
+    struct TwoStepTestGym {
+        device: Device,
+        steps: usize,
+        truncates: bool,
+    }
+
+    impl TwoStepTestGym {
+        fn new(device: Device, truncates: bool) -> Self {
+            Self {
+                device,
+                steps: 0,
+                truncates,
+            }
+        }
+    }
+
+    impl Gym<usize> for TwoStepTestGym {
+        type Error = candle_core::Error;
+        type SpaceError = candle_core::Error;
+
+        fn step(&mut self, _action: Tensor) -> Result<StepInfo<usize>, Self::Error> {
+            self.steps += 1;
+            Ok(StepInfo {
+                state: Tensor::zeros(4, DType::F32, &self.device)?,
+                reward: 1.0,
+                done: self.steps == 2 && !self.truncates,
+                truncated: self.steps == 2 && self.truncates,
+                info: self.steps,
+            })
+        }
+
+        fn reset(&mut self) -> Result<ResetInfo<usize>, Self::Error> {
+            self.steps = 0;
+            Ok(ResetInfo {
+                state: Tensor::zeros(4, DType::F32, &self.device)?,
+                info: 0,
+            })
+        }
+
+        fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(BoxSpace::new_with_universal_bounds(
+                vec![4],
+                -1.0,
+                1.0,
+                &self.device,
+            ))
+        }
+
+        fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(Discrete::new(2))
+        }
     }
 
     #[test]
@@ -1276,6 +1411,99 @@ mod schedule_tests {
             .unwrap();
 
         assert!(actual.is_nan());
+    }
+
+    #[test]
+    fn collection_logs_report_fresh_rewards_and_completed_episodes() {
+        let device = Device::Cpu;
+        let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = vec![
+            TwoStepTestGym::new(device.clone(), false),
+            TwoStepTestGym::new(device.clone(), true),
+        ]
+        .into();
+        let actor_vars = VarMap::new();
+        let critic_vars = VarMap::new();
+        let actor = MLP::builder()
+            .input_size(4)
+            .output_size(2)
+            .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let critic = MLP::builder()
+            .input_size(4)
+            .output_size(1)
+            .vb(VarBuilder::from_varmap(&critic_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let networks = PPONetworkInfo::Separate(
+            SeparatePPONetwork::builder()
+                .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                .actor_network(Box::new(
+                    ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor)),
+                ))
+                .critic_network(Box::new(critic))
+                .build(),
+        );
+
+        struct CollectionLogger {
+            collection_rewards: Vec<Vec<f32>>,
+            infos: Vec<Vec<usize>>,
+            completed_episodes: Vec<(usize, f32, usize, bool, bool, usize)>,
+        }
+
+        impl PPOLogger<usize> for CollectionLogger {
+            fn log(&mut self, _entry: &PPOLogEntry) {}
+
+            fn log_collection(&mut self, entry: &PPOCollectionLogEntry<usize>) {
+                self.collection_rewards
+                    .push(entry.collection_rewards.to_vec1::<f32>().unwrap());
+                self.infos.push(entry.infos.clone());
+                self.completed_episodes
+                    .extend(entry.completed_episodes.iter().map(|episode| {
+                        (
+                            episode.environment_index,
+                            episode.episode_return,
+                            episode.episode_length,
+                            episode.terminated,
+                            episode.truncated,
+                            episode.collection_timestep,
+                        )
+                    }));
+            }
+        }
+
+        let mut logger = CollectionLogger {
+            collection_rewards: Vec::new(),
+            infos: Vec::new(),
+            completed_episodes: Vec::new(),
+        };
+        let mut agent = PPOAgent::builder()
+            .action_space(env.action_space())
+            .network_info(networks)
+            .batch_size(2)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .training_horizon(4)
+            .logging_info(&mut logger)
+            .device(device)
+            .build();
+
+        agent.learn(&mut env, 2).unwrap();
+        agent.learn(&mut env, 2).unwrap();
+        drop(agent);
+
+        assert_eq!(
+            logger.collection_rewards,
+            vec![vec![1.0, 1.0], vec![1.0, 1.0]]
+        );
+        assert_eq!(logger.infos, vec![vec![1, 1], vec![2, 2]]);
+        assert_eq!(
+            logger.completed_episodes,
+            vec![(0, 2.0, 2, true, false, 3), (1, 2.0, 2, false, true, 4)]
+        );
     }
 
     #[test]

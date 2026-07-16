@@ -13,24 +13,24 @@ use crate::{
     spaces::{Discrete, Space},
 };
 
-pub trait DDQNLogger {
+pub trait DDQNLogger<I = ()> {
     fn log(&mut self, info: &QLogEntry);
 
-    fn log_collection(&mut self, _info: &QCollectionLogEntry) {}
+    fn log_collection(&mut self, _info: &QCollectionLogEntry<I>) {}
 }
 
-struct DDQNLoggingInfo<'a> {
-    logger: &'a mut dyn DDQNLogger,
+struct DDQNLoggingInfo<'a, I> {
+    logger: &'a mut dyn DDQNLogger<I>,
 }
 
-impl QLearningLogger for Option<DDQNLoggingInfo<'_>> {
+impl<I> QLearningLogger<I> for Option<DDQNLoggingInfo<'_, I>> {
     fn log_update(&mut self, entry: &QLogEntry) {
         if let Some(info) = self {
             info.logger.log(entry);
         }
     }
 
-    fn log_collection(&mut self, entry: &QCollectionLogEntry) {
+    fn log_collection(&mut self, entry: &QCollectionLogEntry<I>) {
         if let Some(info) = self {
             info.logger.log_collection(entry);
         }
@@ -62,18 +62,18 @@ impl QLearningTarget for DDQNTarget {
 }
 
 /// Double Deep Q-Network agent.
-pub struct DDQNAgent<'a, O, GE, SE>
+pub struct DDQNAgent<'a, O, GE, SE, I = ()>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
     inner: QLearningAgent<'a, O, GE, SE, DDQNTarget>,
-    logging_info: Option<DDQNLoggingInfo<'a>>,
+    logging_info: Option<DDQNLoggingInfo<'a, I>>,
 }
 
 #[bon]
-impl<'a, O, GE, SE> DDQNAgent<'a, O, GE, SE>
+impl<'a, O, GE, SE, I> DDQNAgent<'a, O, GE, SE, I>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
@@ -98,7 +98,7 @@ where
         #[builder(default = 1000)] training_start: usize,
         #[builder(default = 1000)] target_update_interval: usize,
         training_horizon: usize,
-        logger: Option<&'a mut dyn DDQNLogger>,
+        logger: Option<&'a mut dyn DDQNLogger<I>>,
         device_strategy: QLearningDeviceStrategy,
     ) -> Result<Self, QAgentError<GE, SE>> {
         let inner = QLearningAgent::<'a, O, GE, SE, DDQNTarget>::builder()
@@ -134,7 +134,7 @@ where
     }
 }
 
-impl<'a, O, GE, SE> Agent for DDQNAgent<'a, O, GE, SE>
+impl<'a, O, GE, SE, I> Agent<I> for DDQNAgent<'a, O, GE, SE, I>
 where
     O: Optimizer,
     GE: std::fmt::Debug,
@@ -150,7 +150,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<Error = Self::GymError, SpaceError = Self::SpaceError>,
+        env: &mut dyn VectorizedGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)

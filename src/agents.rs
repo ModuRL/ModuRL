@@ -3,7 +3,7 @@ use candle_core::Tensor;
 pub mod ppo;
 pub mod q_learning;
 
-pub trait Agent {
+pub trait Agent<I = ()> {
     type Error;
     type GymError;
     type SpaceError;
@@ -12,7 +12,7 @@ pub trait Agent {
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error>;
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<Error = Self::GymError, SpaceError = Self::SpaceError>,
+        env: &mut dyn VectorizedGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error>;
 }
