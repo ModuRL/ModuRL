@@ -1,0 +1,43 @@
+[package]
+name = "modurl_ale"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Arcade Learning Environment environments for ModuRL"
+license = "GPL-2.0-only"
+repository = "https://github.com/ModuRL/modurl_ale"
+readme = "README.md"
+keywords = ["reinforcement-learning", "atari", "ale"]
+categories = ["science"]
+build = "build.rs"
+include = [
+    "/src/**",
+    "/tests/**",
+    "/native/ale/CMakeLists.txt",
+    "/native/ale/cmake/**",
+    "/native/ale/src/**",
+    "/native/ale/License.txt",
+    "/native/ale/Copyright.txt",
+    "/build.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "/THIRD_PARTY_LICENSES.md",
+]
+
+[dependencies]
+bon = "3.7.2"
+candle-core = "0.11.0"
+minifb = { version = "0.28.0", optional = true }
+modurl = { version = "0.1.0", path = "../.." }
+
+[build-dependencies]
+cmake = "0.1"
+
+[features]
+default = []
+rendering = ["dep:minifb"]
+cuda = ["candle-core/cuda"]
+cudnn = ["candle-core/cudnn"]
+metal = ["candle-core/metal"]
