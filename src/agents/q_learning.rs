@@ -71,8 +71,9 @@ pub struct QLogEntry {
     pub collection_timestep: usize,
 }
 
-pub struct QCollectionLogEntry {
+pub struct QCollectionLogEntry<I = ()> {
     pub collection_rewards: Tensor,
+    pub infos: Vec<I>,
     pub epsilon: f64,
     pub collection_timestep: usize,
     pub completed_episodes: Vec<QEpisodeLogEntry>,
@@ -87,10 +88,10 @@ pub struct QEpisodeLogEntry {
     pub collection_timestep: usize,
 }
 
-pub(crate) trait QLearningLogger {
+pub(crate) trait QLearningLogger<I = ()> {
     fn log_update(&mut self, entry: &QLogEntry);
 
-    fn log_collection(&mut self, entry: &QCollectionLogEntry);
+    fn log_collection(&mut self, entry: &QCollectionLogEntry<I>);
 }
 
 pub(crate) trait QLearningTarget {
@@ -250,10 +251,10 @@ where
         )?)
     }
 
-    fn optimize(
+    fn optimize<I>(
         &mut self,
         collection_timestep: usize,
-        logger: &mut dyn QLearningLogger,
+        logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), Error> {
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(());
@@ -318,11 +319,11 @@ where
         }
     }
 
-    pub(crate) fn learn(
+    pub(crate) fn learn<I>(
         &mut self,
-        env: &mut dyn VectorizedGym<Error = GE, SpaceError = SE>,
+        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
         num_timesteps: usize,
-        logger: &mut dyn QLearningLogger,
+        logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, SE>> {
         let mut elapsed_timesteps = 0;
         let mut observations = env.reset().map_err(QAgentError::GymError)?;
@@ -339,6 +340,7 @@ where
             let VectorizedStepInfo {
                 states: next_observations,
                 rewards,
+                infos,
                 dones,
                 truncateds,
                 ..
@@ -387,6 +389,7 @@ where
             let collection_timestep = first_training_timestep.saturating_add(env.num_envs());
             let collection_entry = QCollectionLogEntry {
                 collection_rewards,
+                infos,
                 epsilon: self.current_epsilon,
                 collection_timestep,
                 completed_episodes,

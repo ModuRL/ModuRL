@@ -24,11 +24,11 @@ pub trait Gym<I = ()> {
 /// Actors take this as input.
 /// This is automatically implemented for any Gym.
 /// Reset is called automatically when an environment is done.
-pub trait VectorizedGym {
+pub trait VectorizedGym<I = ()> {
     type Error;
     type SpaceError;
 
-    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo, Self::Error>;
+    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error>;
     fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     fn num_envs(&self) -> usize;
@@ -73,16 +73,17 @@ pub struct StepInfo<I = ()> {
 }
 
 #[derive(Debug, Clone)]
-pub struct VectorizedStepInfo {
+pub struct VectorizedStepInfo<I = ()> {
     pub states: Tensor,
     pub rewards: Tensor,
+    pub infos: Vec<I>,
     // really wish candle had a bool tensor type
     pub dones: Vec<bool>,
     pub truncateds: Vec<bool>,
     pub terminal_states: Vec<Option<Tensor>>,
 }
 
-impl VectorizedStepInfo {
+impl<I> VectorizedStepInfo<I> {
     pub fn transition_next_states(&self) -> candle_core::Result<Tensor> {
         let env_count = self.dones.len();
         let state_chunks = self.states.chunk(env_count, 0)?;
@@ -129,7 +130,7 @@ where
     }
 }
 
-impl<G, I> VectorizedGym for VectorizedGymWrapper<G, I>
+impl<G, I> VectorizedGym<I> for VectorizedGymWrapper<G, I>
 where
     G: Gym<I>,
     G::Error: std::fmt::Debug,
@@ -137,13 +138,14 @@ where
     type Error = VectorizedGymError<G::Error>;
     type SpaceError = G::SpaceError;
 
-    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo, Self::Error> {
+    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error> {
         let env_count = self.envs.len();
         let actions: Vec<Tensor> = action.chunk(env_count, 0)?;
         // this keeps the dimension for env count it's just 1 now so we squeeze it later
 
         let mut states = Vec::with_capacity(env_count);
         let mut rewards = Vec::with_capacity(env_count);
+        let mut infos = Vec::with_capacity(env_count);
         let mut dones = Vec::with_capacity(env_count);
         let mut truncateds = Vec::with_capacity(env_count);
         let mut terminal_states = Vec::with_capacity(env_count);
@@ -164,6 +166,7 @@ where
 
             states.push(step_info.state);
             rewards.push(step_info.reward);
+            infos.push(step_info.info);
             dones.push(step_info.done);
             truncateds.push(step_info.truncated);
             terminal_states.push(terminal_state);
@@ -175,6 +178,7 @@ where
         Ok(VectorizedStepInfo {
             states,
             rewards,
+            infos,
             dones,
             truncateds,
             terminal_states,
@@ -282,7 +286,7 @@ where
 }
 
 #[cfg(feature = "multithreading")]
-impl<G, O, A, SE, I> VectorizedGym for MultithreadedVectorizedGymWrapper<G, O, A, SE, I>
+impl<G, O, A, SE, I> VectorizedGym<I> for MultithreadedVectorizedGymWrapper<G, O, A, SE, I>
 where
     G: Gym<I> + 'static,
     G::Error: Send + Sync + std::fmt::Debug,
@@ -294,7 +298,7 @@ where
     type Error = VectorizedGymError<G::Error>;
     type SpaceError = SE;
 
-    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo, Self::Error> {
+    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error> {
         let batch_size = self.envs.len();
         let actions: Vec<Tensor> = action.chunk(batch_size, 0)?;
         let mut step_info_recievers = Vec::with_capacity(batch_size);
@@ -313,6 +317,7 @@ where
 
         let mut states = Vec::with_capacity(batch_size);
         let mut rewards = Vec::with_capacity(batch_size);
+        let mut infos = Vec::with_capacity(batch_size);
         let mut dones = Vec::with_capacity(batch_size);
         let mut truncateds = Vec::with_capacity(batch_size);
         let mut terminal_states = Vec::with_capacity(batch_size);
@@ -325,6 +330,7 @@ where
             let step_info = thread_step_info.step_info;
             states.push(step_info.state);
             rewards.push(step_info.reward);
+            infos.push(step_info.info);
             dones.push(step_info.done);
             truncateds.push(step_info.truncated);
             terminal_states.push(thread_step_info.terminal_state);
@@ -336,6 +342,7 @@ where
         Ok(VectorizedStepInfo {
             states,
             rewards,
+            infos,
             dones,
             truncateds,
             terminal_states,
@@ -636,13 +643,15 @@ mod tests {
     }
 
     #[test]
-    fn vectorized_wrapper_infers_and_erases_non_unit_info() {
+    fn vectorized_wrapper_preserves_non_unit_step_info() {
         let mut vec_env = VectorizedGymWrapper::from(vec![InfoEnv]);
         assert_eq!(vec_env.reset().unwrap().dims(), &[1, 1]);
 
         let actions =
             Tensor::zeros((1, 1), candle_core::DType::U32, &candle_core::Device::Cpu).unwrap();
-        assert_eq!(vec_env.step(actions).unwrap().states.dims(), &[1, 1]);
+        let step = vec_env.step(actions).unwrap();
+        assert_eq!(step.states.dims(), &[1, 1]);
+        assert_eq!(step.infos, vec![TestInfo { value: 2 }]);
     }
 
     #[cfg(feature = "multithreading")]

@@ -4,6 +4,7 @@
 
 - [Getting Started](./getting-started.md)
 - [Core Concepts](./core-concepts.md)
+  - [Models, Policies, and Distributions](./models-policies-and-distributions.md)
 - [PPO](./ppo.md)
   - [Understand a PPO Training Run](./understand-ppo-training.md)
 - [Value-Based Training](./q-learning.md)

@@ -2,20 +2,31 @@
 
 The Getting Started program confirms that training completed, but it does not
 record metrics. Add a `PPOLogger` when you need to compare runs or diagnose a
-configuration. `PPOLogger::log` receives one `PPOLogEntry` for each logged PPO
-update.
+configuration. `PPOLogger::log` receives update metrics, while
+`PPOLogger::log_collection` receives the newest environment rewards and any
+episodes completed during that vectorized step.
 
-Each entry contains tensors for one update. Aggregate them before graphing or
-comparing them across a run. The graphs are useful for comparing or diagnosing runs.
+Each `PPOLogEntry` contains tensors for one optimization minibatch. Aggregate
+them before graphing or comparing them across a run. The graphs are useful for
+comparing or diagnosing runs.
 
-## Start With Episode Length
+## Start With Episode Performance
 
 CartPole gives a reward of one for each step that keeps the pole balanced. The
-example turns its mean rewards into an estimated episode length, so longer
-episodes are the clearest sign that the policy is improving.
+example graphs completed episode returns and lengths, so longer episodes are
+the clearest sign that the policy is improving.
 
-This conversion is specific to CartPole. Do not copy it to an environment whose
-reward does not represent one survived step.
+`PPOCollectionLogEntry::completed_episodes` contains one `PPOEpisodeLogEntry`
+for each environment that terminated or truncated on that vectorized step.
+Each episode entry reports its environment index, return, length, ending flags,
+and collection timestep. Partial episodes carry across PPO rollout boundaries
+and repeated `learn` calls.
+
+`PPOCollectionLogEntry::infos` contains the typed step metadata from each
+vectorized environment in the same environment order as `collection_rewards`.
+Wrappers can add logging-only values there without changing the reward used for
+training. For example, `RecordRawRewardGym` records rewards before outer reward
+wrappers normalize or clip them.
 
 ## Read the Other Metrics Together
 

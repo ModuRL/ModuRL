@@ -4,18 +4,28 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
+[[example]]
+name = "ppo_mujoco_with_graphs"
+path = "examples/ppo_mujoco_with_graphs.rs"
+required-features = ["mujoco-environment"]
+
 [dependencies]
 modurl = { version = "0.1.0", path = "../.." }
 modurl_gym = { version = "0.1.0", path = "../modurl_gym", features = [
     "rendering",
 ] }
+modurl_mojoco = { version = "0.1.0", path = "../modurl_mojoco" }
 candle-core = "0.11.0"
 candle-nn = "0.11.0"
 textplots = "0.8.7"
 
 [features]
 default = []
-cuda = ["modurl/cuda", "modurl_gym/cuda", "candle-core/cuda"]
-cudnn = ["modurl/cudnn", "modurl_gym/cudnn", "candle-core/cudnn"]
-metal = ["modurl/metal", "modurl_gym/metal", "candle-core/metal"]
+half-cheetah = ["mujoco-environment"]
+hopper = ["mujoco-environment"]
+mujoco-environment = []
+walker2d = ["mujoco-environment"]
+cuda = ["modurl/cuda", "modurl_gym/cuda", "modurl_mojoco/cuda", "candle-core/cuda"]
+cudnn = ["modurl/cudnn", "modurl_gym/cudnn", "modurl_mojoco/cudnn", "candle-core/cudnn"]
+metal = ["modurl/metal", "modurl_gym/metal", "modurl_mojoco/metal", "candle-core/metal"]
 multithreading = ["modurl/multithreading"]

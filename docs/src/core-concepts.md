@@ -13,13 +13,12 @@ In ModuRL, an agent can do two things:
 - `act` from observations
 - `learn` from a vectorized environment
 
-Concrete agents are named after the algorithm they implement. `PPOAgent`
-implements PPO, `DQNAgent` implements DQN, and `DDQNAgent` implements Double
-DQN.
+ModuRL provides agent types named after the algorithms they implement.
+`PPOAgent` implements PPO, `DQNAgent` implements DQN, and `DDQNAgent` implements
+Double DQN.
 
-An agent is not just a neural network. It usually owns or receives the pieces it
-needs for training: model modules, optimizers, schedules, buffers,
-distributions, and update logic.
+An agent coordinates the pieces needed for training: model modules, optimizers,
+schedules, buffers, distributions, and update logic.
 
 ## Environments and Spaces
 
@@ -35,6 +34,10 @@ inner environment and returns a batch of results.
 
 `VectorizedGymWrapper` is the simple wrapper used in the getting-started
 example. It turns several single environments into one vectorized environment.
+With the `multithreading` feature enabled,
+`MultithreadedVectorizedGymWrapper` can step the inner environments on worker
+threads. Applications can also implement the public `VectorizedGym` trait when
+they need a different way to manage or step a batch of environments.
 
 Vectorized environments auto-reset each inner environment when it returns
 `done` or `truncated`. The `states` field in `VectorizedStepInfo` contains the
@@ -53,7 +56,7 @@ Spaces also help convert policy outputs into environment actions. In PPO, the
 policy produces action information as tensors. The action space defines how
 those tensors map to valid actions for the environment.
 
-## Models
+## Models and Policies
 
 Models are neural network modules.
 
@@ -61,48 +64,36 @@ Models are neural network modules.
 all of its inputs to all of its outputs. In the getting-started example, both
 networks are `MLP`s with two hidden layers.
 
-`MLP` does not know about PPO by itself. It just maps input tensors to output
+`MLP` does not know about PPO by itself. It maps input tensors to output
 tensors. The agent and policy model decide what those outputs mean.
 
-For DQN and DDQN, an `MLP` is a *Q-network*. Its output has one value for each
-discrete action, rather than policy logits or a single state value. The agent
-selects an action from those values with epsilon-greedy exploration. Read
-[Value-Based Training](./q-learning.md) for the two-network setup these agents
-use.
+A policy is the rule used to choose actions. A stochastic policy samples from
+a distribution. PPO wraps its actor module in
+`ProbabilisticPolicyModel<D>`, where `D` defines how to interpret the actor's
+output. `D` can be a distribution supplied by ModuRL or a user-defined type
+that implements the public `Distribution` trait. This gives PPO the operations
+it needs:
 
-## Probabilistic Policies
-
-A policy is the rule used to choose actions.
-
-Some policies are deterministic. A deterministic policy chooses the same action
-whenever it sees the same observation. Some policies are stochastic. A
-stochastic policy samples an action from a distribution.
-
-PPO uses a stochastic policy during training. That is why the PPO examples do
-not pass a plain neural network directly as the policy. They wrap a model module
-in `ProbabilisticPolicyModel`.
-
-`ProbabilisticPolicyModel<D>` gives policy meaning to a network's outputs. The
-wrapped model is still the source of the scores. The policy model adds the
-distribution math for a particular distribution `D`.
-
-For example, `ProbabilisticPolicyModel<CategoricalDistribution>` treats model
-logits as a categorical policy. That gives PPO the operations it needs:
-
-- sample an action from the logits
+- sample an action representation
 - compute the log probability of an action
 - compute the policy entropy
 
-PPO uses log probabilities to measure how much the policy changed during an
-update. PPO can also use entropy to encourage exploration.
+For DQN and DDQN, an `MLP` is a *Q-network*. Its output has one value for each
+discrete action. The agent selects an action from those values with
+epsilon-greedy exploration instead of a probability distribution.
+
+Read [Models, Policies, and
+Distributions](./models-policies-and-distributions.md) for how tensors move
+between actors, distributions, and action spaces. Read [Value-Based
+Training](./q-learning.md) for Q-networks.
 
 ## Tensors and Devices
 
 ModuRL uses Candle tensors.
 
-A tensor has a shape, data type, and device. The shape must match the model or
-environment contract. The device says where the tensor lives, such as CPU, CUDA,
-or Metal.
+A tensor has a shape, data type, and device. The shape must match what the model
+or environment expects. The device says where the tensor lives, such as CPU,
+CUDA, or Metal.
 
 Most examples start with:
 

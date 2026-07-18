@@ -356,13 +356,10 @@ fn ppo_cartpole_shared_multithreaded() {
         Tensor::full(-1000.0f32, &[obs_space_shape], &device).unwrap(),
         Tensor::full(1000.0f32, &[obs_space_shape], &device).unwrap(),
     );
-    let action_space_concrete = Discrete::new(2);
+    let action_space = Discrete::new(2);
 
-    let mut vec_env = MultithreadedVectorizedGymWrapper::new(
-        env_constructors,
-        obs_space,
-        action_space_concrete.clone(),
-    );
+    let mut vec_env =
+        MultithreadedVectorizedGymWrapper::new(env_constructors, obs_space, action_space.clone());
 
     let var_map = VarMap::new();
     let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
@@ -406,7 +403,7 @@ fn ppo_cartpole_shared_multithreaded() {
     );
 
     let mut agent = PPOAgent::builder()
-        .action_space(Box::new(action_space_concrete))
+        .action_space(Box::new(action_space))
         .network_info(ppo_network_info)
         .batch_size(2048)
         .mini_batch_size(64)

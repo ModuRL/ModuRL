@@ -12,7 +12,8 @@ struct PPOGrapher {
     entropies: Vec<f32>,
     kl_divs: Vec<f32>,
     explained_variances: Vec<f32>,
-    rewards: Vec<f32>,
+    episode_returns: Vec<f32>,
+    episode_lengths: Vec<f32>,
 }
 
 impl PPOGrapher {
@@ -25,7 +26,8 @@ impl PPOGrapher {
             entropies: vec![],
             kl_divs: vec![],
             explained_variances: vec![],
-            rewards: vec![],
+            episode_returns: vec![],
+            episode_lengths: vec![],
         }
     }
 
@@ -56,24 +58,14 @@ impl PPOGrapher {
             .unwrap()
             .to_vec0::<f32>()
             .unwrap();
-        let reward = info.rewards.mean_all().unwrap().to_vec0::<f32>().unwrap();
-
         let self_fields = vec![
             &mut self.actor_losses,
             &mut self.critic_losses,
             &mut self.entropies,
             &mut self.kl_divs,
             &mut self.explained_variances,
-            &mut self.rewards,
         ];
-        let new_values = vec![
-            policy_loss,
-            value_loss,
-            entropy,
-            kl_div,
-            explained_variance,
-            reward,
-        ];
+        let new_values = vec![policy_loss, value_loss, entropy, kl_div, explained_variance];
         for (field, new_value) in self_fields.into_iter().zip(new_values) {
             let current_total = field.last().cloned().unwrap_or(0.0);
             let updated_total = current_total + new_value;
@@ -94,7 +86,6 @@ impl PPOGrapher {
             &mut self.entropies,
             &mut self.kl_divs,
             &mut self.explained_variances,
-            &mut self.rewards,
         ];
         for field in fields {
             field.push(0.0);
@@ -109,7 +100,6 @@ impl PPOGrapher {
             &mut self.entropies,
             &mut self.kl_divs,
             &mut self.explained_variances,
-            &mut self.rewards,
         ];
         for field in fields {
             if let Some(last_value) = field.last_mut() {
@@ -120,6 +110,10 @@ impl PPOGrapher {
     }
 
     fn textplot_graph(data: &[f32], label: &str) {
+        if data.is_empty() {
+            println!("No data collected for {label}.");
+            return;
+        }
         println!("Graph for {}:", label);
         Chart::new(180, 30, 0.0, data.len() as f32)
             .lineplot(&textplots::Shape::Lines(
@@ -128,6 +122,15 @@ impl PPOGrapher {
                     .collect::<Vec<(f32, f32)>>(),
             ))
             .display();
+    }
+
+    fn moving_average(data: &[f32], window: usize) -> Vec<f32> {
+        if data.len() < window {
+            return data.to_vec();
+        }
+        data.windows(window)
+            .map(|values| values.iter().sum::<f32>() / window as f32)
+            .collect()
     }
 
     fn display_graphs(&mut self, rolling_window_size: usize) {
@@ -139,7 +142,6 @@ impl PPOGrapher {
             self.entropies.clone(),
             self.kl_divs.clone(),
             self.explained_variances.clone(),
-            self.rewards.clone(),
         ];
         for var in variables.iter_mut() {
             let len = var.len();
@@ -159,11 +161,14 @@ impl PPOGrapher {
         Self::textplot_graph(&variables[2], "Entropy");
         Self::textplot_graph(&variables[3], "KL Divergence");
         Self::textplot_graph(&variables[4], "Explained Variance");
-        let episode_lengths: Vec<f32> = variables[5]
-            .iter()
-            .map(|&r| if r != 1.0 { -r / (r - 1.0) } else { 1.0 })
-            .collect();
-        Self::textplot_graph(&episode_lengths, "Episode Lengths");
+        Self::textplot_graph(
+            &Self::moving_average(&self.episode_returns, rolling_window_size),
+            "Episode Returns",
+        );
+        Self::textplot_graph(
+            &Self::moving_average(&self.episode_lengths, rolling_window_size),
+            "Episode Lengths",
+        );
     }
 }
 
@@ -173,6 +178,13 @@ impl PPOLogger for PPOGrapher {
             self.add_to_running_total(info);
         } else {
             self.add_new_step(info);
+        }
+    }
+
+    fn log_collection(&mut self, info: &PPOCollectionLogEntry) {
+        for episode in &info.completed_episodes {
+            self.episode_returns.push(episode.episode_return);
+            self.episode_lengths.push(episode.episode_length as f32);
         }
     }
 }

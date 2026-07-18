@@ -9,10 +9,13 @@ pub trait Space {
     fn sample(&self, device: &Device) -> Result<Tensor, Self::Error>;
     /// Returns true if the input tensor is within the space.
     fn contains(&self, x: &Tensor) -> bool;
-    /// returns the shape of the space.
-    /// This is the gonna be the shape of the tensor that is inputted into the from_neurons function.
+    /// Returns the shape of one unbatched value in the space.
     fn shape(&self) -> Vec<usize>;
-    /// "Translates" the output of the neurons (of shape [batch_size, shape]) to the space.
+    /// Converts latent policy output shaped `[batch_size, ..]` into valid
+    /// environment actions.
+    ///
+    /// A continuous [`BoxSpace`] clamps each component to its bounds. PPO keeps
+    /// its original latent action separately for probability calculations.
     fn tensor_from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error>;
 }
 
@@ -63,10 +66,11 @@ impl Discrete {
     }
 }
 
-/// Box
-/// A box space is a bounded, n-dimensional space.
-/// The bounds are defined by two vectors: low and high.
-// I don't like forcing the user to use f32, but this is what we'll do for now.
+/// A bounded, n-dimensional continuous space.
+///
+/// The `low` and `high` tensors define the inclusive component bounds.
+/// [`Space::tensor_from_neurons`] clamps policy outputs to these bounds before
+/// they are sent to an environment.
 #[derive(Clone)]
 pub struct BoxSpace {
     low: Tensor,

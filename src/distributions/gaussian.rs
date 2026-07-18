@@ -2,12 +2,25 @@ use candle_core::Tensor;
 
 use crate::distributions::{DistEval, Distribution};
 
-pub struct GuassianDistribution {
+/// A batch of independent Gaussian action distributions.
+///
+/// `GaussianDistribution` expects a rank-2 parameter tensor with shape
+/// `[batch_size, 2 * action_size]`. The first half of dimension 1 contains the
+/// action means. The second half contains their log standard deviations.
+/// Sampling returns `[batch_size, action_size]`; log probability and entropy
+/// each reduce the independent action components to `[batch_size]`.
+///
+/// The distribution does not squash or clamp samples. A bounded [`BoxSpace`]
+/// clamps the separate action tensor sent to an environment while PPO retains
+/// the original sample for probability calculations.
+///
+/// [`BoxSpace`]: crate::spaces::BoxSpace
+pub struct GaussianDistribution {
     action_mean: Tensor,
     action_log_std: Tensor,
 }
 
-impl Distribution for GuassianDistribution {
+impl Distribution for GaussianDistribution {
     type Error = candle_core::Error;
 
     fn sample(&self) -> Tensor {
@@ -79,7 +92,7 @@ mod tests {
         let actions =
             Tensor::zeros((1, ACTION_DIMS), candle_core::DType::F32, &Device::Cpu).unwrap();
 
-        let distribution = GuassianDistribution::from_outputs(&outputs);
+        let distribution = GaussianDistribution::from_outputs(&outputs);
         let evaluation = distribution.dist_eval(&actions).unwrap();
         let actual_entropy = evaluation.entropy().to_vec1::<f32>().unwrap()[0];
         let actual_log_prob = evaluation.log_prob().to_vec1::<f32>().unwrap()[0];
@@ -102,7 +115,7 @@ mod tests {
             &Device::Cpu,
         )
         .unwrap();
-        let distribution = GuassianDistribution::from_outputs(&outputs);
+        let distribution = GaussianDistribution::from_outputs(&outputs);
 
         assert_eq!(
             distribution.mode().to_vec2::<f32>().unwrap(),

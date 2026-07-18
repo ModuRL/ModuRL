@@ -3,10 +3,14 @@
 //! The modules follow Gymnasium's conventional categories: observation
 //! transformations, reward transformations, and episode-control wrappers.
 
+pub mod info;
+pub mod normalize;
 pub mod observation;
 pub mod reward;
 pub mod time_limit;
 
+pub use info::{RawRewardInfo, RecordRawRewardGym};
+pub use normalize::{NormalizeObservationGym, NormalizeObservationGymError, NormalizeRewardGym};
 pub use observation::{FrameStackGym, FrameStackGymError, MaxAndSkipGym, MaxAndSkipGymError};
 pub use reward::{ClipRewardGym, ClipRewardGymError};
 pub use time_limit::TimeLimitGym;

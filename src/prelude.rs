@@ -7,8 +7,8 @@
 pub use crate::agents::{
     Agent,
     ppo::{
-        PPOAgent, PPOError, PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork,
-        SharedPPONetwork,
+        PPOAgent, PPOCollectionLogEntry, PPOEpisodeLogEntry, PPOError, PPOLogEntry, PPOLogger,
+        PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
     },
     q_learning::{
         QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError,
@@ -18,7 +18,7 @@ pub use crate::agents::{
     },
 };
 pub use crate::distributions::{
-    CategoricalDistribution, DistEval, Distribution, GuassianDistribution,
+    CategoricalDistribution, DistEval, Distribution, GaussianDistribution,
 };
 #[cfg(feature = "multithreading")]
 pub use crate::gym::MultithreadedVectorizedGymWrapper;
@@ -37,5 +37,6 @@ pub use crate::parameter_schedule::{
 pub use crate::spaces::{BoxSpace, Discrete, Space};
 pub use crate::wrappers::{
     ClipRewardGym, ClipRewardGymError, FrameStackGym, FrameStackGymError, MaxAndSkipGym,
-    MaxAndSkipGymError, TimeLimitGym,
+    MaxAndSkipGymError, NormalizeObservationGym, NormalizeObservationGymError, NormalizeRewardGym,
+    RawRewardInfo, RecordRawRewardGym, TimeLimitGym,
 };

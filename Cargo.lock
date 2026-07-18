@@ -859,6 +859,7 @@ dependencies = [
  "candle-nn",
  "modurl",
  "modurl_gym",
+ "modurl_mojoco",
  "textplots",
 ]
 
