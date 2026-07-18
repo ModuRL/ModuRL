@@ -18,7 +18,7 @@ pub use crate::agents::{
     },
 };
 pub use crate::distributions::{
-    CategoricalDistribution, DistEval, Distribution, GuassianDistribution,
+    CategoricalDistribution, DistEval, Distribution, GaussianDistribution,
 };
 #[cfg(feature = "multithreading")]
 pub use crate::gym::MultithreadedVectorizedGymWrapper;

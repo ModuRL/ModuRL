@@ -96,7 +96,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{distributions::GuassianDistribution, models::MLP};
+    use crate::{distributions::GaussianDistribution, models::MLP};
     use candle_core::{DType, Device, Tensor};
     use candle_nn::{Activation, VarBuilder, VarMap};
 
@@ -104,7 +104,7 @@ mod tests {
         input_size: usize,
         action_size: usize,
         hidden_sizes: Vec<usize>,
-    ) -> Result<ProbabilisticPolicyModel<GuassianDistribution>, candle_core::Error> {
+    ) -> Result<ProbabilisticPolicyModel<GaussianDistribution>, candle_core::Error> {
         let device = Device::Cpu;
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F64, &device);
@@ -305,7 +305,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let policy: ProbabilisticPolicyModel<GuassianDistribution> =
+        let policy: ProbabilisticPolicyModel<GaussianDistribution> =
             ProbabilisticPolicyModel::new(Box::new(mlp));
         let state = create_test_state(2, 4).unwrap();
 

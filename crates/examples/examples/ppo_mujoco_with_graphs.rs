@@ -3,122 +3,41 @@ use std::io::{self, Write};
 use candle_core::{Module, Tensor};
 use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
-use modurl_mojoco::{HalfCheetahV5, HopperV5, MujocoError, Walker2dV5};
 use textplots::{Chart, Plot};
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
 
-#[derive(Clone, Copy)]
-enum EnvironmentId {
-    HalfCheetah,
-    Hopper,
-    Walker2d,
-}
+#[cfg(not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d")))]
+compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
 
-impl EnvironmentId {
-    fn from_args() -> Self {
-        let args = std::env::args().skip(1).collect::<Vec<_>>();
-        let name = match args.as_slice() {
-            [arg] if matches!(arg.as_str(), "-h" | "--help") => {
-                Self::print_usage();
-                std::process::exit(0);
-            }
-            [flag, name] if flag == "--env" => name,
-            _ => {
-                Self::print_usage();
-                std::process::exit(2);
-            }
-        };
+#[cfg(any(
+    all(feature = "half-cheetah", feature = "hopper"),
+    all(feature = "half-cheetah", feature = "walker2d"),
+    all(feature = "hopper", feature = "walker2d"),
+))]
+compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
 
-        match name.to_ascii_lowercase().as_str() {
-            "halfcheetah" | "halfcheetah-v5" | "half-cheetah" | "half-cheetah-v5" => {
-                Self::HalfCheetah
-            }
-            "hopper" | "hopper-v5" => Self::Hopper,
-            "walker2d" | "walker2d-v5" | "walker-2d" | "walker-2d-v5" => Self::Walker2d,
-            _ => {
-                eprintln!("Unknown environment: {name}\n");
-                Self::print_usage();
-                std::process::exit(2);
-            }
-        }
-    }
+#[cfg(feature = "half-cheetah")]
+use modurl_mojoco::HalfCheetahV5 as SelectedEnvironment;
+#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
+use modurl_mojoco::HopperV5 as SelectedEnvironment;
+#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
+use modurl_mojoco::Walker2dV5 as SelectedEnvironment;
 
-    fn print_usage() {
-        eprintln!(
-            "Usage: ppo_mujoco_with_graphs --env \
-             <HalfCheetah-v5|Hopper-v5|Walker2d-v5>"
-        );
-    }
+#[cfg(feature = "half-cheetah")]
+const ENVIRONMENT_NAME: &str = "HalfCheetah-v5";
+#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
+const ENVIRONMENT_NAME: &str = "Hopper-v5";
+#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
+const ENVIRONMENT_NAME: &str = "Walker2d-v5";
 
-    fn name(self) -> &'static str {
-        match self {
-            Self::HalfCheetah => "HalfCheetah-v5",
-            Self::Hopper => "Hopper-v5",
-            Self::Walker2d => "Walker2d-v5",
-        }
-    }
-
-    fn build(self, device: &candle_core::Device) -> Result<MujocoEnvironment, MujocoError> {
-        match self {
-            Self::HalfCheetah => Ok(MujocoEnvironment::HalfCheetah(
-                HalfCheetahV5::builder().device(device).build()?,
-            )),
-            Self::Hopper => Ok(MujocoEnvironment::Hopper(
-                HopperV5::builder().device(device).build()?,
-            )),
-            Self::Walker2d => Ok(MujocoEnvironment::Walker2d(
-                Walker2dV5::builder().device(device).build()?,
-            )),
-        }
-    }
-}
-
-enum MujocoEnvironment {
-    HalfCheetah(HalfCheetahV5),
-    Hopper(HopperV5),
-    Walker2d(Walker2dV5),
-}
-
-impl Gym for MujocoEnvironment {
-    type Error = MujocoError;
-    type SpaceError = candle_core::Error;
-
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        match self {
-            Self::HalfCheetah(environment) => environment.step(action),
-            Self::Hopper(environment) => environment.step(action),
-            Self::Walker2d(environment) => environment.step(action),
-        }
-    }
-
-    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
-        match self {
-            Self::HalfCheetah(environment) => environment.reset(),
-            Self::Hopper(environment) => environment.reset(),
-            Self::Walker2d(environment) => environment.reset(),
-        }
-    }
-
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        match self {
-            Self::HalfCheetah(environment) => environment.observation_space(),
-            Self::Hopper(environment) => environment.observation_space(),
-            Self::Walker2d(environment) => environment.observation_space(),
-        }
-    }
-
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        match self {
-            Self::HalfCheetah(environment) => environment.action_space(),
-            Self::Hopper(environment) => environment.action_space(),
-            Self::Walker2d(environment) => environment.action_space(),
-        }
-    }
-}
-
-/// CleanRL's observation-independent Gaussian log standard deviation plus a
-/// state-dependent mean network.
+/// Produces the parameter tensor required by `GaussianDistribution`.
+///
+/// For observations shaped `[batch, observation_size]`, `mean` produces
+/// `[batch, action_size]`. `log_std` has shape `[1, action_size]`, making it
+/// trainable but observation-independent. `forward` returns
+/// `[mean_0, ..., mean_(A-1), log_std_0, ..., log_std_(A-1)]` in each batch row,
+/// with shape `[batch, 2 * action_size]`.
 struct GaussianParameterModule {
     mean: MLP,
     log_std: Tensor,
@@ -126,8 +45,11 @@ struct GaussianParameterModule {
 
 impl Module for GaussianParameterModule {
     fn forward(&self, observations: &Tensor) -> candle_core::Result<Tensor> {
+        // The mean changes with each observation: [batch, action_size].
         let mean = self.mean.forward(observations)?;
+        // Every observation shares one learned log standard deviation row.
         let log_std = self.log_std.broadcast_as(mean.shape())?;
+        // GaussianDistribution splits this tensor into equal halves.
         Tensor::cat(&[mean, log_std], 1)
     }
 }
@@ -264,14 +186,16 @@ impl PPOLogger<RawRewardInfo<()>> for Grapher {
 }
 
 fn main() {
-    let environment_id = EnvironmentId::from_args();
     let device = candle_core::Device::cuda_if_available(0).unwrap();
-    println!("Environment: {}", environment_id.name());
+    println!("Environment: {ENVIRONMENT_NAME}");
     println!("Using device: {device:?}");
 
     let env = NormalizeRewardGym::new(
         NormalizeObservationGym::new(RecordRawRewardGym::new(TimeLimitGym::new(
-            environment_id.build(&device).unwrap(),
+            SelectedEnvironment::builder()
+                .device(&device)
+                .build()
+                .unwrap(),
             1_000,
         )))
         .with_clip(10.0),
@@ -286,6 +210,8 @@ fn main() {
     let actor_vars = VarMap::new();
     let actor_vb = VarBuilder::from_varmap(&actor_vars, candle_core::DType::F32, &device);
     let actor = GaussianParameterModule {
+        // The mean network returns action_size values. GaussianParameterModule
+        // appends another action_size values for log_std.
         mean: MLP::builder()
             .input_size(observation_size)
             .output_size(action_size)
@@ -298,6 +224,8 @@ fn main() {
             }))
             .build()
             .unwrap(),
+        // Because this tensor comes from actor_vb, actor_vars tracks it and the
+        // actor optimizer updates it along with the mean network.
         log_std: actor_vb
             .get_with_hints((1, action_size), "log_std", Init::Const(0.0))
             .unwrap(),
@@ -329,8 +257,11 @@ fn main() {
     };
     let networks = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
+            // The policy interprets actor output as [mean, log_std], samples an
+            // unsquashed Gaussian action, and evaluates its log probability.
+            // BoxSpace separately clips the action sent to the environment.
             .actor_network(Box::new(
-                ProbabilisticPolicyModel::<GuassianDistribution>::new(Box::new(actor)),
+                ProbabilisticPolicyModel::<GaussianDistribution>::new(Box::new(actor)),
             ))
             .critic_network(Box::new(critic))
             .actor_optimizer(AdamW::new(actor_vars.all_vars(), optimizer_config.clone()).unwrap())

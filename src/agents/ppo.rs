@@ -1315,7 +1315,7 @@ mod schedule_tests {
             Agent,
             test_support::{CountingOptimizer, FixedEnv},
         },
-        distributions::{CategoricalDistribution, GuassianDistribution},
+        distributions::{CategoricalDistribution, GaussianDistribution},
         gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
         models::{
             MLP,
@@ -1553,7 +1553,7 @@ mod schedule_tests {
                 .actor_optimizer(CountingOptimizer::with_learning_rate(3e-4))
                 .critic_optimizer(CountingOptimizer::with_learning_rate(3e-4))
                 .actor_network(Box::new(
-                    ProbabilisticPolicyModel::<GuassianDistribution>::new(Box::new(actor_network)),
+                    ProbabilisticPolicyModel::<GaussianDistribution>::new(Box::new(actor_network)),
                 ))
                 .critic_network(Box::new(critic_network))
                 .combined_loss(true)
