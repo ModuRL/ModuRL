@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use candle_core::{Module, Tensor};
 use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
-use textplots::{Chart, Plot};
+use modurl_logger::{Aggregation, AggregationConfig, Logger, TerminalLogger};
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
 
@@ -56,12 +56,9 @@ impl Module for GaussianParameterModule {
 
 struct Grapher {
     timestep: usize,
-    samples: usize,
-    metrics: [Vec<f32>; 5],
-    raw_step_rewards: Vec<f32>,
+    terminal: TerminalLogger,
     raw_reward_sum: f32,
     raw_reward_samples: usize,
-    episode_returns: Vec<f32>,
     running_episode_returns: Vec<f32>,
 }
 
@@ -69,24 +66,14 @@ impl Grapher {
     fn new() -> Self {
         Self {
             timestep: 0,
-            samples: 0,
-            metrics: std::array::from_fn(|_| Vec::new()),
-            raw_step_rewards: Vec::new(),
+            terminal: TerminalLogger::new(AggregationConfig::new(
+                Aggregation::mean().with_rolling_window(10),
+            ))
+            .with_live_updates(),
             raw_reward_sum: 0.0,
             raw_reward_samples: 0,
-            episode_returns: Vec::new(),
             running_episode_returns: Vec::new(),
         }
-    }
-
-    fn finish_update(&mut self) {
-        if self.samples == 0 {
-            return;
-        }
-        for values in &mut self.metrics {
-            *values.last_mut().unwrap() /= self.samples as f32;
-        }
-        self.samples = 0;
     }
 
     fn progress(&self) {
@@ -102,67 +89,53 @@ impl Grapher {
         io::stdout().flush().unwrap();
     }
 
-    fn plot(data: &[f32], label: &str) {
-        let window = 10.min(data.len());
-        let smoothed = data
-            .windows(window)
-            .map(|values| values.iter().sum::<f32>() / window as f32)
-            .enumerate()
-            .map(|(x, y)| (x as f32, y))
-            .collect::<Vec<_>>();
-        println!("{label}:");
-        Chart::new(180, 30, 0.0, smoothed.len() as f32)
-            .lineplot(&textplots::Shape::Lines(&smoothed))
-            .display();
-    }
-
     fn display(mut self) {
-        self.finish_update();
         self.timestep = TOTAL_TIMESTEPS;
+        self.terminal.display();
         self.progress();
         println!();
-        for (values, label) in self.metrics.iter().zip([
-            "Actor Loss",
-            "Critic Loss",
-            "Entropy",
-            "KL Divergence",
-            "Explained Variance",
-        ]) {
-            Self::plot(values, label);
-        }
-        Self::plot(&self.raw_step_rewards, "Mean Raw Step Reward");
-        Self::plot(&self.episode_returns, "Episodic Return");
     }
 }
 
 impl PPOLogger<RawRewardInfo<()>> for Grapher {
     fn log(&mut self, info: &PPOLogEntry) {
-        if info.timestep != self.timestep {
-            self.finish_update();
+        let new_timestep = info.timestep != self.timestep;
+        if new_timestep {
             self.timestep = info.timestep;
-            self.progress();
-            for values in &mut self.metrics {
-                values.push(0.0);
-            }
             if self.raw_reward_samples > 0 {
-                self.raw_step_rewards
-                    .push(self.raw_reward_sum / self.raw_reward_samples as f32);
+                let mean_raw_reward = Tensor::new(
+                    self.raw_reward_sum / self.raw_reward_samples as f32,
+                    &candle_core::Device::Cpu,
+                )
+                .unwrap();
+                self.terminal
+                    .log(info.timestep, &[("Mean Raw Step Reward", &mean_raw_reward)])
+                    .unwrap();
             }
             self.raw_reward_sum = 0.0;
             self.raw_reward_samples = 0;
         }
 
-        let values = [
-            &info.actor_loss,
-            &info.critic_loss,
-            &info.entropy,
-            &info.kl_divergence,
-            &info.explained_variance,
-        ];
-        for (history, value) in self.metrics.iter_mut().zip(values) {
-            *history.last_mut().unwrap() += value.mean_all().unwrap().to_scalar::<f32>().unwrap();
+        let actor_loss = info.actor_loss.mean_all().unwrap();
+        let critic_loss = info.critic_loss.mean_all().unwrap();
+        let entropy = info.entropy.mean_all().unwrap();
+        let kl_divergence = info.kl_divergence.mean_all().unwrap();
+        let explained_variance = info.explained_variance.mean_all().unwrap();
+        self.terminal
+            .log(
+                info.timestep,
+                &[
+                    ("Actor Loss", &actor_loss),
+                    ("Critic Loss", &critic_loss),
+                    ("Entropy", &entropy),
+                    ("KL Divergence", &kl_divergence),
+                    ("Explained Variance", &explained_variance),
+                ],
+            )
+            .unwrap();
+        if new_timestep {
+            self.progress();
         }
-        self.samples += 1;
     }
 
     fn log_collection(&mut self, info: &PPOCollectionLogEntry<RawRewardInfo<()>>) {
@@ -178,9 +151,19 @@ impl PPOLogger<RawRewardInfo<()>> for Grapher {
             *episode_return += raw_reward;
         }
         for episode in &info.completed_episodes {
-            self.episode_returns
-                .push(self.running_episode_returns[episode.environment_index]);
+            let episode_return = Tensor::new(
+                self.running_episode_returns[episode.environment_index],
+                &candle_core::Device::Cpu,
+            )
+            .unwrap();
+            self.terminal
+                .log(
+                    episode.collection_timestep,
+                    &[("Episodic Return", &episode_return)],
+                )
+                .unwrap();
             self.running_episode_returns[episode.environment_index] = 0.0;
+            self.progress();
         }
     }
 }
@@ -273,25 +256,26 @@ fn main() {
     );
 
     let mut grapher = Grapher::new();
-    let mut agent = PPOAgent::builder()
-        .action_space(action_space)
-        .network_info(networks)
-        .batch_size(2_048)
-        .mini_batch_size(64)
-        .num_epochs(10)
-        .normalize_advantage(true)
-        .clip_range(Box::new(ConstantSchedule::new(0.2)))
-        .clip_value_loss(true)
-        .gamma(0.99)
-        .gae_lambda(0.95)
-        .ent_coef(0.0)
-        .vf_coef(0.5)
-        .training_horizon(TOTAL_TIMESTEPS)
-        .logging_info(&mut grapher)
-        .device(device)
-        .build();
+    {
+        let mut agent = PPOAgent::builder()
+            .action_space(action_space)
+            .network_info(networks)
+            .batch_size(2_048)
+            .mini_batch_size(64)
+            .num_epochs(10)
+            .normalize_advantage(true)
+            .clip_range(Box::new(ConstantSchedule::new(0.2)))
+            .clip_value_loss(true)
+            .gamma(0.99)
+            .gae_lambda(0.95)
+            .ent_coef(0.0)
+            .vf_coef(0.5)
+            .training_horizon(TOTAL_TIMESTEPS)
+            .logging_info(&mut grapher)
+            .device(device)
+            .build();
 
-    agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
-    drop(agent);
+        agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
+    }
     grapher.display();
 }

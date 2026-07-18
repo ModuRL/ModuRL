@@ -8,6 +8,7 @@ members = [
     ".",
     "crates/modurl_gym",
     "crates/modurl_ale",
+    "crates/modurl_logger",
     "crates/modurl_mojoco",
     "crates/examples",
 ]

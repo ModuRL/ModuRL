@@ -2,189 +2,61 @@ use candle_core::{Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
-use textplots::{Chart, Plot};
+use modurl_logger::{Aggregation, AggregationConfig, Logger, TerminalLogger};
 
 struct PPOGrapher {
-    last_timestep: usize,
-    samples_on_this_step: u32,
-    actor_losses: Vec<f32>,
-    critic_losses: Vec<f32>,
-    entropies: Vec<f32>,
-    kl_divs: Vec<f32>,
-    explained_variances: Vec<f32>,
-    episode_returns: Vec<f32>,
-    episode_lengths: Vec<f32>,
+    terminal: TerminalLogger,
 }
 
 impl PPOGrapher {
     fn new() -> Self {
         Self {
-            last_timestep: 0,
-            samples_on_this_step: 0,
-            actor_losses: vec![],
-            critic_losses: vec![],
-            entropies: vec![],
-            kl_divs: vec![],
-            explained_variances: vec![],
-            episode_returns: vec![],
-            episode_lengths: vec![],
-        }
-    }
-
-    fn add_to_running_total(&mut self, info: &PPOLogEntry) {
-        self.samples_on_this_step += 1;
-        let policy_loss = info
-            .actor_loss
-            .mean_all()
-            .unwrap()
-            .to_vec0::<f32>()
-            .unwrap();
-        let value_loss = info
-            .critic_loss
-            .mean_all()
-            .unwrap()
-            .to_vec0::<f32>()
-            .unwrap();
-        let entropy = info.entropy.mean_all().unwrap().to_vec0::<f32>().unwrap();
-        let kl_div = info
-            .kl_divergence
-            .mean_all()
-            .unwrap()
-            .to_vec0::<f32>()
-            .unwrap();
-        let explained_variance = info
-            .explained_variance
-            .mean_all()
-            .unwrap()
-            .to_vec0::<f32>()
-            .unwrap();
-        let self_fields = vec![
-            &mut self.actor_losses,
-            &mut self.critic_losses,
-            &mut self.entropies,
-            &mut self.kl_divs,
-            &mut self.explained_variances,
-        ];
-        let new_values = vec![policy_loss, value_loss, entropy, kl_div, explained_variance];
-        for (field, new_value) in self_fields.into_iter().zip(new_values) {
-            let current_total = field.last().cloned().unwrap_or(0.0);
-            let updated_total = current_total + new_value;
-            if field.is_empty() {
-                field.push(updated_total);
-            } else {
-                *field.last_mut().unwrap() = updated_total;
-            }
-        }
-    }
-
-    fn add_new_step(&mut self, info: &PPOLogEntry) {
-        self.divide_last_by_samples();
-        self.last_timestep = info.timestep;
-        let fields = vec![
-            &mut self.actor_losses,
-            &mut self.critic_losses,
-            &mut self.entropies,
-            &mut self.kl_divs,
-            &mut self.explained_variances,
-        ];
-        for field in fields {
-            field.push(0.0);
-        }
-        self.add_to_running_total(info);
-    }
-
-    fn divide_last_by_samples(&mut self) {
-        let fields = vec![
-            &mut self.actor_losses,
-            &mut self.critic_losses,
-            &mut self.entropies,
-            &mut self.kl_divs,
-            &mut self.explained_variances,
-        ];
-        for field in fields {
-            if let Some(last_value) = field.last_mut() {
-                *last_value /= self.samples_on_this_step as f32;
-            }
-        }
-        self.samples_on_this_step = 0;
-    }
-
-    fn textplot_graph(data: &[f32], label: &str) {
-        if data.is_empty() {
-            println!("No data collected for {label}.");
-            return;
-        }
-        println!("Graph for {}:", label);
-        Chart::new(180, 30, 0.0, data.len() as f32)
-            .lineplot(&textplots::Shape::Lines(
-                &(0..data.len())
-                    .map(|x| (x as f32, data[x]))
-                    .collect::<Vec<(f32, f32)>>(),
+            terminal: TerminalLogger::new(AggregationConfig::new(
+                Aggregation::mean().with_rolling_window(5),
             ))
-            .display();
+            .with_live_updates(),
+        }
     }
 
-    fn moving_average(data: &[f32], window: usize) -> Vec<f32> {
-        if data.len() < window {
-            return data.to_vec();
-        }
-        data.windows(window)
-            .map(|values| values.iter().sum::<f32>() / window as f32)
-            .collect()
-    }
-
-    fn display_graphs(&mut self, rolling_window_size: usize) {
-        self.divide_last_by_samples();
-
-        let mut variables = [
-            self.actor_losses.clone(),
-            self.critic_losses.clone(),
-            self.entropies.clone(),
-            self.kl_divs.clone(),
-            self.explained_variances.clone(),
-        ];
-        for var in variables.iter_mut() {
-            let len = var.len();
-            if len >= rolling_window_size {
-                let mut smoothed = vec![];
-                for i in 0..=len - rolling_window_size {
-                    let window = &var[i..i + rolling_window_size];
-                    let window_avg: f32 = window.iter().sum::<f32>() / rolling_window_size as f32;
-                    smoothed.push(window_avg);
-                }
-                *var = smoothed;
-            }
-        }
-
-        Self::textplot_graph(&variables[0], "Actor Loss");
-        Self::textplot_graph(&variables[1], "Critic Loss");
-        Self::textplot_graph(&variables[2], "Entropy");
-        Self::textplot_graph(&variables[3], "KL Divergence");
-        Self::textplot_graph(&variables[4], "Explained Variance");
-        Self::textplot_graph(
-            &Self::moving_average(&self.episode_returns, rolling_window_size),
-            "Episode Returns",
-        );
-        Self::textplot_graph(
-            &Self::moving_average(&self.episode_lengths, rolling_window_size),
-            "Episode Lengths",
-        );
+    fn display_graphs(mut self) {
+        self.terminal.display();
     }
 }
 
 impl PPOLogger for PPOGrapher {
     fn log(&mut self, info: &PPOLogEntry) {
-        if info.timestep == self.last_timestep {
-            self.add_to_running_total(info);
-        } else {
-            self.add_new_step(info);
-        }
+        let actor_loss = info.actor_loss.mean_all().unwrap();
+        let critic_loss = info.critic_loss.mean_all().unwrap();
+        let entropy = info.entropy.mean_all().unwrap();
+        let kl_divergence = info.kl_divergence.mean_all().unwrap();
+        let explained_variance = info.explained_variance.mean_all().unwrap();
+        self.terminal
+            .log(
+                info.timestep,
+                &[
+                    ("Actor Loss", &actor_loss),
+                    ("Critic Loss", &critic_loss),
+                    ("Entropy", &entropy),
+                    ("KL Divergence", &kl_divergence),
+                    ("Explained Variance", &explained_variance),
+                ],
+            )
+            .unwrap();
     }
 
     fn log_collection(&mut self, info: &PPOCollectionLogEntry) {
         for episode in &info.completed_episodes {
-            self.episode_returns.push(episode.episode_return);
-            self.episode_lengths.push(episode.episode_length as f32);
+            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
+            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            self.terminal
+                .log(
+                    episode.collection_timestep,
+                    &[
+                        ("Episode Returns", &episode_return),
+                        ("Episode Lengths", &episode_length),
+                    ],
+                )
+                .unwrap();
         }
     }
 }
@@ -298,5 +170,5 @@ fn ppo_cartpole() {
 
     agent.learn(&mut vec_env, 100_000).unwrap();
 
-    logger.display_graphs(5);
+    logger.display_graphs();
 }
