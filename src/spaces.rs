@@ -1,4 +1,4 @@
-use candle_core::{Device, Tensor, D};
+use candle_core::{D, Device, Tensor};
 
 use crate::tensor_operations::gen_range_int_tensor;
 
