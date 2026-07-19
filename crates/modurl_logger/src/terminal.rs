@@ -68,7 +68,12 @@ impl TerminalLogger {
     /// A timestep normally completes when a larger timestep is logged. Call
     /// this after the last log entry because no later timestep will arrive to
     /// complete it.
-    pub fn finish(&mut self) {
+    pub fn finish(&mut self) -> Result<()> {
+        self.finish_timestep();
+        Ok(())
+    }
+
+    fn finish_timestep(&mut self) {
         if let Some(completed) = self.aggregator.finish() {
             self.store(completed);
         }
@@ -81,7 +86,7 @@ impl TerminalLogger {
 
     /// Completes the current timestep and plots every metric.
     pub fn display(&mut self) {
-        self.finish();
+        self.finish_timestep();
         if !self.live_updates || !self.redraw_dashboard() {
             self.plot_all_sequentially();
         }
@@ -144,6 +149,8 @@ impl TerminalLogger {
 }
 
 impl Logger for TerminalLogger {
+    type Error = crate::Error;
+
     fn log(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) -> Result<()> {
         if let Some(completed) = self.aggregator.log(timestep, metrics)? {
             self.store(completed);
@@ -152,6 +159,10 @@ impl Logger for TerminalLogger {
             }
         }
         Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        Self::finish(self)
     }
 }
 

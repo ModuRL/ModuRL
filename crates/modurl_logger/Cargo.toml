@@ -6,4 +6,6 @@ edition = "2024"
 [dependencies]
 candle-core = "0.11.0"
 console = "0.15.11"
+crc = "3.3.0"
+prost = "0.14.1"
 textplots = "0.8.7"

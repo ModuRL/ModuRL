@@ -16,7 +16,7 @@ fn reduces_repeated_values_and_uses_partial_rolling_windows() {
     logger.log(10, &[("loss", &one)]).unwrap();
     logger.log(10, &[("loss", &three)]).unwrap();
     logger.log(20, &[("loss", &five)]).unwrap();
-    logger.finish();
+    logger.finish().unwrap();
 
     assert_eq!(logger.series("loss"), Some(&[(10, 2.0), (20, 3.5)][..]));
 }
@@ -56,7 +56,7 @@ fn applies_name_based_reduction_overrides() {
             ],
         )
         .unwrap();
-    logger.finish();
+    logger.finish().unwrap();
 
     assert_eq!(logger.series("mean"), Some(&[(1, 2.0)][..]));
     assert_eq!(logger.series("sum"), Some(&[(1, 4.0)][..]));
@@ -71,7 +71,7 @@ fn converts_numeric_scalar_tensors_to_f32() {
     let value = Tensor::new(7_i64, &Device::Cpu).unwrap();
 
     logger.log(4, &[("integer", &value)]).unwrap();
-    logger.finish();
+    logger.finish().unwrap();
 
     assert_eq!(logger.series("integer"), Some(&[(4, 7.0)][..]));
 }
@@ -90,7 +90,7 @@ fn rejects_non_scalar_tensors_without_advancing_the_timestep() {
 
     let value = scalar(3.0);
     logger.log(5, &[("loss", &value)]).unwrap();
-    logger.finish();
+    logger.finish().unwrap();
     assert_eq!(logger.series("loss"), Some(&[(5, 3.0)][..]));
 }
 
@@ -128,7 +128,7 @@ fn live_updates_preserve_completed_series() {
     let two = scalar(2.0);
     logger.log(10, &[("loss", &one)]).unwrap();
     logger.log(20, &[("loss", &two)]).unwrap();
-    logger.finish();
+    logger.finish().unwrap();
 
     assert_eq!(logger.series("loss"), Some(&[(10, 1.0), (20, 2.0)][..]));
 }

@@ -55,10 +55,6 @@ impl DQNLogger for DQNGrapher {
 
     fn log_collection(&mut self, entry: &QCollectionLogEntry) {
         for episode in &entry.completed_episodes {
-            println!(
-                "CartPole episode finished at step {}: length = {}, return = {}",
-                episode.collection_timestep, episode.episode_length, episode.episode_return,
-            );
             let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
             let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
             self.terminal
