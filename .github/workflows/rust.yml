@@ -30,7 +30,13 @@ jobs:
           import json
           from pathlib import Path
 
-          publishable = {"modurl", "modurl_gym", "modurl_ale", "modurl_mojoco"}
+          publishable = {
+              "modurl",
+              "modurl_gym",
+              "modurl_ale",
+              "modurl_logger",
+              "modurl_mojoco",
+          }
           test_package = "examples"
           expected = publishable | {test_package}
           metadata = json.loads(Path("target/workspace-metadata.json").read_text())
@@ -225,7 +231,7 @@ jobs:
       - name: List package contents
         shell: bash
         run: |
-          for package in modurl modurl_gym modurl_ale modurl_mojoco; do
+          for package in modurl modurl_gym modurl_ale modurl_logger modurl_mojoco; do
             files="$(cargo package --locked --allow-dirty --list -p "$package")"
             printf '%s\n' "$files"
             if printf '%s\n' "$files" | grep -Eiq \
@@ -244,7 +250,7 @@ jobs:
         run: |
           # The initial 0.1.0 internal crates are not yet available from crates.io.
           # CLI-only patches let Cargo normalize every archive without changing manifests.
-          for package in modurl modurl_gym modurl_ale modurl_mojoco; do
+          for package in modurl modurl_gym modurl_ale modurl_logger modurl_mojoco; do
             cargo package --locked --allow-dirty --no-verify -p "$package" \
               --config "patch.crates-io.modurl.path='.'" \
               --config "patch.crates-io.modurl_gym.path='crates/modurl_gym'"
@@ -260,13 +266,20 @@ jobs:
           import tomllib
           from pathlib import Path
 
-          publishable = {"modurl", "modurl_gym", "modurl_ale", "modurl_mojoco"}
+          publishable = {
+              "modurl",
+              "modurl_gym",
+              "modurl_ale",
+              "modurl_logger",
+              "modurl_mojoco",
+          }
           test_package = "examples"
           workspace_packages = publishable | {test_package}
           expected_dependencies = {
               "modurl": set(),
               "modurl_gym": {"modurl"},
               "modurl_ale": {"modurl"},
+              "modurl_logger": set(),
               "modurl_mojoco": {"modurl"},
           }
           metadata = json.loads(Path("target/package-metadata.json").read_text())
