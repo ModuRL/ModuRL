@@ -2,87 +2,70 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
-use textplots::{Chart, Plot};
+use modurl_logger::{Aggregation, AggregationConfig, Logger, TerminalLogger};
 
 struct DQNGrapher {
-    losses: Vec<f32>,
-    epsilons: Vec<f32>,
-    mean_q_values: Vec<f32>,
-    episode_returns: Vec<f32>,
-    episode_lengths: Vec<f32>,
+    terminal: TerminalLogger,
 }
 
 impl DQNGrapher {
     fn new() -> Self {
         Self {
-            losses: Vec::new(),
-            epsilons: Vec::new(),
-            mean_q_values: Vec::new(),
-            episode_returns: Vec::new(),
-            episode_lengths: Vec::new(),
+            terminal: TerminalLogger::new(
+                AggregationConfig::new(Aggregation::mean())
+                    .with_override("DQN Loss", Aggregation::mean().with_rolling_window(100))
+                    .with_override(
+                        "Mean Selected Q-Value",
+                        Aggregation::mean().with_rolling_window(100),
+                    )
+                    .with_override(
+                        "Episode Return",
+                        Aggregation::mean().with_rolling_window(25),
+                    )
+                    .with_override(
+                        "Episode Length",
+                        Aggregation::mean().with_rolling_window(25),
+                    ),
+            )
+            .with_live_updates(),
         }
     }
 
-    fn plot(data: &[f32], label: &str) {
-        if data.is_empty() {
-            println!("No data collected for {label}.");
-            return;
-        }
-
-        println!("Graph for {label}:");
-        Chart::new(180, 30, 0.0, data.len() as f32)
-            .lineplot(&textplots::Shape::Lines(
-                &(0..data.len())
-                    .map(|index| (index as f32, data[index]))
-                    .collect::<Vec<_>>(),
-            ))
-            .display();
-    }
-
-    fn moving_average(data: &[f32], window: usize) -> Vec<f32> {
-        if data.len() < window {
-            return data.to_vec();
-        }
-
-        data.windows(window)
-            .map(|values| values.iter().sum::<f32>() / window as f32)
-            .collect()
-    }
-
-    fn display_graphs(&self) {
-        Self::plot(&Self::moving_average(&self.losses, 100), "DQN Loss");
-        Self::plot(&self.epsilons, "Exploration Epsilon");
-        Self::plot(
-            &Self::moving_average(&self.mean_q_values, 100),
-            "Mean Selected Q-Value",
-        );
-        Self::plot(
-            &Self::moving_average(&self.episode_returns, 25),
-            "Episode Return",
-        );
-        Self::plot(
-            &Self::moving_average(&self.episode_lengths, 25),
-            "Episode Length",
-        );
+    fn display_graphs(mut self) {
+        self.terminal.display();
     }
 }
 
 impl DQNLogger for DQNGrapher {
     fn log(&mut self, entry: &QLogEntry) {
-        self.losses.push(entry.loss.to_vec0::<f32>().unwrap());
-        self.epsilons.push(entry.epsilon as f32);
-        self.mean_q_values
-            .push(entry.q_values.mean_all().unwrap().to_vec0::<f32>().unwrap());
+        let loss = entry.loss.mean_all().unwrap();
+        let epsilon = Tensor::new(entry.epsilon as f32, &Device::Cpu).unwrap();
+        let mean_q_value = entry.q_values.mean_all().unwrap();
+        self.terminal
+            .log(
+                entry.collection_timestep,
+                &[
+                    ("DQN Loss", &loss),
+                    ("Exploration Epsilon", &epsilon),
+                    ("Mean Selected Q-Value", &mean_q_value),
+                ],
+            )
+            .unwrap();
     }
 
     fn log_collection(&mut self, entry: &QCollectionLogEntry) {
         for episode in &entry.completed_episodes {
-            println!(
-                "CartPole episode finished at step {}: length = {}, return = {}",
-                episode.collection_timestep, episode.episode_length, episode.episode_return,
-            );
-            self.episode_returns.push(episode.episode_return);
-            self.episode_lengths.push(episode.episode_length as f32);
+            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
+            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            self.terminal
+                .log(
+                    episode.collection_timestep,
+                    &[
+                        ("Episode Return", &episode_return),
+                        ("Episode Length", &episode_length),
+                    ],
+                )
+                .unwrap();
         }
     }
 }

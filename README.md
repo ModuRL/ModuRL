@@ -98,7 +98,7 @@ cargo run --features metal --example ppo_bench
 | --- | --- |
 | `examples/ppo_bench.rs` | PPO on CartPole with separate actor and critic networks |
 | `examples/ppo_cartpole_with_graphs.rs` | PPO training metrics through `PPOLogger` |
-| `examples/ppo_mujoco_with_graphs.rs` | Continuous PPO on a feature-selected MuJoCo environment with progress and terminal plots |
+| `examples/ppo_mujoco_with_graphs.rs` | Continuous PPO on a feature-selected MuJoCo environment with progress, terminal plots, and TensorBoard logs under `runs/ppo_mujoco` |
 | `examples/dqn_cartpole_with_graphs.rs` | DQN training metrics and episode graphs through `DQNLogger` |
 | `examples/rendered_lunar_lander_ppo.rs` | PPO on LunarLander with rendering and learning-rate schedules |
 
