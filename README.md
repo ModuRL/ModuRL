@@ -74,6 +74,14 @@ cargo run --release -p examples --example ppo_mujoco_with_graphs --features hopp
 cargo run --release -p examples --example ppo_mujoco_with_graphs --features walker2d
 ```
 
+The MuJoCo SAC example supports the same environment selection:
+
+```sh
+cargo run --release -p examples --example sac_mujoco --features half-cheetah
+cargo run --release -p examples --example sac_mujoco --features hopper
+cargo run --release -p examples --example sac_mujoco --features walker2d
+```
+
 For DQN training with terminal plots for loss, exploration, Q-values, and
 episode performance:
 

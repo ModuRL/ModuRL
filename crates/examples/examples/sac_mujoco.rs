@@ -1,11 +1,34 @@
 use candle_core::{DType, Device, Module, Tensor, Var};
 use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
-use modurl_mojoco::HalfCheetahV5;
 
 #[path = "support/graphers.rs"]
 mod graphers;
 use graphers::SACGrapher;
+
+#[cfg(not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d")))]
+compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
+
+#[cfg(any(
+    all(feature = "half-cheetah", feature = "hopper"),
+    all(feature = "half-cheetah", feature = "walker2d"),
+    all(feature = "hopper", feature = "walker2d"),
+))]
+compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
+
+#[cfg(feature = "half-cheetah")]
+use modurl_mojoco::HalfCheetahV5 as SelectedEnvironment;
+#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
+use modurl_mojoco::HopperV5 as SelectedEnvironment;
+#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
+use modurl_mojoco::Walker2dV5 as SelectedEnvironment;
+
+#[cfg(feature = "half-cheetah")]
+const ENVIRONMENT_NAME: &str = "HalfCheetah-v5";
+#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
+const ENVIRONMENT_NAME: &str = "Hopper-v5";
+#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
+const ENVIRONMENT_NAME: &str = "Walker2d-v5";
 
 fn sac_mlp(
     vb: VarBuilder<'_>,
@@ -79,9 +102,13 @@ fn scalar_critic<'a>(
 fn main() {
     let total_timesteps = 1_000_000;
     let device = Device::cuda_if_available(0).unwrap();
+    println!("Environment: {ENVIRONMENT_NAME}");
     println!("Using device: {device:?}");
     let mut env = VectorizedGymWrapper::from(vec![TimeLimitGym::new(
-        HalfCheetahV5::builder().device(&device).build().unwrap(),
+        SelectedEnvironment::builder()
+            .device(&device)
+            .build()
+            .unwrap(),
         1_000,
     )]);
     let observation_space = env.observation_space();
