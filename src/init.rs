@@ -68,6 +68,8 @@ pub fn orthogonal_init(shape: &[usize], gain: f64, device: &Device) -> Result<Te
 ///
 /// Candle does not expose a QR decomposition, so this keeps the unavoidable
 /// column loop but leaves the projection and normalization work as tensor ops.
+/// `a` must be a matrix `[rows, columns]`; the returned Q matrix has the same
+/// shape.
 fn qr_decomposition(a: &Tensor) -> Result<Tensor> {
     let shape = a.dims();
     let cols = shape[1];

@@ -14,6 +14,7 @@ struct ExpectedOutput {
 
 pub(crate) trait Testable {
     fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error>;
+    /// Restores one unbatched environment state shaped `observation_shape`.
     fn set_state(&mut self, state: Tensor, extra_info: Option<serde_json::Value>);
 }
 

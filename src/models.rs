@@ -1,7 +1,18 @@
 use bon::bon;
-use candle_core::Error;
+use candle_core::{Error, Tensor};
 use candle_nn::{self, VarBuilder, linear};
 pub mod probabilistic_model;
+
+/// A module that can preserve input gradients while treating its parameters as
+/// constants. This is useful when optimizing an input-producing network
+/// through another network without computing gradients for the latter's
+/// parameters.
+pub trait FrozenParametersModule: candle_core::Module {
+    /// Runs the module on `input` using the same input shape as
+    /// [`candle_core::Module::forward`], while excluding module parameters
+    /// from the gradient graph. The output shape also matches `forward`.
+    fn forward_frozen(&self, input: &Tensor) -> Result<Tensor, Error>;
+}
 
 pub struct MLPArchitecture {
     pub input_size: usize,
@@ -141,6 +152,7 @@ impl MLP {
 }
 
 impl candle_nn::Module for MLP {
+    /// Maps `xs` shaped `[batch, input_size]` to `[batch, output_size]`.
     fn forward(&self, xs: &candle_core::Tensor) -> Result<candle_core::Tensor, Error> {
         let mut x = self.input_layer.forward(xs)?;
         x = self.activation.forward(&x)?;
@@ -153,6 +165,32 @@ impl candle_nn::Module for MLP {
             x = output_activation.forward(&x)?;
         }
         Ok(x)
+    }
+}
+
+impl FrozenParametersModule for MLP {
+    /// Maps `input` shaped `[batch, input_size]` to `[batch, output_size]`
+    /// without parameter gradients.
+    fn forward_frozen(&self, input: &Tensor) -> Result<Tensor, Error> {
+        /// Maps `[batch, input_features]` to `[batch, output_features]` with
+        /// detached linear parameters.
+        fn frozen_linear(layer: &candle_nn::Linear, input: &Tensor) -> Result<Tensor, Error> {
+            let layer =
+                candle_nn::Linear::new(layer.weight().detach(), layer.bias().map(Tensor::detach));
+            candle_core::Module::forward(&layer, input)
+        }
+
+        let mut output = frozen_linear(&self.input_layer, input)?;
+        output = self.activation.forward(&output)?;
+        for layer in &self.hidden_layers {
+            output = frozen_linear(layer, &output)?;
+            output = self.activation.forward(&output)?;
+        }
+        output = frozen_linear(&self.output_layer, &output)?;
+        if let Some(output_activation) = &self.output_activation {
+            output = output_activation.forward(&output)?;
+        }
+        Ok(output)
     }
 }
 

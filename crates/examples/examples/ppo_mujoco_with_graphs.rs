@@ -1,13 +1,10 @@
-use std::{
-    io::{self, Write},
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
-
 use candle_core::{Module, Tensor};
 use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
-use modurl_logger::{Aggregation, AggregationConfig, Logger, TensorBoardLogger, TerminalLogger};
+
+#[path = "support/graphers.rs"]
+mod graphers;
+use graphers::PPOMujocoGrapher;
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
 
@@ -48,6 +45,8 @@ struct GaussianParameterModule {
 }
 
 impl Module for GaussianParameterModule {
+    /// Maps observations `[batch, observation_size]` to Gaussian parameters
+    /// `[batch, 2 * action_size]`.
     fn forward(&self, observations: &Tensor) -> candle_core::Result<Tensor> {
         // The mean changes with each observation: [batch, action_size].
         let mean = self.mean.forward(observations)?;
@@ -55,142 +54,6 @@ impl Module for GaussianParameterModule {
         let log_std = self.log_std.broadcast_as(mean.shape())?;
         // GaussianDistribution splits this tensor into equal halves.
         Tensor::cat(&[mean, log_std], 1)
-    }
-}
-
-struct Grapher {
-    timestep: usize,
-    terminal: TerminalLogger,
-    tensorboard: TensorBoardLogger,
-    raw_reward_sum: f32,
-    raw_reward_samples: usize,
-    running_episode_returns: Vec<f32>,
-}
-
-impl Grapher {
-    fn new() -> Self {
-        let aggregation = AggregationConfig::new(Aggregation::mean().with_rolling_window(10));
-        let tensorboard_log_dir = tensorboard_log_dir();
-        let tensorboard = TensorBoardLogger::new(&tensorboard_log_dir, aggregation.clone())
-            .expect("failed to create the TensorBoard event file");
-        println!(
-            "TensorBoard log directory: {}",
-            tensorboard_log_dir.display()
-        );
-        println!("View all runs with: tensorboard --logdir runs/ppo_mujoco");
-
-        Self {
-            timestep: 0,
-            terminal: TerminalLogger::new(aggregation).with_live_updates(),
-            tensorboard,
-            raw_reward_sum: 0.0,
-            raw_reward_samples: 0,
-            running_episode_returns: Vec::new(),
-        }
-    }
-
-    fn progress(&self) {
-        let fraction = (self.timestep as f32 / TOTAL_TIMESTEPS as f32).min(1.0);
-        let filled = (fraction * 40.0) as usize;
-        print!(
-            "\rTraining [{:<40}] {:>6.2}% ({}/{})",
-            "=".repeat(filled),
-            fraction * 100.0,
-            self.timestep,
-            TOTAL_TIMESTEPS
-        );
-        io::stdout().flush().unwrap();
-    }
-
-    fn display(mut self) {
-        self.timestep = TOTAL_TIMESTEPS;
-        self.tensorboard
-            .finish()
-            .expect("failed to finish the TensorBoard event file");
-        self.terminal.display();
-        self.progress();
-        println!();
-    }
-
-    fn log_metrics(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) {
-        self.terminal.log(timestep, metrics).unwrap();
-        self.tensorboard.log(timestep, metrics).unwrap();
-    }
-}
-
-fn tensorboard_log_dir() -> PathBuf {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time must be after the Unix epoch")
-        .as_secs();
-    PathBuf::from("runs").join("ppo_mujoco").join(format!(
-        "{ENVIRONMENT_NAME}-{timestamp}-{}",
-        std::process::id()
-    ))
-}
-
-impl PPOLogger<RawRewardInfo<()>> for Grapher {
-    fn log(&mut self, info: &PPOLogEntry) {
-        let new_timestep = info.timestep != self.timestep;
-        if new_timestep {
-            self.timestep = info.timestep;
-            if self.raw_reward_samples > 0 {
-                let mean_raw_reward = Tensor::new(
-                    self.raw_reward_sum / self.raw_reward_samples as f32,
-                    &candle_core::Device::Cpu,
-                )
-                .unwrap();
-                self.log_metrics(info.timestep, &[("Mean Raw Step Reward", &mean_raw_reward)]);
-            }
-            self.raw_reward_sum = 0.0;
-            self.raw_reward_samples = 0;
-        }
-
-        let actor_loss = info.actor_loss.mean_all().unwrap();
-        let critic_loss = info.critic_loss.mean_all().unwrap();
-        let entropy = info.entropy.mean_all().unwrap();
-        let kl_divergence = info.kl_divergence.mean_all().unwrap();
-        let explained_variance = info.explained_variance.mean_all().unwrap();
-        self.log_metrics(
-            info.timestep,
-            &[
-                ("Actor Loss", &actor_loss),
-                ("Critic Loss", &critic_loss),
-                ("Entropy", &entropy),
-                ("KL Divergence", &kl_divergence),
-                ("Explained Variance", &explained_variance),
-            ],
-        );
-        if new_timestep {
-            self.progress();
-        }
-    }
-
-    fn log_collection(&mut self, info: &PPOCollectionLogEntry<RawRewardInfo<()>>) {
-        if self.running_episode_returns.len() != info.infos.len() {
-            self.running_episode_returns = vec![0.0; info.infos.len()];
-        }
-        for (episode_return, env_info) in self.running_episode_returns.iter_mut().zip(&info.infos) {
-            let raw_reward = env_info
-                .raw_reward
-                .expect("step info must have a raw reward");
-            self.raw_reward_sum += raw_reward;
-            self.raw_reward_samples += 1;
-            *episode_return += raw_reward;
-        }
-        for episode in &info.completed_episodes {
-            let episode_return = Tensor::new(
-                self.running_episode_returns[episode.environment_index],
-                &candle_core::Device::Cpu,
-            )
-            .unwrap();
-            self.log_metrics(
-                episode.collection_timestep,
-                &[("Episodic Return", &episode_return)],
-            );
-            self.running_episode_returns[episode.environment_index] = 0.0;
-            self.progress();
-        }
     }
 }
 
@@ -214,7 +77,8 @@ fn main() {
     let mut env = VectorizedGymWrapper::from(vec![env]);
     let observation_size = env.observation_space().shape()[0];
     let action_space = env.action_space();
-    let action_size = action_space.shape()[0];
+    let action_shape = action_space.shape();
+    let action_size = action_shape.iter().product();
 
     let actor_vars = VarMap::new();
     let actor_vb = VarBuilder::from_varmap(&actor_vars, candle_core::DType::F32, &device);
@@ -269,9 +133,10 @@ fn main() {
             // The policy interprets actor output as [mean, log_std], samples an
             // unsquashed Gaussian action, and evaluates its log probability.
             // BoxSpace separately clips the action sent to the environment.
-            .actor_network(Box::new(
-                ProbabilisticPolicyModel::<GaussianDistribution>::new(Box::new(actor)),
-            ))
+            .actor_network(Box::new(ProbabilisticPolicyModel::with_distribution(
+                Box::new(actor),
+                GaussianDistribution::new(action_shape).unwrap(),
+            )))
             .critic_network(Box::new(critic))
             .actor_optimizer(AdamW::new(actor_vars.all_vars(), optimizer_config.clone()).unwrap())
             .critic_optimizer(AdamW::new(critic_vars.all_vars(), optimizer_config).unwrap())
@@ -281,7 +146,7 @@ fn main() {
             .build(),
     );
 
-    let mut grapher = Grapher::new();
+    let mut grapher = PPOMujocoGrapher::new(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
     {
         let mut agent = PPOAgent::builder()
             .action_space(action_space)

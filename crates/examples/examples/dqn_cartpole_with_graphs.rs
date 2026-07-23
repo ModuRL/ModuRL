@@ -2,73 +2,10 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
-use modurl_logger::{Aggregation, AggregationConfig, Logger, TerminalLogger};
 
-struct DQNGrapher {
-    terminal: TerminalLogger,
-}
-
-impl DQNGrapher {
-    fn new() -> Self {
-        Self {
-            terminal: TerminalLogger::new(
-                AggregationConfig::new(Aggregation::mean())
-                    .with_override("DQN Loss", Aggregation::mean().with_rolling_window(100))
-                    .with_override(
-                        "Mean Selected Q-Value",
-                        Aggregation::mean().with_rolling_window(100),
-                    )
-                    .with_override(
-                        "Episode Return",
-                        Aggregation::mean().with_rolling_window(25),
-                    )
-                    .with_override(
-                        "Episode Length",
-                        Aggregation::mean().with_rolling_window(25),
-                    ),
-            )
-            .with_live_updates(),
-        }
-    }
-
-    fn display_graphs(mut self) {
-        self.terminal.display();
-    }
-}
-
-impl DQNLogger for DQNGrapher {
-    fn log(&mut self, entry: &QLogEntry) {
-        let loss = entry.loss.mean_all().unwrap();
-        let epsilon = Tensor::new(entry.epsilon as f32, &Device::Cpu).unwrap();
-        let mean_q_value = entry.q_values.mean_all().unwrap();
-        self.terminal
-            .log(
-                entry.collection_timestep,
-                &[
-                    ("DQN Loss", &loss),
-                    ("Exploration Epsilon", &epsilon),
-                    ("Mean Selected Q-Value", &mean_q_value),
-                ],
-            )
-            .unwrap();
-    }
-
-    fn log_collection(&mut self, entry: &QCollectionLogEntry) {
-        for episode in &entry.completed_episodes {
-            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
-            self.terminal
-                .log(
-                    episode.collection_timestep,
-                    &[
-                        ("Episode Return", &episode_return),
-                        ("Episode Length", &episode_length),
-                    ],
-                )
-                .unwrap();
-        }
-    }
-}
+#[path = "support/graphers.rs"]
+mod graphers;
+use graphers::DQNGrapher;
 
 fn main() {
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
@@ -147,5 +84,5 @@ fn main() {
 
     agent.learn(&mut env, 500_000).expect("DQN learning failed");
     drop(agent);
-    grapher.display_graphs();
+    grapher.display();
 }

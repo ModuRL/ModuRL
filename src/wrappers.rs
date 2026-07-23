@@ -67,6 +67,7 @@ mod test_support {
         type Error = candle_core::Error;
         type SpaceError = candle_core::Error;
 
+        /// Steps with one scalar discrete action shaped `[]`.
         fn step(&mut self, _action: Tensor) -> Result<StepInfo<TestInfo>, Self::Error> {
             Ok(self.steps.pop_front().expect("test step script exhausted"))
         }
@@ -95,6 +96,7 @@ mod test_support {
         Tensor::new(0u32, &Device::Cpu).unwrap()
     }
 
+    /// Reads one scalar tensor shaped `[]`.
     pub(super) fn scalar(tensor: &Tensor) -> f32 {
         tensor.to_scalar::<f32>().unwrap()
     }

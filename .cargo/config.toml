@@ -1,0 +1,2 @@
+[env]
+MUJOCO_DOWNLOAD_DIR = { value = "target/mujoco", relative = true, force = false }

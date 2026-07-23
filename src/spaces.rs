@@ -5,14 +5,18 @@ use crate::tensor_operations::gen_range_int_tensor;
 pub trait Space {
     type Error;
 
-    /// Returns a random sample from the space.
+    /// Returns one unbatched environment action. Concrete spaces document its
+    /// exact shape.
     fn sample(&self, device: &Device) -> Result<Tensor, Self::Error>;
-    /// Returns true if the input tensor is within the space.
+    /// Returns true if `x` has the concrete space's unbatched environment
+    /// action shape and is within the space.
     fn contains(&self, x: &Tensor) -> bool;
-    /// Returns the shape of one unbatched value in the space.
+    /// Returns the shape of one latent policy output consumed by
+    /// [`Space::tensor_from_neurons`].
     fn shape(&self) -> Vec<usize>;
-    /// Converts latent policy output shaped `[batch_size, ..]` into valid
-    /// environment actions.
+    /// Converts latent policy output shaped `[batch_size, ...self.shape()]`
+    /// into batched environment actions. Concrete spaces document the output
+    /// shape.
     ///
     /// A continuous [`BoxSpace`] clamps each component to its bounds. PPO keeps
     /// its original latent action separately for probability calculations.
@@ -27,11 +31,13 @@ pub struct Discrete {
 impl Space for Discrete {
     type Error = candle_core::Error;
 
+    /// Samples one scalar environment action shaped `[]`.
     fn sample(&self, device: &Device) -> Result<Tensor, Self::Error> {
         let value = gen_range_int_tensor(0, self.possible_values as u32 - 1, device)?;
         Tensor::from_vec(vec![value], vec![], device)
     }
 
+    /// Tests one scalar environment action `x` shaped `[]`.
     fn contains(&self, x: &Tensor) -> bool {
         if x.dims() != Vec::<usize>::new() {
             return false;
@@ -43,6 +49,8 @@ impl Space for Discrete {
         false
     }
 
+    /// Returns latent policy shape `[action_count]` (or `[]` for a one-action
+    /// space).
     fn shape(&self) -> Vec<usize> {
         if self.possible_values == 1 {
             vec![]
@@ -51,6 +59,8 @@ impl Space for Discrete {
         }
     }
 
+    /// Converts logits `neurons` shaped `[batch_size, action_count]` into
+    /// scalar action indices shaped `[batch_size]`.
     fn tensor_from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error> {
         neurons.argmax(D::Minus1)
     }
@@ -80,6 +90,7 @@ pub struct BoxSpace {
 impl Space for BoxSpace {
     type Error = candle_core::Error;
 
+    /// Samples one environment action shaped `self.shape()`.
     fn sample(&self, device: &Device) -> Result<Tensor, Self::Error> {
         let mut values = vec![];
 
@@ -115,6 +126,7 @@ impl Space for BoxSpace {
         Tensor::from_vec(values, low.shape(), device)
     }
 
+    /// Tests one environment action `x` shaped `self.shape()`.
     fn contains(&self, x: &Tensor) -> bool {
         // This is kinda weird, because if the shape is not equal,
         // Should we just say false, or should we return an error?
@@ -152,6 +164,8 @@ impl Space for BoxSpace {
         self.low.shape().clone().into_dims()
     }
 
+    /// Clips `neurons` shaped `[batch_size, ...self.shape()]`, preserving that
+    /// shape.
     fn tensor_from_neurons(&self, neurons: &Tensor) -> Result<Tensor, Self::Error> {
         // Continuous policies (for example, an unsquashed Gaussian) may
         // produce values outside the environment's bounds. Keep the latent
@@ -172,6 +186,8 @@ impl Space for BoxSpace {
 }
 
 impl BoxSpace {
+    /// Creates a box whose `low` and `high` bounds have the same
+    /// `action_shape`, which becomes the shape of one unbatched value.
     pub fn new(low: Tensor, high: Tensor) -> Self {
         assert!(low.shape() == high.shape());
         Self { low, high }

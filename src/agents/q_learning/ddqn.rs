@@ -44,6 +44,8 @@ impl QLearningTarget for DDQNTarget {
         true
     }
 
+    /// Computes `[batch]` targets from reward/done vectors `[batch]` and online
+    /// and target Q values `[batch, action_count]`.
     fn target_q_values(
         rewards: &Tensor,
         next_dones: &Tensor,
@@ -144,6 +146,8 @@ where
     type GymError = GE;
     type SpaceError = SE;
 
+    /// Selects scalar discrete actions `[batch]` for observations
+    /// `[batch, ...observation_shape]`.
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
         self.inner.act(observation)
     }

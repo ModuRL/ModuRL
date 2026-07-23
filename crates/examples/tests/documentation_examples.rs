@@ -345,6 +345,7 @@ impl Gym for CounterEnv {
         })
     }
 
+    /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
         match action.to_vec0::<u32>()? {
             0 => self.state -= 1,

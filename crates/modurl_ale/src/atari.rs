@@ -312,6 +312,7 @@ impl Gym<AtariInfo> for AtariGym {
         Box::new(self.get_observation_space().clone())
     }
 
+    /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo<AtariInfo>, Self::Error> {
         let action = action.to_scalar::<u32>()? as usize;
         self.step_usize(action)

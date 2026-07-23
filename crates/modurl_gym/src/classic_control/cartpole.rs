@@ -251,6 +251,7 @@ impl Gym for CartPoleV1 {
         })
     }
 
+    /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
         assert!(self.action_space.contains(&action));
         let state_vec = self.state.to_vec1::<f32>()?;
@@ -458,6 +459,7 @@ mod tests {
             Ok(self.state.clone())
         }
 
+        /// Restores one CartPole state shaped `[4]`.
         fn set_state(&mut self, state: Tensor, _: Option<serde_json::Value>) {
             self.state = state;
         }

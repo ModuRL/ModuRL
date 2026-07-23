@@ -24,6 +24,7 @@ pub use terminal::TerminalLogger;
 pub trait Logger {
     type Error;
 
+    /// Logs named scalar metric tensors, each shaped `[]`.
     fn log(
         &mut self,
         timestep: usize,
