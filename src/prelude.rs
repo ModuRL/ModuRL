@@ -16,9 +16,19 @@ pub use crate::agents::{
         ddqn::{DDQNAgent, DDQNLogger},
         dqn::{DQNAgent, DQNLogger},
     },
+    sac::{
+        DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
+        SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork, SACDeviceStrategy,
+        SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
+        SACStabilizationConfiguration, ScalarStateActionCritic, aggregate_critic_values,
+        sac_alpha_loss, sac_bellman_targets, sac_clipped_critic_loss, sac_entropy_change_loss,
+    },
 };
 pub use crate::distributions::{
-    CategoricalDistribution, DistEval, Distribution, GaussianDistribution,
+    AffineTransform, AffineTransformError, CategoricalDistribution, CategoricalDistributionError,
+    DifferentiableExpectation, DistEval, Distribution, DistributionTransform, ExpectationTerms,
+    GaussianDistribution, GaussianDistributionError, TanhTransform, TransformedDistribution,
+    TransformedDistributionError,
 };
 #[cfg(feature = "multithreading")]
 pub use crate::gym::MultithreadedVectorizedGymWrapper;
@@ -26,8 +36,9 @@ pub use crate::gym::{
     Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper,
 };
 pub use crate::models::{
-    DefaultMLPInitializer, MLP, MLPArchitecture, MLPInitializedLayers, MLPInitializer,
-    OrthogonalMLPInitializer, probabilistic_model::ProbabilisticPolicy,
+    DefaultMLPInitializer, FrozenParametersModule, MLP, MLPArchitecture, MLPInitializedLayers,
+    MLPInitializer, OrthogonalMLPInitializer, probabilistic_model::DifferentiableExpectationPolicy,
+    probabilistic_model::ExpectationPolicy, probabilistic_model::ProbabilisticPolicy,
     probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };

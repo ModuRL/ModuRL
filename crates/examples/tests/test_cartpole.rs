@@ -57,6 +57,7 @@ impl Gym for DebugCartpoleV1 {
     type Error = <CartPoleV1 as Gym>::Error;
     type SpaceError = <CartPoleV1 as Gym>::SpaceError;
 
+    /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo, Self::Error> {
         self.steps_since_print += 1;
         self.env.step(action)
@@ -260,7 +261,9 @@ fn ppo_cartpole_shared() {
 
     let ppo_network_info: PPONetworkInfo<
         AdamW,
-        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
+        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<
+            CategoricalDistributionError,
+        >,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
@@ -389,7 +392,9 @@ fn ppo_cartpole_shared_multithreaded() {
 
     let ppo_network_info: PPONetworkInfo<
         AdamW,
-        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
+        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<
+            CategoricalDistributionError,
+        >,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()

@@ -138,6 +138,7 @@ impl TensorBoardLogger {
 impl Logger for TensorBoardLogger {
     type Error = TensorBoardError;
 
+    /// Logs named scalar metric tensors, each shaped `[]`.
     fn log(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) -> TensorBoardResult<()> {
         tensorboard_timestep(timestep)?;
         if let Some(completed) = self.aggregator.log(timestep, metrics)? {

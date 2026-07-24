@@ -97,6 +97,8 @@ pub(crate) trait QLearningLogger<I = ()> {
 pub(crate) trait QLearningTarget {
     fn requires_online_next_q_values() -> bool;
 
+    /// Computes targets from `rewards` and `next_dones` shaped `[batch]` and Q
+    /// tensors shaped `[batch, action_count]`, returning `[batch]`.
     fn target_q_values(
         rewards: &Tensor,
         next_dones: &Tensor,
@@ -242,6 +244,8 @@ where
         &*self.observation_space
     }
 
+    /// Selects scalar discrete actions shaped `[batch]` for observations shaped
+    /// `[batch, ...observation_shape]`.
     pub(crate) fn act(&mut self, observation: &Tensor) -> Result<Tensor, QAgentError<GE, SE>> {
         Ok(epsilon_greedy_actions(
             observation,
@@ -456,6 +460,9 @@ pub(crate) fn validate_epsilon(epsilon: f64) -> Result<f64, QLearningConfigurati
     Ok(epsilon)
 }
 
+/// Selects scalar actions `[batch]` for observations
+/// `[batch, ...observation_shape]`; `forward` must return
+/// `[selected_batch, action_count]`.
 pub(crate) fn epsilon_greedy_actions(
     observation: &Tensor,
     epsilon: f64,
@@ -504,6 +511,8 @@ pub(crate) fn epsilon_greedy_actions(
     Tensor::stack(&actions, 0)
 }
 
+/// Gathers scalar `actions` containing one index per batch item from `q_values`
+/// shaped `[batch, action_count]`, returning `[batch, 1]`.
 pub(crate) fn selected_action_q_values(
     q_values: &Tensor,
     actions: &Tensor,
@@ -512,6 +521,8 @@ pub(crate) fn selected_action_q_values(
     q_values.gather(&actions, 1)
 }
 
+/// Computes targets `[batch]` from `rewards`, `next_dones`, and
+/// `next_q_values`, all shaped `[batch]`.
 fn bellman_targets(
     rewards: &Tensor,
     next_dones: &Tensor,
@@ -578,6 +589,8 @@ mod tests {
             false
         }
 
+        /// Computes `[batch]` targets from reward/done vectors `[batch]` and Q
+        /// values `[batch, action_count]`.
         fn target_q_values(
             rewards: &Tensor,
             next_dones: &Tensor,
@@ -686,6 +699,7 @@ mod tests {
         type Error = candle_core::Error;
         type SpaceError = candle_core::Error;
 
+        /// Steps with one scalar discrete action shaped `[]`.
         fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
             self.steps += 1;
             Ok(StepInfo {

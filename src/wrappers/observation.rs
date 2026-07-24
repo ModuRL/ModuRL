@@ -47,6 +47,7 @@ where
         Ok(reset)
     }
 
+    /// Forwards one unbatched environment action shaped `action_shape`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
         let mut info = self
             .gym
@@ -100,6 +101,7 @@ where
         self.gym.reset().map_err(MaxAndSkipGymError::GymError)
     }
 
+    /// Forwards one unbatched environment action shaped `action_shape`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
         let mut total_reward = 0.0;
         let mut last_observation = None;

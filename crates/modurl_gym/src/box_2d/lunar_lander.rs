@@ -882,6 +882,7 @@ impl Gym for LunarLanderV3 {
         })
     }
 
+    /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
         assert!(self.lander.is_some(), "You forgot to call reset()");
         let world = self.world.as_ref().unwrap().clone();
@@ -1408,6 +1409,8 @@ mod tests {
             self.get_current_state()
         }
 
+        /// Restores one LunarLander observation shaped `[8]` plus physics
+        /// metadata.
         fn set_state(&mut self, _state: Tensor, extra_info: Option<serde_json::Value>) {
             // Extract raw physics values from the extra_info (from Python custom_info)
             let info = extra_info.expect("extra_info is required for set_state");

@@ -2,13 +2,18 @@ use crate::gym::VectorizedGym;
 use candle_core::Tensor;
 pub mod ppo;
 pub mod q_learning;
+pub mod sac;
 
 pub trait Agent<I = ()> {
     type Error;
     type GymError;
     type SpaceError;
 
-    /// Observation must be a tensor of shape [batch_size, observation_size].
+    /// Selects actions for observations shaped
+    /// `[batch_size, ...observation_shape]`.
+    ///
+    /// Returns environment actions shaped
+    /// `[batch_size, ...environment_action_shape]`.
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error>;
     fn learn(
         &mut self,
@@ -41,6 +46,7 @@ pub(crate) mod test_support {
         type Error = candle_core::Error;
         type SpaceError = candle_core::Error;
 
+        /// Steps with one scalar discrete action shaped `[]`.
         fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
             Ok(StepInfo {
                 state: Tensor::zeros(&[4], DType::F32, &self.device)?,
