@@ -1115,6 +1115,9 @@ where
         )?)
     }
 
+    /// Optimizes each critic against Bellman `targets` shaped `[batch]`.
+    ///
+    /// Returns one scalar loss tensor per critic.
     fn optimize_critics(
         &mut self,
         batch: &SACOptimizationBatch,
@@ -1200,6 +1203,8 @@ where
         })
     }
 
+    /// Optimizes automatic entropy temperature from states shaped
+    /// `[batch, ...state_shape]`.
     fn optimize_temperature(
         &mut self,
         states: &Tensor,
@@ -1263,6 +1268,8 @@ where
         Ok(())
     }
 
+    /// Logs Bellman `targets` shaped `[batch]` and one scalar loss tensor per
+    /// critic, along with the actor and temperature update tensors.
     fn log_optimization(
         &mut self,
         collection_timestep: usize,
@@ -1313,6 +1320,8 @@ where
         Ok(())
     }
 
+    /// Computes collection-policy entropy metadata for observations shaped
+    /// `[environment_count, ...observation_shape]`.
     fn collection_entropy_metadata(
         &self,
         observations: &Tensor,
@@ -1344,6 +1353,8 @@ where
         })
     }
 
+    /// Selects actions shaped `[environment_count, ...action_shape]` for
+    /// observations shaped `[environment_count, ...observation_shape]`.
     fn select_collection_actions(
         &self,
         observations: &Tensor,
