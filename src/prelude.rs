@@ -5,20 +5,19 @@
 //! Candle and ModuRL Gym are intentionally left explicit.
 
 pub use crate::agents::{
-    Agent,
+    Agent, ReplayDeviceStrategy,
     ppo::{
         PPOAgent, PPOCollectionLogEntry, PPOEpisodeLogEntry, PPOError, PPOLogEntry, PPOLogger,
         PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
     },
     q_learning::{
-        QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError,
-        QLearningDeviceStrategy, QLogEntry,
+        QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError, QLogEntry,
         ddqn::{DDQNAgent, DDQNLogger},
         dqn::{DQNAgent, DQNLogger},
     },
     sac::{
         DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
-        SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork, SACDeviceStrategy,
+        SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
         SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
         SACStabilizationConfiguration, ScalarStateActionCritic, aggregate_critic_values,
         sac_alpha_loss, sac_bellman_targets, sac_clipped_critic_loss, sac_entropy_change_loss,
@@ -37,9 +36,8 @@ pub use crate::gym::{
 };
 pub use crate::models::{
     DefaultMLPInitializer, FrozenParametersModule, MLP, MLPArchitecture, MLPInitializedLayers,
-    MLPInitializer, OrthogonalMLPInitializer, probabilistic_model::DifferentiableExpectationPolicy,
-    probabilistic_model::ExpectationPolicy, probabilistic_model::ProbabilisticPolicy,
-    probabilistic_model::ProbabilisticPolicyModel,
+    MLPInitializer, OrthogonalMLPInitializer, probabilistic_model::ExpectationPolicy,
+    probabilistic_model::ProbabilisticPolicy, probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
 pub use crate::parameter_schedule::{

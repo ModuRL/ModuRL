@@ -50,8 +50,6 @@ pub trait ExpectationPolicy: ProbabilisticPolicy {
     fn default_target_entropy(&self, state: &Tensor) -> Result<f64, Self::Error>;
 }
 
-pub use ExpectationPolicy as DifferentiableExpectationPolicy;
-
 pub struct ProbabilisticPolicyModel<D>
 where
     D: Distribution,

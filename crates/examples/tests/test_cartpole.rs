@@ -511,7 +511,7 @@ fn dqn_cartpole() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         }))
-        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DQN configuration should be valid");
 
@@ -599,7 +599,7 @@ fn ddqn_cartpole() {
         .update_frequency(10)
         .target_update_interval(500)
         .training_horizon(500_000)
-        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DDQN configuration should be valid");
 

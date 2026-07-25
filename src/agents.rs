@@ -2,7 +2,10 @@ use crate::gym::VectorizedGym;
 use candle_core::Tensor;
 pub mod ppo;
 pub mod q_learning;
+mod replay_device_strategy;
 pub mod sac;
+
+pub use replay_device_strategy::ReplayDeviceStrategy;
 
 pub trait Agent<I = ()> {
     type Error;

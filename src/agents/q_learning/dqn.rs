@@ -3,11 +3,11 @@ use candle_core::{Error, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
 use super::{
-    QAgentError, QCollectionLogEntry, QLearningAgent, QLearningDeviceStrategy, QLearningLogger,
-    QLearningTarget, QLogEntry, bellman_targets,
+    QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
+    bellman_targets,
 };
 use crate::{
-    agents::Agent,
+    agents::{Agent, ReplayDeviceStrategy},
     gym::VectorizedGym,
     parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, Space},
@@ -100,7 +100,7 @@ where
         #[builder(default = 1000)] training_start: usize,
         training_horizon: usize,
         logger: Option<&'a mut dyn DQNLogger<I>>,
-        device_strategy: QLearningDeviceStrategy,
+        device_strategy: ReplayDeviceStrategy,
     ) -> Result<Self, QAgentError<GE, SE>> {
         let inner = QLearningAgent::<'a, O, GE, SE, DQNTarget>::builder()
             .action_space(action_space)

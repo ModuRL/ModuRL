@@ -10,7 +10,7 @@ use bon::bon;
 use candle_core::{D, DType, IndexOp, Tensor, Var};
 use candle_nn::{Optimizer, VarMap};
 
-use super::Agent;
+use super::{Agent, ReplayDeviceStrategy};
 use crate::{
     buffers::{
         experience,
@@ -22,8 +22,6 @@ use crate::{
     spaces::Space,
     tensor_operations::{tensor_has_nan, torch_like_max, torch_like_min},
 };
-
-pub use super::q_learning::QLearningDeviceStrategy as SACDeviceStrategy;
 
 /// A Q network that can evaluate replay actions and policy candidates.
 pub trait SACCriticNetwork {
@@ -844,7 +842,7 @@ where
     entropy_change_penalty: Option<f64>,
     q_value_clip: Option<f64>,
     schedule_progress: ScheduleProgress,
-    device_strategy: SACDeviceStrategy,
+    device_strategy: ReplayDeviceStrategy,
     optimization_steps: usize,
     logger: Option<&'a mut dyn SACLogger<I>>,
     _errors: std::marker::PhantomData<(GE, fn() -> I)>,
@@ -868,7 +866,7 @@ where
         entropy_configuration: SACEntropyConfiguration<EO>,
         action_space: Box<dyn Space<Error = SE>>,
         observation_space: Box<dyn Space<Error = SE>>,
-        device_strategy: SACDeviceStrategy,
+        device_strategy: ReplayDeviceStrategy,
         logger: Option<&'a mut dyn SACLogger<I>>,
         aggregation_mode: Option<SACCriticAggregationMode>,
         /// Optional grouped defaults for stabilization techniques.
@@ -2157,7 +2155,7 @@ mod tests {
                 10.0,
                 &Device::Cpu,
             )))
-            .device_strategy(SACDeviceStrategy::OneDevice(Device::Cpu))
+            .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
             .replay_capacity(2)
             .batch_size(1)
             .training_start(10)
@@ -2385,7 +2383,7 @@ mod tests {
                 1.0,
                 &device,
             )))
-            .device_strategy(SACDeviceStrategy::OneDevice(device.clone()))
+            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
             .replay_capacity(16)
             .batch_size(2)
             .training_start(2)

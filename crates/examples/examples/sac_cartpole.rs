@@ -144,7 +144,7 @@ fn main() {
         .batch_size(64)
         .training_horizon(total_timesteps)
         .logger(&mut grapher)
-        .device_strategy(SACDeviceStrategy::OneDevice(device))
+        .device_strategy(ReplayDeviceStrategy::OneDevice(device))
         .build()
         .unwrap();
 
