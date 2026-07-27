@@ -12,8 +12,8 @@ The project is currently early and API stability is not guaranteed.
 ModuRL is built around a few long-term goals:
 
 - **Be the fastest Rust-native RL library for supported algorithms.** We want
-  PPO, DQN, and future supported algorithms to compete on training throughput,
-  memory efficiency, and backend utilization.
+  PPO, SAC, DQN, and future supported algorithms to compete on training
+  throughput, memory efficiency, and backend utilization.
 - **Make RL systems modular without making them slow.** Users should be able to
   swap policies, critics, distributions, environments, schedules, loggers, and
   buffers while staying close to hand-written training-loop performance.
@@ -45,6 +45,7 @@ ModuRL intentionally does not try to be everything:
 | Area | Status |
 | --- | --- |
 | PPO | Implemented |
+| SAC | Implemented |
 | DQN | Implemented |
 | DDQN | Implemented |
 | Vectorized environments | Implemented |
@@ -82,6 +83,12 @@ cargo run --release -p examples --example sac_mujoco --features hopper
 cargo run --release -p examples --example sac_mujoco --features walker2d
 ```
 
+The discrete SAC variant also has a CartPole example:
+
+```sh
+cargo run --release -p examples --example sac_cartpole
+```
+
 For DQN training with terminal plots for loss, exploration, Q-values, and
 episode performance:
 
@@ -92,6 +99,11 @@ cargo run --example dqn_cartpole_with_graphs
 For value-based CartPole programs, read the [DQN guide](docs/src/dqn.md) or
 [Double DQN guide](docs/src/ddqn.md). Both pages include a complete program and
 explain the required replay, exploration, and target-network configuration.
+
+For Soft Actor-Critic continuous control, read the
+[SAC guide](docs/src/sac.md). It explains actor and critic construction,
+entropy configuration, stabilization, replay devices, and the complete MuJoCo
+example.
 
 For GPU-backed builds, enable the matching Candle backend feature:
 
@@ -107,6 +119,8 @@ cargo run --features metal --example ppo_bench
 | `examples/ppo_bench.rs` | PPO on CartPole with separate actor and critic networks |
 | `examples/ppo_cartpole_with_graphs.rs` | PPO training metrics through `PPOLogger` |
 | `examples/ppo_mujoco_with_graphs.rs` | Continuous PPO on a feature-selected MuJoCo environment with progress, terminal plots, and TensorBoard logs under `runs/ppo_mujoco` |
+| `examples/sac_cartpole.rs` | Discrete SAC variant on CartPole |
+| `examples/sac_mujoco.rs` | Continuous SAC on a feature-selected MuJoCo environment |
 | `examples/dqn_cartpole_with_graphs.rs` | DQN training metrics and episode graphs through `DQNLogger` |
 | `examples/rendered_lunar_lander_ppo.rs` | PPO on LunarLander with rendering and learning-rate schedules |
 

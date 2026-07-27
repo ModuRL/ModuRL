@@ -7,6 +7,8 @@
   - [Models, Policies, and Distributions](./models-policies-and-distributions.md)
 - [PPO](./ppo.md)
   - [Understand a PPO Training Run](./understand-ppo-training.md)
+- [Soft Actor-Critic](./sac.md)
+  - [Understand an SAC Training Run](./understand-sac-training.md)
 - [Value-Based Training](./q-learning.md)
   - [DQN](./dqn.md)
   - [Double DQN](./ddqn.md)

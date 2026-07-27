@@ -419,9 +419,13 @@ fn copy_var_map(online: &VarMap, target: &mut VarMap, tau: f64) -> Result<(), SA
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SACCriticAggregationMode {
+    /// Uses the arithmetic mean of all critic values.
     Mean,
+    /// Uses the middle critic value, or the mean of the two middle values.
     Median,
+    /// Uses the lowest critic value.
     Min,
+    /// Uses the highest critic value.
     Max,
 }
 
@@ -541,12 +545,19 @@ pub enum SACEntropyConfiguration<O>
 where
     O: Optimizer,
 {
+    /// Optimizes `log_alpha` toward a policy or scheduled target entropy.
     Automatic {
+        /// Scalar logarithm of the entropy coefficient.
         log_alpha: Var,
+        /// Optimizer containing `log_alpha`.
         optimizer: O,
+        /// Optional target entropy over training progress. `None` uses the
+        /// policy's [`ExpectationPolicy::default_target_entropy`].
         target_entropy_schedule: Option<Box<dyn ParameterSchedule>>,
     },
+    /// Keeps the entropy coefficient constant.
     Fixed {
+        /// Finite, non-negative entropy coefficient.
         alpha: f64,
     },
 }
@@ -555,6 +566,7 @@ impl<O> SACEntropyConfiguration<O>
 where
     O: Optimizer,
 {
+    /// Creates an automatically tuned entropy coefficient.
     pub fn automatic(
         log_alpha: Var,
         optimizer: O,
@@ -567,6 +579,7 @@ where
         }
     }
 
+    /// Creates a fixed entropy coefficient.
     pub fn fixed(alpha: f64) -> Self {
         Self::Fixed { alpha }
     }
@@ -587,7 +600,9 @@ pub struct SACStabilizationConfiguration {
 impl SACStabilizationConfiguration {
     #[builder]
     pub fn new(
+        /// Coefficient for the replay-to-current entropy-change penalty.
         entropy_change_penalty: Option<f64>,
+        /// Critic aggregation override associated with this preset.
         aggregation_mode: Option<SACCriticAggregationMode>,
     ) -> Self {
         Self {
@@ -728,37 +743,61 @@ struct SACEpisodeTracker {
 }
 
 pub struct SACLogEntry {
+    /// One scalar optimization loss per critic.
     pub critic_losses: Vec<Tensor>,
+    /// Scalar actor optimization loss.
     pub actor_loss: Tensor,
+    /// Scalar automatic entropy-coefficient loss, or `None` for fixed entropy.
     pub alpha_loss: Option<Tensor>,
+    /// Scalar replay-to-current entropy penalty when enabled.
     pub entropy_change_loss: Option<Tensor>,
+    /// Current automatic target entropy, or `None` for fixed entropy.
     pub target_entropy: Option<f64>,
+    /// Current scalar entropy coefficient.
     pub alpha: Tensor,
     /// The detached soft Bellman targets shared by all critics for this update.
+    /// Shape: `[batch_size]`.
     pub bellman_targets: Tensor,
+    /// Candidate log probabilities shaped `[batch_size, candidate_count]`.
     pub policy_log_probabilities: Tensor,
+    /// Candidate expectation weights shaped `[batch_size, candidate_count]`.
     pub policy_weights: Tensor,
     /// Raw soft-Q critic values before the actor's current entropy term.
+    /// Shape: `[batch_size, candidate_count]`.
     pub policy_q_values: Tensor,
+    /// Rewards from the sampled replay batch, shaped `[batch_size]`.
     pub replay_rewards: Tensor,
+    /// Zero-based number of the optimization step.
     pub update_index: usize,
+    /// Total collected transitions when this update was triggered.
     pub collection_timestep: usize,
 }
 
 pub struct SACCollectionLogEntry<I = ()> {
+    /// Latest reward for each inner environment, shaped `[environment_count]`.
     pub collection_rewards: Tensor,
+    /// Latest typed step metadata in inner-environment order.
     pub infos: Vec<I>,
+    /// Total transitions collected after this vectorized environment step.
     pub collection_timestep: usize,
+    /// Episodes completed during this vectorized environment step.
     pub completed_episodes: Vec<SACEpisodeLogEntry>,
+    /// Number of transitions currently held in replay.
     pub replay_len: usize,
 }
 
 pub struct SACEpisodeLogEntry {
+    /// Index of the inner environment that completed.
     pub environment_index: usize,
+    /// Sum of rewards collected during the episode.
     pub episode_return: f32,
+    /// Number of environment steps in the episode.
     pub episode_length: usize,
+    /// Whether the environment reached a terminal state.
     pub terminated: bool,
+    /// Whether an external limit truncated the episode.
     pub truncated: bool,
+    /// Total collected transitions when the episode completed.
     pub collection_timestep: usize,
 }
 
@@ -799,7 +838,9 @@ impl SACEpisodeTracker {
 }
 
 pub trait SACLogger<I = ()> {
+    /// Receives one sampled-replay update after `training_start`.
     fn log_update(&mut self, entry: &SACLogEntry);
+    /// Receives the result of one vectorized environment step.
     fn log_collection(&mut self, entry: &SACCollectionLogEntry<I>);
 }
 
@@ -867,7 +908,10 @@ where
         action_space: Box<dyn Space<Error = SE>>,
         observation_space: Box<dyn Space<Error = SE>>,
         device_strategy: ReplayDeviceStrategy,
+        /// Optional update and collection metric sink.
         logger: Option<&'a mut dyn SACLogger<I>>,
+        /// Explicit critic aggregation mode. This takes precedence over the
+        /// stabilization configuration and defaults to `Min`.
         aggregation_mode: Option<SACCriticAggregationMode>,
         /// Optional grouped defaults for stabilization techniques.
         #[builder(default)]
@@ -878,8 +922,13 @@ where
         #[builder(default = 0.005)] tau: f64,
         #[builder(default = 1_000_000)] replay_capacity: usize,
         #[builder(default = 256)] batch_size: usize,
-        #[builder(default = 1_000)] training_start: usize,
-        #[builder(default = NonZeroUsize::MIN)] samples: NonZeroUsize,
+        /// Number of random-action transitions collected before optimization.
+        #[builder(default = 1_000)]
+        training_start: usize,
+        /// Candidate count used for sampled action expectations. Exact
+        /// categorical expectations ignore this value.
+        #[builder(default = NonZeroUsize::MIN)]
+        samples: NonZeroUsize,
         /// Total collected transitions over which parameter schedules run.
         training_horizon: usize,
     ) -> Result<Self, SACError<PE, GE, SE>> {

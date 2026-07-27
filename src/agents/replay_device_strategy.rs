@@ -6,9 +6,13 @@ use candle_core::Device;
 /// `Hybrid` stores replay on one device and transfers sampled batches to the
 /// device used for network optimization.
 pub enum ReplayDeviceStrategy {
+    /// Stores replay and runs optimization on the same device.
     OneDevice(Device),
+    /// Stores replay separately and transfers sampled batches for optimization.
     Hybrid {
+        /// Device holding model parameters and tensors during optimization.
         optimization_device: Device,
+        /// Device holding detached transitions while they remain in replay.
         storage_device: Device,
     },
 }

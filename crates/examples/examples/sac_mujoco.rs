@@ -51,12 +51,12 @@ fn sac_mlp(
         .build()
 }
 
-struct GaussianActor {
+struct GaussianModule {
     mean: MLP,
     log_std: Tensor,
 }
 
-impl Module for GaussianActor {
+impl Module for GaussianModule {
     /// Maps observations `[batch, observation_size]` to Gaussian parameters
     /// `[batch, 2 * action_size]`.
     fn forward(&self, observations: &Tensor) -> candle_core::Result<Tensor> {
@@ -140,7 +140,7 @@ fn main() {
         TanhTransform,
     );
     let policy = ProbabilisticPolicyModel::with_distribution(
-        Box::new(GaussianActor { mean, log_std }),
+        Box::new(GaussianModule { mean, log_std }),
         distribution,
     );
     let actor_optimizer = AdamW::new(actor_vars.all_vars(), optimizer_parameters.clone()).unwrap();
