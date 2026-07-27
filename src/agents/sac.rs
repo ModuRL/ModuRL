@@ -1470,10 +1470,6 @@ where
                 collection_policy_entropy: policy_entropies[index],
                 entropy_change_weight,
             });
-
-            if collection_timestep >= self.training_start {
-                self.optimize(collection_timestep)?;
-            }
         }
 
         Ok(completed_episodes)
@@ -1528,6 +1524,12 @@ where
                 },
                 &mut episodes,
             )?;
+            for index in 0..environment_count {
+                let collection_timestep = first_timestep + index + 1;
+                if collection_timestep >= self.training_start {
+                    self.optimize(collection_timestep)?;
+                }
+            }
 
             elapsed_timesteps += environment_count;
             observations = reset_next_states;
