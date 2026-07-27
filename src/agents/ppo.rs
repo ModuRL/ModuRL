@@ -7,6 +7,7 @@ use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
     gym::{VectorizedGym, VectorizedStepInfo},
     models::probabilistic_model::ProbabilisticPolicy,
+    objectives::clipped_value_loss,
     parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
     sampling::shuffle_with_device_rng,
     spaces,
@@ -784,12 +785,7 @@ where
         let critic_loss = if self.clip_value_loss {
             // PPO2/CleanRL value-loss clipping: bound how far the value estimate
             // may move from its rollout-time value within one update.
-            let clip_range = clip_range as f64;
-            let value_delta = (&values - &old_values)?.clamp(-clip_range, clip_range)?;
-            let values_clipped = (&old_values + value_delta)?;
-            let loss_unclipped = (&values - &returns)?.sqr()?;
-            let loss_clipped = (&values_clipped - &returns)?.sqr()?;
-            loss_unclipped.maximum(&loss_clipped)?.mean_all()?
+            clipped_value_loss(&values, &returns, &old_values, clip_range as f64)?
         } else {
             loss::mse(&values, &returns)?
         };

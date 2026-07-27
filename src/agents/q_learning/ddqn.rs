@@ -4,11 +4,12 @@ use candle_nn::{Optimizer, VarMap};
 
 use super::{
     QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
-    bellman_targets, selected_action_q_values,
+    selected_action_q_values,
 };
 use crate::{
     agents::{Agent, ReplayDeviceStrategy},
     gym::VectorizedGym,
+    objectives::bellman_targets,
     parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, Space},
 };
@@ -59,7 +60,7 @@ impl QLearningTarget for DDQNTarget {
         let next_q_values = selected_action_q_values(target_next_q_values, &next_actions)?
             .squeeze(1)?
             .detach();
-        bellman_targets(rewards, next_dones, &next_q_values, gamma)
+        bellman_targets(rewards, next_dones, &next_q_values, f64::from(gamma))
     }
 }
 

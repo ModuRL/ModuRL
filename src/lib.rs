@@ -4,6 +4,7 @@ pub mod distributions;
 pub mod gym;
 pub mod init;
 pub mod models;
+pub mod objectives;
 pub mod parameter_schedule;
 pub mod prelude;
 pub mod sampling;

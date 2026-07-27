@@ -18,6 +18,7 @@ use crate::{
     },
     gym::{VectorizedGym, VectorizedStepInfo},
     models::{FrozenParametersModule, probabilistic_model::ExpectationPolicy},
+    objectives::{bellman_targets, clipped_value_loss},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::Space,
     tensor_operations::tensor_has_nan,
@@ -64,9 +65,6 @@ pub enum SACCriticError {
         target_only: Vec<String>,
     },
     NoCriticValues,
-    InvalidQValueClip {
-        epsilon: f64,
-    },
 }
 
 impl From<candle_core::Error> for SACCriticError {
@@ -478,18 +476,6 @@ pub fn aggregate_critic_values(
     Ok(aggregated)
 }
 
-/// Builds SAC Bellman targets from `rewards`, `terminated`, and
-/// `next_soft_values`, all shaped `[batch]`, and returns `[batch]`.
-pub fn sac_bellman_targets(
-    rewards: &Tensor,
-    terminated: &Tensor,
-    next_soft_values: &Tensor,
-    gamma: f64,
-) -> candle_core::Result<Tensor> {
-    let continuation = (1.0 - terminated)?;
-    Ok((rewards + ((next_soft_values * continuation)? * gamma)?)?.detach())
-}
-
 /// Returns a scalar temperature loss from scalar `log_alpha` shaped `[]` and
 /// `expected_log_probability` shaped `[batch]`.
 pub fn sac_alpha_loss(
@@ -514,26 +500,6 @@ pub fn sac_entropy_change_loss(
         .mul(weights)?;
     let normalizer = weights.sum_all()?.clamp(1.0, f64::INFINITY)?;
     weighted_error.sum_all()?.broadcast_div(&normalizer)? * coefficient
-}
-
-/// Returns a scalar clipped critic loss from `prediction`, `target`, and
-/// `anchor`, all shaped `[batch]`.
-pub fn sac_clipped_critic_loss(
-    prediction: &Tensor,
-    target: &Tensor,
-    anchor: &Tensor,
-    epsilon: f64,
-) -> Result<Tensor, SACCriticError> {
-    if !epsilon.is_finite() || epsilon <= 0.0 {
-        return Err(SACCriticError::InvalidQValueClip { epsilon });
-    }
-    let anchor = anchor.detach();
-    let target = target.detach();
-    let delta = (prediction - &anchor)?.clamp(-epsilon, epsilon)?;
-    let clipped = (&anchor + &delta)?;
-    let loss = (prediction - &target)?.sqr()?;
-    let clipped_loss = (clipped - &target)?.sqr()?;
-    Ok(loss.maximum(&clipped_loss)?.mean_all()?)
 }
 
 /// Entropy coefficient configuration.
@@ -1149,8 +1115,9 @@ where
         let entropy_cost = next_log_probabilities.broadcast_mul(&alpha)?;
         let soft_values = (&target_values - entropy_cost)?
             .mul(&next_weights)?
-            .sum(D::Minus1)?;
-        Ok(sac_bellman_targets(
+            .sum(D::Minus1)?
+            .detach();
+        Ok(bellman_targets(
             &batch.rewards,
             &batch.terminated,
             &soft_values,
@@ -1166,6 +1133,7 @@ where
         batch: &SACOptimizationBatch,
         targets: &Tensor,
     ) -> Result<Vec<Tensor>, SACError<PE, GE, SE>> {
+        let targets = targets.detach();
         let mut critic_losses = Vec::with_capacity(self.critics.len());
         for critic in &mut self.critics {
             let predicted = critic.online_replay_values(&batch.states, &batch.actions)?;
@@ -1174,10 +1142,12 @@ where
             // around its target-network value, as in PPO's value loss.
             let loss = match self.q_value_clip {
                 Some(epsilon) => {
-                    let anchor = critic.target_replay_values(&batch.states, &batch.actions)?;
-                    sac_clipped_critic_loss(&predicted, targets, &anchor, epsilon)?
+                    let anchor = critic
+                        .target_replay_values(&batch.states, &batch.actions)?
+                        .detach();
+                    clipped_value_loss(&predicted, &targets, &anchor, epsilon)?
                 }
-                None => candle_nn::loss::mse(&predicted, targets)?,
+                None => candle_nn::loss::mse(&predicted, &targets)?,
             };
             if !tensor_has_nan(&loss)? {
                 critic.optimizer_mut().backward_step(&loss)?;
@@ -1830,34 +1800,6 @@ mod tests {
     }
 
     #[test]
-    fn clipped_critic_loss_uses_larger_error_and_detaches_anchor() {
-        let prediction = Var::from_vec(vec![0.0f32, 0.0], 2, &Device::Cpu).unwrap();
-        let anchor = Var::from_vec(vec![2.0f32, 0.0], 2, &Device::Cpu).unwrap();
-        let target = Var::from_vec(vec![0.0f32, 0.0], 2, &Device::Cpu).unwrap();
-        let loss = sac_clipped_critic_loss(
-            prediction.as_tensor(),
-            target.as_tensor(),
-            anchor.as_tensor(),
-            0.5,
-        )
-        .unwrap();
-        assert_eq!(loss.to_scalar::<f32>().unwrap(), 1.125);
-        let gradients = loss.backward().unwrap();
-        assert!(gradients.get(prediction.as_tensor()).is_some());
-        assert!(gradients.get(anchor.as_tensor()).is_none());
-        assert!(gradients.get(target.as_tensor()).is_none());
-        assert!(matches!(
-            sac_clipped_critic_loss(
-                prediction.as_tensor(),
-                target.as_tensor(),
-                anchor.as_tensor(),
-                0.0,
-            ),
-            Err(SACCriticError::InvalidQValueClip { epsilon: 0.0 })
-        ));
-    }
-
-    #[test]
     fn scalar_adapter_broadcasts_states_across_candidates() {
         let critic = ScalarStateActionCritic::new(Box::new(SumModule));
         let states = tensor(&[1.0, 2.0, 3.0, 4.0], (2, 2));
@@ -2091,39 +2033,6 @@ mod tests {
                 .unwrap()
                 .get(actor_outputs.as_tensor())
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn target_gradients_reach_online_critic_only() {
-        let policy_value = Var::from_vec(vec![2.0f32], 1, &Device::Cpu).unwrap();
-        let target_critic_value = Var::from_vec(vec![3.0f32], 1, &Device::Cpu).unwrap();
-        let online_critic_value = Var::from_vec(vec![0.0f32], 1, &Device::Cpu).unwrap();
-        let soft_value = policy_value
-            .as_tensor()
-            .mul(target_critic_value.as_tensor())
-            .unwrap();
-        let target =
-            sac_bellman_targets(&tensor(&[1.0], 1), &tensor(&[0.0], 1), &soft_value, 0.99).unwrap();
-        let loss = candle_nn::loss::mse(online_critic_value.as_tensor(), &target).unwrap();
-        let gradients = loss.backward().unwrap();
-
-        assert!(gradients.get(online_critic_value.as_tensor()).is_some());
-        assert!(gradients.get(policy_value.as_tensor()).is_none());
-        assert!(gradients.get(target_critic_value.as_tensor()).is_none());
-    }
-
-    #[test]
-    fn target_mask_ignores_bootstrap_only_for_termination() {
-        let rewards = tensor(&[1.0, 2.0], 2);
-        let terminated = tensor(&[0.0, 1.0], 2);
-        let soft_values = tensor(&[10.0, 20.0], 2);
-        assert_eq!(
-            sac_bellman_targets(&rewards, &terminated, &soft_values, 0.9)
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap(),
-            vec![10.0, 2.0]
         );
     }
 
