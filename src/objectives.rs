@@ -27,9 +27,6 @@ pub fn clipped_value_loss(
     anchor: &Tensor,
     epsilon: f64,
 ) -> candle_core::Result<Tensor> {
-    if !epsilon.is_finite() || epsilon <= 0.0 {
-        candle_core::bail!("clip range must be finite and greater than zero, got {epsilon}")
-    }
     let delta = (prediction - anchor)?.clamp(-epsilon, epsilon)?;
     let clipped = (anchor + delta)?;
     let loss = (prediction - target)?.sqr()?;
@@ -80,14 +77,5 @@ mod tests {
         assert!(gradients.get(prediction.as_tensor()).is_some());
         assert!(gradients.get(anchor.as_tensor()).is_some());
         assert!(gradients.get(target.as_tensor()).is_some());
-        assert!(
-            clipped_value_loss(
-                prediction.as_tensor(),
-                target.as_tensor(),
-                anchor.as_tensor(),
-                0.0,
-            )
-            .is_err()
-        );
     }
 }

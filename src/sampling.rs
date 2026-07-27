@@ -1,6 +1,51 @@
+use std::fmt::{Display, Formatter};
+
 use candle_core::{DType, Device, Tensor};
 
 const MAX_EXACT_F32_INTEGER: u32 = 1 << 24;
+
+/// Failures from sampling with Candle's device RNG.
+#[derive(Debug)]
+pub enum SamplingError {
+    InvalidInclusiveRange { start: u32, end: u32 },
+    InclusiveRangeTooLarge { end: u32, maximum: u32 },
+    TensorError(candle_core::Error),
+}
+
+impl Display for SamplingError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidInclusiveRange { start, end } => {
+                write!(
+                    formatter,
+                    "invalid inclusive sampling range {start}..={end}"
+                )
+            }
+            Self::InclusiveRangeTooLarge { end, maximum } => write!(
+                formatter,
+                "inclusive sampling range end {end} exceeds the maximum {maximum}"
+            ),
+            Self::TensorError(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for SamplingError {}
+
+impl From<candle_core::Error> for SamplingError {
+    fn from(error: candle_core::Error) -> Self {
+        Self::TensorError(error)
+    }
+}
+
+impl From<SamplingError> for candle_core::Error {
+    fn from(error: SamplingError) -> Self {
+        match error {
+            SamplingError::TensorError(error) => error,
+            error => Self::Msg(error.to_string()),
+        }
+    }
+}
 
 /// Samples one integer uniformly from the inclusive range `start..=end`.
 ///
@@ -9,22 +54,21 @@ const MAX_EXACT_F32_INTEGER: u32 = 1 << 24;
 /// seed also controls this sample. Values above `2^24 - 1` are rejected because
 /// the underlying `f32` uniform sampler cannot represent every larger integer
 /// exactly.
-pub fn sample_u32_inclusive(
-    start: u32,
-    end: u32,
-    device: &Device,
-) -> Result<u32, candle_core::Error> {
+pub fn sample_u32_inclusive(start: u32, end: u32, device: &Device) -> Result<u32, SamplingError> {
     if start > end {
-        candle_core::bail!("invalid inclusive sampling range {start}..={end}")
+        return Err(SamplingError::InvalidInclusiveRange { start, end });
     }
     if end >= MAX_EXACT_F32_INTEGER {
-        candle_core::bail!("inclusive sampling range must end below {MAX_EXACT_F32_INTEGER}")
+        return Err(SamplingError::InclusiveRangeTooLarge {
+            end,
+            maximum: MAX_EXACT_F32_INTEGER - 1,
+        });
     }
 
-    Tensor::rand(start as f32, (end + 1) as f32, (), device)?
+    Ok(Tensor::rand(start as f32, (end + 1) as f32, (), device)?
         .floor()?
         .to_dtype(DType::U32)?
-        .to_scalar::<u32>()
+        .to_scalar::<u32>()?)
 }
 
 /// Shuffles `values` using random numbers produced by Candle on `device`.
@@ -63,8 +107,17 @@ mod tests {
     #[test]
     fn rejects_invalid_ranges() {
         let device = Device::Cpu;
-        assert!(sample_u32_inclusive(2, 1, &device).is_err());
-        assert!(sample_u32_inclusive(0, MAX_EXACT_F32_INTEGER, &device).is_err());
+        assert!(matches!(
+            sample_u32_inclusive(2, 1, &device),
+            Err(SamplingError::InvalidInclusiveRange { start: 2, end: 1 })
+        ));
+        assert!(matches!(
+            sample_u32_inclusive(0, MAX_EXACT_F32_INTEGER, &device),
+            Err(SamplingError::InclusiveRangeTooLarge {
+                end: MAX_EXACT_F32_INTEGER,
+                maximum: 16_777_215,
+            })
+        ));
     }
 
     #[test]
