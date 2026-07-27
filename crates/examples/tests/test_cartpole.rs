@@ -57,6 +57,7 @@ impl Gym for DebugCartpoleV1 {
     type Error = <CartPoleV1 as Gym>::Error;
     type SpaceError = <CartPoleV1 as Gym>::SpaceError;
 
+    /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo, Self::Error> {
         self.steps_since_print += 1;
         self.env.step(action)
@@ -260,7 +261,9 @@ fn ppo_cartpole_shared() {
 
     let ppo_network_info: PPONetworkInfo<
         AdamW,
-        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
+        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<
+            CategoricalDistributionError,
+        >,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
@@ -389,7 +392,9 @@ fn ppo_cartpole_shared_multithreaded() {
 
     let ppo_network_info: PPONetworkInfo<
         AdamW,
-        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<candle_core::Error>,
+        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<
+            CategoricalDistributionError,
+        >,
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
@@ -506,7 +511,7 @@ fn dqn_cartpole() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         }))
-        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DQN configuration should be valid");
 
@@ -594,7 +599,7 @@ fn ddqn_cartpole() {
         .update_frequency(10)
         .target_update_interval(500)
         .training_horizon(500_000)
-        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DDQN configuration should be valid");
 

@@ -129,6 +129,7 @@ impl Aggregator {
         }
     }
 
+    /// Aggregates named scalar metric tensors, each shaped `[]`.
     pub(crate) fn log(
         &mut self,
         timestep: usize,
@@ -184,6 +185,7 @@ impl Aggregator {
     }
 }
 
+/// Converts named scalar tensors shaped `[]` into host values.
 fn read_metrics(metrics: &[(&str, &Tensor)]) -> Result<Vec<(String, f32)>> {
     metrics
         .iter()

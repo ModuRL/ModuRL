@@ -151,6 +151,7 @@ impl TerminalLogger {
 impl Logger for TerminalLogger {
     type Error = crate::Error;
 
+    /// Logs named scalar metric tensors, each shaped `[]`.
     fn log(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) -> Result<()> {
         if let Some(completed) = self.aggregator.log(timestep, metrics)? {
             self.store(completed);

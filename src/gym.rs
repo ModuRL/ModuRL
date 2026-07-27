@@ -10,7 +10,9 @@ pub trait Gym<I = ()> {
     type Error;
     type SpaceError;
 
-    /// Returns the next state, reward, and done flag.
+    /// Steps with one unbatched environment action. A [`Discrete`](crate::spaces::Discrete)
+    /// action is scalar `[]`; a [`BoxSpace`](crate::spaces::BoxSpace) action is
+    /// shaped `action_space().shape()`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error>;
     /// Resets the environment to its initial state.
     fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error>;
@@ -28,6 +30,9 @@ pub trait VectorizedGym<I = ()> {
     type Error;
     type SpaceError;
 
+    /// Steps every environment with batched environment actions. Discrete
+    /// actions are `[num_envs]`; box actions are
+    /// `[num_envs, ...action_space().shape()]`.
     fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error>;
     fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
@@ -138,6 +143,8 @@ where
     type Error = VectorizedGymError<G::Error>;
     type SpaceError = G::SpaceError;
 
+    /// Steps with discrete actions `[num_envs]` or box actions
+    /// `[num_envs, ...action_shape]`.
     fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error> {
         let env_count = self.envs.len();
         let actions: Vec<Tensor> = action.chunk(env_count, 0)?;
@@ -298,6 +305,8 @@ where
     type Error = VectorizedGymError<G::Error>;
     type SpaceError = SE;
 
+    /// Steps with discrete actions `[num_envs]` or box actions
+    /// `[num_envs, ...action_shape]`.
     fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error> {
         let batch_size = self.envs.len();
         let actions: Vec<Tensor> = action.chunk(batch_size, 0)?;
@@ -418,6 +427,8 @@ impl<E, I> GymHandle<E, I>
 where
     E: Send + Sync,
 {
+    /// Sends one unbatched environment action (`[]` for discrete or
+    /// `action_space.shape()` for box actions) to the worker thread.
     fn step(&self, action: Tensor) -> std::sync::mpsc::Receiver<Result<ThreadStepInfo<I>, E>> {
         let (resp_tx, resp_rx) = mpsc::channel();
         self.tx.send(GymCmd::Step(action, resp_tx)).unwrap();
@@ -503,6 +514,7 @@ mod tests {
         type Error = candle_core::Error;
         type SpaceError = candle_core::Error;
 
+        /// Steps with one scalar discrete action shaped `[]`.
         fn step(&mut self, _action: Tensor) -> Result<StepInfo<TestInfo>, Self::Error> {
             Ok(StepInfo {
                 state: Tensor::zeros(1, candle_core::DType::F32, &candle_core::Device::Cpu)?,
@@ -549,6 +561,7 @@ mod tests {
         type Error = ();
         type SpaceError = candle_core::Error;
 
+        /// Steps with one scalar discrete action shaped `[]`.
         fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
             self.step_count += 1;
             let done = self.step_count >= 5;

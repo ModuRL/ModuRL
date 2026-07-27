@@ -80,6 +80,7 @@ impl Gym for HalfCheetahV5 {
         })
     }
 
+    /// Steps with one continuous actuator vector shaped `[action_size]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
         let x_before = self.core.qpos()[0];
         let action = self.core.step(&action)?;

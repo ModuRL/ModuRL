@@ -45,6 +45,7 @@ impl Gym for DebugLunarLander {
         self.env.reset()
     }
 
+    /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
         let step_info = self.env.step(action)?;
         self.reward_sum += step_info.reward;

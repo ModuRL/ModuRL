@@ -153,6 +153,7 @@ impl MujocoCore {
         self.set_state(&qpos, &qvel)
     }
 
+    /// Advances MuJoCo with one actuator vector `action` shaped `[nu]`.
     pub(crate) fn step(&mut self, action: &Tensor) -> Result<Vec<f64>, MujocoError> {
         if action.rank() != 1 || action.dims()[0] != self.nu() {
             return Err(MujocoError::InvalidInput(format!(

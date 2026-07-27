@@ -65,6 +65,8 @@ impl<G> NormalizeObservationGym<G> {
         self
     }
 
+    /// Normalizes one observation of arbitrary `observation_shape` and returns
+    /// a tensor with that same shape.
     fn normalize(&mut self, observation: &Tensor) -> candle_core::Result<Tensor> {
         let shape = observation.shape().clone();
         let device = observation.device().clone();
@@ -113,6 +115,7 @@ where
         Ok(reset)
     }
 
+    /// Forwards one unbatched environment action shaped `action_shape`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
         let mut step = self
             .gym
@@ -173,6 +176,7 @@ where
         self.gym.reset()
     }
 
+    /// Forwards one unbatched environment action shaped `action_shape`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
         let mut step = self.gym.step(action)?;
         self.discounted_reward =

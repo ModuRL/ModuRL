@@ -293,6 +293,7 @@ impl Gym for MountainCarV0 {
         })
     }
 
+    /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
         assert!(self.action_space.contains(&action));
 
@@ -420,6 +421,7 @@ mod tests {
             Ok(self.state.clone())
         }
 
+        /// Restores one MountainCar state shaped `[2]`.
         fn set_state(&mut self, state: Tensor, _: Option<serde_json::Value>) {
             self.state = state;
         }

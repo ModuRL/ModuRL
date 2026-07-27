@@ -55,6 +55,11 @@ struct PPOExperience {
 
 #[bon]
 impl PPOExperience {
+    /// Creates one vectorized rollout transition.
+    ///
+    /// `states` and `next_states` are `[env_count, ...observation_shape]`,
+    /// `actions` is `[env_count, ...action_shape]`, and `rewards`, `log_probs`,
+    /// optional `advantages`, and optional `this_returns` are `[env_count]`.
     #[builder]
     pub fn new(
         states: Tensor,
@@ -187,11 +192,14 @@ struct PPOLosses {
     critic_loss: Tensor,
 }
 
+/// Returns scalar population variance for `values` of arbitrary shape `[...]`.
 fn population_variance(values: &Tensor) -> candle_core::Result<Tensor> {
     let mean = values.mean_all()?.broadcast_as(values.shape())?;
     (values - mean)?.sqr()?.mean_all()
 }
 
+/// Returns scalar explained variance for `returns` and `rollout_values` with
+/// identical shape `[sample_count]`.
 fn compute_explained_variance(
     returns: &Tensor,
     rollout_values: &Tensor,
@@ -601,6 +609,9 @@ where
         Ok(())
     }
 
+    /// Computes advantages `[time, env_count]` from rewards, values, done
+    /// masks, and truncation masks with that same shape; `bootstrapped_values`
+    /// is `[env_count]`.
     fn compute_gae(
         &self,
         rewards: &candle_core::Tensor,
@@ -655,8 +666,8 @@ where
         Ok(advantages_tensor)
     }
 
-    /// Forward pass through the critic network
-    /// Expects states as latent if shared network is used
+    /// Forwards latent or raw `states` shaped `[batch, ...state_shape]` and
+    /// returns critic values shaped `[batch, 1]`.
     fn critic_network_forward(
         &mut self,
         states: &candle_core::Tensor,
@@ -673,8 +684,8 @@ where
         }
     }
 
-    /// Log prob and entropy from the actor network
-    /// Expects states as latent if shared network is used
+    /// Evaluates `actions` `[batch, ...action_shape]` for latent or raw
+    /// `states` `[batch, ...state_shape]`, returning two `[batch]` tensors.
     fn actor_network_log_prob_and_entropy(
         &mut self,
         states: &candle_core::Tensor,
@@ -698,8 +709,10 @@ where
         }
     }
 
-    /// Compute the loss for the actor and critic networks
-    /// Then backpropagate the loss
+    /// Computes losses from `states` `[batch, ...state_shape]`, `actions`
+    /// `[batch, ...action_shape]`, and vector statistics (`old_log_probs`,
+    /// `advantages`, `returns`, `rewards`, and `old_values`) shaped `[batch]`.
+    /// `explained_variance` is scalar `[]`.
     fn compute_loss(
         &mut self,
         states: &candle_core::Tensor,
@@ -862,7 +875,8 @@ where
         Ok(())
     }
 
-    /// Expects states as latent
+    /// Samples latent actions `[batch, ...action_shape]` for latent or raw
+    /// `states` `[batch, ...state_shape]`.
     fn act_neurons(
         &mut self,
         states: &candle_core::Tensor,
@@ -896,6 +910,8 @@ where
         }
     }
 
+    /// Logs vectorized `rewards` shaped `[env_count]` alongside one metadata
+    /// and termination entry per environment.
     fn log_collection(
         &mut self,
         rewards: &Tensor,
@@ -953,7 +969,9 @@ where
     /// Selects the policy distribution's mode without sampling.
     ///
     /// This is intended for deterministic evaluation. PPO rollouts remain
-    /// stochastic and continue to use [`Agent::act`].
+    /// stochastic and continue to use [`Agent::act`]. `observation` is shaped
+    /// `[batch, ...observation_shape]`; the returned environment action is
+    /// `[batch, ...action_shape]`.
     pub fn act_deterministic(
         &mut self,
         observation: &Tensor,
@@ -995,6 +1013,8 @@ where
     type GymError = GE;
     type SpaceError = SE;
 
+    /// Selects environment actions `[batch, ...action_shape]` for observations
+    /// `[batch, ...observation_shape]`.
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
         let latent_states = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
@@ -1136,6 +1156,7 @@ mod tests {
         type Error = candle_core::Error;
         type SpaceError = candle_core::Error;
 
+        /// Steps with one scalar discrete action shaped `[]`.
         fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
             self.step_count += 1;
             let next_done = self.step_count >= 5;
@@ -1352,6 +1373,7 @@ mod schedule_tests {
         type Error = candle_core::Error;
         type SpaceError = candle_core::Error;
 
+        /// Steps with one scalar discrete action shaped `[]`.
         fn step(&mut self, _action: Tensor) -> Result<StepInfo<usize>, Self::Error> {
             self.steps += 1;
             Ok(StepInfo {
@@ -1563,7 +1585,7 @@ mod schedule_tests {
             '_,
             CountingOptimizer,
             CountingOptimizer,
-            ProbabilisticPolicyModelError<candle_core::Error>,
+            ProbabilisticPolicyModelError<crate::distributions::GaussianDistributionError>,
             candle_core::Error,
             candle_core::Error,
         > = PPOAgent::builder()

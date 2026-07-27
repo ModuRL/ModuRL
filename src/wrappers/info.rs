@@ -40,6 +40,7 @@ where
         })
     }
 
+    /// Forwards one unbatched environment action shaped `action_shape`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo<RawRewardInfo<I>>, Self::Error> {
         let step = self.gym.step(action)?;
         Ok(StepInfo {

@@ -169,7 +169,7 @@ fn dqn_program() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         }))
-        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DQN configuration should be valid");
 
@@ -239,7 +239,7 @@ fn ddqn_program() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         }))
-        .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+        .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DDQN configuration should be valid");
 
@@ -345,6 +345,7 @@ impl Gym for CounterEnv {
         })
     }
 
+    /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
         match action.to_vec0::<u32>()? {
             0 => self.state -= 1,

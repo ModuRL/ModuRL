@@ -61,6 +61,7 @@ where
         Ok(reset)
     }
 
+    /// Forwards one scalar Atari action shaped `[]`.
     fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<I>, Self::Error> {
         self.gym.step(action).map_err(NoopResetGymError::GymError)
     }
@@ -129,6 +130,7 @@ where
         Ok(reset)
     }
 
+    /// Forwards one scalar Atari action shaped `[]`.
     fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<AtariInfo>, Self::Error> {
         let mut info = self.gym.step(action)?;
         let current_lives = info.info.lives;
@@ -222,6 +224,7 @@ where
         Ok(reset)
     }
 
+    /// Forwards one scalar Atari action shaped `[]`.
     fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<I>, Self::Error> {
         self.gym.step(action).map_err(FireResetGymError::GymError)
     }
@@ -255,12 +258,15 @@ impl<G> WarpGym<G> {
         Self { gym }
     }
 
+    /// Resizes grayscale `obs` from `[210, 160]` to `[84, 84]`.
     fn resize_observation(&self, obs: Tensor) -> Result<Tensor, candle_core::Error> {
         // Resize from [210, 160] to [84, 84] using area-based interpolation
         // This mimics OpenCV's INTER_AREA which is standard for Atari preprocessing
         self.resize_area_interp(obs, 84, 84)
     }
 
+    /// Resizes a grayscale matrix `input` shaped `[input_h, input_w]` to
+    /// `[target_h, target_w]`.
     fn resize_area_interp(
         &self,
         input: Tensor,
@@ -318,6 +324,8 @@ impl<G> WarpGym<G> {
         Tensor::from_vec(output_data, (target_h, target_w), input.device())
     }
 
+    /// Converts `obs` shaped `[height, width, 3]` to `[height, width]`; an
+    /// already-grayscale `[height, width]` tensor is returned unchanged.
     fn extract_luminance(&self, obs: &Tensor) -> Result<Tensor, candle_core::Error> {
         if obs.dims().len() == 2 {
             return Ok(obs.clone());
@@ -329,6 +337,8 @@ impl<G> WarpGym<G> {
         r.add(&g)?.add(&b)
     }
 
+    /// Converts an Atari observation `[210, 160, 3]` or `[210, 160]` to the
+    /// warped grayscale shape `[84, 84]`.
     fn preprocess_observation(&self, obs: &Tensor) -> Result<Tensor, candle_core::Error> {
         let luminance = self.extract_luminance(obs)?;
         let resized = self.resize_observation(luminance)?;
@@ -351,6 +361,7 @@ where
         Ok(reset)
     }
 
+    /// Forwards one scalar Atari action shaped `[]`.
     fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<I>, Self::Error> {
         let mut info = self.gym.step(action).map_err(WarpGymError::GymError)?;
         info.state = self
@@ -422,6 +433,7 @@ mod tests {
         type Error = candle_core::Error;
         type SpaceError = candle_core::Error;
 
+        /// Steps with one scalar discrete action shaped `[]`.
         fn step(&mut self, action: Tensor) -> Result<StepInfo<AtariInfo>, Self::Error> {
             self.actions.push(action.to_scalar::<u32>()?);
             let step = self.steps.get(self.step_index).cloned().unwrap_or_else(|| {
@@ -473,6 +485,7 @@ mod tests {
         }
     }
 
+    /// Reads one scalar tensor shaped `[]`.
     fn scalar(tensor: &Tensor) -> f32 {
         tensor.to_scalar::<f32>().unwrap()
     }

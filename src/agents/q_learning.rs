@@ -1,9 +1,10 @@
 use bon::bon;
-use candle_core::{Device, Error, IndexOp, Tensor};
+use candle_core::{Error, IndexOp, Tensor};
 use candle_nn::{Optimizer, VarMap};
 use std::{marker::PhantomData, ops::Deref};
 
 use crate::{
+    agents::ReplayDeviceStrategy,
     buffers::{
         experience,
         experience_replay::{ExperienceReplay, ExperienceReplayError},
@@ -97,6 +98,8 @@ pub(crate) trait QLearningLogger<I = ()> {
 pub(crate) trait QLearningTarget {
     fn requires_online_next_q_values() -> bool;
 
+    /// Computes targets from `rewards` and `next_dones` shaped `[batch]` and Q
+    /// tensors shaped `[batch, action_count]`, returning `[batch]`.
     fn target_q_values(
         rewards: &Tensor,
         next_dones: &Tensor,
@@ -151,7 +154,7 @@ where
     gamma: f32,
     update_frequency: usize,
     training_start: usize,
-    device_strategy: QLearningDeviceStrategy,
+    device_strategy: ReplayDeviceStrategy,
     optimization_steps: usize,
     _phantom: PhantomData<(GE, T)>,
 }
@@ -183,7 +186,7 @@ where
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         training_horizon: usize,
-        device_strategy: QLearningDeviceStrategy,
+        device_strategy: ReplayDeviceStrategy,
     ) -> Result<Self, QAgentError<GE, SE>> {
         let initial_epsilon = epsilon_schedule.value(0.0);
         let final_epsilon = epsilon_schedule.value(1.0);
@@ -242,6 +245,8 @@ where
         &*self.observation_space
     }
 
+    /// Selects scalar discrete actions shaped `[batch]` for observations shaped
+    /// `[batch, ...observation_shape]`.
     pub(crate) fn act(&mut self, observation: &Tensor) -> Result<Tensor, QAgentError<GE, SE>> {
         Ok(epsilon_greedy_actions(
             observation,
@@ -456,6 +461,9 @@ pub(crate) fn validate_epsilon(epsilon: f64) -> Result<f64, QLearningConfigurati
     Ok(epsilon)
 }
 
+/// Selects scalar actions `[batch]` for observations
+/// `[batch, ...observation_shape]`; `forward` must return
+/// `[selected_batch, action_count]`.
 pub(crate) fn epsilon_greedy_actions(
     observation: &Tensor,
     epsilon: f64,
@@ -504,6 +512,8 @@ pub(crate) fn epsilon_greedy_actions(
     Tensor::stack(&actions, 0)
 }
 
+/// Gathers scalar `actions` containing one index per batch item from `q_values`
+/// shaped `[batch, action_count]`, returning `[batch, 1]`.
 pub(crate) fn selected_action_q_values(
     q_values: &Tensor,
     actions: &Tensor,
@@ -512,6 +522,8 @@ pub(crate) fn selected_action_q_values(
     q_values.gather(&actions, 1)
 }
 
+/// Computes targets `[batch]` from `rewards`, `next_dones`, and
+/// `next_q_values`, all shaped `[batch]`.
 fn bellman_targets(
     rewards: &Tensor,
     next_dones: &Tensor,
@@ -522,47 +534,18 @@ fn bellman_targets(
     Ok((rewards + (next_q_values * ((1.0 - next_dones)?.mul(&gamma_tensor)?)))?.detach())
 }
 
-/// Strategy for selecting devices used by value-based agent computations.
-///
-/// `OneDevice` keeps collection, replay, and optimization on one device.
-/// `Hybrid` stores replay on one device and transfers sampled batches to the
-/// device used for network optimization.
-pub enum QLearningDeviceStrategy {
-    OneDevice(Device),
-    Hybrid {
-        optimization_device: Device,
-        storage_device: Device,
-    },
-}
-
-impl QLearningDeviceStrategy {
-    pub(crate) fn storage_device(&self) -> Device {
-        match self {
-            QLearningDeviceStrategy::OneDevice(device) => device.clone(),
-            QLearningDeviceStrategy::Hybrid { storage_device, .. } => storage_device.clone(),
-        }
-    }
-
-    pub(crate) fn optimization_device(&self) -> Device {
-        match self {
-            QLearningDeviceStrategy::OneDevice(device) => device.clone(),
-            QLearningDeviceStrategy::Hybrid {
-                optimization_device,
-                ..
-            } => optimization_device.clone(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningDeviceStrategy,
-        QLearningLogger, QLearningTarget, bellman_targets, selected_action_q_values,
-        validate_configuration, validate_epsilon,
+        QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningLogger,
+        QLearningTarget, bellman_targets, selected_action_q_values, validate_configuration,
+        validate_epsilon,
     };
     use crate::{
-        agents::test_support::{CountingOptimizer, FixedEnv},
+        agents::{
+            ReplayDeviceStrategy,
+            test_support::{CountingOptimizer, FixedEnv},
+        },
         gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper},
         models::MLP,
         parameter_schedule::LinearSchedule,
@@ -578,6 +561,8 @@ mod tests {
             false
         }
 
+        /// Computes `[batch]` targets from reward/done vectors `[batch]` and Q
+        /// values `[batch, action_count]`.
         fn target_q_values(
             rewards: &Tensor,
             next_dones: &Tensor,
@@ -686,6 +671,7 @@ mod tests {
         type Error = candle_core::Error;
         type SpaceError = candle_core::Error;
 
+        /// Steps with one scalar discrete action shaped `[]`.
         fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
             self.steps += 1;
             Ok(StepInfo {
@@ -757,7 +743,7 @@ mod tests {
             .update_frequency(2)
             .target_update_interval(4)
             .training_horizon(10)
-            .device_strategy(QLearningDeviceStrategy::OneDevice(device.clone()))
+            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
             .build()
             .unwrap();
 
@@ -822,7 +808,7 @@ mod tests {
             .update_frequency(1)
             .target_update_interval(4)
             .training_horizon(4)
-            .device_strategy(QLearningDeviceStrategy::OneDevice(device))
+            .device_strategy(ReplayDeviceStrategy::OneDevice(device))
             .build()
             .unwrap();
 

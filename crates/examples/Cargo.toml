@@ -9,6 +9,11 @@ name = "ppo_mujoco_with_graphs"
 path = "examples/ppo_mujoco_with_graphs.rs"
 required-features = ["mujoco-environment"]
 
+[[example]]
+name = "sac_mujoco"
+path = "examples/sac_mujoco.rs"
+required-features = ["mujoco-environment"]
+
 [dependencies]
 modurl = { version = "0.1.0", path = "../.." }
 modurl_gym = { version = "0.1.0", path = "../modurl_gym", features = [

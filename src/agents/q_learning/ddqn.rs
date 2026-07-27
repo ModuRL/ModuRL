@@ -3,11 +3,11 @@ use candle_core::{Error, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
 use super::{
-    QAgentError, QCollectionLogEntry, QLearningAgent, QLearningDeviceStrategy, QLearningLogger,
-    QLearningTarget, QLogEntry, bellman_targets, selected_action_q_values,
+    QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
+    bellman_targets, selected_action_q_values,
 };
 use crate::{
-    agents::Agent,
+    agents::{Agent, ReplayDeviceStrategy},
     gym::VectorizedGym,
     parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, Space},
@@ -44,6 +44,8 @@ impl QLearningTarget for DDQNTarget {
         true
     }
 
+    /// Computes `[batch]` targets from reward/done vectors `[batch]` and online
+    /// and target Q values `[batch, action_count]`.
     fn target_q_values(
         rewards: &Tensor,
         next_dones: &Tensor,
@@ -99,7 +101,7 @@ where
         #[builder(default = 1000)] target_update_interval: usize,
         training_horizon: usize,
         logger: Option<&'a mut dyn DDQNLogger<I>>,
-        device_strategy: QLearningDeviceStrategy,
+        device_strategy: ReplayDeviceStrategy,
     ) -> Result<Self, QAgentError<GE, SE>> {
         let inner = QLearningAgent::<'a, O, GE, SE, DDQNTarget>::builder()
             .action_space(action_space)
@@ -144,6 +146,8 @@ where
     type GymError = GE;
     type SpaceError = SE;
 
+    /// Selects scalar discrete actions `[batch]` for observations
+    /// `[batch, ...observation_shape]`.
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
         self.inner.act(observation)
     }

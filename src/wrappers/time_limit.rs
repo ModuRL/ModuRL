@@ -37,6 +37,7 @@ where
         self.gym.reset()
     }
 
+    /// Forwards one unbatched environment action shaped `action_shape`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
         let mut info = self.gym.step(action)?;
         self.elapsed_steps += 1;

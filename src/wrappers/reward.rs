@@ -31,6 +31,7 @@ where
         self.gym.reset().map_err(ClipRewardGymError::GymError)
     }
 
+    /// Forwards one unbatched environment action shaped `action_shape`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
         let mut info = self
             .gym

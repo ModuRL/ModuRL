@@ -14,8 +14,8 @@ In ModuRL, an agent can do two things:
 - `learn` from a vectorized environment
 
 ModuRL provides agent types named after the algorithms they implement.
-`PPOAgent` implements PPO, `DQNAgent` implements DQN, and `DDQNAgent` implements
-Double DQN.
+`PPOAgent` implements PPO, `SACAgent` implements Soft Actor-Critic,
+`DQNAgent` implements DQN, and `DDQNAgent` implements Double DQN.
 
 An agent coordinates the pieces needed for training: model modules, optimizers,
 schedules, buffers, distributions, and update logic.

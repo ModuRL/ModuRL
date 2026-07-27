@@ -2,64 +2,10 @@ use candle_core::{Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
-use modurl_logger::{Aggregation, AggregationConfig, Logger, TerminalLogger};
 
-struct PPOGrapher {
-    terminal: TerminalLogger,
-}
-
-impl PPOGrapher {
-    fn new() -> Self {
-        Self {
-            terminal: TerminalLogger::new(AggregationConfig::new(
-                Aggregation::mean().with_rolling_window(5),
-            ))
-            .with_live_updates(),
-        }
-    }
-
-    fn display_graphs(mut self) {
-        self.terminal.display();
-    }
-}
-
-impl PPOLogger for PPOGrapher {
-    fn log(&mut self, info: &PPOLogEntry) {
-        let actor_loss = info.actor_loss.mean_all().unwrap();
-        let critic_loss = info.critic_loss.mean_all().unwrap();
-        let entropy = info.entropy.mean_all().unwrap();
-        let kl_divergence = info.kl_divergence.mean_all().unwrap();
-        let explained_variance = info.explained_variance.mean_all().unwrap();
-        self.terminal
-            .log(
-                info.timestep,
-                &[
-                    ("Actor Loss", &actor_loss),
-                    ("Critic Loss", &critic_loss),
-                    ("Entropy", &entropy),
-                    ("KL Divergence", &kl_divergence),
-                    ("Explained Variance", &explained_variance),
-                ],
-            )
-            .unwrap();
-    }
-
-    fn log_collection(&mut self, info: &PPOCollectionLogEntry) {
-        for episode in &info.completed_episodes {
-            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
-            self.terminal
-                .log(
-                    episode.collection_timestep,
-                    &[
-                        ("Episode Returns", &episode_return),
-                        ("Episode Lengths", &episode_length),
-                    ],
-                )
-                .unwrap();
-        }
-    }
-}
+#[path = "support/graphers.rs"]
+mod graphers;
+use graphers::PPOGrapher;
 
 fn main() {
     ppo_cartpole();
@@ -170,5 +116,5 @@ fn ppo_cartpole() {
 
     agent.learn(&mut vec_env, 100_000).unwrap();
 
-    logger.display_graphs();
+    logger.display();
 }

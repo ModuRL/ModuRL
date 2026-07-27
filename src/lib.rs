@@ -9,3 +9,6 @@ pub mod prelude;
 pub mod spaces;
 pub mod tensor_operations;
 pub mod wrappers;
+
+#[cfg(test)]
+mod documentation_tests;

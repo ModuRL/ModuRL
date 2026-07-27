@@ -1,5 +1,7 @@
 use candle_core::{DType, Error, Tensor, backprop::GradStore};
 
+/// Returns the elementwise maximum of identically shaped `a` and `b`,
+/// preserving their arbitrary shape `[...]`.
 pub(crate) fn torch_like_max(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
     // See torch_like_min for why this is a masked select; ties route to `b`.
     let mask = a.gt(b)?.to_dtype(a.dtype())?;
@@ -7,6 +9,8 @@ pub(crate) fn torch_like_max(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
     (a * &mask)? + (b * &inv_mask)?
 }
 
+/// Returns the elementwise minimum of identically shaped `a` and `b`,
+/// preserving their arbitrary shape `[...]`.
 pub(crate) fn torch_like_min(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
     // candle's min-reduction backward sends full gradient to every element tied
     // for the minimum, so a cat+min implementation double-counts gradient when
@@ -18,6 +22,8 @@ pub(crate) fn torch_like_min(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
     (a * &mask)? + (b * &inv_mask)?
 }
 
+/// Clips gradients reachable from scalar `loss` shaped `[]`; gradient tensors
+/// in `grad_store` retain their parameter shapes.
 pub(crate) fn clip_gradients(
     loss: &Tensor,
     grad_store: &mut GradStore,
@@ -67,6 +73,8 @@ pub(crate) fn clip_gradients(
     Ok(total_norm)
 }
 
+/// Normalizes `t` over all elements while preserving its arbitrary shape
+/// `[...]`.
 pub(crate) fn normalize_tensor(t: &Tensor) -> Result<Tensor, candle_core::Error> {
     let mean = t.mean_all()?.broadcast_as(t.shape())?;
     let diff = (t.clone() - mean.clone())?;
@@ -79,8 +87,9 @@ pub(crate) fn normalize_tensor(t: &Tensor) -> Result<Tensor, candle_core::Error>
     diff / std_with_eps
 }
 
-/// Check if a tensor contains any NaN values.
-/// Use very sparingly extremely slow.
+/// Checks an arbitrarily shaped tensor `t` (`[...]`) for NaN values.
+///
+/// Use very sparingly; this copies to the CPU and is extremely slow.
 pub fn tensor_has_nan(t: &Tensor) -> Result<bool, candle_core::Error> {
     // First, ensure tensor is on CPU (or copy to CPU)
     let t_cpu = if t.device().is_cpu() {
