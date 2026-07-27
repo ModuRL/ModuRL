@@ -1,6 +1,5 @@
-use crate::tensor_operations;
-
 use super::{ExperienceBatch, experience};
+use crate::sampling::shuffle_with_device_rng;
 use std::vec;
 
 pub enum RolloutBufferError<E> {
@@ -64,7 +63,7 @@ where
     pub fn get_all_shuffled(
         &mut self,
     ) -> Result<Vec<ExperienceBatch<T>>, RolloutBufferError<T::Error>> {
-        tensor_operations::fisher_yates_shuffle(&mut self.buffer, &self.device);
+        shuffle_with_device_rng(&mut self.buffer, &self.device)?;
 
         let samples = self
             .get_all()

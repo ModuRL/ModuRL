@@ -20,7 +20,7 @@ use crate::{
     models::{FrozenParametersModule, probabilistic_model::ExpectationPolicy},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::Space,
-    tensor_operations::{tensor_has_nan, torch_like_max, torch_like_min},
+    tensor_operations::tensor_has_nan,
 };
 
 /// A Q network that can evaluate replay actions and policy candidates.
@@ -457,15 +457,11 @@ pub fn aggregate_critic_values(
         SACCriticAggregationMode::Min => values
             .iter()
             .skip(1)
-            .try_fold(values[0].clone(), |current, value| {
-                torch_like_min(&current, value)
-            })?,
+            .try_fold(values[0].clone(), |current, value| current.minimum(value))?,
         SACCriticAggregationMode::Max => values
             .iter()
             .skip(1)
-            .try_fold(values[0].clone(), |current, value| {
-                torch_like_max(&current, value)
-            })?,
+            .try_fold(values[0].clone(), |current, value| current.maximum(value))?,
         SACCriticAggregationMode::Median => {
             let stacked = Tensor::stack(values, rank)?;
             let (sorted, _) = stacked.sort_last_dim(true)?;
@@ -537,7 +533,7 @@ pub fn sac_clipped_critic_loss(
     let clipped = (&anchor + &delta)?;
     let loss = (prediction - &target)?.sqr()?;
     let clipped_loss = (clipped - &target)?.sqr()?;
-    Ok(torch_like_max(&loss, &clipped_loss)?.mean_all()?)
+    Ok(loss.maximum(&clipped_loss)?.mean_all()?)
 }
 
 /// Entropy coefficient configuration.

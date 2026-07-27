@@ -6,6 +6,7 @@ pub mod init;
 pub mod models;
 pub mod parameter_schedule;
 pub mod prelude;
+pub mod sampling;
 pub mod spaces;
 pub mod tensor_operations;
 pub mod wrappers;
