@@ -20,7 +20,7 @@ pub use crate::agents::{
         SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
         SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
         SACStabilizationConfiguration, ScalarStateActionCritic, aggregate_critic_values,
-        sac_alpha_loss, sac_bellman_targets, sac_clipped_critic_loss, sac_entropy_change_loss,
+        sac_alpha_loss, sac_entropy_change_loss,
     },
 };
 pub use crate::distributions::{
@@ -40,6 +40,7 @@ pub use crate::models::{
     probabilistic_model::ProbabilisticPolicy, probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
+pub use crate::objectives::{bellman_targets, clipped_value_loss};
 pub use crate::parameter_schedule::{
     ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
 };

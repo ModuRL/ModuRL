@@ -2,7 +2,7 @@ use crate::AtariInfo;
 use candle_core::{Device, IndexOp, Tensor};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    tensor_operations::gen_range_int_tensor,
+    sampling::sample_u32_inclusive,
 };
 
 /// Takes a random number of no-op actions after reset.
@@ -42,7 +42,7 @@ where
 
     fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
         let mut reset = self.gym.reset().map_err(NoopResetGymError::GymError)?;
-        for _ in 0..gen_range_int_tensor(1, self.noop_max, reset.state.device()).unwrap() {
+        for _ in 0..sample_u32_inclusive(1, self.noop_max, reset.state.device()).unwrap() {
             let noop_action =
                 Tensor::new(0u32, reset.state.device()).map_err(NoopResetGymError::CandleError)?;
             let step = self

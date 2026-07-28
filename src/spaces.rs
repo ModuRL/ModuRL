@@ -1,6 +1,6 @@
 use candle_core::{D, Device, Tensor};
 
-use crate::tensor_operations::gen_range_int_tensor;
+use crate::sampling::sample_u32_inclusive;
 
 pub trait Space {
     type Error;
@@ -33,7 +33,7 @@ impl Space for Discrete {
 
     /// Samples one scalar environment action shaped `[]`.
     fn sample(&self, device: &Device) -> Result<Tensor, Self::Error> {
-        let value = gen_range_int_tensor(0, self.possible_values as u32 - 1, device)?;
+        let value = sample_u32_inclusive(0, self.possible_values as u32 - 1, device)?;
         Tensor::from_vec(vec![value], vec![], device)
     }
 

@@ -7,9 +7,11 @@ use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
     gym::{VectorizedGym, VectorizedStepInfo},
     models::probabilistic_model::ProbabilisticPolicy,
+    objectives::clipped_value_loss,
     parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
+    sampling::shuffle_with_device_rng,
     spaces,
-    tensor_operations::{normalize_tensor, tensor_has_nan, torch_like_max, torch_like_min},
+    tensor_operations::{normalize_tensor, tensor_has_nan},
 };
 
 #[derive(Debug)]
@@ -462,7 +464,7 @@ where
             }
 
             let mut indices: Vec<u32> = (0..total_samples as u32).collect();
-            crate::tensor_operations::fisher_yates_shuffle(&mut indices, device);
+            shuffle_with_device_rng(&mut indices, device)?;
             let indices_tensor = Tensor::from_vec(indices, &[total_samples], device)?;
 
             for start in (0..total_samples).step_by(self.mini_batch_size) {
@@ -754,7 +756,7 @@ where
 
                 let surrogate1 = (ratio.clone() * advantages.clone())?;
                 let surrogate2 = (clipped_ratio.clone() * advantages.clone())?;
-                let surrogate = torch_like_min(&surrogate1, &surrogate2)?;
+                let surrogate = surrogate1.minimum(&surrogate2)?;
 
                 (-1.0 * surrogate.mean_all()?)?
             }
@@ -783,12 +785,7 @@ where
         let critic_loss = if self.clip_value_loss {
             // PPO2/CleanRL value-loss clipping: bound how far the value estimate
             // may move from its rollout-time value within one update.
-            let clip_range = clip_range as f64;
-            let value_delta = (&values - &old_values)?.clamp(-clip_range, clip_range)?;
-            let values_clipped = (&old_values + value_delta)?;
-            let loss_unclipped = (&values - &returns)?.sqr()?;
-            let loss_clipped = (&values_clipped - &returns)?.sqr()?;
-            torch_like_max(&loss_unclipped, &loss_clipped)?.mean_all()?
+            clipped_value_loss(&values, &returns, &old_values, clip_range as f64)?
         } else {
             loss::mse(&values, &returns)?
         };
@@ -1351,6 +1348,35 @@ mod schedule_tests {
             (actual - expected).abs() < 1e-12,
             "expected {expected}, got {actual}"
         );
+    }
+
+    #[test]
+    fn candle_elementwise_minimum_and_maximum_split_tied_gradients() {
+        /// Checks scalar `loss` shaped `[1]` made from tied scalar variables.
+        fn assert_tied_gradients(loss: Tensor, left: &Var, right: &Var) {
+            let gradients = loss.sum_all().unwrap().backward().unwrap();
+            for variable in [left, right] {
+                assert_eq!(
+                    gradients
+                        .get(variable.as_tensor())
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap(),
+                    vec![0.5]
+                );
+            }
+        }
+
+        for maximum in [false, true] {
+            let left = Var::from_vec(vec![1.0_f32], 1, &Device::Cpu).unwrap();
+            let right = Var::from_vec(vec![1.0_f32], 1, &Device::Cpu).unwrap();
+            let loss = if maximum {
+                left.as_tensor().maximum(right.as_tensor()).unwrap()
+            } else {
+                left.as_tensor().minimum(right.as_tensor()).unwrap()
+            };
+            assert_tied_gradients(loss, &left, &right);
+        }
     }
 
     struct TwoStepTestGym {
