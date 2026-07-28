@@ -7,6 +7,16 @@ pub struct Renderer {
     h: usize,
 }
 
+pub struct Flag {
+    pub x: usize,
+    pub y_bottom: usize,
+    pub pole_height: usize,
+    pub width: usize,
+    pub height: usize,
+    pub pole_color: u32,
+    pub color: u32,
+}
+
 impl Renderer {
     pub fn new(w: usize, h: usize, title: &str) -> Self {
         let window = Window::new(title, w, h, WindowOptions::default()).expect("create window");
@@ -81,9 +91,9 @@ impl Renderer {
 
     pub fn draw_circle(&mut self, center_x: usize, center_y: usize, radius: usize, color: u32) {
         let radius_sq = (radius * radius) as isize;
-        let x_start = center_x.saturating_sub(radius).max(0);
+        let x_start = center_x.saturating_sub(radius);
         let x_end = (center_x + radius).min(self.w - 1);
-        let y_start = center_y.saturating_sub(radius).max(0);
+        let y_start = center_y.saturating_sub(radius);
         let y_end = (center_y + radius).min(self.h - 1);
 
         for y in y_start..=y_end {
@@ -104,48 +114,30 @@ impl Renderer {
         self.h
     }
 
-    /// Draw a flag with pole at the specified position
-    ///
-    /// # Arguments
-    /// * `flag_x` - X position of the flag pole
-    /// * `flag_y_bottom` - Y position of the bottom of the flag pole
-    /// * `pole_height` - Height of the flag pole
-    /// * `flag_width` - Width of the triangular flag
-    /// * `flag_height` - Height of the triangular flag  
-    /// * `pole_color` - Color of the flag pole (e.g., 0x000000 for black)
-    /// * `flag_color` - Color of the flag (e.g., 0xCCCC00 for yellow)
-    pub fn draw_flag(
-        &mut self,
-        flag_x: usize,
-        flag_y_bottom: usize,
-        pole_height: usize,
-        flag_width: usize,
-        flag_height: usize,
-        pole_color: u32,
-        flag_color: u32,
-    ) {
-        let flag_y_top = flag_y_bottom.saturating_sub(pole_height);
+    /// Draws a flag with its pole at the specified position.
+    pub fn draw_flag(&mut self, flag: &Flag) {
+        let flag_y_top = flag.y_bottom.saturating_sub(flag.pole_height);
 
         // Draw flag pole (vertical line)
-        for y in flag_y_top..=flag_y_bottom {
-            if flag_x < self.w && y < self.h {
-                self.rect(flag_x, y, 2, 1, pole_color);
+        for y in flag_y_top..=flag.y_bottom {
+            if flag.x < self.w && y < self.h {
+                self.rect(flag.x, y, 2, 1, flag.pole_color);
             }
         }
 
         // Draw flag (triangle) with point vertically centered
         // Fill the triangular flag area
-        for y_offset in 0..flag_height {
-            let distance_from_center = ((y_offset as i32) - (flag_height as i32 / 2)).abs();
-            let width_at_y = flag_width as i32 * (flag_height as i32 / 2 - distance_from_center)
-                / (flag_height as i32 / 2);
+        for y_offset in 0..flag.height {
+            let distance_from_center = ((y_offset as i32) - (flag.height as i32 / 2)).abs();
+            let width_at_y = flag.width as i32 * (flag.height as i32 / 2 - distance_from_center)
+                / (flag.height as i32 / 2);
 
             if width_at_y > 0 {
                 for x_offset in 0..width_at_y {
-                    let px = flag_x + 2 + x_offset as usize; // Start after the pole
+                    let px = flag.x + 2 + x_offset as usize; // Start after the pole
                     let py = flag_y_top + y_offset;
                     if px < self.w && py < self.h {
-                        self.rect(px, py, 1, 1, flag_color);
+                        self.rect(px, py, 1, 1, flag.color);
                     }
                 }
             }

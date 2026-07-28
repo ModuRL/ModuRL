@@ -118,17 +118,49 @@ struct QLearningExperience {
     next_done: f32,
 }
 
+struct QLearningBatch {
+    states: Tensor,
+    next_states: Tensor,
+    actions: Tensor,
+    rewards: Tensor,
+    next_dones: Tensor,
+}
+
 impl experience::Experience for QLearningExperience {
+    type Batch = QLearningBatch;
     type Error = candle_core::Error;
 
-    fn get_elements(&self) -> Result<Vec<Tensor>, Self::Error> {
-        Ok(vec![
-            self.state.clone(),
-            self.next_state.clone(),
-            self.action.clone(),
-            Tensor::from_vec(vec![self.reward], [].to_vec(), self.state.device())?,
-            Tensor::from_vec(vec![self.next_done], [].to_vec(), self.state.device())?,
-        ])
+    fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
+        let device = experiences
+            .first()
+            .expect("cannot batch an empty Q-learning replay sample")
+            .state
+            .device();
+        Ok(QLearningBatch {
+            states: experience::stack_tensor_field(experiences, |experience| {
+                experience.state.clone()
+            })?,
+            next_states: experience::stack_tensor_field(experiences, |experience| {
+                experience.next_state.clone()
+            })?,
+            actions: experience::stack_tensor_field(experiences, |experience| {
+                experience.action.clone()
+            })?,
+            rewards: Tensor::new(
+                experiences
+                    .iter()
+                    .map(|experience| experience.reward)
+                    .collect::<Vec<_>>(),
+                device,
+            )?,
+            next_dones: Tensor::new(
+                experiences
+                    .iter()
+                    .map(|experience| experience.next_done)
+                    .collect::<Vec<_>>(),
+                device,
+            )?,
+        })
     }
 }
 
@@ -190,16 +222,16 @@ where
     ) -> Result<Self, QAgentError<GE, SE>> {
         let initial_epsilon = epsilon_schedule.value(0.0);
         let final_epsilon = epsilon_schedule.value(1.0);
-        validate_configuration(
-            replay_capacity,
-            batch_size,
-            gamma,
-            initial_epsilon,
-            final_epsilon,
-            update_frequency,
-            target_update_interval,
-            training_horizon,
-        )?;
+        QLearningConfigurationValidator::validate_configuration()
+            .replay_capacity(replay_capacity)
+            .batch_size(batch_size)
+            .gamma(gamma)
+            .initial_epsilon(initial_epsilon)
+            .final_epsilon(final_epsilon)
+            .update_frequency(update_frequency)
+            .target_update_interval(target_update_interval)
+            .training_horizon(training_horizon)
+            .call()?;
 
         let mut agent = Self {
             online_q_network,
@@ -269,15 +301,23 @@ where
             Err(ExperienceReplayError::ExperienceError(error)) => return Err(error),
             Err(ExperienceReplayError::TensorError(error)) => return Err(error),
         };
-        let mut elements = training_batch.get_elements();
-        for element in &mut elements {
+        let mut training_batch = training_batch;
+        for element in [
+            &mut training_batch.states,
+            &mut training_batch.next_states,
+            &mut training_batch.actions,
+            &mut training_batch.rewards,
+            &mut training_batch.next_dones,
+        ] {
             *element = element.to_device(&self.device_strategy.optimization_device())?;
         }
-        let states = elements[0].clone();
-        let next_states = elements[1].clone();
-        let actions = elements[2].clone();
-        let rewards = elements[3].clone();
-        let next_dones = elements[4].clone();
+        let QLearningBatch {
+            states,
+            next_states,
+            actions,
+            rewards,
+            next_dones,
+        } = training_batch;
 
         let target_next_q_values = self.target_q_network.forward(&next_states)?;
         let online_next_q_values = T::requires_online_next_q_values()
@@ -417,40 +457,46 @@ where
     }
 }
 
-pub(crate) fn validate_configuration(
-    replay_capacity: usize,
-    batch_size: usize,
-    gamma: f32,
-    initial_epsilon: f64,
-    final_epsilon: f64,
-    update_frequency: usize,
-    target_update_interval: usize,
-    training_horizon: usize,
-) -> Result<(), QLearningConfigurationError> {
-    if replay_capacity == 0 {
-        return Err(QLearningConfigurationError::ZeroReplayCapacity);
+struct QLearningConfigurationValidator;
+
+#[bon]
+impl QLearningConfigurationValidator {
+    #[builder]
+    pub(crate) fn validate_configuration(
+        replay_capacity: usize,
+        batch_size: usize,
+        gamma: f32,
+        initial_epsilon: f64,
+        final_epsilon: f64,
+        update_frequency: usize,
+        target_update_interval: usize,
+        training_horizon: usize,
+    ) -> Result<(), QLearningConfigurationError> {
+        if replay_capacity == 0 {
+            return Err(QLearningConfigurationError::ZeroReplayCapacity);
+        }
+        if batch_size == 0 {
+            return Err(QLearningConfigurationError::ZeroBatchSize);
+        }
+        if target_update_interval == 0 {
+            return Err(QLearningConfigurationError::ZeroTargetUpdateInterval);
+        }
+        if update_frequency == 0 {
+            return Err(QLearningConfigurationError::ZeroUpdateFrequency);
+        }
+        if training_horizon == 0 {
+            return Err(QLearningConfigurationError::ZeroTrainingHorizon);
+        }
+        if replay_capacity < batch_size {
+            return Err(QLearningConfigurationError::ReplayCapacityBelowBatchSize);
+        }
+        if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
+            return Err(QLearningConfigurationError::InvalidGamma);
+        }
+        validate_epsilon(initial_epsilon)?;
+        validate_epsilon(final_epsilon)?;
+        Ok(())
     }
-    if batch_size == 0 {
-        return Err(QLearningConfigurationError::ZeroBatchSize);
-    }
-    if target_update_interval == 0 {
-        return Err(QLearningConfigurationError::ZeroTargetUpdateInterval);
-    }
-    if update_frequency == 0 {
-        return Err(QLearningConfigurationError::ZeroUpdateFrequency);
-    }
-    if training_horizon == 0 {
-        return Err(QLearningConfigurationError::ZeroTrainingHorizon);
-    }
-    if replay_capacity < batch_size {
-        return Err(QLearningConfigurationError::ReplayCapacityBelowBatchSize);
-    }
-    if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
-        return Err(QLearningConfigurationError::InvalidGamma);
-    }
-    validate_epsilon(initial_epsilon)?;
-    validate_epsilon(final_epsilon)?;
-    Ok(())
 }
 
 pub(crate) fn validate_epsilon(epsilon: f64) -> Result<f64, QLearningConfigurationError> {
@@ -524,8 +570,9 @@ pub(crate) fn selected_action_q_values(
 #[cfg(test)]
 mod tests {
     use super::{
-        QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningLogger,
-        QLearningTarget, selected_action_q_values, validate_configuration, validate_epsilon,
+        QCollectionLogEntry, QLearningAgent, QLearningConfigurationError,
+        QLearningConfigurationValidator, QLearningLogger, QLearningTarget,
+        selected_action_q_values, validate_epsilon,
     };
     use crate::{
         agents::{
@@ -577,7 +624,16 @@ mod tests {
     #[test]
     fn accepts_valid_configuration() {
         assert_eq!(
-            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 4, 1_000, 10_000),
+            QLearningConfigurationValidator::validate_configuration()
+                .replay_capacity(1_000)
+                .batch_size(32)
+                .gamma(0.99)
+                .initial_epsilon(1.0)
+                .final_epsilon(0.1)
+                .update_frequency(4)
+                .target_update_interval(1_000)
+                .training_horizon(10_000)
+                .call(),
             Ok(())
         );
     }
@@ -585,31 +641,94 @@ mod tests {
     #[test]
     fn rejects_invalid_configuration_values() {
         assert_eq!(
-            validate_configuration(0, 32, 0.99, 1.0, 0.1, 4, 1_000, 10_000),
+            QLearningConfigurationValidator::validate_configuration()
+                .replay_capacity(0)
+                .batch_size(32)
+                .gamma(0.99)
+                .initial_epsilon(1.0)
+                .final_epsilon(0.1)
+                .update_frequency(4)
+                .target_update_interval(1_000)
+                .training_horizon(10_000)
+                .call(),
             Err(QLearningConfigurationError::ZeroReplayCapacity)
         );
         assert_eq!(
-            validate_configuration(1_000, 0, 0.99, 1.0, 0.1, 4, 1_000, 10_000),
+            QLearningConfigurationValidator::validate_configuration()
+                .replay_capacity(1_000)
+                .batch_size(0)
+                .gamma(0.99)
+                .initial_epsilon(1.0)
+                .final_epsilon(0.1)
+                .update_frequency(4)
+                .target_update_interval(1_000)
+                .training_horizon(10_000)
+                .call(),
             Err(QLearningConfigurationError::ZeroBatchSize)
         );
         assert_eq!(
-            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 4, 0, 10_000),
+            QLearningConfigurationValidator::validate_configuration()
+                .replay_capacity(1_000)
+                .batch_size(32)
+                .gamma(0.99)
+                .initial_epsilon(1.0)
+                .final_epsilon(0.1)
+                .update_frequency(4)
+                .target_update_interval(0)
+                .training_horizon(10_000)
+                .call(),
             Err(QLearningConfigurationError::ZeroTargetUpdateInterval)
         );
         assert_eq!(
-            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 0, 1_000, 10_000),
+            QLearningConfigurationValidator::validate_configuration()
+                .replay_capacity(1_000)
+                .batch_size(32)
+                .gamma(0.99)
+                .initial_epsilon(1.0)
+                .final_epsilon(0.1)
+                .update_frequency(0)
+                .target_update_interval(1_000)
+                .training_horizon(10_000)
+                .call(),
             Err(QLearningConfigurationError::ZeroUpdateFrequency)
         );
         assert_eq!(
-            validate_configuration(31, 32, 0.99, 1.0, 0.1, 4, 1_000, 10_000),
+            QLearningConfigurationValidator::validate_configuration()
+                .replay_capacity(31)
+                .batch_size(32)
+                .gamma(0.99)
+                .initial_epsilon(1.0)
+                .final_epsilon(0.1)
+                .update_frequency(4)
+                .target_update_interval(1_000)
+                .training_horizon(10_000)
+                .call(),
             Err(QLearningConfigurationError::ReplayCapacityBelowBatchSize)
         );
         assert_eq!(
-            validate_configuration(1_000, 32, 1.01, 1.0, 0.1, 4, 1_000, 10_000),
+            QLearningConfigurationValidator::validate_configuration()
+                .replay_capacity(1_000)
+                .batch_size(32)
+                .gamma(1.01)
+                .initial_epsilon(1.0)
+                .final_epsilon(0.1)
+                .update_frequency(4)
+                .target_update_interval(1_000)
+                .training_horizon(10_000)
+                .call(),
             Err(QLearningConfigurationError::InvalidGamma)
         );
         assert_eq!(
-            validate_configuration(1_000, 32, 0.99, 1.0, 0.1, 4, 1_000, 0),
+            QLearningConfigurationValidator::validate_configuration()
+                .replay_capacity(1_000)
+                .batch_size(32)
+                .gamma(0.99)
+                .initial_epsilon(1.0)
+                .final_epsilon(0.1)
+                .update_frequency(4)
+                .target_update_interval(1_000)
+                .training_horizon(0)
+                .call(),
             Err(QLearningConfigurationError::ZeroTrainingHorizon)
         );
         assert_eq!(

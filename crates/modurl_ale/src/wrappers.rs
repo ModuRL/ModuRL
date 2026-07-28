@@ -15,7 +15,6 @@ pub struct NoopResetGym<G> {
 }
 
 impl<G> NoopResetGym<G> {
-    #[allow(dead_code)]
     pub fn new(gym: G) -> Self {
         Self { gym, noop_max: 30 }
     }
@@ -29,7 +28,6 @@ impl<G> NoopResetGym<G> {
 #[derive(Debug)]
 pub enum NoopResetGymError<E> {
     GymError(E),
-    #[allow(dead_code)]
     CandleError(candle_core::Error),
 }
 
@@ -159,7 +157,6 @@ where
 #[derive(Debug)]
 pub enum FireResetGymError<E> {
     GymError(E),
-    #[allow(dead_code)]
     CandleError(candle_core::Error),
 }
 
@@ -241,7 +238,6 @@ where
 #[derive(Debug)]
 pub enum WarpGymError<E> {
     GymError(E),
-    #[allow(dead_code)]
     CandleError(candle_core::Error),
 }
 

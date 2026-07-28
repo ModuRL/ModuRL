@@ -97,14 +97,16 @@ impl MountainCarV0 {
             // Draw the car
             Self::draw_car(
                 renderer,
-                pos,
-                scale,
-                car_width,
-                car_height,
-                clearance,
-                screen_height,
-                min_position,
-                max_position,
+                CarDrawParams {
+                    pos,
+                    scale,
+                    width: car_width,
+                    height: car_height,
+                    clearance,
+                    screen_height,
+                    min_position,
+                    max_position,
+                },
             );
 
             // Draw the goal flag
@@ -164,17 +166,17 @@ impl MountainCarV0 {
     }
 
     #[cfg(feature = "rendering")]
-    fn draw_car(
-        renderer: &mut crate::rendering::Renderer,
-        pos: f32,
-        scale: f32,
-        car_width: f32,
-        car_height: f32,
-        clearance: f32,
-        screen_height: f32,
-        min_position: f32,
-        max_position: f32,
-    ) {
+    fn draw_car(renderer: &mut crate::rendering::Renderer, params: CarDrawParams) {
+        let CarDrawParams {
+            pos,
+            scale,
+            width: car_width,
+            height: car_height,
+            clearance,
+            screen_height,
+            min_position,
+            max_position,
+        } = params;
         let car_x = (pos - min_position) * scale;
         let car_y = screen_height - (clearance + Self::height(pos) * scale);
 
@@ -254,16 +256,28 @@ impl MountainCarV0 {
         let flag_x = ((goal_position - min_position) * scale) as usize;
         let flag_y_bottom = (screen_height - Self::height(goal_position) * scale) as usize;
 
-        renderer.draw_flag(
-            flag_x,
-            flag_y_bottom,
-            50,       // pole height
-            25,       // flag width
-            10,       // flag height
-            0x000000, // black pole
-            0xCCCC00, // yellow flag
-        );
+        renderer.draw_flag(&crate::rendering::Flag {
+            x: flag_x,
+            y_bottom: flag_y_bottom,
+            pole_height: 50,
+            width: 25,
+            height: 10,
+            pole_color: 0x000000,
+            color: 0xCCCC00,
+        });
     }
+}
+
+#[cfg(feature = "rendering")]
+struct CarDrawParams {
+    pos: f32,
+    scale: f32,
+    width: f32,
+    height: f32,
+    clearance: f32,
+    screen_height: f32,
+    min_position: f32,
+    max_position: f32,
 }
 
 impl Default for MountainCarV0 {
@@ -369,7 +383,7 @@ mod tests {
             ..
         } = env
             .step(
-                Tensor::from_vec(vec![0 as u32], vec![], &Device::Cpu)
+                Tensor::from_vec(vec![0_u32], vec![], &Device::Cpu)
                     .expect("Failed to create tensor."),
             )
             .expect("Failed to step environment.");
@@ -391,7 +405,7 @@ mod tests {
         let _state = env.reset();
         let _info = env
             .step(
-                Tensor::from_vec(vec![3 as u32], vec![], &Device::Cpu)
+                Tensor::from_vec(vec![3_u32], vec![], &Device::Cpu)
                     .expect("Failed to create tensor."),
             )
             .expect("Failed to step environment.");
