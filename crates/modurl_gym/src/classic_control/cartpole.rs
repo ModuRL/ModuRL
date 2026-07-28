@@ -57,9 +57,9 @@ impl CartPoleV1 {
 
         let high = vec![
             x_threshold * 2.0,
-            std::f32::INFINITY,
+            f32::INFINITY,
             theta_threshold_radians * 2.0,
-            std::f32::INFINITY,
+            f32::INFINITY,
         ];
         let low = high.iter().map(|x| -x).collect::<Vec<_>>();
         let high = Tensor::from_vec(high, vec![4], device).expect("Failed to create tensor.");
@@ -390,7 +390,7 @@ mod tests {
             ..
         } = env
             .step(
-                Tensor::from_vec(vec![0 as u32], vec![], &Device::Cpu)
+                Tensor::from_vec(vec![0_u32], vec![], &Device::Cpu)
                     .expect("Failed to create tensor."),
             )
             .expect("Failed to step environment.");
@@ -412,7 +412,7 @@ mod tests {
         let _state = env.reset();
         let _info = env
             .step(
-                Tensor::from_vec(vec![1 as u32], vec![1], &Device::Cpu)
+                Tensor::from_vec(vec![1_u32], vec![1], &Device::Cpu)
                     .expect("Failed to create tensor."),
             )
             .expect("Failed to step environment.");

@@ -121,15 +121,18 @@ pub(crate) fn test_gym_against_python<T, E>(
         );
 
         // verify observation matches expected (within a tolerance)
-        let obs_len = expected.observation.len();
-        for j in 0..obs_len {
+        for (j, actual) in actual_obs
+            .iter()
+            .enumerate()
+            .take(expected.observation.len())
+        {
             assert!(
-                (actual_obs[j] - expected.observation[j]).abs() < tolerances.obs_tol,
+                (*actual - expected.observation[j]).abs() < tolerances.obs_tol,
                 "Mismatch at step {}, observation index {}: expected {}, got {}",
                 i,
                 j,
                 expected.observation[j],
-                actual_obs[j]
+                actual
             );
         }
     }

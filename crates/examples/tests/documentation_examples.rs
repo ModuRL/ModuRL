@@ -4,7 +4,6 @@ use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 // This is the logger shape shown in docs/src/understand-q-learning-training.md.
-#[allow(dead_code)]
 struct DocumentationDQNLogger;
 
 impl DQNLogger for DocumentationDQNLogger {
@@ -27,7 +26,6 @@ impl DQNLogger for DocumentationDQNLogger {
 }
 
 // DDQN has the same logger entry types, and collection logging remains optional.
-#[allow(dead_code)]
 struct DocumentationDDQNLogger;
 
 impl DDQNLogger for DocumentationDDQNLogger {
@@ -38,7 +36,6 @@ impl DDQNLogger for DocumentationDDQNLogger {
 
 // This is the complete program shown in docs/src/getting-started.md. Keep this
 // test compile-only: running it would turn a documentation check into training.
-#[allow(dead_code)]
 fn getting_started_program() {
     let device = Device::Cpu;
 
@@ -74,8 +71,10 @@ fn getting_started_program() {
         .build()
         .expect("failed to build critic network");
 
-    let mut optimizer_config = ParamsAdamW::default();
-    optimizer_config.lr = 3e-4;
+    let optimizer_config = ParamsAdamW {
+        lr: 3e-4,
+        ..Default::default()
+    };
 
     let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
         .expect("failed to build actor optimizer");
@@ -109,7 +108,6 @@ fn getting_started_program() {
 
 // This is the complete DQN program shown in docs/src/dqn.md. Keep this test
 // compile-only: running it would turn a documentation check into training.
-#[allow(dead_code)]
 fn dqn_program() {
     let device = Device::Cpu;
     let envs = vec![CartPoleV1::builder().device(&device).build()];
@@ -151,6 +149,7 @@ fn dqn_program() {
     )
     .expect("failed to build the optimizer");
 
+    let mut logger = DocumentationDQNLogger;
     let mut agent = DQNAgent::builder()
         .action_space(Discrete::new(2))
         .observation_space(observation_space)
@@ -170,6 +169,7 @@ fn dqn_program() {
             1.0 + (0.05 - 1.0) * exploration_progress
         }))
         .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+        .logger(&mut logger)
         .build()
         .expect("DQN configuration should be valid");
 
@@ -179,7 +179,6 @@ fn dqn_program() {
 
 // This is the DQN program with the DDQN-specific construction shown in
 // docs/src/ddqn.md. Keep this test compile-only for the same reason.
-#[allow(dead_code)]
 fn ddqn_program() {
     let device = Device::Cpu;
     let envs = vec![CartPoleV1::builder().device(&device).build()];
@@ -221,6 +220,7 @@ fn ddqn_program() {
     )
     .expect("failed to build the optimizer");
 
+    let mut logger = DocumentationDDQNLogger;
     let mut agent = DDQNAgent::builder()
         .action_space(Discrete::new(2))
         .observation_space(observation_space)
@@ -240,6 +240,7 @@ fn ddqn_program() {
             1.0 + (0.05 - 1.0) * exploration_progress
         }))
         .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+        .logger(&mut logger)
         .build()
         .expect("DDQN configuration should be valid");
 
@@ -250,7 +251,6 @@ fn ddqn_program() {
 }
 
 // This is the PPO builder configuration shown in docs/src/understand-ppo-training.md.
-#[allow(dead_code)]
 fn understand_ppo_training_configuration() {
     let device = Device::Cpu;
 
@@ -286,8 +286,10 @@ fn understand_ppo_training_configuration() {
         .build()
         .expect("failed to build critic network");
 
-    let mut optimizer_config = ParamsAdamW::default();
-    optimizer_config.lr = 3e-4;
+    let optimizer_config = ParamsAdamW {
+        lr: 3e-4,
+        ..Default::default()
+    };
     let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
         .expect("failed to build actor optimizer");
     let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
@@ -393,14 +395,27 @@ fn custom_gym_can_be_vectorized() {
         .expect("transition states have a consistent shape");
 }
 
+#[test]
+fn documentation_programs_compile_without_running_training() {
+    let _ = getting_started_program as fn();
+    let _ = dqn_program as fn();
+    let _ = ddqn_program as fn();
+    let _ = understand_ppo_training_configuration as fn();
+
+    #[cfg(feature = "cuda")]
+    let _ = cuda_device as fn() -> candle_core::Result<Device>;
+    #[cfg(feature = "metal")]
+    let _ = metal_device as fn() -> candle_core::Result<Device>;
+}
+
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
+
 fn cuda_device() -> candle_core::Result<Device> {
     Device::new_cuda(0)
 }
 
 #[cfg(feature = "metal")]
-#[allow(dead_code)]
+
 fn metal_device() -> candle_core::Result<Device> {
     Device::new_metal(0)
 }

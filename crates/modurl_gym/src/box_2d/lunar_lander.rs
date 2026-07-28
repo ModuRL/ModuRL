@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 #[cfg(feature = "rendering")]
-use crate::rendering::Renderer;
+use crate::rendering::{Flag, Renderer};
 
 // Constants from Python code
 const FPS: f32 = 50.0;
@@ -99,7 +99,7 @@ impl Particle {
     }
 
     fn get_alpha(&self) -> f32 {
-        (self.ttl / self.initial_ttl).max(0.0).min(1.0)
+        (self.ttl / self.initial_ttl).clamp(0.0, 1.0)
     }
 }
 
@@ -109,12 +109,29 @@ pub struct ContactDetector {
     pub legs_ground_contact: [bool; 2],
 }
 
+#[cfg(feature = "rendering")]
+struct SideEngineParticleParams<'a> {
+    world: B2worldPtr<UserDataTypes>,
+    lander_pos: &'a B2vec2,
+    lander_angle: f32,
+    tip: &'a (f32, f32),
+    side: &'a (f32, f32),
+    direction: f32,
+    dispersion: &'a [f32; 2],
+}
+
 impl ContactDetector {
     pub fn new() -> Self {
         Self {
             game_over: false,
             legs_ground_contact: [false; 2],
         }
+    }
+}
+
+impl Default for ContactDetector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -258,14 +275,14 @@ impl LunarLanderV3 {
             gravity
         );
 
-        if wind_power < 0.0 || wind_power > 20.0 {
+        if !(0.0..=20.0).contains(&wind_power) {
             eprintln!(
                 "wind_power value is recommended to be between 0.0 and 20.0, (current value: {})",
                 wind_power
             );
         }
 
-        if turbulence_power < 0.0 || turbulence_power > 2.0 {
+        if !(0.0..=2.0).contains(&turbulence_power) {
             eprintln!(
                 "turbulence_power value is recommended to be between 0.0 and 2.0, (current value: {})",
                 turbulence_power
@@ -417,26 +434,26 @@ impl LunarLanderV3 {
         let flag_y_bottom = pad_y as usize;
 
         // Left flag
-        renderer.draw_flag(
-            pad_x as usize - 5, // slightly to the left of the pad
-            flag_y_bottom,
-            flag_height,
-            20,         // flag width
-            8,          // flag height
-            0xFFFFFFFF, // white pole
-            0xFFCCCC00, // yellow flag for contrast
-        );
+        renderer.draw_flag(&Flag {
+            x: pad_x as usize - 5,
+            y_bottom: flag_y_bottom,
+            pole_height: flag_height,
+            width: 20,
+            height: 8,
+            pole_color: 0xFFFFFFFF,
+            color: 0xFFCCCC00,
+        });
 
         // Right flag
-        renderer.draw_flag(
-            (pad_x + pad_width * SCALE) as usize + 5, // slightly to the right of the pad
-            flag_y_bottom,
-            flag_height,
-            20,         // flag width
-            8,          // flag height
-            0xFFFFFFFF, // white pole
-            0xFFCCCC00, // yellow flag for contrast
-        );
+        renderer.draw_flag(&Flag {
+            x: (pad_x + pad_width * SCALE) as usize + 5,
+            y_bottom: flag_y_bottom,
+            pole_height: flag_height,
+            width: 20,
+            height: 8,
+            pole_color: 0xFFFFFFFF,
+            color: 0xFFCCCC00,
+        });
     }
 
     #[cfg(feature = "rendering")]
@@ -572,8 +589,10 @@ impl LunarLanderV3 {
         tip: &(f32, f32),
         dispersion: &[f32; 2],
     ) -> Result<(), candle_core::Error> {
-        let mut particle_body_def = B2bodyDef::default();
-        particle_body_def.body_type = B2bodyType::B2DynamicBody;
+        let mut particle_body_def = B2bodyDef {
+            body_type: B2bodyType::B2DynamicBody,
+            ..Default::default()
+        };
 
         // Position particles at the main engine nozzle
         let particle_x =
@@ -596,10 +615,12 @@ impl LunarLanderV3 {
         let mut particle_shape = B2polygonShape::default();
         particle_shape.set_as_box(0.8 / SCALE, 0.8 / SCALE);
 
-        let mut fixture_def = B2fixtureDef::default();
-        fixture_def.shape = Some(Rc::new(RefCell::new(particle_shape)));
-        fixture_def.density = 0.1;
-        fixture_def.friction = 0.0;
+        let mut fixture_def = B2fixtureDef {
+            shape: Some(Rc::new(RefCell::new(particle_shape))),
+            density: 0.1,
+            friction: 0.0,
+            ..Default::default()
+        };
         fixture_def.filter.category_bits = 0x0100; // Different category so they don't collide with lander
         fixture_def.filter.mask_bits = 0x0000; // Don't collide with anything
 
@@ -620,18 +641,23 @@ impl LunarLanderV3 {
     #[cfg(feature = "rendering")]
     fn create_side_engine_particles(
         &mut self,
-        world: B2worldPtr<UserDataTypes>,
-        lander_pos: &B2vec2,
-        lander_angle: f32,
-        tip: &(f32, f32),
-        side: &(f32, f32),
-        direction: f32,
-        dispersion: &[f32; 2],
+        params: SideEngineParticleParams,
     ) -> Result<(), candle_core::Error> {
+        let SideEngineParticleParams {
+            world,
+            lander_pos,
+            lander_angle,
+            tip,
+            side,
+            direction,
+            dispersion,
+        } = params;
         // Create particle for side engine flames (reduced count like original)
         for _ in 0..1 {
-            let mut particle_body_def = B2bodyDef::default();
-            particle_body_def.body_type = B2bodyType::B2DynamicBody;
+            let mut particle_body_def = B2bodyDef {
+                body_type: B2bodyType::B2DynamicBody,
+                ..Default::default()
+            };
 
             // Position particles at the side engine nozzle
             let engine_offset_x = side.0 * direction * SIDE_ENGINE_AWAY / SCALE + dispersion[0];
@@ -654,10 +680,12 @@ impl LunarLanderV3 {
             let mut particle_shape = B2polygonShape::default();
             particle_shape.set_as_box(0.4 / SCALE, 0.4 / SCALE);
 
-            let mut fixture_def = B2fixtureDef::default();
-            fixture_def.shape = Some(Rc::new(RefCell::new(particle_shape)));
-            fixture_def.density = 0.05;
-            fixture_def.friction = 0.0;
+            let mut fixture_def = B2fixtureDef {
+                shape: Some(Rc::new(RefCell::new(particle_shape))),
+                density: 0.05,
+                friction: 0.0,
+                ..Default::default()
+            };
             fixture_def.filter.category_bits = 0x0100; // Different category so they don't collide with lander
             fixture_def.filter.mask_bits = 0x0000; // Don't collide with anything
 
@@ -713,9 +741,9 @@ impl Gym for LunarLanderV3 {
 
         // Create Terrain
         const CHUNKS: usize = 11;
-        let mut height = vec![0.0; CHUNKS + 1];
-        for i in 0..=CHUNKS {
-            height[i] = self.random_uniform(0.0, h / 2.0)?;
+        let mut height = [0.0; CHUNKS + 1];
+        for height in &mut height {
+            *height = self.random_uniform(0.0, h / 2.0)?;
         }
 
         let chunk_x: Vec<f32> = (0..CHUNKS)
@@ -737,8 +765,10 @@ impl Gym for LunarLanderV3 {
             .collect();
 
         // Create moon (ground)
-        let mut ground_body_def = B2bodyDef::default();
-        ground_body_def.body_type = B2bodyType::B2StaticBody;
+        let mut ground_body_def = B2bodyDef {
+            body_type: B2bodyType::B2StaticBody,
+            ..Default::default()
+        };
         ground_body_def.position.set(0.0, 0.0);
         ground_body_def.user_data = Some(0); // Ground body ID = 0
         let moon = B2world::create_body(world.clone(), &ground_body_def);
@@ -747,10 +777,12 @@ impl Gym for LunarLanderV3 {
         let mut ground_edge = B2edgeShape::default();
         ground_edge.set_two_sided(B2vec2::new(0.0, 0.0), B2vec2::new(w, 0.0));
 
-        let mut ground_fixture_def = B2fixtureDef::default();
-        ground_fixture_def.shape = Some(Rc::new(RefCell::new(ground_edge)));
-        ground_fixture_def.density = 0.0;
-        ground_fixture_def.friction = 0.1;
+        let ground_fixture_def = B2fixtureDef {
+            shape: Some(Rc::new(RefCell::new(ground_edge))),
+            density: 0.0,
+            friction: 0.1,
+            ..Default::default()
+        };
 
         B2body::create_fixture(moon.clone(), &ground_fixture_def);
 
@@ -762,10 +794,12 @@ impl Gym for LunarLanderV3 {
             let mut terrain_edge = B2edgeShape::default();
             terrain_edge.set_two_sided(B2vec2::new(p1.0, p1.1), B2vec2::new(p2.0, p2.1));
 
-            let mut fixture_def = B2fixtureDef::default();
-            fixture_def.shape = Some(Rc::new(RefCell::new(terrain_edge)));
-            fixture_def.density = 0.0;
-            fixture_def.friction = 0.1;
+            let fixture_def = B2fixtureDef {
+                shape: Some(Rc::new(RefCell::new(terrain_edge))),
+                density: 0.0,
+                friction: 0.1,
+                ..Default::default()
+            };
 
             B2body::create_fixture(moon.clone(), &fixture_def);
 
@@ -778,8 +812,10 @@ impl Gym for LunarLanderV3 {
         let initial_y = VIEWPORT_H / SCALE;
         let initial_x = VIEWPORT_W / SCALE / 2.0;
 
-        let mut lander_body_def = B2bodyDef::default();
-        lander_body_def.body_type = B2bodyType::B2DynamicBody;
+        let mut lander_body_def = B2bodyDef {
+            body_type: B2bodyType::B2DynamicBody,
+            ..Default::default()
+        };
         lander_body_def.position.set(initial_x, initial_y);
         lander_body_def.angle = 0.0;
         lander_body_def.user_data = Some(1); // Lander body ID = 1
@@ -794,10 +830,12 @@ impl Gym for LunarLanderV3 {
             .collect();
         lander_shape.set(&vertices);
 
-        let mut fixture_def = B2fixtureDef::default();
-        fixture_def.shape = Some(Rc::new(RefCell::new(lander_shape)));
-        fixture_def.density = 5.0;
-        fixture_def.friction = 0.1;
+        let mut fixture_def = B2fixtureDef {
+            shape: Some(Rc::new(RefCell::new(lander_shape))),
+            density: 5.0,
+            friction: 0.1,
+            ..Default::default()
+        };
         fixture_def.filter.category_bits = 0x0010;
         fixture_def.filter.mask_bits = 0x001; // collide only with ground
         fixture_def.restitution = 0.0;
@@ -824,8 +862,10 @@ impl Gym for LunarLanderV3 {
         self.leg_joints.clear();
         for (leg_index, i) in [-1, 1].iter().enumerate() {
             let i_f = *i as f32;
-            let mut leg_body_def = B2bodyDef::default();
-            leg_body_def.body_type = B2bodyType::B2DynamicBody;
+            let mut leg_body_def = B2bodyDef {
+                body_type: B2bodyType::B2DynamicBody,
+                ..Default::default()
+            };
             leg_body_def
                 .position
                 .set(initial_x - i_f * LEG_AWAY / SCALE, initial_y);
@@ -837,10 +877,12 @@ impl Gym for LunarLanderV3 {
             let mut leg_shape = B2polygonShape::default();
             leg_shape.set_as_box(LEG_W / SCALE, LEG_H / SCALE);
 
-            let mut fixture_def = B2fixtureDef::default();
-            fixture_def.shape = Some(Rc::new(RefCell::new(leg_shape)));
-            fixture_def.density = 1.0;
-            fixture_def.restitution = 0.0;
+            let mut fixture_def = B2fixtureDef {
+                shape: Some(Rc::new(RefCell::new(leg_shape))),
+                density: 1.0,
+                restitution: 0.0,
+                ..Default::default()
+            };
             fixture_def.filter.category_bits = 0x0020;
             fixture_def.filter.mask_bits = 0x001;
 
@@ -1017,15 +1059,15 @@ impl Gym for LunarLanderV3 {
             #[cfg(feature = "rendering")]
             if self.renderer.is_some() {
                 // Create side engine particles
-                self.create_side_engine_particles(
-                    world.clone(),
-                    &lander_pos,
+                self.create_side_engine_particles(SideEngineParticleParams {
+                    world: world.clone(),
+                    lander_pos: &lander_pos,
                     lander_angle,
-                    &tip,
-                    &side,
+                    tip: &tip,
+                    side: &side,
                     direction,
-                    &dispersion,
-                )?;
+                    dispersion: &dispersion,
+                })?;
             }
         }
 
@@ -1241,11 +1283,8 @@ mod tests {
 
             // Create DETERMINISTIC Terrain (no randomness)
             const CHUNKS: usize = 11;
-            let mut height = vec![0.0; CHUNKS + 1];
-            // Set all heights to a fixed value instead of random
-            for i in 0..=CHUNKS {
-                height[i] = h / 8.0; // Fixed height instead of random
-            }
+            // Set all heights to a fixed value instead of random.
+            let mut height = [h / 8.0; CHUNKS + 1];
 
             let chunk_x: Vec<f32> = (0..CHUNKS)
                 .map(|i| w / (CHUNKS - 1) as f32 * i as f32)
@@ -1266,8 +1305,10 @@ mod tests {
                 .collect();
 
             // Create moon (ground)
-            let mut ground_body_def = B2bodyDef::default();
-            ground_body_def.body_type = B2bodyType::B2StaticBody;
+            let mut ground_body_def = B2bodyDef {
+                body_type: B2bodyType::B2StaticBody,
+                ..Default::default()
+            };
             ground_body_def.position.set(0.0, 0.0);
             ground_body_def.user_data = Some(0); // Ground body ID = 0
             let moon = B2world::create_body(world.clone(), &ground_body_def);
@@ -1276,10 +1317,12 @@ mod tests {
             let mut ground_edge = B2edgeShape::default();
             ground_edge.set_two_sided(B2vec2::new(0.0, 0.0), B2vec2::new(w, 0.0));
 
-            let mut ground_fixture_def = B2fixtureDef::default();
-            ground_fixture_def.shape = Some(Rc::new(RefCell::new(ground_edge)));
-            ground_fixture_def.density = 0.0;
-            ground_fixture_def.friction = 0.1;
+            let ground_fixture_def = B2fixtureDef {
+                shape: Some(Rc::new(RefCell::new(ground_edge))),
+                density: 0.0,
+                friction: 0.1,
+                ..Default::default()
+            };
 
             B2body::create_fixture(moon.clone(), &ground_fixture_def);
 
@@ -1291,10 +1334,12 @@ mod tests {
                 let mut terrain_edge = B2edgeShape::default();
                 terrain_edge.set_two_sided(B2vec2::new(p1.0, p1.1), B2vec2::new(p2.0, p2.1));
 
-                let mut fixture_def = B2fixtureDef::default();
-                fixture_def.shape = Some(Rc::new(RefCell::new(terrain_edge)));
-                fixture_def.density = 0.0;
-                fixture_def.friction = 0.1;
+                let fixture_def = B2fixtureDef {
+                    shape: Some(Rc::new(RefCell::new(terrain_edge))),
+                    density: 0.0,
+                    friction: 0.1,
+                    ..Default::default()
+                };
 
                 B2body::create_fixture(moon.clone(), &fixture_def);
 
@@ -1307,8 +1352,10 @@ mod tests {
             let initial_y = VIEWPORT_H / SCALE * 0.8; // Deterministic Y position
             let initial_x = VIEWPORT_W / SCALE / 2.0; // Deterministic X position
 
-            let mut lander_body_def = B2bodyDef::default();
-            lander_body_def.body_type = B2bodyType::B2DynamicBody;
+            let mut lander_body_def = B2bodyDef {
+                body_type: B2bodyType::B2DynamicBody,
+                ..Default::default()
+            };
             lander_body_def.position.set(initial_x, initial_y);
             lander_body_def.angle = 0.0;
             lander_body_def.user_data = Some(1); // Lander body ID = 1
@@ -1323,10 +1370,12 @@ mod tests {
                 .collect();
             lander_shape.set(&vertices);
 
-            let mut fixture_def = B2fixtureDef::default();
-            fixture_def.shape = Some(Rc::new(RefCell::new(lander_shape)));
-            fixture_def.density = 5.0;
-            fixture_def.friction = 0.1;
+            let mut fixture_def = B2fixtureDef {
+                shape: Some(Rc::new(RefCell::new(lander_shape))),
+                density: 5.0,
+                friction: 0.1,
+                ..Default::default()
+            };
             fixture_def.filter.category_bits = 0x0010;
             fixture_def.filter.mask_bits = 0x001; // collide only with ground
             fixture_def.restitution = 0.0;
@@ -1354,8 +1403,10 @@ mod tests {
             self.leg_joints.clear();
             for (leg_index, i) in [-1, 1].iter().enumerate() {
                 let i_f = *i as f32;
-                let mut leg_body_def = B2bodyDef::default();
-                leg_body_def.body_type = B2bodyType::B2DynamicBody;
+                let mut leg_body_def = B2bodyDef {
+                    body_type: B2bodyType::B2DynamicBody,
+                    ..Default::default()
+                };
                 leg_body_def
                     .position
                     .set(initial_x - i_f * LEG_AWAY / SCALE, initial_y);
@@ -1367,10 +1418,12 @@ mod tests {
                 let mut leg_shape = B2polygonShape::default();
                 leg_shape.set_as_box(LEG_W / SCALE, LEG_H / SCALE);
 
-                let mut fixture_def = B2fixtureDef::default();
-                fixture_def.shape = Some(Rc::new(RefCell::new(leg_shape)));
-                fixture_def.density = 1.0;
-                fixture_def.restitution = 0.0;
+                let mut fixture_def = B2fixtureDef {
+                    shape: Some(Rc::new(RefCell::new(leg_shape))),
+                    density: 1.0,
+                    restitution: 0.0,
+                    ..Default::default()
+                };
                 fixture_def.filter.category_bits = 0x0020;
                 fixture_def.filter.mask_bits = 0x001;
 
@@ -1461,35 +1514,37 @@ mod tests {
                 // Set legs using explicit leg data from extra_info
                 for (i, leg) in self.legs.iter().enumerate() {
                     let leg_x = info
-                        .get(&format!("raw_leg{}_pos_x", i))
+                        .get(format!("raw_leg{}_pos_x", i))
                         .and_then(|v| v.as_f64())
                         .map(|v| v as f32)
-                        .expect(&format!("raw_leg{}_pos_x not found in extra_info", i));
+                        .unwrap_or_else(|| panic!("raw_leg{}_pos_x not found in extra_info", i));
                     let leg_y = info
-                        .get(&format!("raw_leg{}_pos_y", i))
+                        .get(format!("raw_leg{}_pos_y", i))
                         .and_then(|v| v.as_f64())
                         .map(|v| v as f32)
-                        .expect(&format!("raw_leg{}_pos_y not found in extra_info", i));
+                        .unwrap_or_else(|| panic!("raw_leg{}_pos_y not found in extra_info", i));
                     let leg_angle = info
-                        .get(&format!("raw_leg{}_angle", i))
+                        .get(format!("raw_leg{}_angle", i))
                         .and_then(|v| v.as_f64())
                         .map(|v| v as f32)
-                        .expect(&format!("raw_leg{}_angle not found in extra_info", i));
+                        .unwrap_or_else(|| panic!("raw_leg{}_angle not found in extra_info", i));
                     let leg_vel_x = info
-                        .get(&format!("raw_leg{}_vel_x", i))
+                        .get(format!("raw_leg{}_vel_x", i))
                         .and_then(|v| v.as_f64())
                         .map(|v| v as f32)
-                        .expect(&format!("raw_leg{}_vel_x not found in extra_info", i));
+                        .unwrap_or_else(|| panic!("raw_leg{}_vel_x not found in extra_info", i));
                     let leg_vel_y = info
-                        .get(&format!("raw_leg{}_vel_y", i))
+                        .get(format!("raw_leg{}_vel_y", i))
                         .and_then(|v| v.as_f64())
                         .map(|v| v as f32)
-                        .expect(&format!("raw_leg{}_vel_y not found in extra_info", i));
+                        .unwrap_or_else(|| panic!("raw_leg{}_vel_y not found in extra_info", i));
                     let leg_angular_vel = info
-                        .get(&format!("raw_leg{}_angular_vel", i))
+                        .get(format!("raw_leg{}_angular_vel", i))
                         .and_then(|v| v.as_f64())
                         .map(|v| v as f32)
-                        .expect(&format!("raw_leg{}_angular_vel not found in extra_info", i));
+                        .unwrap_or_else(|| {
+                            panic!("raw_leg{}_angular_vel not found in extra_info", i)
+                        });
 
                     leg.borrow_mut()
                         .set_transform(B2vec2::new(leg_x, leg_y), leg_angle);
