@@ -570,13 +570,14 @@ pub(crate) fn selected_action_q_values(
 #[cfg(test)]
 mod tests {
     use super::{
-        QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningLogger,
-        QLearningTarget, selected_action_q_values, validate_configuration, validate_epsilon,
+        QCollectionLogEntry, QLearningAgent, QLearningConfigurationError,
+        QLearningConfigurationValidator, QLearningLogger, QLearningTarget,
+        selected_action_q_values, validate_epsilon,
     };
     use crate::{
         agents::{
-            test_support::{CountingOptimizer, FixedEnv},
             ReplayDeviceStrategy,
+            test_support::{CountingOptimizer, FixedEnv},
         },
         gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper},
         models::MLP,

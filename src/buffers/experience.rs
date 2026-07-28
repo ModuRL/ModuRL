@@ -12,10 +12,7 @@ pub(crate) fn stack_tensor_field<T>(
     experiences: &[T],
     select: fn(&T) -> Tensor,
 ) -> Result<Tensor, candle_core::Error> {
-    Tensor::stack(
-        &experiences.iter().map(select).collect::<Vec<_>>(),
-        0,
-    )
+    Tensor::stack(&experiences.iter().map(select).collect::<Vec<_>>(), 0)
 }
 
 /// Converts one `[item_count]` boolean field from each experience into an

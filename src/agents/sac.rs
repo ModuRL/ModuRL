@@ -7,7 +7,7 @@
 use std::{fmt::Debug, num::NonZeroUsize, ops::Deref};
 
 use bon::bon;
-use candle_core::{DType, IndexOp, Tensor, Var, D};
+use candle_core::{D, DType, IndexOp, Tensor, Var};
 use candle_nn::{Optimizer, VarMap};
 
 use super::{Agent, ReplayDeviceStrategy};
@@ -1569,8 +1569,8 @@ mod tests {
     use candle_core::{Device, Module};
     use candle_nn::{Init, VarBuilder};
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     struct SumModule;
@@ -1945,10 +1945,12 @@ mod tests {
         let gradients = loss.backward().unwrap();
 
         assert!(gradients.get(logits.as_tensor()).is_some());
-        assert!(critic_vars
-            .all_vars()
-            .iter()
-            .all(|parameter| gradients.get(parameter.as_tensor()).is_none()));
+        assert!(
+            critic_vars
+                .all_vars()
+                .iter()
+                .all(|parameter| gradients.get(parameter.as_tensor()).is_none())
+        );
     }
 
     #[test]
@@ -1979,17 +1981,19 @@ mod tests {
         let gradients = loss.backward().unwrap();
 
         assert!(gradients.get(actions.as_tensor()).is_some());
-        assert!(critic_vars
-            .all_vars()
-            .iter()
-            .all(|parameter| gradients.get(parameter.as_tensor()).is_none()));
+        assert!(
+            critic_vars
+                .all_vars()
+                .iter()
+                .all(|parameter| gradients.get(parameter.as_tensor()).is_none())
+        );
     }
 
     #[test]
     fn continuous_actor_reparameterization_reaches_actor_but_not_critic_or_targets() {
         use crate::{
             distributions::{GaussianDistribution, TanhTransform, TransformedDistribution},
-            models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
+            models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         };
 
         let actor_outputs = Var::from_vec(vec![0.1f32, -0.5], (1, 2), &Device::Cpu).unwrap();
@@ -2030,10 +2034,12 @@ mod tests {
             .to_vec2::<f32>()
             .unwrap();
         assert!(actor_gradient[0].iter().all(|value| value.abs() > 1e-6));
-        assert!(critic_vars
-            .all_vars()
-            .iter()
-            .all(|parameter| gradients.get(parameter.as_tensor()).is_none()));
+        assert!(
+            critic_vars
+                .all_vars()
+                .iter()
+                .all(|parameter| gradients.get(parameter.as_tensor()).is_none())
+        );
 
         let target_terms = policy.expectation(&states, NonZeroUsize::MIN).unwrap();
         let detached_loss = target_terms.log_probabilities().detach().sum_all().unwrap();
@@ -2044,11 +2050,13 @@ mod tests {
             .policy_values(&states, &target_actions)
             .unwrap()
             .detach();
-        assert!(detached_q
-            .backward()
-            .unwrap()
-            .get(actor_outputs.as_tensor())
-            .is_none());
+        assert!(
+            detached_q
+                .backward()
+                .unwrap()
+                .get(actor_outputs.as_tensor())
+                .is_none()
+        );
     }
 
     #[test]
@@ -2267,7 +2275,7 @@ mod tests {
             agents::test_support::FixedEnv,
             distributions::CategoricalDistribution,
             gym::VectorizedGymWrapper,
-            models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
+            models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
             spaces::{BoxSpace, Discrete},
         };
 

@@ -1,6 +1,6 @@
 use bon::bon;
-use candle_core::{IndexOp, Tensor, D};
-use candle_nn::{loss, Optimizer};
+use candle_core::{D, IndexOp, Tensor};
+use candle_nn::{Optimizer, loss};
 use std::marker::PhantomData;
 
 use crate::{
@@ -799,6 +799,8 @@ where
         let critic_loss = if self.clip_value_loss {
             // PPO2/CleanRL value-loss clipping: bound how far the value estimate
             // may move from its rollout-time value within one update.
+            let old_values = old_values
+                .expect("PPO old values must be prepared when value-loss clipping is enabled");
             clipped_value_loss(&values, &returns, &old_values, clip_range as f64)?
         } else {
             loss::mse(&values, &returns)?
@@ -1142,7 +1144,7 @@ mod tests {
     use crate::{
         distributions::CategoricalDistribution,
         gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
-        models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
+        models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         spaces::Discrete,
     };
     use candle_core::Device;
@@ -1344,14 +1346,14 @@ mod schedule_tests {
     use super::*;
     use crate::{
         agents::{
-            test_support::{CountingOptimizer, FixedEnv},
             Agent,
+            test_support::{CountingOptimizer, FixedEnv},
         },
         distributions::{CategoricalDistribution, GaussianDistribution},
         gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
         models::{
-            probabilistic_model::{ProbabilisticPolicyModel, ProbabilisticPolicyModelError},
             MLP,
+            probabilistic_model::{ProbabilisticPolicyModel, ProbabilisticPolicyModelError},
         },
         parameter_schedule::LinearSchedule,
         spaces::{BoxSpace, Discrete, Space},
