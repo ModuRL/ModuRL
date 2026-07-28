@@ -591,6 +591,7 @@ where
 /// mean critic aggregation and a `0.5` replay-to-current entropy penalty.
 /// Q-value clipping remains opt-in because its useful scale depends on the
 /// task's rewards.
+#[derive(Default)]
 pub struct SACStabilizationConfiguration {
     entropy_change_penalty: Option<f64>,
     aggregation_mode: Option<SACCriticAggregationMode>,
@@ -615,15 +616,6 @@ impl SACStabilizationConfiguration {
         Self {
             entropy_change_penalty: Some(0.5),
             aggregation_mode: Some(SACCriticAggregationMode::Mean),
-        }
-    }
-}
-
-impl Default for SACStabilizationConfiguration {
-    fn default() -> Self {
-        Self {
-            entropy_change_penalty: None,
-            aggregation_mode: None,
         }
     }
 }
@@ -936,6 +928,7 @@ where
     SE: Debug,
 {
     #[builder]
+    #[allow(clippy::type_complexity)] // Generated builder state carries this constructor's generic parameters.
     pub fn new(
         policy: Box<dyn ExpectationPolicy<Error = PE>>,
         actor_optimizer: AO,
@@ -971,17 +964,17 @@ where
         let aggregation_mode = aggregation_mode
             .or(stabilization_configuration.aggregation_mode)
             .unwrap_or(SACCriticAggregationMode::Min);
-        validate_configuration(
-            critics.len(),
-            replay_capacity,
-            batch_size,
-            gamma,
-            tau,
-            &entropy_configuration,
-            stabilization_configuration.entropy_change_penalty,
-            q_value_clip,
-            training_horizon,
-        )?;
+        SACConfigurationValidator::validate_configuration()
+            .critic_count(critics.len())
+            .replay_capacity(replay_capacity)
+            .batch_size(batch_size)
+            .gamma(gamma)
+            .tau(tau)
+            .entropy(&entropy_configuration)
+            .maybe_entropy_change_penalty(stabilization_configuration.entropy_change_penalty)
+            .maybe_q_value_clip(q_value_clip)
+            .training_horizon(training_horizon)
+            .call()?;
         Ok(Self {
             policy,
             actor_optimizer,
@@ -1010,48 +1003,55 @@ where
     }
 }
 
-fn validate_configuration<PE: Debug, GE: Debug, SE: Debug, O: Optimizer>(
-    critic_count: usize,
-    replay_capacity: usize,
-    batch_size: usize,
-    gamma: f64,
-    tau: f64,
-    entropy: &SACEntropyConfiguration<O>,
-    entropy_change_penalty: Option<f64>,
-    q_value_clip: Option<f64>,
-    training_horizon: usize,
-) -> Result<(), SACError<PE, GE, SE>> {
-    let error = if critic_count == 0 {
-        Some(SACConfigurationError::NoCritics)
-    } else if replay_capacity == 0 {
-        Some(SACConfigurationError::ZeroReplayCapacity)
-    } else if batch_size == 0 {
-        Some(SACConfigurationError::ZeroBatchSize)
-    } else if replay_capacity < batch_size {
-        Some(SACConfigurationError::ReplayCapacityBelowBatchSize)
-    } else if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
-        Some(SACConfigurationError::InvalidGamma)
-    } else if !tau.is_finite() || !(0.0..=1.0).contains(&tau) {
-        Some(SACConfigurationError::InvalidTau)
-    } else if matches!(entropy, SACEntropyConfiguration::Fixed { alpha } if !alpha.is_finite() || *alpha < 0.0)
-    {
-        Some(SACConfigurationError::InvalidAlpha)
-    } else if matches!(entropy, SACEntropyConfiguration::Automatic { target_entropy_schedule: Some(schedule), .. }
+struct SACConfigurationValidator;
+
+#[bon]
+impl SACConfigurationValidator {
+    #[builder]
+    fn validate_configuration<PE: Debug, GE: Debug, SE: Debug, O: Optimizer>(
+        critic_count: usize,
+        replay_capacity: usize,
+        batch_size: usize,
+        gamma: f64,
+        tau: f64,
+        entropy: &SACEntropyConfiguration<O>,
+        entropy_change_penalty: Option<f64>,
+        q_value_clip: Option<f64>,
+        training_horizon: usize,
+    ) -> Result<(), SACError<PE, GE, SE>> {
+        let error = if critic_count == 0 {
+            Some(SACConfigurationError::NoCritics)
+        } else if replay_capacity == 0 {
+            Some(SACConfigurationError::ZeroReplayCapacity)
+        } else if batch_size == 0 {
+            Some(SACConfigurationError::ZeroBatchSize)
+        } else if replay_capacity < batch_size {
+            Some(SACConfigurationError::ReplayCapacityBelowBatchSize)
+        } else if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
+            Some(SACConfigurationError::InvalidGamma)
+        } else if !tau.is_finite() || !(0.0..=1.0).contains(&tau) {
+            Some(SACConfigurationError::InvalidTau)
+        } else if matches!(entropy, SACEntropyConfiguration::Fixed { alpha } if !alpha.is_finite() || *alpha < 0.0)
+        {
+            Some(SACConfigurationError::InvalidAlpha)
+        } else if matches!(entropy, SACEntropyConfiguration::Automatic { target_entropy_schedule: Some(schedule), .. }
         if !schedule.value(0.0).is_finite() || !schedule.value(1.0).is_finite())
-    {
-        Some(SACConfigurationError::InvalidTargetEntropySchedule)
-    } else if matches!(entropy_change_penalty, Some(value) if !value.is_finite() || value < 0.0) {
-        Some(SACConfigurationError::InvalidEntropyChangePenalty)
-    } else if matches!(q_value_clip, Some(value) if !value.is_finite() || value <= 0.0) {
-        Some(SACConfigurationError::InvalidQValueClip)
-    } else if training_horizon == 0 {
-        Some(SACConfigurationError::ZeroTrainingHorizon)
-    } else {
-        None
-    };
-    match error {
-        Some(error) => Err(SACError::ConfigurationError(error)),
-        None => Ok(()),
+        {
+            Some(SACConfigurationError::InvalidTargetEntropySchedule)
+        } else if matches!(entropy_change_penalty, Some(value) if !value.is_finite() || value < 0.0)
+        {
+            Some(SACConfigurationError::InvalidEntropyChangePenalty)
+        } else if matches!(q_value_clip, Some(value) if !value.is_finite() || value <= 0.0) {
+            Some(SACConfigurationError::InvalidQValueClip)
+        } else if training_horizon == 0 {
+            Some(SACConfigurationError::ZeroTrainingHorizon)
+        } else {
+            None
+        };
+        match error {
+            Some(error) => Err(SACError::ConfigurationError(error)),
+            None => Ok(()),
+        }
     }
 }
 

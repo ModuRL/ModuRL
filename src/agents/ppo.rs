@@ -1,6 +1,6 @@
 use bon::bon;
-use candle_core::{D, IndexOp, Tensor};
-use candle_nn::{Optimizer, loss};
+use candle_core::{IndexOp, Tensor, D};
+use candle_nn::{loss, Optimizer};
 use std::marker::PhantomData;
 
 use crate::{
@@ -83,7 +83,9 @@ impl PPOPreparedRolloutBatch {
             .collect::<Option<Vec<_>>>();
         let Some(prepared) = prepared else {
             assert!(
-                experiences.iter().all(|experience| experience.prepared.is_none()),
+                experiences
+                    .iter()
+                    .all(|experience| experience.prepared.is_none()),
                 "PPO rollout preparation must be all-or-nothing"
             );
             return Ok(None);
@@ -105,7 +107,9 @@ impl PPOPreparedRolloutBatch {
         Ok(Some(Self {
             advantages: Tensor::stack(&advantages, 0)?,
             returns: Tensor::stack(&returns, 0)?,
-            old_values: old_values.map(|old_values| Tensor::stack(&old_values, 0)).transpose()?,
+            old_values: old_values
+                .map(|old_values| Tensor::stack(&old_values, 0))
+                .transpose()?,
         }))
     }
 }
@@ -149,12 +153,18 @@ impl experience::Experience for PPOExperience {
             .first()
             .expect("cannot batch an empty PPO rollout");
         Ok(PPORolloutBatch {
-            states: experience::stack_tensor_field(experiences, |experience| experience.states.clone())?,
+            states: experience::stack_tensor_field(experiences, |experience| {
+                experience.states.clone()
+            })?,
             next_states: experience::stack_tensor_field(experiences, |experience| {
                 experience.next_states.clone()
             })?,
-            actions: experience::stack_tensor_field(experiences, |experience| experience.actions.clone())?,
-            rewards: experience::stack_tensor_field(experiences, |experience| experience.rewards.clone())?,
+            actions: experience::stack_tensor_field(experiences, |experience| {
+                experience.actions.clone()
+            })?,
+            rewards: experience::stack_tensor_field(experiences, |experience| {
+                experience.rewards.clone()
+            })?,
             next_dones: experience::stack_bool_field(
                 experiences,
                 |experience| &experience.next_dones,
@@ -464,6 +474,7 @@ where
     }
 }
 
+#[bon]
 impl<'a, O1, O2, AE, GE, SE, I> PPOAgent<'a, O1, O2, AE, GE, SE, I>
 where
     O1: Optimizer,
@@ -521,17 +532,18 @@ where
                     .map(|old_values| old_values.index_select(&batch_indices, 0))
                     .transpose()?;
 
-                let ppo_losses = self.compute_loss(
-                    &batch_states,
-                    &batch_actions,
-                    batch_log_probs.detach(),
-                    batch_advantages,
-                    batch_returns,
-                    batch_rewards,
-                    batch_old_values.map(|old_values| old_values.detach()),
-                    rollout_explained_variance.clone(),
-                    clip_range,
-                )?;
+                let ppo_losses = self
+                    .compute_loss()
+                    .states(&batch_states)
+                    .actions(&batch_actions)
+                    .old_log_probs(batch_log_probs.detach())
+                    .advantages(batch_advantages)
+                    .returns(batch_returns)
+                    .rewards(batch_rewards)
+                    .maybe_old_values(batch_old_values.map(|old_values| old_values.detach()))
+                    .explained_variance(rollout_explained_variance.clone())
+                    .clip_range(clip_range)
+                    .call()?;
 
                 self.backpropagate_loss(ppo_losses.clone())?;
             }
@@ -714,6 +726,7 @@ where
     /// `advantages`, `returns`, and `rewards`) shaped `[batch]`. `old_values`
     /// is present only when value-loss clipping is enabled.
     /// `explained_variance` is scalar `[]`.
+    #[builder]
     fn compute_loss(
         &mut self,
         states: &candle_core::Tensor,
@@ -1636,17 +1649,17 @@ mod schedule_tests {
         ]);
 
         let losses = agent
-            .compute_loss(
-                &rollout_states.detach(),
-                &rollout_actions.detach(),
-                rollout_log_probs.detach(),
-                rollout_advantages.detach(),
-                rollout_returns.detach(),
-                rollout_rewards.detach(),
-                Some(rollout_old_values.detach()),
-                Tensor::new(0.0f32, &device).unwrap(),
-                0.2,
-            )
+            .compute_loss()
+            .states(&rollout_states.detach())
+            .actions(&rollout_actions.detach())
+            .old_log_probs(rollout_log_probs.detach())
+            .advantages(rollout_advantages.detach())
+            .returns(rollout_returns.detach())
+            .rewards(rollout_rewards.detach())
+            .old_values(rollout_old_values.detach())
+            .explained_variance(Tensor::new(0.0f32, &device).unwrap())
+            .clip_range(0.2)
+            .call()
             .unwrap();
 
         let actor_gradients = losses.actor_loss.backward().unwrap();
