@@ -1,26 +1,4 @@
-use candle_core::{DType, Error, Tensor, backprop::GradStore};
-
-/// Returns the elementwise maximum of identically shaped `a` and `b`,
-/// preserving their arbitrary shape `[...]`.
-pub(crate) fn torch_like_max(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
-    // See torch_like_min for why this is a masked select; ties route to `b`.
-    let mask = a.gt(b)?.to_dtype(a.dtype())?;
-    let inv_mask = (1.0 - &mask)?;
-    (a * &mask)? + (b * &inv_mask)?
-}
-
-/// Returns the elementwise minimum of identically shaped `a` and `b`,
-/// preserving their arbitrary shape `[...]`.
-pub(crate) fn torch_like_min(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
-    // candle's min-reduction backward sends full gradient to every element tied
-    // for the minimum, so a cat+min implementation double-counts gradient when
-    // a == b (e.g. PPO's first minibatch, where ratio == 1 makes both surrogates
-    // equal). Select with a detached mask instead so exactly one branch receives
-    // gradient; ties route to `b`.
-    let mask = a.lt(b)?.to_dtype(a.dtype())?;
-    let inv_mask = (1.0 - &mask)?;
-    (a * &mask)? + (b * &inv_mask)?
-}
+use candle_core::{Tensor, backprop::GradStore};
 
 /// Clips gradients reachable from scalar `loss` shaped `[]`; gradient tensors
 /// in `grad_store` retain their parameter shapes.
@@ -87,96 +65,15 @@ pub(crate) fn normalize_tensor(t: &Tensor) -> Result<Tensor, candle_core::Error>
     diff / std_with_eps
 }
 
-/// Checks an arbitrarily shaped tensor `t` (`[...]`) for NaN values.
+/// Checks an arbitrarily shaped tensor for NaN values.
 ///
-/// Use very sparingly; this copies to the CPU and is extremely slow.
+/// The comparison and reduction remain on the tensor's device; only the final
+/// scalar result is transferred to the host.
 pub fn tensor_has_nan(t: &Tensor) -> Result<bool, candle_core::Error> {
-    // First, ensure tensor is on CPU (or copy to CPU)
-    let t_cpu = if t.device().is_cpu() {
-        t.clone()
-    } else {
-        t.to_device(&candle_core::Device::Cpu)?
+    if !t.dtype().is_float() || t.elem_count() == 0 {
+        return Ok(false);
     }
-    .flatten_all()?;
-
-    // Now get raw buffer as Vec<f32> (if dtype is f32)
-    match t_cpu.dtype() {
-        DType::F32 => {
-            // assuming there's a method to get the raw Vec<f32> or slice
-            let data: Vec<f32> = t_cpu.to_vec1()?;
-            // (you'd need to check how Candle exposes this; I didn't find `as_slice` in docs)
-            for x in data {
-                if x.is_nan() {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        DType::F64 => {
-            let data: Vec<f64> = t_cpu.to_vec1()?;
-            for x in data {
-                if x.is_nan() {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        _ => {
-            // for integer types etc, NaN isn't relevant
-            // not sure about bfloat16 or float16
-            Ok(false)
-        }
-    }
-}
-
-pub fn gen_range_int_tensor(
-    start: u32,
-    end: u32,
-    device: &candle_core::Device,
-) -> Result<u32, candle_core::Error> {
-    Ok(Tensor::rand(start as f32, end as f32 + 1.0, &[], device)?
-        .floor()?
-        .to_dtype(candle_core::DType::U32)?
-        .to_vec0::<u32>()?
-        .clamp(start, end)) // ensure within bounds
-}
-
-pub fn fisher_yates_shuffle<T: Clone>(arr: &mut [T], device: &candle_core::Device) {
-    // generate arr.len random floats from 0 to 1
-    let random_floats_tensor = Tensor::rand(0.0f32, 1.0f32, &[arr.len()], device).unwrap();
-    let random_floats_vec = random_floats_tensor.to_vec1::<f32>().unwrap();
-    let n = arr.len();
-    for i in (1..n).rev() {
-        let rand_float = random_floats_vec[i];
-        // now we scale it to 0..=i
-        let mut j = (rand_float * (i as f32 + 1.0)).floor() as usize;
-        // make sure j is in bounds
-        j = j.clamp(0, i);
-        arr.swap(i, j);
-    }
-}
-
-pub fn resevoir_sample<T: Clone>(arr: &[T], size: usize, device: &candle_core::Device) -> Vec<T> {
-    let arr_len = arr.len();
-    if arr_len == 0 {
-        return vec![];
-    }
-    if arr.len() < size {
-        return arr.to_vec();
-    }
-    // fill the reservoir array
-    let mut reservoir: Vec<T> = arr[0..size.min(arr_len)].to_vec();
-    let random_floats_tensor =
-        Tensor::rand(0.0f32, 1.0f32, &[arr_len - reservoir.len()], device).unwrap();
-    let random_floats_vec = random_floats_tensor.to_vec1::<f32>().unwrap();
-    for i in size..arr_len {
-        let rand_float = random_floats_vec[i - size];
-        let j = (rand_float * (i as f32 + 1.0)).floor() as usize;
-        if j < size {
-            reservoir[j] = arr[i].clone();
-        }
-    }
-    reservoir
+    Ok(t.ne(t)?.max_all()?.to_scalar::<u8>()? != 0)
 }
 
 #[cfg(test)]
@@ -241,27 +138,9 @@ mod tests {
         let c =
             Tensor::from_vec(vec![1.0, f32::NAN, 3.0], &[3], &candle_core::Device::Cpu).unwrap();
         assert!(tensor_has_nan(&c).unwrap());
-    }
-
-    #[cfg(any(feature = "cuda", feature = "metal"))]
-    #[test]
-    fn test_fisher_yates_shuffle_determinism() {
-        #[cfg(feature = "cuda")]
-        let device = candle_core::Device::new_cuda(0).unwrap();
-        #[cfg(feature = "metal")]
-        let device = candle_core::Device::new_metal(0).unwrap();
-
-        let mut arr1: Vec<u32> = (0..100).collect();
-        let mut arr2: Vec<u32> = (0..100).collect();
-
-        device.set_seed(42).unwrap();
-        fisher_yates_shuffle(&mut arr1, &device);
-        fisher_yates_shuffle(&mut arr1, &device);
-
-        device.set_seed(42).unwrap();
-        fisher_yates_shuffle(&mut arr2, &device);
-        fisher_yates_shuffle(&mut arr2, &device);
-
-        assert_eq!(arr1, arr2);
+        let d = Tensor::from_vec(vec![1.0_f64, f64::NAN], 2, &candle_core::Device::Cpu).unwrap();
+        assert!(tensor_has_nan(&d).unwrap());
+        let integers = Tensor::from_vec(vec![1_u32, 2], 2, &candle_core::Device::Cpu).unwrap();
+        assert!(!tensor_has_nan(&integers).unwrap());
     }
 }

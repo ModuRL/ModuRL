@@ -330,8 +330,7 @@ where
             &target_next_q_values,
             self.gamma,
         )?
-        .reshape(&[rewards.shape().dims()[0], 1])?
-        .detach();
+        .reshape(&[rewards.shape().dims()[0], 1])?;
 
         let state_action_q_values = selected_action_q_values(
             &self.online_q_network.forward(&states)?.squeeze(1)?,
@@ -568,24 +567,11 @@ pub(crate) fn selected_action_q_values(
     q_values.gather(&actions, 1)
 }
 
-/// Computes targets `[batch]` from `rewards`, `next_dones`, and
-/// `next_q_values`, all shaped `[batch]`.
-fn bellman_targets(
-    rewards: &Tensor,
-    next_dones: &Tensor,
-    next_q_values: &Tensor,
-    gamma: f32,
-) -> Result<Tensor, Error> {
-    let gamma_tensor = Tensor::full(gamma, next_q_values.shape(), rewards.device())?;
-    Ok((rewards + (next_q_values * ((1.0 - next_dones)?.mul(&gamma_tensor)?)))?.detach())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        bellman_targets, selected_action_q_values, validate_epsilon, QCollectionLogEntry,
-        QLearningAgent, QLearningConfigurationError, QLearningConfigurationValidator,
-        QLearningLogger, QLearningTarget,
+        QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningLogger,
+        QLearningTarget, selected_action_q_values, validate_configuration, validate_epsilon,
     };
     use crate::{
         agents::{
@@ -594,6 +580,7 @@ mod tests {
         },
         gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper},
         models::MLP,
+        objectives::bellman_targets,
         parameter_schedule::LinearSchedule,
         spaces::{BoxSpace, Discrete},
     };
@@ -620,7 +607,7 @@ mod tests {
                 rewards,
                 next_dones,
                 &target_next_q_values.max(1)?.detach(),
-                gamma,
+                f64::from(gamma),
             )
         }
     }
