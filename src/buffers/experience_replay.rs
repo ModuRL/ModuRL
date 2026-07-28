@@ -1,4 +1,4 @@
-use super::{ExperienceBatch, experience};
+use super::experience;
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
 
@@ -25,7 +25,7 @@ where
 
 impl<T> ExperienceReplay<T>
 where
-    T: experience::Experience + Clone,
+    T: experience::Experience,
 {
     pub fn new(capacity: usize, batch_size: usize, _device: candle_core::Device) -> Self {
         Self {
@@ -42,19 +42,16 @@ where
         self.buffer.push_front(experience);
     }
 
-    pub fn sample(&self) -> Result<ExperienceBatch<T>, ExperienceReplayError<T::Error>> {
+    pub fn sample(&self) -> Result<T::Batch, ExperienceReplayError<T::Error>> {
         let total_samples = self.buffer.len();
         let size_to_sample = self.batch_size.min(total_samples);
         let indices = sample_indices_without_replacement(total_samples, size_to_sample);
-        let batch = indices
+        let batch: Vec<T> = indices
             .into_iter()
             .map(|index| self.buffer[index].clone())
             .collect();
 
-        let experience_sample =
-            ExperienceBatch::new(batch).map_err(ExperienceReplayError::ExperienceError)?;
-
-        Ok(experience_sample)
+        T::batch(&batch).map_err(ExperienceReplayError::ExperienceError)
     }
 
     pub fn len(&self) -> usize {
@@ -98,11 +95,20 @@ mod tests {
     #[derive(Clone)]
     struct Number(u32);
 
+    struct NumberBatch(Tensor);
+
     impl Experience for Number {
+        type Batch = NumberBatch;
         type Error = candle_core::Error;
 
-        fn get_elements(&self) -> Result<Vec<Tensor>, Self::Error> {
-            Ok(vec![Tensor::new(self.0, &Device::Cpu)?])
+        fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
+            Ok(NumberBatch(Tensor::new(
+                experiences
+                    .iter()
+                    .map(|experience| experience.0)
+                    .collect::<Vec<_>>(),
+                &Device::Cpu,
+            )?))
         }
     }
 
@@ -112,9 +118,7 @@ mod tests {
         for value in 0..100 {
             replay.add(Number(value));
         }
-        let values = replay.sample().unwrap().get_elements()[0]
-            .to_vec1::<u32>()
-            .unwrap();
+        let values = replay.sample().unwrap().0.to_vec1::<u32>().unwrap();
         let unique = values
             .iter()
             .copied()
@@ -129,9 +133,7 @@ mod tests {
         for value in 0..7 {
             replay.add(Number(value));
         }
-        let values = replay.sample().unwrap().get_elements()[0]
-            .to_vec1::<u32>()
-            .unwrap();
+        let values = replay.sample().unwrap().0.to_vec1::<u32>().unwrap();
         let unique = values
             .iter()
             .copied()

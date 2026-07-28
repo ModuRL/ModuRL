@@ -118,17 +118,49 @@ struct QLearningExperience {
     next_done: f32,
 }
 
+struct QLearningBatch {
+    states: Tensor,
+    next_states: Tensor,
+    actions: Tensor,
+    rewards: Tensor,
+    next_dones: Tensor,
+}
+
 impl experience::Experience for QLearningExperience {
+    type Batch = QLearningBatch;
     type Error = candle_core::Error;
 
-    fn get_elements(&self) -> Result<Vec<Tensor>, Self::Error> {
-        Ok(vec![
-            self.state.clone(),
-            self.next_state.clone(),
-            self.action.clone(),
-            Tensor::from_vec(vec![self.reward], [].to_vec(), self.state.device())?,
-            Tensor::from_vec(vec![self.next_done], [].to_vec(), self.state.device())?,
-        ])
+    fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
+        let device = experiences
+            .first()
+            .expect("cannot batch an empty Q-learning replay sample")
+            .state
+            .device();
+        Ok(QLearningBatch {
+            states: experience::stack_tensor_field(experiences, |experience| {
+                experience.state.clone()
+            })?,
+            next_states: experience::stack_tensor_field(experiences, |experience| {
+                experience.next_state.clone()
+            })?,
+            actions: experience::stack_tensor_field(experiences, |experience| {
+                experience.action.clone()
+            })?,
+            rewards: Tensor::new(
+                experiences
+                    .iter()
+                    .map(|experience| experience.reward)
+                    .collect::<Vec<_>>(),
+                device,
+            )?,
+            next_dones: Tensor::new(
+                experiences
+                    .iter()
+                    .map(|experience| experience.next_done)
+                    .collect::<Vec<_>>(),
+                device,
+            )?,
+        })
     }
 }
 
@@ -269,15 +301,23 @@ where
             Err(ExperienceReplayError::ExperienceError(error)) => return Err(error),
             Err(ExperienceReplayError::TensorError(error)) => return Err(error),
         };
-        let mut elements = training_batch.get_elements();
-        for element in &mut elements {
+        let mut training_batch = training_batch;
+        for element in [
+            &mut training_batch.states,
+            &mut training_batch.next_states,
+            &mut training_batch.actions,
+            &mut training_batch.rewards,
+            &mut training_batch.next_dones,
+        ] {
             *element = element.to_device(&self.device_strategy.optimization_device())?;
         }
-        let states = elements[0].clone();
-        let next_states = elements[1].clone();
-        let actions = elements[2].clone();
-        let rewards = elements[3].clone();
-        let next_dones = elements[4].clone();
+        let QLearningBatch {
+            states,
+            next_states,
+            actions,
+            rewards,
+            next_dones,
+        } = training_batch;
 
         let target_next_q_values = self.target_q_network.forward(&next_states)?;
         let online_next_q_values = T::requires_online_next_q_values()
@@ -537,14 +577,14 @@ fn bellman_targets(
 #[cfg(test)]
 mod tests {
     use super::{
+        bellman_targets, selected_action_q_values, validate_configuration, validate_epsilon,
         QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningLogger,
-        QLearningTarget, bellman_targets, selected_action_q_values, validate_configuration,
-        validate_epsilon,
+        QLearningTarget,
     };
     use crate::{
         agents::{
-            ReplayDeviceStrategy,
             test_support::{CountingOptimizer, FixedEnv},
+            ReplayDeviceStrategy,
         },
         gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper},
         models::MLP,

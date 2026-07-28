@@ -1,7 +1,6 @@
 use crate::tensor_operations;
 
-use super::{ExperienceBatch, experience};
-use std::vec;
+use super::experience;
 
 pub enum RolloutBufferError<E> {
     TensorError(candle_core::Error),
@@ -22,7 +21,7 @@ pub struct RolloutBuffer<T> {
 
 impl<T> RolloutBuffer<T>
 where
-    T: experience::Experience + Clone,
+    T: experience::Experience,
 {
     pub fn new(batch_size: usize, device: candle_core::Device) -> Self {
         Self {
@@ -44,26 +43,16 @@ where
         &mut self.buffer
     }
 
-    pub fn get_all(&mut self) -> Result<Vec<ExperienceBatch<T>>, T::Error> {
-        let mut samples = vec![];
-        for i in 0..(self.buffer.len() / self.batch_size) {
-            let start = i * self.batch_size;
-            let mut end = start + self.batch_size;
-            end = end.min(self.buffer.len());
-            let experiences = &self.buffer[start..end];
-
-            let experience_sample = ExperienceBatch::new(experiences.to_vec())?;
-
-            samples.push(experience_sample);
+    pub fn get_all(&self) -> Result<Vec<T::Batch>, T::Error> {
+        if self.batch_size == 0 {
+            return Ok(Vec::new());
         }
 
-        Ok(samples)
+        self.buffer.chunks(self.batch_size).map(T::batch).collect()
     }
 
     /// Shuffles the buffer and returns all samples.
-    pub fn get_all_shuffled(
-        &mut self,
-    ) -> Result<Vec<ExperienceBatch<T>>, RolloutBufferError<T::Error>> {
+    pub fn get_all_shuffled(&mut self) -> Result<Vec<T::Batch>, RolloutBufferError<T::Error>> {
         tensor_operations::fisher_yates_shuffle(&mut self.buffer, &self.device);
 
         let samples = self

@@ -7,7 +7,7 @@
 use std::{fmt::Debug, num::NonZeroUsize, ops::Deref};
 
 use bon::bon;
-use candle_core::{D, DType, IndexOp, Tensor, Var};
+use candle_core::{DType, IndexOp, Tensor, Var, D};
 use candle_nn::{Optimizer, VarMap};
 
 use super::{Agent, ReplayDeviceStrategy};
@@ -17,7 +17,7 @@ use crate::{
         experience_replay::{ExperienceReplay, ExperienceReplayError},
     },
     gym::{VectorizedGym, VectorizedStepInfo},
-    models::{FrozenParametersModule, probabilistic_model::ExpectationPolicy},
+    models::{probabilistic_model::ExpectationPolicy, FrozenParametersModule},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::Space,
     tensor_operations::{tensor_has_nan, torch_like_max, torch_like_min},
@@ -682,18 +682,54 @@ struct SACExperience {
 }
 
 impl experience::Experience for SACExperience {
+    type Batch = SACOptimizationBatch;
     type Error = candle_core::Error;
 
-    fn get_elements(&self) -> Result<Vec<Tensor>, Self::Error> {
-        Ok(vec![
-            self.state.clone(),
-            self.next_state.clone(),
-            self.action.clone(),
-            Tensor::new(self.reward, self.state.device())?,
-            Tensor::new(self.terminated, self.state.device())?,
-            Tensor::new(self.collection_policy_entropy, self.state.device())?,
-            Tensor::new(self.entropy_change_weight, self.state.device())?,
-        ])
+    fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
+        let device = experiences
+            .first()
+            .expect("cannot batch an empty SAC replay sample")
+            .state
+            .device();
+        Ok(SACOptimizationBatch {
+            states: experience::stack_tensor_field(experiences, |experience| {
+                experience.state.clone()
+            })?,
+            next_states: experience::stack_tensor_field(experiences, |experience| {
+                experience.next_state.clone()
+            })?,
+            actions: experience::stack_tensor_field(experiences, |experience| {
+                experience.action.clone()
+            })?,
+            rewards: Tensor::new(
+                experiences
+                    .iter()
+                    .map(|experience| experience.reward)
+                    .collect::<Vec<_>>(),
+                device,
+            )?,
+            terminated: Tensor::new(
+                experiences
+                    .iter()
+                    .map(|experience| experience.terminated)
+                    .collect::<Vec<_>>(),
+                device,
+            )?,
+            collection_policy_entropies: Tensor::new(
+                experiences
+                    .iter()
+                    .map(|experience| experience.collection_policy_entropy)
+                    .collect::<Vec<_>>(),
+                device,
+            )?,
+            entropy_change_weights: Tensor::new(
+                experiences
+                    .iter()
+                    .map(|experience| experience.entropy_change_weight)
+                    .collect::<Vec<_>>(),
+                device,
+            )?,
+        })
     }
 }
 
@@ -1096,37 +1132,24 @@ where
         if self.replay.len() < self.replay.get_batch_size() {
             return Ok(None);
         }
-        let batch = match self.replay.sample() {
+        let mut batch = match self.replay.sample() {
             Ok(batch) => batch,
             Err(ExperienceReplayError::TensorError(error))
             | Err(ExperienceReplayError::ExperienceError(error)) => return Err(error.into()),
         };
         let optimization_device = self.device_strategy.optimization_device();
-        let elements = batch
-            .get_elements()
-            .into_iter()
-            .map(|element| element.to_device(&optimization_device))
-            .collect::<candle_core::Result<Vec<_>>>()?;
-        let [
-            states,
-            next_states,
-            actions,
-            rewards,
-            terminated,
-            collection_policy_entropies,
-            entropy_change_weights,
-        ] = elements
-            .try_into()
-            .expect("SAC experiences always contain seven tensors");
-        Ok(Some(SACOptimizationBatch {
-            states,
-            next_states,
-            actions,
-            rewards,
-            terminated,
-            collection_policy_entropies,
-            entropy_change_weights,
-        }))
+        for element in [
+            &mut batch.states,
+            &mut batch.next_states,
+            &mut batch.actions,
+            &mut batch.rewards,
+            &mut batch.terminated,
+            &mut batch.collection_policy_entropies,
+            &mut batch.entropy_change_weights,
+        ] {
+            *element = element.to_device(&optimization_device)?;
+        }
+        Ok(Some(batch))
     }
 
     fn compute_bellman_targets(
@@ -1580,8 +1603,8 @@ mod tests {
     use candle_core::{Device, Module};
     use candle_nn::{Init, VarBuilder};
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     struct SumModule;
@@ -1984,12 +2007,10 @@ mod tests {
         let gradients = loss.backward().unwrap();
 
         assert!(gradients.get(logits.as_tensor()).is_some());
-        assert!(
-            critic_vars
-                .all_vars()
-                .iter()
-                .all(|parameter| gradients.get(parameter.as_tensor()).is_none())
-        );
+        assert!(critic_vars
+            .all_vars()
+            .iter()
+            .all(|parameter| gradients.get(parameter.as_tensor()).is_none()));
     }
 
     #[test]
@@ -2020,19 +2041,17 @@ mod tests {
         let gradients = loss.backward().unwrap();
 
         assert!(gradients.get(actions.as_tensor()).is_some());
-        assert!(
-            critic_vars
-                .all_vars()
-                .iter()
-                .all(|parameter| gradients.get(parameter.as_tensor()).is_none())
-        );
+        assert!(critic_vars
+            .all_vars()
+            .iter()
+            .all(|parameter| gradients.get(parameter.as_tensor()).is_none()));
     }
 
     #[test]
     fn continuous_actor_reparameterization_reaches_actor_but_not_critic_or_targets() {
         use crate::{
             distributions::{GaussianDistribution, TanhTransform, TransformedDistribution},
-            models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
+            models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
         };
 
         let actor_outputs = Var::from_vec(vec![0.1f32, -0.5], (1, 2), &Device::Cpu).unwrap();
@@ -2073,12 +2092,10 @@ mod tests {
             .to_vec2::<f32>()
             .unwrap();
         assert!(actor_gradient[0].iter().all(|value| value.abs() > 1e-6));
-        assert!(
-            critic_vars
-                .all_vars()
-                .iter()
-                .all(|parameter| gradients.get(parameter.as_tensor()).is_none())
-        );
+        assert!(critic_vars
+            .all_vars()
+            .iter()
+            .all(|parameter| gradients.get(parameter.as_tensor()).is_none()));
 
         let target_terms = policy.expectation(&states, NonZeroUsize::MIN).unwrap();
         let detached_loss = target_terms.log_probabilities().detach().sum_all().unwrap();
@@ -2089,13 +2106,11 @@ mod tests {
             .policy_values(&states, &target_actions)
             .unwrap()
             .detach();
-        assert!(
-            detached_q
-                .backward()
-                .unwrap()
-                .get(actor_outputs.as_tensor())
-                .is_none()
-        );
+        assert!(detached_q
+            .backward()
+            .unwrap()
+            .get(actor_outputs.as_tensor())
+            .is_none());
     }
 
     #[test]
@@ -2216,13 +2231,16 @@ mod tests {
         let mut env = VectorizedGymWrapper::new(vec![TruncatingEnv]);
         agent.learn(&mut env, 1).unwrap();
 
-        let replay = agent.replay.sample().unwrap().get_elements();
+        let replay = agent.replay.sample().unwrap();
         assert_eq!(
-            replay[1].to_vec2::<f32>().unwrap(),
+            replay.next_states.to_vec2::<f32>().unwrap(),
             vec![vec![5.0, 5.0, 5.0, 5.0]]
         );
-        assert_eq!(replay[4].to_vec1::<f32>().unwrap(), vec![0.0]);
-        assert_eq!(replay[6].to_vec1::<f32>().unwrap(), vec![0.0]);
+        assert_eq!(replay.terminated.to_vec1::<f32>().unwrap(), vec![0.0]);
+        assert_eq!(
+            replay.entropy_change_weights.to_vec1::<f32>().unwrap(),
+            vec![0.0]
+        );
     }
 
     #[test]
@@ -2344,7 +2362,7 @@ mod tests {
             agents::test_support::FixedEnv,
             distributions::CategoricalDistribution,
             gym::VectorizedGymWrapper,
-            models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
+            models::{probabilistic_model::ProbabilisticPolicyModel, MLP},
             spaces::{BoxSpace, Discrete},
         };
 
