@@ -1454,6 +1454,12 @@ mod schedule_tests {
         );
     }
 
+    struct NoopLogger;
+
+    impl PPOLogger for NoopLogger {
+        fn log(&mut self, _info: &PPOLogEntry) {}
+    }
+
     #[test]
     fn candle_elementwise_minimum_and_maximum_split_tied_gradients() {
         /// Checks scalar `loss` shaped `[1]` made from tied scalar variables.
@@ -1659,6 +1665,83 @@ mod schedule_tests {
     }
 
     #[test]
+    fn shared_agent_runs_collection_training_actions_and_state_reset() {
+        let device = Device::Cpu;
+        let mut env: VectorizedGymWrapper<FixedEnv> =
+            vec![FixedEnv::new(device.clone()), FixedEnv::new(device.clone())].into();
+        let shared_vars = VarMap::new();
+        let actor_vars = VarMap::new();
+        let critic_vars = VarMap::new();
+        let shared_network = MLP::builder()
+            .input_size(4)
+            .output_size(4)
+            .vb(VarBuilder::from_varmap(&shared_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![4])
+            .build()
+            .unwrap();
+        let actor_head = MLP::builder()
+            .input_size(4)
+            .output_size(2)
+            .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let critic_head = MLP::builder()
+            .input_size(4)
+            .output_size(1)
+            .vb(VarBuilder::from_varmap(&critic_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let network_info: PPONetworkInfo<CountingOptimizer, _, FakeOptimizer> =
+            PPONetworkInfo::Shared(
+                SharedPPONetwork::builder()
+                    .optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                    .shared_network(Box::new(shared_network))
+                    .actor_head(Box::new(
+                        ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(
+                            actor_head,
+                        )),
+                    ))
+                    .critic_head(Box::new(critic_head))
+                    .lr_scheduler(Box::new(LinearSchedule::new(1e-3, 1e-4)))
+                    .build(),
+            );
+        let mut logger = NoopLogger;
+        let mut agent = PPOAgent::builder()
+            .action_space(env.action_space())
+            .network_info(network_info)
+            .batch_size(2)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .training_horizon(10)
+            .logging_info(&mut logger)
+            .device(device.clone())
+            .build();
+
+        agent.learn(&mut env, 2).unwrap();
+        let observations = agent.current_states.as_ref().unwrap().clone();
+        assert_eq!(agent.act(&observations).unwrap().dims(), &[2]);
+        assert_eq!(agent.act_deterministic(&observations).unwrap().dims(), &[2]);
+        assert_eq!(agent.episode_tracker.environment_count(), 2);
+        let PPONetworkInfo::Shared(network) = &agent.network_info else {
+            panic!("expected shared PPO network");
+        };
+        assert_eq!(network.optimizer.steps, 1);
+        assert_close(network.optimizer.learning_rate(), 0.00082);
+
+        agent.set_learning_rate(0.25);
+        let PPONetworkInfo::Shared(network) = &agent.network_info else {
+            panic!("expected shared PPO network");
+        };
+        assert_close(network.optimizer.learning_rate(), 0.25);
+
+        agent.reset_current_states();
+        assert!(agent.current_states.is_none());
+        assert_eq!(agent.episode_tracker.environment_count(), 0);
+    }
+
+    #[test]
     fn separate_ppo_losses_only_reach_their_parameters() {
         fn parameter_ids(vars: &[Var]) -> HashSet<TensorId> {
             vars.iter().map(|var| var.as_tensor().id()).collect()
@@ -1850,7 +1933,7 @@ mod schedule_tests {
             .num_epochs(1)
             .clip_range(Box::new(LinearSchedule::new(0.2, 0.1)))
             .training_horizon(10)
-            .device(device)
+            .device(device.clone())
             .build();
 
         agent.learn(&mut env, 2).unwrap();
@@ -1874,5 +1957,15 @@ mod schedule_tests {
         assert_close(network.critic_optimizer.learning_rate(), 0.00064);
         assert_eq!(network.actor_optimizer.steps, 2);
         assert_eq!(network.critic_optimizer.steps, 2);
+
+        let observations = Tensor::zeros((2, 4), DType::F32, &device).unwrap();
+        assert_eq!(agent.act(&observations).unwrap().dims(), &[2]);
+        assert_eq!(agent.act_deterministic(&observations).unwrap().dims(), &[2]);
+        agent.set_learning_rate(0.25);
+        let PPONetworkInfo::Separate(network) = &agent.network_info else {
+            panic!("expected separate PPO network");
+        };
+        assert_close(network.actor_optimizer.learning_rate(), 0.25);
+        assert_close(network.critic_optimizer.learning_rate(), 0.25);
     }
 }

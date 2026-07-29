@@ -162,9 +162,89 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::DQNTarget;
-    use crate::agents::q_learning::{QLearningTarget, selected_action_q_values};
-    use candle_core::{Device, Tensor};
+    use super::{DQNAgent, DQNLogger, DQNTarget};
+    use crate::{
+        agents::{
+            Agent, ReplayDeviceStrategy,
+            q_learning::{QLearningTarget, selected_action_q_values},
+            test_support::{CountingOptimizer, FixedEnv},
+        },
+        gym::{VectorizedGym, VectorizedGymWrapper},
+        models::MLP,
+        parameter_schedule::ConstantSchedule,
+        spaces::Discrete,
+    };
+    use candle_core::{DType, Device, Tensor};
+    use candle_nn::{VarBuilder, VarMap};
+
+    fn q_network(var_map: &VarMap, device: &Device) -> MLP {
+        MLP::builder()
+            .input_size(4)
+            .output_size(2)
+            .vb(VarBuilder::from_varmap(var_map, DType::F32, device))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap()
+    }
+
+    #[derive(Default)]
+    struct RecordingLogger {
+        update_timesteps: Vec<usize>,
+        collection_timesteps: Vec<usize>,
+    }
+
+    impl DQNLogger for RecordingLogger {
+        fn log(&mut self, entry: &super::QLogEntry) {
+            self.update_timesteps.push(entry.collection_timestep);
+        }
+
+        fn log_collection(&mut self, entry: &super::QCollectionLogEntry) {
+            self.collection_timesteps.push(entry.collection_timestep);
+        }
+    }
+
+    #[test]
+    fn public_agent_runs_actions_collection_training_and_logging() {
+        let device = Device::Cpu;
+        let mut env: VectorizedGymWrapper<FixedEnv> =
+            vec![FixedEnv::new(device.clone()), FixedEnv::new(device.clone())].into();
+        let online_vars = VarMap::new();
+        let mut target_vars = VarMap::new();
+        let mut logger = RecordingLogger::default();
+        let mut agent = DQNAgent::builder()
+            .action_space(Discrete::new(2))
+            .observation_space(env.observation_space())
+            .online_q_network(Box::new(q_network(&online_vars, &device)))
+            .target_q_network(Box::new(q_network(&target_vars, &device)))
+            .online_vars(&online_vars)
+            .target_vars(&mut target_vars)
+            .optimizer(CountingOptimizer::with_learning_rate(1e-3))
+            .epsilon_schedule(Box::new(ConstantSchedule::new(0.0)))
+            .replay_capacity(4)
+            .batch_size(1)
+            .training_start(1)
+            .update_frequency(1)
+            .target_update_interval(2)
+            .training_horizon(4)
+            .logger(&mut logger)
+            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+            .build()
+            .unwrap();
+
+        assert_eq!(agent.get_action_space().get_possible_values(), 2);
+        assert_eq!(agent.get_observation_space().shape(), vec![4]);
+        let actions = agent
+            .act(&Tensor::zeros((2, 4), DType::F32, &device).unwrap())
+            .unwrap();
+        assert_eq!(actions.dims(), &[2]);
+
+        agent.learn(&mut env, 2).unwrap();
+        assert_eq!(agent.inner.optimizer.steps, 2);
+        drop(agent);
+
+        assert_eq!(logger.collection_timesteps, vec![2]);
+        assert_eq!(logger.update_timesteps, vec![1, 2]);
+    }
 
     #[test]
     fn targets_use_target_max_and_mask_terminal_transitions() {
