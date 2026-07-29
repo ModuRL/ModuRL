@@ -89,6 +89,47 @@ pub struct QEpisodeLogEntry {
     pub collection_timestep: usize,
 }
 
+struct QEpisodeTracker {
+    returns: Vec<f32>,
+    lengths: Vec<usize>,
+}
+
+impl QEpisodeTracker {
+    fn new(environment_count: usize) -> Self {
+        Self {
+            returns: vec![0.0; environment_count],
+            lengths: vec![0; environment_count],
+        }
+    }
+
+    fn record(
+        &mut self,
+        environment_index: usize,
+        reward: f32,
+        terminated: bool,
+        truncated: bool,
+        collection_timestep: usize,
+    ) -> Option<QEpisodeLogEntry> {
+        self.returns[environment_index] += reward;
+        self.lengths[environment_index] += 1;
+        if !terminated && !truncated {
+            return None;
+        }
+
+        let entry = QEpisodeLogEntry {
+            environment_index,
+            episode_return: self.returns[environment_index],
+            episode_length: self.lengths[environment_index],
+            terminated,
+            truncated,
+            collection_timestep,
+        };
+        self.returns[environment_index] = 0.0;
+        self.lengths[environment_index] = 0;
+        Some(entry)
+    }
+}
+
 pub(crate) trait QLearningLogger<I = ()> {
     fn log_update(&mut self, entry: &QLogEntry);
 
@@ -124,6 +165,16 @@ struct QLearningBatch {
     actions: Tensor,
     rewards: Tensor,
     next_dones: Tensor,
+}
+
+struct QCollectedTransitions<'a> {
+    states: &'a Tensor,
+    next_states: &'a Tensor,
+    actions: &'a Tensor,
+    rewards: &'a Tensor,
+    dones: &'a [bool],
+    truncateds: &'a [bool],
+    first_timestep: usize,
 }
 
 impl experience::Experience for QLearningExperience {
@@ -363,6 +414,85 @@ where
         }
     }
 
+    fn store_vectorized_transitions(
+        &mut self,
+        transitions: QCollectedTransitions<'_>,
+        episodes: &mut QEpisodeTracker,
+    ) -> Result<Vec<QEpisodeLogEntry>, QAgentError<GE, SE>> {
+        let QCollectedTransitions {
+            states,
+            next_states,
+            actions,
+            rewards,
+            dones,
+            truncateds,
+            first_timestep,
+        } = transitions;
+        let environment_count = dones.len();
+        let state_rows = states.chunk(environment_count, 0)?;
+        let next_state_rows = next_states.chunk(environment_count, 0)?;
+        let action_rows = actions.chunk(environment_count, 0)?;
+        let reward_rows = rewards.chunk(environment_count, 0)?;
+        let storage_device = self.device_strategy.storage_device();
+        let mut completed_episodes = Vec::new();
+
+        for environment_index in 0..environment_count {
+            let reward = reward_rows[environment_index].i(0)?.to_scalar::<f32>()?;
+            let collection_timestep = first_timestep.saturating_add(environment_index + 1);
+            if let Some(entry) = episodes.record(
+                environment_index,
+                reward,
+                dones[environment_index],
+                truncateds[environment_index],
+                collection_timestep,
+            ) {
+                completed_episodes.push(entry);
+            }
+
+            self.experience_replay.add(QLearningExperience {
+                state: state_rows[environment_index]
+                    .clone()
+                    .squeeze(0)?
+                    .detach()
+                    .to_device(&storage_device)?,
+                next_state: next_state_rows[environment_index]
+                    .clone()
+                    .squeeze(0)?
+                    .detach()
+                    .to_device(&storage_device)?,
+                action: action_rows[environment_index]
+                    .clone()
+                    .squeeze(0)?
+                    .detach()
+                    .to_device(&storage_device)?,
+                reward,
+                next_done: if dones[environment_index] { 1.0 } else { 0.0 },
+            });
+        }
+
+        Ok(completed_episodes)
+    }
+
+    fn run_scheduled_updates<I>(
+        &mut self,
+        first_timestep: usize,
+        environment_count: usize,
+        logger: &mut dyn QLearningLogger<I>,
+    ) -> Result<(), QAgentError<GE, SE>> {
+        for timestep_offset in 1..=environment_count {
+            let training_timestep = first_timestep.saturating_add(timestep_offset);
+            if training_timestep % self.update_frequency == 0
+                && training_timestep >= self.training_start
+            {
+                self.optimize(training_timestep, logger)?;
+            }
+            if training_timestep % self.target_update_interval == 0 {
+                self.update_target_network();
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn learn<I>(
         &mut self,
         env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
@@ -371,18 +501,19 @@ where
     ) -> Result<(), QAgentError<GE, SE>> {
         let mut elapsed_timesteps = 0;
         let mut observations = env.reset().map_err(QAgentError::GymError)?;
-        let mut episode_returns = vec![0.0; env.num_envs()];
-        let mut episode_lengths = vec![0; env.num_envs()];
+        let environment_count = env.num_envs();
+        let mut episodes = QEpisodeTracker::new(environment_count);
+
         while elapsed_timesteps < num_timesteps {
             self.current_epsilon = validate_epsilon(
                 self.schedule_progress
                     .parameter(self.epsilon_schedule.as_ref()),
             )?;
-            let action = self.act(&observations)?;
-            let step_info = env.step(action.clone()).map_err(QAgentError::GymError)?;
-            let training_next_observations = step_info.transition_next_states()?;
+            let actions = self.act(&observations)?;
+            let step_info = env.step(actions.clone()).map_err(QAgentError::GymError)?;
+            let transition_next_states = step_info.transition_next_states()?;
             let VectorizedStepInfo {
-                states: next_observations,
+                states: reset_next_states,
                 rewards,
                 infos,
                 dones,
@@ -391,46 +522,21 @@ where
             } = step_info;
 
             let collection_rewards = rewards.clone();
-            let rewards = rewards.chunk(env.num_envs(), 0)?;
-            let actions = action.chunk(env.num_envs(), 0)?;
-            let current_observations = observations.chunk(env.num_envs(), 0)?;
-            observations = next_observations;
-            let next_observations = training_next_observations.chunk(env.num_envs(), 0)?;
-            let first_training_timestep = self.schedule_progress.elapsed_steps();
-            let mut completed_episodes = Vec::new();
-            for i in 0..env.num_envs() {
-                let mut state = current_observations[i].clone().squeeze(0)?.detach();
-                let mut next_state = next_observations[i].clone().squeeze(0)?.detach();
-                let mut action = actions[i].clone().squeeze(0)?.detach();
-                for tensor in [&mut state, &mut next_state, &mut action] {
-                    *tensor = tensor.to_device(&self.device_strategy.storage_device())?;
-                }
-                let reward = rewards[i].i(0)?.to_scalar::<f32>()?;
-                episode_returns[i] += reward;
-                episode_lengths[i] += 1;
-                let collection_timestep = first_training_timestep.saturating_add(i + 1);
-                if dones[i] || truncateds[i] {
-                    completed_episodes.push(QEpisodeLogEntry {
-                        environment_index: i,
-                        episode_return: episode_returns[i],
-                        episode_length: episode_lengths[i],
-                        terminated: dones[i],
-                        truncated: truncateds[i],
-                        collection_timestep,
-                    });
-                    episode_returns[i] = 0.0;
-                    episode_lengths[i] = 0;
-                }
-                self.experience_replay.add(QLearningExperience {
-                    state,
-                    next_state,
-                    action,
-                    reward,
-                    next_done: if dones[i] { 1.0 } else { 0.0 },
-                });
-            }
-
-            let collection_timestep = first_training_timestep.saturating_add(env.num_envs());
+            let first_timestep = self.schedule_progress.elapsed_steps();
+            let completed_episodes = self.store_vectorized_transitions(
+                QCollectedTransitions {
+                    states: &observations,
+                    next_states: &transition_next_states,
+                    actions: &actions,
+                    rewards: &rewards,
+                    dones: &dones,
+                    truncateds: &truncateds,
+                    first_timestep,
+                },
+                &mut episodes,
+            )?;
+            observations = reset_next_states;
+            let collection_timestep = first_timestep.saturating_add(environment_count);
             let collection_entry = QCollectionLogEntry {
                 collection_rewards,
                 infos,
@@ -439,19 +545,10 @@ where
                 completed_episodes,
             };
             logger.log_collection(&collection_entry);
-            for timestep_offset in 1..=env.num_envs() {
-                elapsed_timesteps += 1;
-                let training_timestep = first_training_timestep.saturating_add(timestep_offset);
-                if training_timestep % self.update_frequency == 0
-                    && training_timestep >= self.training_start
-                {
-                    self.optimize(training_timestep, logger)?;
-                }
-                if training_timestep % self.target_update_interval == 0 {
-                    self.update_target_network();
-                }
-            }
-            self.schedule_progress.advance_steps(env.num_envs());
+
+            elapsed_timesteps += environment_count;
+            self.run_scheduled_updates(first_timestep, environment_count, logger)?;
+            self.schedule_progress.advance_steps(environment_count);
         }
         Ok(())
     }
