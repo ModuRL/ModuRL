@@ -6,6 +6,13 @@
 
 pub use crate::agents::{
     Agent, ReplayDeviceStrategy,
+    deterministic_actor_critic::{
+        DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
+        DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
+        DeterministicActorCriticLogEntry, DeterministicActorCriticResult, DeterministicCritic,
+        ddpg::{DDPGAgent, DDPGLogger},
+        td3::{TD3Agent, TD3Logger},
+    },
     ppo::{
         PPOAgent, PPOCollectionLogEntry, PPOEpisodeLogEntry, PPOError, PPOLogEntry, PPOLogger,
         PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,

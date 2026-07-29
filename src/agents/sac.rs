@@ -890,7 +890,10 @@ where
     SE: Debug,
 {
     #[builder]
-    #[allow(clippy::type_complexity)] // Generated builder state carries this constructor's generic parameters.
+    #[allow(
+        clippy::type_complexity,
+        reason = "Bon's generated typestate contains every SAC agent generic parameter"
+    )]
     pub fn new(
         policy: Box<dyn ExpectationPolicy<Error = PE>>,
         actor_optimizer: AO,

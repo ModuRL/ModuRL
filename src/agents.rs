@@ -1,5 +1,6 @@
 use crate::gym::VectorizedGym;
 use candle_core::Tensor;
+pub mod deterministic_actor_critic;
 pub mod ppo;
 pub mod q_learning;
 mod replay_device_strategy;
@@ -114,6 +115,57 @@ pub(crate) mod test_support {
 
         fn set_learning_rate(&mut self, learning_rate: f64) {
             self.learning_rate = learning_rate;
+        }
+    }
+
+    pub(crate) struct FixedContinuousEnv {
+        device: Device,
+    }
+
+    impl FixedContinuousEnv {
+        pub(crate) fn new(device: Device) -> Self {
+            Self { device }
+        }
+    }
+
+    impl Gym for FixedContinuousEnv {
+        type Error = candle_core::Error;
+        type SpaceError = candle_core::Error;
+
+        /// Steps with one continuous action shaped `[1]`.
+        fn step(&mut self, _action: Tensor) -> Result<StepInfo, Self::Error> {
+            Ok(StepInfo {
+                state: Tensor::zeros(&[4], DType::F32, &self.device)?,
+                reward: 1.0,
+                done: false,
+                truncated: false,
+                info: (),
+            })
+        }
+
+        fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+            Ok(ResetInfo {
+                state: Tensor::zeros(&[4], DType::F32, &self.device)?,
+                info: (),
+            })
+        }
+
+        fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(BoxSpace::new_with_universal_bounds(
+                vec![4],
+                -1.0,
+                1.0,
+                &self.device,
+            ))
+        }
+
+        fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(BoxSpace::new_with_universal_bounds(
+                vec![1],
+                -1.0,
+                1.0,
+                &self.device,
+            ))
         }
     }
 }

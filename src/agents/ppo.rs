@@ -191,19 +191,6 @@ impl experience::Experience for PPOExperience {
     }
 }
 
-#[allow(unused)]
-enum PPOElement {
-    State = 0,
-    NextState = 1,
-    Action = 2,
-    Reward = 3,
-    NextDone = 4,
-    Truncated = 5,
-    LogProb = 6,
-    Advantage = 7,
-    Return = 8,
-}
-
 struct PPOLoggingInfo<'a, I> {
     logger: &'a mut dyn PPOLogger<I>,
     epoch: usize,
