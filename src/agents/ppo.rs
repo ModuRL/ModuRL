@@ -60,6 +60,12 @@ struct PPOExperience {
     prepared: Option<PPOPreparedExperience>,
 }
 
+struct PPOCollectionAction {
+    policy_actions: Tensor,
+    environment_actions: Tensor,
+    log_probs: Tensor,
+}
+
 struct PPOPreparedRolloutBatch {
     advantages: Tensor,
     returns: Tensor,
@@ -243,6 +249,56 @@ pub struct PPOEpisodeLogEntry {
     pub collection_timestep: usize,
 }
 
+struct PPOEpisodeTracker {
+    returns: Vec<f32>,
+    lengths: Vec<usize>,
+}
+
+impl PPOEpisodeTracker {
+    fn new(environment_count: usize) -> Self {
+        Self {
+            returns: vec![0.0; environment_count],
+            lengths: vec![0; environment_count],
+        }
+    }
+
+    fn environment_count(&self) -> usize {
+        self.returns.len()
+    }
+
+    fn clear(&mut self) {
+        self.returns.clear();
+        self.lengths.clear();
+    }
+
+    fn record(
+        &mut self,
+        environment_index: usize,
+        reward: f32,
+        terminated: bool,
+        truncated: bool,
+        collection_timestep: usize,
+    ) -> Option<PPOEpisodeLogEntry> {
+        self.returns[environment_index] += reward;
+        self.lengths[environment_index] += 1;
+        if !terminated && !truncated {
+            return None;
+        }
+
+        let entry = PPOEpisodeLogEntry {
+            environment_index,
+            episode_return: self.returns[environment_index],
+            episode_length: self.lengths[environment_index],
+            terminated,
+            truncated,
+            collection_timestep,
+        };
+        self.returns[environment_index] = 0.0;
+        self.lengths[environment_index] = 0;
+        Some(entry)
+    }
+}
+
 pub trait PPOLogger<I = ()> {
     fn log(&mut self, info: &PPOLogEntry);
 
@@ -405,8 +461,7 @@ where
     logging_info: Option<PPOLoggingInfo<'a, I>>,
     gradient_clip: f32,
     current_states: Option<Tensor>,
-    episode_returns: Vec<f32>,
-    episode_lengths: Vec<usize>,
+    episode_tracker: PPOEpisodeTracker,
     _phantom: PhantomData<GE>,
 }
 
@@ -469,8 +524,7 @@ where
             logging_info: logging_info.map(PPOLoggingInfo::new),
             gradient_clip,
             current_states: None,
-            episode_returns: Vec::new(),
-            episode_lengths: Vec::new(),
+            episode_tracker: PPOEpisodeTracker::new(0),
             _phantom: PhantomData,
         }
     }
@@ -902,6 +956,34 @@ where
         network.sample(states).map_err(PPOError::PolicyError)
     }
 
+    /// Samples policy actions for `states` shaped
+    /// `[environment_count, ...observation_shape]`.
+    fn sample_collection_action(
+        &mut self,
+        states: &Tensor,
+    ) -> Result<PPOCollectionAction, PPOError<AE, GE, SE>> {
+        let latent_states = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                shared_info.shared_network.forward(states)?
+            }
+            PPONetworkInfo::Separate(_) => states.clone(),
+        };
+        let policy_actions = self.act_neurons(&latent_states)?;
+        let environment_actions = self
+            .action_space
+            .tensor_from_neurons(&policy_actions)
+            .map_err(PPOError::SpaceError)?;
+        let (log_probs, _) =
+            self.actor_network_log_prob_and_entropy(&latent_states, &policy_actions)?;
+
+        Ok(PPOCollectionAction {
+            policy_actions,
+            environment_actions,
+            // Do not retain the collection forward graph in the rollout buffer.
+            log_probs: log_probs.detach(),
+        })
+    }
+
     fn update_learning_rates(&mut self) {
         match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
@@ -940,21 +1022,16 @@ where
         let rewards_vec = rewards.to_vec1::<f32>()?;
         let mut completed_episodes = Vec::new();
         for (environment_index, reward) in rewards_vec.iter().copied().enumerate() {
-            self.episode_returns[environment_index] += reward;
-            self.episode_lengths[environment_index] += 1;
             let collection_timestep =
                 first_collection_timestep.saturating_add(environment_index + 1);
-            if dones[environment_index] || truncateds[environment_index] {
-                completed_episodes.push(PPOEpisodeLogEntry {
-                    environment_index,
-                    episode_return: self.episode_returns[environment_index],
-                    episode_length: self.episode_lengths[environment_index],
-                    terminated: dones[environment_index],
-                    truncated: truncateds[environment_index],
-                    collection_timestep,
-                });
-                self.episode_returns[environment_index] = 0.0;
-                self.episode_lengths[environment_index] = 0;
+            if let Some(entry) = self.episode_tracker.record(
+                environment_index,
+                reward,
+                dones[environment_index],
+                truncateds[environment_index],
+                collection_timestep,
+            ) {
+                completed_episodes.push(entry);
             }
         }
 
@@ -1009,8 +1086,95 @@ where
 
     pub fn reset_current_states(&mut self) {
         self.current_states = None;
-        self.episode_returns.clear();
-        self.episode_lengths.clear();
+        self.episode_tracker.clear();
+    }
+
+    /// Prepares an empty rollout buffer and episode tracking, returning the
+    /// observations shaped `[environment_count, ...observation_shape]` from
+    /// which collection should resume.
+    fn prepare_rollout_collection(
+        &mut self,
+        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+    ) -> Result<Tensor, PPOError<AE, GE, SE>> {
+        let states = if let Some(states) = self.current_states.take() {
+            states
+        } else {
+            env.reset().map_err(PPOError::GymError)?
+        };
+        let environment_count = env.num_envs();
+        self.rollout_buffer = RolloutBuffer::new(
+            self.mini_batch_size / environment_count,
+            states.device().clone(),
+        );
+        if self.logging_info.is_some()
+            && self.episode_tracker.environment_count() != environment_count
+        {
+            self.episode_tracker = PPOEpisodeTracker::new(environment_count);
+        }
+        Ok(states)
+    }
+
+    /// Fills the rollout buffer, updating `next_states` shaped
+    /// `[environment_count, ...observation_shape]` after each environment step.
+    fn collect_rollout(
+        &mut self,
+        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        next_states: &mut Tensor,
+    ) -> Result<usize, PPOError<AE, GE, SE>> {
+        let environment_count = env.num_envs();
+        while self.rollout_buffer.len() * environment_count < self.batch_size {
+            let states = next_states.clone();
+            let collection_action = self.sample_collection_action(&states)?;
+            let step_info = env
+                .step(collection_action.environment_actions.clone())
+                .map_err(PPOError::GymError)?;
+            let training_next_states = step_info.transition_next_states()?;
+            let VectorizedStepInfo {
+                states: reset_or_next_states,
+                rewards,
+                infos,
+                dones: next_dones,
+                truncateds,
+                terminal_states: _,
+            } = step_info;
+            let first_collection_timestep = self
+                .schedule_progress
+                .elapsed_steps()
+                .saturating_add(self.rollout_buffer.len() * environment_count);
+            self.log_collection(
+                &rewards,
+                infos,
+                &next_dones,
+                &truncateds,
+                first_collection_timestep,
+            )?;
+            self.rollout_buffer.add(
+                PPOExperience::builder()
+                    .states(states)
+                    .next_states(training_next_states)
+                    .actions(collection_action.policy_actions.detach())
+                    .rewards(rewards)
+                    .next_dones(next_dones)
+                    .truncateds(truncateds)
+                    .log_probs(collection_action.log_probs)
+                    .build(),
+            );
+            *next_states = reset_or_next_states;
+        }
+
+        Ok(self.rollout_buffer.len() * environment_count)
+    }
+
+    fn train_on_collected_rollout(
+        &mut self,
+        collected_timesteps: usize,
+    ) -> Result<(), PPOError<AE, GE, SE>> {
+        self.schedule_progress.advance_steps(collected_timesteps);
+        self.update_learning_rates();
+        if let Some(logging_info) = &mut self.logging_info {
+            logging_info.timestep = self.schedule_progress.elapsed_steps();
+        }
+        self.optimize()
     }
 }
 
@@ -1049,88 +1213,12 @@ where
         num_timesteps: usize,
     ) -> Result<(), PPOError<AE, GE, SE>> {
         let mut elapsed_timesteps = 0;
-        let mut next_states = if let Some(states) = self.current_states.take() {
-            states
-        } else {
-            env.reset().map_err(PPOError::GymError)?
-        };
-        self.rollout_buffer = RolloutBuffer::new(
-            self.mini_batch_size / env.num_envs(),
-            next_states.device().clone(),
-        );
-        if self.logging_info.is_some() && self.episode_returns.len() != env.num_envs() {
-            self.episode_returns = vec![0.0; env.num_envs()];
-            self.episode_lengths = vec![0; env.num_envs()];
-        }
+        let mut next_states = self.prepare_rollout_collection(env)?;
 
         while elapsed_timesteps < num_timesteps {
-            while self.rollout_buffer.len() * env.num_envs() < self.batch_size {
-                let states = next_states.clone();
-                let latent_states = match self.network_info {
-                    PPONetworkInfo::Shared(ref mut shared_info) => {
-                        shared_info.shared_network.forward(&states)?
-                    }
-                    PPONetworkInfo::Separate(ref mut _separate_info) => states.clone(),
-                };
-
-                let action = self.act_neurons(&latent_states)?;
-                let actual_action = self
-                    .action_space
-                    .tensor_from_neurons(&action)
-                    .map_err(PPOError::SpaceError)?;
-
-                let (log_probs, _) =
-                    self.actor_network_log_prob_and_entropy(&latent_states, &action)?;
-                // Detach so the rollout buffer does not keep the whole forward
-                // graph (CNN activations) alive for every collected step.
-                let log_probs = log_probs.detach();
-
-                let step_info = env
-                    .step(actual_action.clone())
-                    .map_err(PPOError::GymError)?;
-                let training_next_states = step_info.transition_next_states()?;
-                let VectorizedStepInfo {
-                    states: reset_or_next_states,
-                    rewards,
-                    infos,
-                    dones: next_dones,
-                    truncateds,
-                    terminal_states: _,
-                } = step_info;
-                let first_collection_timestep = self
-                    .schedule_progress
-                    .elapsed_steps()
-                    .saturating_add(self.rollout_buffer.len() * env.num_envs());
-                self.log_collection(
-                    &rewards,
-                    infos,
-                    &next_dones,
-                    &truncateds,
-                    first_collection_timestep,
-                )?;
-                self.rollout_buffer.add(
-                    PPOExperience::builder()
-                        .states(states.clone())
-                        .next_states(training_next_states)
-                        .actions(action.detach())
-                        .rewards(rewards.clone())
-                        .next_dones(next_dones)
-                        .truncateds(truncateds)
-                        .log_probs(log_probs)
-                        .build(),
-                );
-                next_states = reset_or_next_states;
-            }
-
-            let collected_timesteps = self.rollout_buffer.len() * env.num_envs();
+            let collected_timesteps = self.collect_rollout(env, &mut next_states)?;
             elapsed_timesteps += collected_timesteps;
-            self.schedule_progress.advance_steps(collected_timesteps);
-            self.update_learning_rates();
-
-            if let Some(logging_info) = &mut self.logging_info {
-                logging_info.timestep = self.schedule_progress.elapsed_steps();
-            }
-            self.optimize()?;
+            self.train_on_collected_rollout(collected_timesteps)?;
         }
         self.current_states = Some(next_states);
         Ok(())
@@ -1366,6 +1454,12 @@ mod schedule_tests {
         );
     }
 
+    struct NoopLogger;
+
+    impl PPOLogger for NoopLogger {
+        fn log(&mut self, _info: &PPOLogEntry) {}
+    }
+
     #[test]
     fn candle_elementwise_minimum_and_maximum_split_tied_gradients() {
         /// Checks scalar `loss` shaped `[1]` made from tied scalar variables.
@@ -1571,6 +1665,83 @@ mod schedule_tests {
     }
 
     #[test]
+    fn shared_agent_runs_collection_training_actions_and_state_reset() {
+        let device = Device::Cpu;
+        let mut env: VectorizedGymWrapper<FixedEnv> =
+            vec![FixedEnv::new(device.clone()), FixedEnv::new(device.clone())].into();
+        let shared_vars = VarMap::new();
+        let actor_vars = VarMap::new();
+        let critic_vars = VarMap::new();
+        let shared_network = MLP::builder()
+            .input_size(4)
+            .output_size(4)
+            .vb(VarBuilder::from_varmap(&shared_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![4])
+            .build()
+            .unwrap();
+        let actor_head = MLP::builder()
+            .input_size(4)
+            .output_size(2)
+            .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let critic_head = MLP::builder()
+            .input_size(4)
+            .output_size(1)
+            .vb(VarBuilder::from_varmap(&critic_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let network_info: PPONetworkInfo<CountingOptimizer, _, FakeOptimizer> =
+            PPONetworkInfo::Shared(
+                SharedPPONetwork::builder()
+                    .optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                    .shared_network(Box::new(shared_network))
+                    .actor_head(Box::new(
+                        ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(
+                            actor_head,
+                        )),
+                    ))
+                    .critic_head(Box::new(critic_head))
+                    .lr_scheduler(Box::new(LinearSchedule::new(1e-3, 1e-4)))
+                    .build(),
+            );
+        let mut logger = NoopLogger;
+        let mut agent = PPOAgent::builder()
+            .action_space(env.action_space())
+            .network_info(network_info)
+            .batch_size(2)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .training_horizon(10)
+            .logging_info(&mut logger)
+            .device(device.clone())
+            .build();
+
+        agent.learn(&mut env, 2).unwrap();
+        let observations = agent.current_states.as_ref().unwrap().clone();
+        assert_eq!(agent.act(&observations).unwrap().dims(), &[2]);
+        assert_eq!(agent.act_deterministic(&observations).unwrap().dims(), &[2]);
+        assert_eq!(agent.episode_tracker.environment_count(), 2);
+        let PPONetworkInfo::Shared(network) = &agent.network_info else {
+            panic!("expected shared PPO network");
+        };
+        assert_eq!(network.optimizer.steps, 1);
+        assert_close(network.optimizer.learning_rate(), 0.00082);
+
+        agent.set_learning_rate(0.25);
+        let PPONetworkInfo::Shared(network) = &agent.network_info else {
+            panic!("expected shared PPO network");
+        };
+        assert_close(network.optimizer.learning_rate(), 0.25);
+
+        agent.reset_current_states();
+        assert!(agent.current_states.is_none());
+        assert_eq!(agent.episode_tracker.environment_count(), 0);
+    }
+
+    #[test]
     fn separate_ppo_losses_only_reach_their_parameters() {
         fn parameter_ids(vars: &[Var]) -> HashSet<TensorId> {
             vars.iter().map(|var| var.as_tensor().id()).collect()
@@ -1762,7 +1933,7 @@ mod schedule_tests {
             .num_epochs(1)
             .clip_range(Box::new(LinearSchedule::new(0.2, 0.1)))
             .training_horizon(10)
-            .device(device)
+            .device(device.clone())
             .build();
 
         agent.learn(&mut env, 2).unwrap();
@@ -1786,5 +1957,15 @@ mod schedule_tests {
         assert_close(network.critic_optimizer.learning_rate(), 0.00064);
         assert_eq!(network.actor_optimizer.steps, 2);
         assert_eq!(network.critic_optimizer.steps, 2);
+
+        let observations = Tensor::zeros((2, 4), DType::F32, &device).unwrap();
+        assert_eq!(agent.act(&observations).unwrap().dims(), &[2]);
+        assert_eq!(agent.act_deterministic(&observations).unwrap().dims(), &[2]);
+        agent.set_learning_rate(0.25);
+        let PPONetworkInfo::Separate(network) = &agent.network_info else {
+            panic!("expected separate PPO network");
+        };
+        assert_close(network.actor_optimizer.learning_rate(), 0.25);
+        assert_close(network.critic_optimizer.learning_rate(), 0.25);
     }
 }
