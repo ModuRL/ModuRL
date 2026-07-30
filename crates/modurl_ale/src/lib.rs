@@ -3,7 +3,6 @@
 //! No ROMs are included or downloaded. Supply a filesystem path to a ROM you are legally
 //! entitled to use.
 
-#[allow(clippy::cmp_null)]
 mod ale;
 mod ale_sys;
 mod atari;

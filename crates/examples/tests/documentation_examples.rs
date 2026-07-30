@@ -34,6 +34,64 @@ impl DDQNLogger for DocumentationDDQNLogger {
     }
 }
 
+// This is the shared logger shape shown in
+// docs/src/understand-deterministic-actor-critic-training.md.
+struct DocumentationDeterministicActorCriticLogger;
+
+fn log_deterministic_update(entry: &DeterministicActorCriticLogEntry) {
+    if entry.update_index % 1_000 != 0 {
+        return;
+    }
+
+    let critic_loss = entry.critic_losses[0]
+        .to_scalar::<f32>()
+        .expect("critic loss must be scalar");
+    let actor_loss = entry
+        .actor_loss
+        .as_ref()
+        .map(|loss| loss.to_scalar::<f32>().expect("actor loss must be scalar"));
+
+    println!(
+        "step={} update={} critic_loss={critic_loss:.4} \
+         actor_updated={} actor_loss={actor_loss:?}",
+        entry.collection_timestep, entry.update_index, entry.actor_updated,
+    );
+}
+
+fn log_deterministic_collection<I>(entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+    for episode in &entry.completed_episodes {
+        println!(
+            "step={} env={} return={} length={} terminated={} truncated={}",
+            episode.collection_timestep,
+            episode.environment_index,
+            episode.episode_return,
+            episode.episode_length,
+            episode.terminated,
+            episode.truncated,
+        );
+    }
+}
+
+impl<I> DDPGLogger<I> for DocumentationDeterministicActorCriticLogger {
+    fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
+        log_deterministic_update(entry);
+    }
+
+    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+        log_deterministic_collection(entry);
+    }
+}
+
+impl<I> TD3Logger<I> for DocumentationDeterministicActorCriticLogger {
+    fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
+        log_deterministic_update(entry);
+    }
+
+    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+        log_deterministic_collection(entry);
+    }
+}
+
 // This is the complete program shown in docs/src/getting-started.md. Keep this
 // test compile-only: running it would turn a documentation check into training.
 fn getting_started_program() {
@@ -397,6 +455,7 @@ fn custom_gym_can_be_vectorized() {
 
 #[test]
 fn documentation_programs_compile_without_running_training() {
+    let _logger = DocumentationDeterministicActorCriticLogger;
     let _ = getting_started_program as fn();
     let _ = dqn_program as fn();
     let _ = ddqn_program as fn();

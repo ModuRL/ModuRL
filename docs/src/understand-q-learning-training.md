@@ -5,12 +5,12 @@ record metrics. Add a logger when you need to compare runs or diagnose a
 configuration. Each logger receives an update entry when the agent optimizes
 from replay and a collection entry after every vectorized environment step.
 
-The repository's `dqn_cartpole_with_graphs` example uses both entry types. It
+The repository's `dqn_cartpole` example uses both entry types. It
 prints completed CartPole episodes during training and draws loss, exploration,
 Q-value, return, and length graphs when training ends. Run it with:
 
 ```sh
-cargo run --example dqn_cartpole_with_graphs
+cargo run --example dqn_cartpole
 ```
 
 Implement the logger trait that matches the agent. Both traits receive the same

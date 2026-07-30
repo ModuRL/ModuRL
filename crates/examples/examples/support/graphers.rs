@@ -412,3 +412,137 @@ impl<I> SACLogger<I> for SACGrapher {
         }
     }
 }
+
+const DETERMINISTIC_ACTOR_CRITIC_UPDATE_LOG_INTERVAL: usize = 1_000;
+
+pub struct DeterministicActorCriticGrapher {
+    terminal: TerminalLogger,
+}
+
+impl DeterministicActorCriticGrapher {
+    pub fn new() -> Self {
+        let aggregation = AggregationConfig::new(Aggregation::mean())
+            .with_override("Critic Loss", Aggregation::mean().with_rolling_window(100))
+            .with_override("Actor Loss", Aggregation::mean().with_rolling_window(100))
+            .with_override("Mean Replay Q", Aggregation::mean().with_rolling_window(10))
+            .with_override("Mean Policy Q", Aggregation::mean().with_rolling_window(10))
+            .with_override(
+                "Mean Bellman Target",
+                Aggregation::mean().with_rolling_window(10),
+            )
+            .with_override(
+                "Episode Return",
+                Aggregation::mean().with_rolling_window(25),
+            )
+            .with_override(
+                "Episode Length",
+                Aggregation::mean().with_rolling_window(25),
+            );
+        Self {
+            terminal: TerminalLogger::new(aggregation).with_live_updates(),
+        }
+    }
+
+    fn log_update(&mut self, entry: &DeterministicActorCriticLogEntry) {
+        if !entry
+            .collection_timestep
+            .is_multiple_of(DETERMINISTIC_ACTOR_CRITIC_UPDATE_LOG_INTERVAL)
+        {
+            return;
+        }
+
+        let critic_loss = Tensor::stack(&entry.critic_losses, 0)
+            .unwrap()
+            .mean_all()
+            .unwrap();
+        let replay_q = Tensor::stack(&entry.critic_q_values, 0)
+            .unwrap()
+            .mean_all()
+            .unwrap();
+        let bellman_target = entry.bellman_targets.mean_all().unwrap();
+        let replay_reward = entry.replay_rewards.mean_all().unwrap();
+        let exploration_noise = Tensor::new(
+            entry.exploration_noise_standard_deviation as f32,
+            &Device::Cpu,
+        )
+        .unwrap();
+        let actor_loss = entry
+            .actor_loss
+            .as_ref()
+            .map(|loss| loss.mean_all().unwrap());
+        let policy_q = entry
+            .policy_q_values
+            .as_ref()
+            .map(|values| values.mean_all().unwrap());
+
+        let mut metrics = vec![
+            ("Critic Loss", &critic_loss),
+            ("Mean Replay Q", &replay_q),
+            ("Mean Bellman Target", &bellman_target),
+            ("Mean Replay Reward", &replay_reward),
+            ("Exploration Noise", &exploration_noise),
+        ];
+        if let Some(actor_loss) = &actor_loss {
+            metrics.push(("Actor Loss", actor_loss));
+        }
+        if let Some(policy_q) = &policy_q {
+            metrics.push(("Mean Policy Q", policy_q));
+        }
+        self.terminal
+            .log(entry.collection_timestep, &metrics)
+            .unwrap();
+    }
+
+    fn log_collection<I>(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+        if entry
+            .collection_timestep
+            .is_multiple_of(DETERMINISTIC_ACTOR_CRITIC_UPDATE_LOG_INTERVAL)
+        {
+            let mean_step_reward = entry.collection_rewards.mean_all().unwrap();
+            self.terminal
+                .log(
+                    entry.collection_timestep,
+                    &[("Mean Collection Reward", &mean_step_reward)],
+                )
+                .unwrap();
+        }
+
+        for episode in &entry.completed_episodes {
+            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
+            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            self.terminal
+                .log(
+                    episode.collection_timestep,
+                    &[
+                        ("Episode Return", &episode_return),
+                        ("Episode Length", &episode_length),
+                    ],
+                )
+                .unwrap();
+        }
+    }
+
+    pub fn display(mut self) {
+        self.terminal.display();
+    }
+}
+
+impl<I> DDPGLogger<I> for DeterministicActorCriticGrapher {
+    fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
+        self.log_update(entry);
+    }
+
+    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+        self.log_collection(entry);
+    }
+}
+
+impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
+    fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
+        self.log_update(entry);
+    }
+
+    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+        self.log_collection(entry);
+    }
+}

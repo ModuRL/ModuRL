@@ -13,8 +13,10 @@ probabilistic:
 
 The algorithm determines whether the action path uses a distribution. A model
 can return an action representation that an action space understands directly.
-An agent can also insert other selection logic. DQN and DDQN, for example,
-choose from Q-values with epsilon-greedy selection.
+DDPG and TD3 use this direct path for their deterministic actors, then add
+Gaussian noise inside the agent during collection. An agent can also insert
+other selection logic. DQN and DDQN, for example, choose from Q-values with
+epsilon-greedy selection.
 
 On the probabilistic path, the policy uses a model and a distribution together.
 The distribution is part of the policy rather than a standalone stage.
@@ -121,7 +123,8 @@ example does.
 
 Read [Getting Started](./getting-started.md) for a categorical policy,
 [Soft Actor-Critic](./sac.md) for policies that expose exact or sampled action
-expectations,
+expectations, [Deterministic Actor-Critic
+Training](./deterministic-actor-critic.md) for direct continuous actors,
 [Value-Based Training](./q-learning.md) for action selection without a
-distribution, and `crates/examples/examples/ppo_mujoco_with_graphs.rs` for a
-Gaussian policy.
+distribution, and `crates/examples/examples/ppo_mujoco.rs` for a Gaussian
+policy.

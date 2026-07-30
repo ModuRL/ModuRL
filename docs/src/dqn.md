@@ -117,7 +117,7 @@ Run the repository example when you want terminal graphs instead of the minimal
 program above:
 
 ```sh
-cargo run --example dqn_cartpole_with_graphs
+cargo run --example dqn_cartpole
 ```
 
 The example prints each completed CartPole episode's collection step, length,
