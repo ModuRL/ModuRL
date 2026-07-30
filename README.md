@@ -12,8 +12,8 @@ The project is currently early and API stability is not guaranteed.
 ModuRL is built around a few long-term goals:
 
 - **Be the fastest Rust-native RL library for supported algorithms.** We want
-  PPO, SAC, DQN, and future supported algorithms to compete on training
-  throughput, memory efficiency, and backend utilization.
+  PPO, SAC, DDPG, TD3, DQN, and future supported algorithms to compete on
+  training throughput, memory efficiency, and backend utilization.
 - **Make RL systems modular without making them slow.** Users should be able to
   swap policies, critics, distributions, environments, schedules, loggers, and
   buffers while staying close to hand-written training-loop performance.
@@ -46,6 +46,8 @@ ModuRL intentionally does not try to be everything:
 | --- | --- |
 | PPO | Implemented |
 | SAC | Implemented |
+| DDPG | Implemented |
+| TD3 | Implemented |
 | DQN | Implemented |
 | DDQN | Implemented |
 | Vectorized environments | Implemented |
@@ -112,6 +114,12 @@ For Soft Actor-Critic continuous control, read the
 [SAC guide](docs/src/sac.md). It explains actor and critic construction,
 entropy configuration, stabilization, replay devices, and the complete MuJoCo
 example.
+
+For deterministic continuous control, start with the [shared actor-critic
+guide](docs/src/deterministic-actor-critic.md), then choose the [DDPG
+guide](docs/src/ddpg.md) or [TD3 guide](docs/src/td3.md). These pages explain
+target networks, replay, exploration noise, TD3's stabilization choices, and
+the complete MuJoCo examples.
 
 For GPU-backed builds, enable the matching Candle backend feature:
 

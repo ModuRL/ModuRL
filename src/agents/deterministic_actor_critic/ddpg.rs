@@ -1,3 +1,8 @@
+//! Deep Deterministic Policy Gradient.
+//!
+//! [`DDPGAgent`] trains one deterministic actor and one state-action critic
+//! from replay. [`DDPGLogger`] receives replay-update and collection metrics.
+
 use std::fmt::Debug;
 
 use bon::bon;
@@ -19,7 +24,10 @@ use crate::{
 
 /// Receives DDPG replay-update and collection metrics.
 pub trait DDPGLogger<I = ()> {
+    /// Records metrics from one replay optimization.
     fn log(&mut self, entry: &DeterministicActorCriticLogEntry);
+
+    /// Records metrics from one vectorized environment step.
     fn log_collection(&mut self, _entry: &DeterministicActorCriticCollectionLogEntry<I>) {}
 }
 
@@ -77,7 +85,11 @@ impl DeterministicActorCriticStrategy for DDPGStrategy {
     }
 }
 
-/// Deep Deterministic Policy Gradient agent.
+/// Deep Deterministic Policy Gradient agent for bounded continuous actions.
+///
+/// The agent collects transitions with a deterministic actor plus Gaussian
+/// exploration noise, trains one critic from replay, and Polyak-updates target
+/// networks after every replay optimization.
 pub struct DDPGAgent<'a, AO, CO, GE, SE, I = ()>
 where
     AO: Optimizer,
@@ -98,24 +110,51 @@ where
     SE: Debug,
 {
     #[builder]
+    /// Builds a DDPG agent and initializes target parameters from the online
+    /// actor and critic parameters.
     pub fn new(
+        /// Actor optimized during replay updates.
         online_actor: Box<dyn candle_core::Module>,
+        /// Actor used to calculate next-state Bellman targets.
         target_actor: Box<dyn candle_core::Module>,
+        /// Parameters belonging to `online_actor`.
         online_actor_vars: &'a VarMap,
+        /// Parameters belonging to `target_actor`.
         target_actor_vars: &'a mut VarMap,
+        /// Optimizer for the online actor parameters.
         actor_optimizer: AO,
+        /// The sole online/target critic pair.
         critic: DeterministicCritic<'a, CO>,
+        /// Bounded action space matching the actor output and environment.
         action_space: BoxSpace,
+        /// Observation-space contract expected by the actor and critic.
         observation_space: Box<dyn Space<Error = SE>>,
+        /// Devices used for replay storage and optimization.
         device_strategy: ReplayDeviceStrategy,
+        /// Optional replay-update and collection metric sink.
         logger: Option<&'a mut dyn DDPGLogger<I>>,
-        #[builder(default = 0.99)] gamma: f64,
-        #[builder(default = 0.005)] tau: f64,
-        #[builder(default = 0.1)] exploration_noise: f64,
-        #[builder(default = 1_000_000)] replay_capacity: usize,
-        #[builder(default = 256)] batch_size: usize,
-        #[builder(default = 1)] update_frequency: usize,
-        #[builder(default = 1_000)] training_start: usize,
+        /// Bellman discount factor.
+        #[builder(default = 0.99)]
+        gamma: f64,
+        /// Polyak coefficient for actor and critic target updates.
+        #[builder(default = 0.005)]
+        tau: f64,
+        /// Standard deviation of Gaussian collection-action noise.
+        #[builder(default = 0.1)]
+        exploration_noise: f64,
+        /// Maximum number of transitions retained in replay.
+        #[builder(default = 1_000_000)]
+        replay_capacity: usize,
+        /// Number of replay transitions sampled per optimization.
+        #[builder(default = 256)]
+        batch_size: usize,
+        /// Collected-transition interval between replay optimizations.
+        #[builder(default = 1)]
+        update_frequency: usize,
+        /// Number of random-action transitions collected before optimization.
+        #[builder(default = 1_000)]
+        training_start: usize,
+        /// Global collected-transition horizon.
         training_horizon: usize,
     ) -> DeterministicActorCriticResult<Self, GE, SE> {
         let inner = DeterministicActorCriticAgent::builder()
@@ -144,10 +183,12 @@ where
         })
     }
 
+    /// Returns the bounded continuous action space used by the agent.
     pub fn get_action_space(&self) -> &BoxSpace {
         self.inner.get_action_space()
     }
 
+    /// Returns the observation-space contract used by the agent.
     pub fn get_observation_space(&self) -> &dyn Space<Error = SE> {
         self.inner.get_observation_space()
     }

@@ -1,3 +1,9 @@
+//! Twin Delayed Deep Deterministic Policy Gradient.
+//!
+//! [`TD3Agent`] extends deterministic replay training with a critic ensemble,
+//! target-policy smoothing, and delayed actor updates. [`TD3Logger`] receives
+//! replay-update and collection metrics.
+
 use std::fmt::Debug;
 
 use bon::bon;
@@ -21,7 +27,10 @@ use crate::{
 
 /// Receives TD3 replay-update and collection metrics.
 pub trait TD3Logger<I = ()> {
+    /// Records metrics from one replay optimization.
     fn log(&mut self, entry: &DeterministicActorCriticLogEntry);
+
+    /// Records metrics from one vectorized environment step.
     fn log_collection(&mut self, _entry: &DeterministicActorCriticCollectionLogEntry<I>) {}
 }
 
@@ -113,24 +122,47 @@ where
     SE: Debug,
 {
     #[builder]
+    /// Builds a TD3 agent and initializes every target network from its online
+    /// counterpart.
     pub fn new(
+        /// Actor optimized on delayed replay updates.
         online_actor: Box<dyn candle_core::Module>,
+        /// Actor used to calculate smoothed next-state Bellman targets.
         target_actor: Box<dyn candle_core::Module>,
+        /// Parameters belonging to `online_actor`.
         online_actor_vars: &'a VarMap,
+        /// Parameters belonging to `target_actor`.
         target_actor_vars: &'a mut VarMap,
+        /// Optimizer for the online actor parameters.
         actor_optimizer: AO,
         /// Non-empty independently optimized critic ensemble.
         critics: Vec<DeterministicCritic<'a, CO>>,
+        /// Bounded action space matching the actor output and environment.
         action_space: BoxSpace,
+        /// Observation-space contract expected by the actor and critics.
         observation_space: Box<dyn Space<Error = SE>>,
+        /// Devices used for replay storage and optimization.
         device_strategy: ReplayDeviceStrategy,
+        /// Optional replay-update and collection metric sink.
         logger: Option<&'a mut dyn TD3Logger<I>>,
-        #[builder(default = 0.99)] gamma: f64,
-        #[builder(default = 0.005)] tau: f64,
-        #[builder(default = 0.1)] exploration_noise: f64,
-        #[builder(default = 0.2)] target_policy_noise: f64,
-        #[builder(default = 0.5)] target_noise_clip: f64,
-        #[builder(default = 2)] actor_update_interval: usize,
+        /// Bellman discount factor.
+        #[builder(default = 0.99)]
+        gamma: f64,
+        /// Polyak coefficient for actor and critic target updates.
+        #[builder(default = 0.005)]
+        tau: f64,
+        /// Standard deviation of Gaussian collection-action noise.
+        #[builder(default = 0.1)]
+        exploration_noise: f64,
+        /// Standard deviation of Gaussian target-policy noise.
+        #[builder(default = 0.2)]
+        target_policy_noise: f64,
+        /// Componentwise absolute limit for target-policy noise.
+        #[builder(default = 0.5)]
+        target_noise_clip: f64,
+        /// Replay-optimization interval between actor and target updates.
+        #[builder(default = 2)]
+        actor_update_interval: usize,
         /// Aggregates the target critics' next-state Q estimates. Canonical
         /// TD3 uses [`SACCriticAggregationMode::Min`].
         #[builder(default = SACCriticAggregationMode::Min)]
@@ -138,10 +170,19 @@ where
         /// Optionally aggregates all online critics for the actor objective.
         /// `None` preserves canonical TD3 behavior by using the first critic.
         actor_aggregation_mode: Option<SACCriticAggregationMode>,
-        #[builder(default = 1_000_000)] replay_capacity: usize,
-        #[builder(default = 256)] batch_size: usize,
-        #[builder(default = 1)] update_frequency: usize,
-        #[builder(default = 1_000)] training_start: usize,
+        /// Maximum number of transitions retained in replay.
+        #[builder(default = 1_000_000)]
+        replay_capacity: usize,
+        /// Number of replay transitions sampled per optimization.
+        #[builder(default = 256)]
+        batch_size: usize,
+        /// Collected-transition interval between replay optimizations.
+        #[builder(default = 1)]
+        update_frequency: usize,
+        /// Number of random-action transitions collected before optimization.
+        #[builder(default = 1_000)]
+        training_start: usize,
+        /// Global collected-transition horizon.
         training_horizon: usize,
     ) -> DeterministicActorCriticResult<Self, GE, SE> {
         let strategy = TD3Strategy {
@@ -177,10 +218,12 @@ where
         })
     }
 
+    /// Returns the bounded continuous action space used by the agent.
     pub fn get_action_space(&self) -> &BoxSpace {
         self.inner.get_action_space()
     }
 
+    /// Returns the observation-space contract used by the agent.
     pub fn get_observation_space(&self) -> &dyn Space<Error = SE> {
         self.inner.get_observation_space()
     }

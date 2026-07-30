@@ -86,8 +86,9 @@ let mut agent = SACAgent::builder()
 move an environment or model parameters for you.
 
 Set up everything you create for SAC on `optimization_device`: the environment,
-actor, critics, target critics, optimizers, and automatic entropy variable. You
-do not create any of these components on `storage_device`.
+actor, critics, target critics, optimizers, and automatic entropy variable. For
+DDPG or TD3, this includes both the online and target actors as well as every
+critic pair. You do not create any of these components on `storage_device`.
 
 Internally, the agent transfers detached transitions to `storage_device` when
 it adds them to replay. It transfers sampled replay batches back to

@@ -15,7 +15,8 @@ In ModuRL, an agent can do two things:
 
 ModuRL provides agent types named after the algorithms they implement.
 `PPOAgent` implements PPO, `SACAgent` implements Soft Actor-Critic,
-`DQNAgent` implements DQN, and `DDQNAgent` implements Double DQN.
+`DDPGAgent` implements DDPG, `TD3Agent` implements TD3, `DQNAgent` implements
+DQN, and `DDQNAgent` implements Double DQN.
 
 An agent coordinates the pieces needed for training: model modules, optimizers,
 schedules, buffers, distributions, and update logic.
@@ -82,10 +83,17 @@ For DQN and DDQN, an `MLP` is a *Q-network*. Its output has one value for each
 discrete action. The agent selects an action from those values with
 epsilon-greedy exploration instead of a probability distribution.
 
+For DDPG and TD3, an actor `MLP` returns a continuous action directly. These
+algorithms add Gaussian noise while collecting experience, but the underlying
+policy is deterministic. Their scalar state-action critics receive an
+observation and action together and return one Q value.
+
 Read [Models, Policies, and
 Distributions](./models-policies-and-distributions.md) for how tensors move
 between actors, distributions, and action spaces. Read [Value-Based
-Training](./q-learning.md) for Q-networks.
+Training](./q-learning.md) for discrete-action Q-networks, or [Deterministic
+Actor-Critic Training](./deterministic-actor-critic.md) for continuous actors
+and state-action critics.
 
 ## Tensors and Devices
 

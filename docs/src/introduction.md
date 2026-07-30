@@ -2,8 +2,8 @@
 
 This guide is for Rust developers who want to build reinforcement learning
 programs with ModuRL and Candle. It starts with PPO on CartPole, then explains
-the library types behind that example, Soft Actor-Critic, and the value-based
-DQN and DDQN paths.
+the library types behind that example, stochastic and deterministic
+actor-critic algorithms, and the value-based DQN and DDQN paths.
 
 The guide assumes basic Rust and Cargo knowledge. It does not teach
 reinforcement learning or neural networks from first principles.
@@ -11,8 +11,11 @@ reinforcement learning or neural networks from first principles.
 ModuRL is early, and API stability is not guaranteed. Start with [Getting
 Started](./getting-started.md) to run and assemble a PPO CartPole program. For
 off-policy stochastic actor training, read [Soft
-Actor-Critic](./sac.md). For discrete-action value-based training, read
-[Value-Based Training](./q-learning.md).
+Actor-Critic](./sac.md). For deterministic continuous-control training, read
+[Deterministic Actor-Critic
+Training](./deterministic-actor-critic.md) before choosing [DDPG](./ddpg.md) or
+[TD3](./td3.md). For discrete-action value-based training, read [Value-Based
+Training](./q-learning.md).
 
 The README provides project status and the shortest repository-based commands.
 Rustdoc provides the precise contracts for public traits, structs, and builders.

@@ -35,19 +35,37 @@ pub type DeterministicCritic<'a, O> = SACCritic<'a, O>;
 /// Invalid deterministic actor-critic configuration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DeterministicActorCriticConfigurationError {
+    /// TD3 received an empty critic ensemble.
     NoCritics,
+    /// Replay capacity was zero.
     ZeroReplayCapacity,
+    /// Replay batch size was zero.
     ZeroBatchSize,
+    /// Replay cannot retain one complete optimization batch.
     ReplayCapacityBelowBatchSize,
+    /// The replay-update frequency was zero.
     ZeroUpdateFrequency,
+    /// The global collection horizon was zero.
     ZeroTrainingHorizon,
+    /// Gamma was non-finite or outside `0.0..=1.0`.
     InvalidGamma,
+    /// Tau was non-finite or outside `0.0..=1.0`.
     InvalidTau,
+    /// The collection exploration-noise deviation was invalid.
     InvalidExplorationNoise,
+    /// The target-policy-noise deviation was invalid.
     InvalidTargetPolicyNoise,
+    /// The target-policy-noise clip was invalid.
     InvalidTargetNoiseClip,
+    /// The actor-update interval was zero.
     ZeroActorUpdateInterval,
-    IncorrectCriticCount { expected: usize, actual: usize },
+    /// An algorithm received a different number of critics than it requires.
+    IncorrectCriticCount {
+        /// Number of critics required by the algorithm.
+        expected: usize,
+        /// Number of critics supplied to the builder.
+        actual: usize,
+    },
 }
 
 /// DDPG and TD3 construction or training failure.
@@ -57,17 +75,26 @@ where
     GE: Debug,
     SE: Debug,
 {
+    /// A Candle tensor operation failed.
     TensorError(candle_core::Error),
+    /// Critic construction, aggregation, or optimization failed.
     CriticError(SACCriticError),
+    /// An agent builder value violated its configuration contract.
     ConfigurationError(DeterministicActorCriticConfigurationError),
+    /// The online and target actors contain different parameter names.
     ActorParameterMapMismatch {
+        /// Parameter names found only in the online actor.
         online_only: Vec<String>,
+        /// Parameter names found only in the target actor.
         target_only: Vec<String>,
     },
+    /// The vectorized environment returned an error.
     GymError(GE),
+    /// The action or observation space returned an error.
     SpaceError(SE),
 }
 
+/// Result type returned by DDPG and TD3 construction and training operations.
 pub type DeterministicActorCriticResult<T, GE, SE> =
     Result<T, DeterministicActorCriticError<GE, SE>>;
 
@@ -98,10 +125,16 @@ pub struct DeterministicActorCriticLogEntry {
     /// Each critic's Q predictions for the sampled replay state-action pairs.
     /// Every tensor is shaped `[batch_size]`.
     pub critic_q_values: Vec<Tensor>,
-    /// `None` on updates where TD3 delays the actor.
+    /// Scalar negative mean policy Q loss.
+    ///
+    /// This is `None` on updates where TD3 delays the actor.
     pub actor_loss: Option<Tensor>,
-    /// Q values from the first critic for current policy actions, shaped
-    /// `[batch_size]`. `None` on updates where TD3 delays the actor.
+    /// Q values used by the actor objective, shaped `[batch_size]`.
+    ///
+    /// DDPG uses its sole critic. Canonical TD3 uses its first critic for the
+    /// actor objective. A configured TD3 actor aggregation mode combines the
+    /// critic ensemble instead. This is `None` on updates where TD3 delays the
+    /// actor.
     pub policy_q_values: Option<Tensor>,
     /// Current policy actions shaped `[batch_size, ...action_shape]`.
     /// `None` on updates where TD3 delays the actor.
@@ -119,27 +152,41 @@ pub struct DeterministicActorCriticLogEntry {
     pub critic_learning_rates: Vec<f32>,
     /// Standard deviation of the Gaussian collection-action noise.
     pub exploration_noise_standard_deviation: f64,
+    /// Whether this replay update changed the actor and target networks.
     pub actor_updated: bool,
+    /// Zero-based replay-optimization index.
     pub update_index: usize,
+    /// Global collected-transition count that triggered this update.
     pub collection_timestep: usize,
 }
 
 /// Metrics from one vectorized environment step.
 pub struct DeterministicActorCriticCollectionLogEntry<I = ()> {
+    /// Newest reward from each inner environment, shaped `[environment_count]`.
     pub collection_rewards: Tensor,
+    /// Typed metadata returned by the inner environments.
     pub infos: Vec<I>,
+    /// Global collected-transition count after this vectorized step.
     pub collection_timestep: usize,
+    /// Episodes that terminated or truncated on this vectorized step.
     pub completed_episodes: Vec<DeterministicActorCriticEpisodeLogEntry>,
+    /// Number of transitions currently retained in replay.
     pub replay_len: usize,
 }
 
 /// Summary of an episode completed during collection.
 pub struct DeterministicActorCriticEpisodeLogEntry {
+    /// Index of the inner vectorized environment that completed the episode.
     pub environment_index: usize,
+    /// Sum of rewards over the completed episode.
     pub episode_return: f32,
+    /// Number of transitions in the completed episode.
     pub episode_length: usize,
+    /// Whether the environment terminated the episode.
     pub terminated: bool,
+    /// Whether a time limit or wrapper truncated the episode.
     pub truncated: bool,
+    /// Global collected-transition count at the end of the episode.
     pub collection_timestep: usize,
 }
 
