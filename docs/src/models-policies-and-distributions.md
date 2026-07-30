@@ -123,5 +123,5 @@ Read [Getting Started](./getting-started.md) for a categorical policy,
 [Soft Actor-Critic](./sac.md) for policies that expose exact or sampled action
 expectations,
 [Value-Based Training](./q-learning.md) for action selection without a
-distribution, and `crates/examples/examples/ppo_mujoco_with_graphs.rs` for a
+distribution, and `crates/examples/examples/ppo_mujoco.rs` for a
 Gaussian policy.

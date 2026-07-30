@@ -64,15 +64,15 @@ cargo run --example ppo_bench
 For a PPO example with logging and terminal plots:
 
 ```sh
-cargo run --example ppo_cartpole_with_graphs
+cargo run --example ppo_cartpole
 ```
 
 The MuJoCo PPO example requires exactly one environment feature:
 
 ```sh
-cargo run --release -p examples --example ppo_mujoco_with_graphs --features half-cheetah
-cargo run --release -p examples --example ppo_mujoco_with_graphs --features hopper
-cargo run --release -p examples --example ppo_mujoco_with_graphs --features walker2d
+cargo run --release -p examples --example ppo_mujoco --features half-cheetah
+cargo run --release -p examples --example ppo_mujoco --features hopper
+cargo run --release -p examples --example ppo_mujoco --features walker2d
 ```
 
 The MuJoCo SAC example supports the same environment selection:
@@ -81,6 +81,14 @@ The MuJoCo SAC example supports the same environment selection:
 cargo run --release -p examples --example sac_mujoco --features half-cheetah
 cargo run --release -p examples --example sac_mujoco --features hopper
 cargo run --release -p examples --example sac_mujoco --features walker2d
+```
+
+The DDPG and TD3 examples use the same MuJoCo feature selection and display
+terminal graphs for optimization and episode metrics:
+
+```sh
+cargo run --release -p examples --example ddpg_mujoco --features half-cheetah
+cargo run --release -p examples --example td3_mujoco --features half-cheetah
 ```
 
 The discrete SAC variant also has a CartPole example:
@@ -93,7 +101,7 @@ For DQN training with terminal plots for loss, exploration, Q-values, and
 episode performance:
 
 ```sh
-cargo run --example dqn_cartpole_with_graphs
+cargo run --example dqn_cartpole
 ```
 
 For value-based CartPole programs, read the [DQN guide](docs/src/dqn.md) or
@@ -117,11 +125,13 @@ cargo run --features metal --example ppo_bench
 | Example | Shows |
 | --- | --- |
 | `examples/ppo_bench.rs` | PPO on CartPole with separate actor and critic networks |
-| `examples/ppo_cartpole_with_graphs.rs` | PPO training metrics through `PPOLogger` |
-| `examples/ppo_mujoco_with_graphs.rs` | Continuous PPO on a feature-selected MuJoCo environment with progress, terminal plots, and TensorBoard logs under `runs/ppo_mujoco` |
+| `examples/ppo_cartpole.rs` | PPO training metrics through `PPOLogger` |
+| `examples/ppo_mujoco.rs` | Continuous PPO on a feature-selected MuJoCo environment with progress, terminal plots, and TensorBoard logs under `runs/ppo_mujoco` |
 | `examples/sac_cartpole.rs` | Discrete SAC variant on CartPole |
 | `examples/sac_mujoco.rs` | Continuous SAC on a feature-selected MuJoCo environment |
-| `examples/dqn_cartpole_with_graphs.rs` | DQN training metrics and episode graphs through `DQNLogger` |
+| `examples/ddpg_mujoco.rs` | DDPG on a feature-selected MuJoCo environment with optimization and episode graphs |
+| `examples/td3_mujoco.rs` | TD3 on a feature-selected MuJoCo environment with optimization and episode graphs |
+| `examples/dqn_cartpole.rs` | DQN training metrics and episode graphs through `DQNLogger` |
 | `examples/rendered_lunar_lander_ppo.rs` | PPO on LunarLander with rendering and learning-rate schedules |
 
 ## Core Concepts
