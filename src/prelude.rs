@@ -6,6 +6,10 @@
 
 pub use crate::agents::{
     Agent, ReplayDeviceStrategy,
+    a2c::{
+        A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
+        A2CLoggerAdapter, A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
+    },
     deterministic_actor_critic::{
         DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
         DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
