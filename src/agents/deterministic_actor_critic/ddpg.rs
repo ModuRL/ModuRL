@@ -361,7 +361,6 @@ mod tests {
         agent.learn(&mut env, 2).unwrap();
         assert_eq!(agent.inner.actor_optimizer.steps, 2);
         assert_eq!(agent.inner.critics[0].optimizer().steps, 2);
-        drop(agent);
         assert_eq!(logger.updates, 2);
     }
 }

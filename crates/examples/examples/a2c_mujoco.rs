@@ -132,19 +132,16 @@ fn main() {
     );
 
     let mut grapher = A2CMujocoGrapher::new(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
-    {
-        let mut logger_adapter = A2CLoggerAdapter::new(&mut grapher);
-        let mut agent = A2CAgent::builder()
-            .action_space(action_space)
-            .network_info(networks)
-            // SB3 A2C collects five steps from each environment per update.
-            .batch_size(5)
-            .training_horizon(TOTAL_TIMESTEPS)
-            .logging_info(&mut logger_adapter)
-            .device(device)
-            .build();
+    let mut agent = A2CAgent::builder()
+        .action_space(action_space)
+        .network_info(networks)
+        // SB3 A2C collects five steps from each environment per update.
+        .batch_size(5)
+        .training_horizon(TOTAL_TIMESTEPS)
+        .logging_info(&mut grapher)
+        .device(device)
+        .build();
 
-        agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
-    }
+    agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
     grapher.display();
 }

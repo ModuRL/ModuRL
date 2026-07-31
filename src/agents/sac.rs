@@ -2372,7 +2372,6 @@ mod tests {
             VectorizedGymWrapper::from(vec![FixedEnv::new(device.clone()), FixedEnv::new(device)]);
         agent.learn(&mut env, 2).unwrap();
         agent.learn(&mut env, 2).unwrap();
-        drop(agent);
 
         assert_eq!(actor_steps.load(Ordering::Relaxed), 3);
         assert_eq!(critic_steps_1.load(Ordering::Relaxed), 3);

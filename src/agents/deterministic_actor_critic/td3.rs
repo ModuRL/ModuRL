@@ -434,7 +434,6 @@ mod tests {
         assert_eq!(agent.inner.critics[0].optimizer().steps, 2);
         assert_eq!(agent.inner.critics[1].optimizer().steps, 2);
         assert_eq!(agent.inner.critics[2].optimizer().steps, 2);
-        drop(agent);
         assert_eq!(logger.actor_updates, vec![false, true]);
     }
 }

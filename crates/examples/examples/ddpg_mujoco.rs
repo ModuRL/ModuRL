@@ -168,6 +168,5 @@ fn main() {
         .unwrap();
 
     agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
-    drop(agent);
     grapher.display();
 }

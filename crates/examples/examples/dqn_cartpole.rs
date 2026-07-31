@@ -83,6 +83,5 @@ fn main() {
         .expect("DQN configuration should be valid");
 
     agent.learn(&mut env, 500_000).expect("DQN learning failed");
-    drop(agent);
     grapher.display();
 }

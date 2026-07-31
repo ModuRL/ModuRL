@@ -298,12 +298,12 @@ impl A2CMujocoGrapher {
 }
 
 impl A2CLogger<RawRewardInfo<()>> for A2CMujocoGrapher {
-    fn log(&mut self, info: &A2CLogEntry<'_>) {
-        self.inner.log(info.inner);
+    fn log(&mut self, info: &A2CLogEntry) {
+        self.inner.log(info);
     }
 
-    fn log_collection(&mut self, info: &A2CCollectionLogEntry<'_, RawRewardInfo<()>>) {
-        self.inner.log_collection(info.inner);
+    fn log_collection(&mut self, info: &A2CCollectionLogEntry<RawRewardInfo<()>>) {
+        self.inner.log_collection(info);
     }
 }
 
