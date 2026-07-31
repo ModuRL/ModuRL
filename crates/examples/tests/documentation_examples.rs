@@ -39,7 +39,7 @@ impl DDQNLogger for DocumentationDDQNLogger {
 struct DocumentationDeterministicActorCriticLogger;
 
 fn log_deterministic_update(entry: &DeterministicActorCriticLogEntry) {
-    if entry.update_index % 1_000 != 0 {
+    if !entry.update_index.is_multiple_of(1_000) {
         return;
     }
 
