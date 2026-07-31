@@ -38,6 +38,34 @@ at a fixed interval.
 epsilon and otherwise chooses the online network's highest-valued action.
 `epsilon_schedule` controls epsilon over the configured training horizon.
 
+## Use a Dueling Q-Network
+
+`DuelingMLP` separates its final representation into a scalar state value and
+one advantage per action. It mean-centers the advantages and combines the two
+streams into the same `[batch, action_count]` output expected from any
+Q-network:
+
+```rust
+let online_q_network = DuelingMLP::builder()
+    .input_size(observation_space.shape()[0])
+    .output_size(2)
+    .vb(online_vb)
+    .hidden_layer_sizes(vec![64, 64])
+    .value_hidden_layer_sizes(vec![64])
+    .advantage_hidden_layer_sizes(vec![64])
+    .build()?;
+```
+
+`hidden_layer_sizes` configures the shared trunk. The value and advantage
+hidden-layer fields configure the two independent streams after that trunk.
+Leave either stream's list empty when you want its output head to connect
+directly to the shared features.
+
+Pass identically configured online and target `DuelingMLP` instances to either
+`DQNAgent` or `DDQNAgent`. Dueling changes the network architecture; DDQN
+independently changes the next-state target calculation, so the two techniques
+can be used together.
+
 ## Where to Go Next
 
 Build the complete [DQN CartPole program](./dqn.md). It shows the two

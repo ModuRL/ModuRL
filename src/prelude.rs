@@ -8,7 +8,7 @@ pub use crate::agents::{
     Agent, ReplayDeviceStrategy,
     a2c::{
         A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
-        A2CLoggerAdapter, A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
+        A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
     },
     deterministic_actor_critic::{
         DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
@@ -46,9 +46,9 @@ pub use crate::gym::{
     Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper,
 };
 pub use crate::models::{
-    DefaultMLPInitializer, FrozenParametersModule, MLP, MLPArchitecture, MLPInitializedLayers,
-    MLPInitializer, OrthogonalMLPInitializer, probabilistic_model::ExpectationPolicy,
-    probabilistic_model::ProbabilisticPolicy, probabilistic_model::ProbabilisticPolicyModel,
+    DefaultMLPInitializer, DuelingMLP, MLP, MLPInitializer, OrthogonalMLPInitializer,
+    probabilistic_model::ExpectationPolicy, probabilistic_model::ProbabilisticPolicy,
+    probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
 pub use crate::objectives::{bellman_targets, clipped_value_loss};

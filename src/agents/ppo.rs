@@ -1638,7 +1638,6 @@ mod schedule_tests {
 
         agent.learn(&mut env, 2).unwrap();
         agent.learn(&mut env, 2).unwrap();
-        drop(agent);
 
         assert_eq!(
             logger.collection_rewards,

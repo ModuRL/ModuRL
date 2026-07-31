@@ -242,7 +242,6 @@ mod tests {
 
         agent.learn(&mut env, 2).unwrap();
         assert_eq!(agent.inner.optimizer.steps, 2);
-        drop(agent);
 
         assert_eq!(logger.collection_timesteps, vec![2]);
         assert_eq!(logger.update_timesteps, vec![1, 2]);

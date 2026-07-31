@@ -17,7 +17,7 @@ use crate::{
         experience_replay::{ExperienceReplay, ExperienceReplayError},
     },
     gym::{VectorizedGym, VectorizedStepInfo},
-    models::{FrozenParametersModule, probabilistic_model::ExpectationPolicy},
+    models::probabilistic_model::ExpectationPolicy,
     objectives::{bellman_targets, clipped_value_loss},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::Space,
@@ -79,11 +79,11 @@ impl From<candle_core::Error> for SACCriticError {
 /// `[batch, ...action_shape]`. Candidate inputs add the candidate axis:
 /// `[batch, candidates, ...action_shape]`.
 pub struct ScalarStateActionCritic {
-    module: Box<dyn FrozenParametersModule>,
+    module: Box<dyn candle_core::Module>,
 }
 
 impl ScalarStateActionCritic {
-    pub fn new(module: Box<dyn FrozenParametersModule>) -> Self {
+    pub fn new(module: Box<dyn candle_core::Module>) -> Self {
         Self { module }
     }
 
@@ -163,7 +163,7 @@ impl SACCriticNetwork for ScalarStateActionCritic {
         let (inputs, batch_size, candidate_count) =
             Self::flattened_policy_inputs(states, candidate_actions)?;
         self.module
-            .forward_frozen(&inputs)?
+            .forward(&inputs)?
             .reshape((batch_size, candidate_count))
     }
 }
@@ -174,11 +174,11 @@ impl SACCriticNetwork for ScalarStateActionCritic {
 /// are indices shaped `[batch, candidates]`; all candidate methods return
 /// `[batch, candidates]`.
 pub struct DiscreteVectorHeadCritic {
-    module: Box<dyn FrozenParametersModule>,
+    module: Box<dyn candle_core::Module>,
 }
 
 impl DiscreteVectorHeadCritic {
-    pub fn new(module: Box<dyn FrozenParametersModule>) -> Self {
+    pub fn new(module: Box<dyn candle_core::Module>) -> Self {
         Self { module }
     }
 
@@ -1585,26 +1585,12 @@ mod tests {
         }
     }
 
-    impl FrozenParametersModule for SumModule {
-        /// Reduces input `[batch, feature_count]` to `[batch, 1]`.
-        fn forward_frozen(&self, input: &Tensor) -> candle_core::Result<Tensor> {
-            Module::forward(self, input)
-        }
-    }
-
     struct IdentityModule;
 
     impl Module for IdentityModule {
         /// Preserves the arbitrary input shape `[...]`.
         fn forward(&self, input: &Tensor) -> candle_core::Result<Tensor> {
             Ok(input.clone())
-        }
-    }
-
-    impl FrozenParametersModule for IdentityModule {
-        /// Preserves the arbitrary input shape `[...]`.
-        fn forward_frozen(&self, input: &Tensor) -> candle_core::Result<Tensor> {
-            Module::forward(self, input)
         }
     }
 
@@ -1957,7 +1943,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_scalar_actor_forward_keeps_action_gradient_only() {
+    fn scalar_actor_forward_reaches_actions_and_unused_critic_gradients() {
         use crate::models::MLP;
 
         let critic_vars = VarMap::new();
@@ -1988,12 +1974,12 @@ mod tests {
             critic_vars
                 .all_vars()
                 .iter()
-                .all(|parameter| gradients.get(parameter.as_tensor()).is_none())
+                .all(|parameter| gradients.get(parameter.as_tensor()).is_some())
         );
     }
 
     #[test]
-    fn continuous_actor_reparameterization_reaches_actor_but_not_critic_or_targets() {
+    fn continuous_actor_reparameterization_reaches_actor_and_critic_but_not_detached_targets() {
         use crate::{
             distributions::{GaussianDistribution, TanhTransform, TransformedDistribution},
             models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
@@ -2041,7 +2027,7 @@ mod tests {
             critic_vars
                 .all_vars()
                 .iter()
-                .all(|parameter| gradients.get(parameter.as_tensor()).is_none())
+                .all(|parameter| gradients.get(parameter.as_tensor()).is_some())
         );
 
         let target_terms = policy.expectation(&states, NonZeroUsize::MIN).unwrap();
@@ -2386,7 +2372,6 @@ mod tests {
             VectorizedGymWrapper::from(vec![FixedEnv::new(device.clone()), FixedEnv::new(device)]);
         agent.learn(&mut env, 2).unwrap();
         agent.learn(&mut env, 2).unwrap();
-        drop(agent);
 
         assert_eq!(actor_steps.load(Ordering::Relaxed), 3);
         assert_eq!(critic_steps_1.load(Ordering::Relaxed), 3);

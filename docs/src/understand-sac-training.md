@@ -67,11 +67,7 @@ let mut agent = SACAgent::builder()
     .build()?;
 
 agent.learn(&mut env, total_timesteps)?;
-drop(agent);
 ```
-
-The agent borrows the logger. Drop the agent before directly reading or
-displaying state held by the logger.
 
 The repository's `sac_mujoco` example uses `SACGrapher` to aggregate these
 callbacks into terminal graphs.

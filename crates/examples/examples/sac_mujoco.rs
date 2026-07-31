@@ -188,6 +188,5 @@ fn main() {
         .unwrap();
 
     agent.learn(&mut env, total_timesteps).unwrap();
-    drop(agent);
     grapher.display();
 }
