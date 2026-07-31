@@ -3,6 +3,8 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
+const DTYPE: DType = DType::F32;
+
 #[path = "support/graphers.rs"]
 mod graphers;
 use graphers::DQNGrapher;
@@ -25,11 +27,7 @@ fn main() {
     let online_q_network = MLP::builder()
         .input_size(observation_space.shape()[0])
         .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &online_var_map,
-            DType::F32,
-            &device,
-        ))
+        .vb(VarBuilder::from_varmap(&online_var_map, DTYPE, &device))
         .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .build()
@@ -39,11 +37,7 @@ fn main() {
     let target_q_network = MLP::builder()
         .input_size(observation_space.shape()[0])
         .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &target_var_map,
-            DType::F32,
-            &device,
-        ))
+        .vb(VarBuilder::from_varmap(&target_var_map, DTYPE, &device))
         .activation(Box::new(Tensor::tanh))
         .hidden_layer_sizes(vec![64, 64])
         .build()
@@ -60,6 +54,7 @@ fn main() {
 
     let mut grapher = DQNGrapher::new();
     let mut agent = DQNAgent::builder()
+        .dtype(DTYPE)
         .action_space(Discrete::new(2))
         .observation_space(observation_space)
         .online_q_network(Box::new(online_q_network))

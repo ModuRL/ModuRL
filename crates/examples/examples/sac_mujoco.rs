@@ -6,6 +6,8 @@ use modurl::prelude::*;
 mod graphers;
 use graphers::SACGrapher;
 
+const DTYPE: DType = DType::F32;
+
 #[cfg(not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d")))]
 compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
 
@@ -74,14 +76,14 @@ fn scalar_critic<'a>(
     device: &Device,
 ) -> Result<SACCritic<'a, AdamW>, SACCriticError> {
     let online = sac_mlp(
-        VarBuilder::from_varmap(online_vars, DType::F32, device),
+        VarBuilder::from_varmap(online_vars, DTYPE, device),
         input_size,
         1,
         1.0,
         "mlp",
     )?;
     let target = sac_mlp(
-        VarBuilder::from_varmap(target_vars, DType::F32, device),
+        VarBuilder::from_varmap(target_vars, DTYPE, device),
         input_size,
         1,
         1.0,
@@ -123,7 +125,7 @@ fn main() {
     };
 
     let actor_vars = VarMap::new();
-    let actor_vb = VarBuilder::from_varmap(&actor_vars, DType::F32, &device);
+    let actor_vb = VarBuilder::from_varmap(&actor_vars, DTYPE, &device);
     let mean = sac_mlp(
         actor_vb.pp("mean"),
         observation_size,
@@ -167,13 +169,14 @@ fn main() {
     )
     .unwrap();
 
-    let log_alpha = Var::from_vec(vec![0.0f32], (), &device).unwrap();
+    let log_alpha = Var::zeros((), DTYPE, &device).unwrap();
     let alpha_optimizer =
         AdamW::new(vec![log_alpha.clone()], optimizer_parameters.clone()).unwrap();
     let entropy = SACEntropyConfiguration::automatic(log_alpha, alpha_optimizer, None);
     let mut grapher = SACGrapher::new();
 
     let mut agent = SACAgent::builder()
+        .dtype(DTYPE)
         .policy(Box::new(policy))
         .actor_optimizer(actor_optimizer)
         .critics(vec![critic_1, critic_2])

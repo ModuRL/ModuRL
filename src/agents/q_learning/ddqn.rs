@@ -103,6 +103,7 @@ where
         training_horizon: usize,
         logger: Option<&'a mut dyn DDQNLogger<I>>,
         device_strategy: ReplayDeviceStrategy,
+        #[builder(default = candle_core::DType::F32)] dtype: candle_core::DType,
     ) -> Result<Self, QAgentError<GE, SE>> {
         let inner = QLearningAgent::<'a, O, GE, SE, DDQNTarget>::builder()
             .action_space(action_space)
@@ -121,6 +122,7 @@ where
             .training_start(training_start)
             .training_horizon(training_horizon)
             .device_strategy(device_strategy)
+            .dtype(dtype)
             .build()?;
         Ok(Self {
             inner,

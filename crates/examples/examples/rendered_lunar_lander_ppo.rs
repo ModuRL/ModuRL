@@ -1,8 +1,10 @@
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 
 use modurl::prelude::*;
 use modurl_gym::box_2d::lunar_lander::LunarLanderV3;
+
+const DTYPE: DType = DType::F32;
 
 struct DebugLunarLander {
     env: LunarLanderV3,
@@ -71,7 +73,7 @@ fn main() {
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let actor_var_map = VarMap::new();
-    let actor_vb = VarBuilder::from_varmap(&actor_var_map, candle_core::DType::F32, &device);
+    let actor_vb = VarBuilder::from_varmap(&actor_var_map, DTYPE, &device);
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
@@ -97,7 +99,7 @@ fn main() {
         AdamW::new(actor_var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
     let critic_var_map = VarMap::new();
-    let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
+    let critic_vb = VarBuilder::from_varmap(&critic_var_map, DTYPE, &device);
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
@@ -132,6 +134,7 @@ fn main() {
 
     // PPO config - Optimized hyperparameters for Lunar Lander
     let mut agent = PPOAgent::builder()
+        .dtype(DTYPE)
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)

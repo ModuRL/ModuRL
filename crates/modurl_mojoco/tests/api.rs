@@ -45,6 +45,17 @@ fn sampled_actions_are_f32_and_can_step_every_environment() {
 }
 
 #[test]
+fn f64_policy_actions_are_converted_to_mujoco_precision() {
+    let mut environment = HalfCheetahV5::builder().build().unwrap();
+    environment.reset().unwrap();
+    let action = Tensor::zeros(6, DType::F64, &Device::Cpu).unwrap();
+
+    let step = environment.step(action).unwrap();
+
+    assert_eq!(step.state.dtype(), DType::F32);
+}
+
+#[test]
 fn invalid_action_is_reported_without_mutating() {
     let mut environment = HopperV5::builder().build().unwrap();
     environment.reset().unwrap();

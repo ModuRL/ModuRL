@@ -162,13 +162,13 @@ impl MujocoCore {
                 action.dims()
             )));
         }
-        if action.dtype() != DType::F32 {
+        if !action.dtype().is_float() {
             return Err(MujocoError::InvalidInput(format!(
-                "action dtype mismatch: expected F32, got {:?}",
+                "action dtype mismatch: expected a floating-point dtype, got {:?}",
                 action.dtype()
             )));
         }
-        let values = action.to_vec1::<f32>()?;
+        let values = action.to_dtype(DType::F64)?.to_vec1::<f64>()?;
         if !values
             .iter()
             .all(|value| value.is_finite() && (-1.0..=1.0).contains(value))
@@ -181,11 +181,11 @@ impl MujocoCore {
             .ctrl_mut()
             .iter_mut()
             .zip(&values)
-            .for_each(|(control, value)| *control = f64::from(*value));
+            .for_each(|(control, value)| *control = *value);
         for _ in 0..self.frame_skip {
             self.data.step();
         }
-        Ok(values.into_iter().map(f64::from).collect())
+        Ok(values)
     }
 
     pub(crate) fn observation(&self, exclude_x: bool, clip_velocity: bool) -> Vec<f64> {

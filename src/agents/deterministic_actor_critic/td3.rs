@@ -184,6 +184,7 @@ where
         training_start: usize,
         /// Global collected-transition horizon.
         training_horizon: usize,
+        #[builder(default = candle_core::DType::F32)] dtype: candle_core::DType,
     ) -> DeterministicActorCriticResult<Self, GE, SE> {
         let strategy = TD3Strategy {
             target_policy_noise,
@@ -211,6 +212,7 @@ where
             .update_frequency(update_frequency)
             .training_start(training_start)
             .training_horizon(training_horizon)
+            .dtype(dtype)
             .build()?;
         Ok(Self {
             inner,

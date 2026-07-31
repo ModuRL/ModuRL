@@ -1,7 +1,9 @@
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
+
+const DTYPE: DType = DType::F32;
 
 fn main() {
     ppo_cartpole();
@@ -27,7 +29,7 @@ fn ppo_cartpole() {
     let observation_space = vec_env.observation_space();
     let action_space = vec_env.action_space();
     let var_map = VarMap::new();
-    let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
+    let vb = VarBuilder::from_varmap(&var_map, DTYPE, &device);
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
@@ -52,7 +54,7 @@ fn ppo_cartpole() {
         AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
     let critic_var_map = VarMap::new();
-    let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
+    let critic_vb = VarBuilder::from_varmap(&critic_var_map, DTYPE, &device);
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
@@ -86,6 +88,7 @@ fn ppo_cartpole() {
     // PPO config
     // Stable baselines3 config:
     let mut agent = PPOAgent::builder()
+        .dtype(DTYPE)
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)

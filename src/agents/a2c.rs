@@ -196,6 +196,7 @@ where
         training_horizon: usize,
         logging_info: Option<&'a mut dyn A2CLogger<I>>,
         device: candle_core::Device,
+        #[builder(default = candle_core::DType::F32)] dtype: candle_core::DType,
     ) -> Self {
         assert!(batch_size > 0, "A2C batch_size must be greater than zero");
 
@@ -217,6 +218,7 @@ where
             .training_horizon(training_horizon)
             .maybe_logging_info(logging_info)
             .device(device)
+            .dtype(dtype)
             .build();
 
         Self { inner }

@@ -7,6 +7,7 @@ mod graphers;
 use graphers::DeterministicActorCriticGrapher;
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
+const DTYPE: DType = DType::F32;
 
 #[cfg(not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d")))]
 compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
@@ -41,7 +42,7 @@ fn actor(
     MLP::builder()
         .input_size(observation_size)
         .output_size(action_size)
-        .vb(VarBuilder::from_varmap(variables, DType::F32, device))
+        .vb(VarBuilder::from_varmap(variables, DTYPE, device))
         .hidden_layer_sizes(vec![64, 64])
         .activation(Box::new(Tensor::relu))
         .output_activation(Box::new(Tensor::tanh))
@@ -61,7 +62,7 @@ fn critic<'a>(
         MLP::builder()
             .input_size(observation_size + action_size)
             .output_size(1)
-            .vb(VarBuilder::from_varmap(variables, DType::F32, device))
+            .vb(VarBuilder::from_varmap(variables, DTYPE, device))
             .hidden_layer_sizes(vec![64, 64])
             .activation(Box::new(Tensor::relu))
             .name("critic".to_owned())
@@ -147,6 +148,7 @@ fn main() {
     let mut grapher = DeterministicActorCriticGrapher::new();
 
     let mut agent = DDPGAgent::builder()
+        .dtype(DTYPE)
         .online_actor(Box::new(online_actor))
         .target_actor(Box::new(target_actor))
         .online_actor_vars(&online_actor_variables)
