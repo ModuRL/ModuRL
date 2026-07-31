@@ -7,6 +7,7 @@
   - [Models, Policies, and Distributions](./models-policies-and-distributions.md)
 - [PPO](./ppo.md)
   - [Understand a PPO Training Run](./understand-ppo-training.md)
+- [A2C](./a2c.md)
 - [Soft Actor-Critic](./sac.md)
   - [Understand an SAC Training Run](./understand-sac-training.md)
 - [Deterministic Actor-Critic Training](./deterministic-actor-critic.md)
