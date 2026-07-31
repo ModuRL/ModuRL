@@ -1,181 +1,198 @@
 # ModuRL
 
-ModuRL is a Rust-native reinforcement learning library built on
-[Candle](https://github.com/huggingface/candle). It focuses on fast,
-composable training components for users who want explicit control over
-agents, environments, models, distributions, schedules, logging, and devices.
+[![Workspace CI](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml/badge.svg)](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml)
 
-The project is currently early and API stability is not guaranteed.
+Composable deep reinforcement learning in Rust, built on
+[Candle](https://github.com/huggingface/candle).
 
-## Goals
+ModuRL provides training agents, environments, models, distributions, replay
+buffers, parameter schedules, and logging without hiding how they fit together.
+It is aimed at Rust developers who want control over tensor shapes, devices,
+networks, and training configuration.
 
-ModuRL is built around a few long-term goals:
+> [!WARNING]
+> ModuRL is early in development. The APIs may change between revisions.
 
-- **Be the fastest Rust-native RL library for supported algorithms.** We want
-  PPO, SAC, DDPG, TD3, DQN, and future supported algorithms to compete on
-  training throughput, memory efficiency, and backend utilization.
-- **Make RL systems modular without making them slow.** Users should be able to
-  swap policies, critics, distributions, environments, schedules, loggers, and
-  buffers while staying close to hand-written training-loop performance.
-- **Provide the clearest Rust API for building RL agents.** ModuRL should feel
-  natural to Rust users: explicit types, predictable ownership, clear
-  contracts, and composable traits.
-- **Make reproducible RL experiments easier.** Runs should be configurable,
-  inspectable, seedable where backends support it, and easy to compare across
-  examples, algorithms, and benchmarks.
-- **Support serious research-style iteration.** It should be straightforward to
-  implement a new agent, distribution, environment wrapper, schedule, logging
-  backend, or algorithm variant without rewriting the whole library.
+[Guide](https://modurl.github.io/ModuRL/dev/) ·
+[Examples](crates/examples/examples) ·
+[Issues](https://github.com/ModuRL/ModuRL/issues)
 
-## Non-Goals
+## At a Glance
 
-ModuRL intentionally does not try to be everything:
+Create an environment, reset it, sample a valid action, and take one step using
+the same `Gym` and `Space` contracts that training agents use:
 
-- **Not a one-line black-box training framework.** Convenience APIs are welcome,
-  but the core library should remain explicit, inspectable, and composable.
-- **Not a Python RL framework clone.** ModuRL learns from libraries like
-  CleanRL, Stable-Baselines3, and RLlib, but the API should fit Rust, Candle,
-  and Rust ownership patterns.
-- **Not backend-agnostic at all costs.** Candle is a core design choice. ModuRL
-  should integrate deeply with Candle rather than dilute the API around every
-  possible tensor backend.
+```rust
+use candle_core::Device;
+use modurl::prelude::*;
+use modurl_gym::classic_control::cartpole::CartPoleV1;
 
-## What Works Today
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let device = Device::Cpu;
+    let mut env = CartPoleV1::builder().device(&device).build();
 
-| Area | Status |
+    let observation = env.reset()?.state;
+    let action = env.action_space().sample(&device)?;
+    let transition = env.step(action)?;
+
+    println!("observation: {:?}", observation.to_vec1::<f32>()?);
+    println!("reward: {}", transition.reward);
+    Ok(())
+}
+```
+
+Training agents apply these same traits to vectorized environments.
+
+## Architectural Principles
+
+ModuRL keeps algorithm behavior explicit and puts reusable responsibilities
+behind small public contracts:
+
+- **Agents coordinate training.** An `Agent` owns the algorithm loop and brings
+  together models, optimizers, schedules, rollout or replay storage, action
+  selection, and update logic. It learns against `VectorizedGym`, not a
+  concrete environment type.
+- **Single and batched environments are separate boundaries.** `Gym` describes
+  one environment. `VectorizedGym` describes batched collection. The supplied
+  synchronous and multithreaded wrappers auto-reset completed environments
+  while preserving their terminal observations.
+- **Models produce tensors; policies give them meaning.** Candle modules remain
+  ordinary tensor-to-tensor functions. `ProbabilisticPolicyModel<D>` combines a
+  module with a `Distribution`, and `Space` converts the resulting policy
+  representation into an environment action. Applications can supply their own
+  modules and distributions.
+- **Network topology stays visible.** PPO and A2C can use separate actor and
+  critic networks or a shared trunk with distinct heads. Optimizers and
+  variables remain attached to the matching topology instead of being hidden
+  behind a global runtime.
+- **Training state is explicit.** On-policy agents use rollout storage;
+  off-policy agents use replay storage. Parameter schedules advance over a
+  declared training horizon and retain progress across repeated `learn` calls.
+- **Device placement is part of configuration.** Tensors, models, and
+  environments use Candle devices directly. Replay-based agents can keep
+  storage and optimization on one device or split them with
+  `ReplayDeviceStrategy`.
+- **Observability is pluggable.** Algorithm-specific logger traits expose
+  collection and optimization data without coupling the core training loop to
+  a particular UI or file format.
+
+This design favors inspectable composition over a one-line black-box trainer.
+It also lets ModuRL integrate deeply with Candle instead of abstracting over
+every tensor backend.
+
+## Features
+
+| Area | Included |
 | --- | --- |
-| PPO | Implemented |
-| SAC | Implemented |
-| DDPG | Implemented |
-| TD3 | Implemented |
-| DQN | Implemented |
-| DDQN | Implemented |
-| Vectorized environments | Implemented |
-| Multithreaded vectorized environments | Available behind the `multithreading` feature |
-| Candle CPU backend | Supported |
-| Candle CUDA / Metal backends | Available through feature flags |
+| Algorithms | PPO, A2C, SAC, DDPG, TD3, DQN, and Double DQN |
+| Policies and models | Categorical and Gaussian policies, transformed distributions, MLPs, dueling networks, and user-supplied Candle modules |
+| Experience | Rollout buffers, replay buffers, configurable replay devices, and parameter schedules |
+| Environments | Single, vectorized, and multithreaded interfaces; CartPole, Mountain Car, LunarLander, MuJoCo, and Atari integrations |
+| Wrappers | Time limits, observation and reward normalization, reward clipping, frame stacking, max-and-skip, and raw reward recording |
+| Backends | CPU, CUDA, cuDNN, Metal, and MKL through Candle |
+| Logging | Algorithm-specific hooks, terminal graphs, and TensorBoard event output |
 
-## Running an Example
+Atari support is provided by the separately licensed `modurl_ale` crate. See
+[Licensing](#licensing) before distributing a binary that uses it.
 
-The examples use `modurl_gym` environments.
+## Algorithms
 
-```sh
-cargo run --example ppo_bench
-```
+| Algorithm | Family | Action Space | Guide |
+| --- | --- | --- | --- |
+| PPO | On-policy actor-critic | Discrete or continuous | [PPO](https://modurl.github.io/ModuRL/dev/ppo.html) |
+| A2C | On-policy actor-critic | Discrete or continuous | [A2C](https://modurl.github.io/ModuRL/dev/a2c.html) |
+| SAC | Off-policy actor-critic | Discrete or continuous | [SAC](https://modurl.github.io/ModuRL/dev/sac.html) |
+| DDPG | Off-policy deterministic actor-critic | Continuous | [DDPG](https://modurl.github.io/ModuRL/dev/ddpg.html) |
+| TD3 | Off-policy deterministic actor-critic | Continuous | [TD3](https://modurl.github.io/ModuRL/dev/td3.html) |
+| DQN | Off-policy value-based | Discrete | [DQN](https://modurl.github.io/ModuRL/dev/dqn.html) |
+| Double DQN | Off-policy value-based | Discrete | [Double DQN](https://modurl.github.io/ModuRL/dev/ddqn.html) |
 
-For a PPO example with logging and terminal plots:
+## Quick Start
 
-```sh
-cargo run --example ppo_cartpole
-```
-
-The MuJoCo PPO example requires exactly one environment feature:
-
-```sh
-cargo run --release -p examples --example ppo_mujoco --features half-cheetah
-cargo run --release -p examples --example ppo_mujoco --features hopper
-cargo run --release -p examples --example ppo_mujoco --features walker2d
-```
-
-The MuJoCo SAC example supports the same environment selection:
+Install a current stable Rust toolchain, clone the repository, and train PPO on
+eight CartPole environments:
 
 ```sh
-cargo run --release -p examples --example sac_mujoco --features half-cheetah
-cargo run --release -p examples --example sac_mujoco --features hopper
-cargo run --release -p examples --example sac_mujoco --features walker2d
+git clone https://github.com/ModuRL/ModuRL.git
+cd ModuRL
+cargo run --release -p examples --example ppo_cartpole
 ```
 
-The DDPG and TD3 examples use the same MuJoCo feature selection and display
-terminal graphs for optimization and episode metrics:
+The [Getting Started guide](https://modurl.github.io/ModuRL/dev/getting-started.html)
+builds a smaller PPO program one component at a time. The
+[examples directory](crates/examples/examples) contains complete programs for
+the other supported algorithms and environments.
 
-```sh
-cargo run --release -p examples --example ddpg_mujoco --features half-cheetah
-cargo run --release -p examples --example td3_mujoco --features half-cheetah
-```
+## Workspace Crates
 
-The discrete SAC variant also has a CartPole example:
+| Crate | Purpose | License |
+| --- | --- | --- |
+| `modurl` | Agents, models, distributions, buffers, spaces, schedules, and environment traits | MIT |
+| `modurl_gym` | CartPole, Mountain Car, LunarLander, rendering, and Gym utilities | MIT |
+| `modurl_mojoco` | HalfCheetah, Hopper, and Walker2d MuJoCo environments | MIT; third-party notices apply |
+| `modurl_ale` | Atari Learning Environment integration and wrappers | GPL-2.0-only |
+| `modurl_logger` | Terminal graphs and TensorBoard event logging | MIT |
+| `examples` | Runnable training programs; not published as a crate | MIT |
 
-```sh
-cargo run --release -p examples --example sac_cartpole
-```
+## Cargo Features
 
-For DQN training with terminal plots for loss, exploration, Q-values, and
-episode performance:
-
-```sh
-cargo run --example dqn_cartpole
-```
-
-For value-based CartPole programs, read the [DQN guide](docs/src/dqn.md) or
-[Double DQN guide](docs/src/ddqn.md). Both pages include a complete program and
-explain the required replay, exploration, and target-network configuration.
-
-For Soft Actor-Critic continuous control, read the
-[SAC guide](docs/src/sac.md). It explains actor and critic construction,
-entropy configuration, stabilization, replay devices, and the complete MuJoCo
-example.
-
-For deterministic continuous control, start with the [shared actor-critic
-guide](docs/src/deterministic-actor-critic.md), then choose the [DDPG
-guide](docs/src/ddpg.md) or [TD3 guide](docs/src/td3.md). These pages explain
-target networks, replay, exploration noise, TD3's stabilization choices, and
-the complete MuJoCo examples.
-
-For GPU-backed builds, enable the matching Candle backend feature:
-
-```sh
-cargo run --features cuda --example ppo_bench
-cargo run --features metal --example ppo_bench
-```
-
-## Examples
-
-| Example | Shows |
-| --- | --- |
-| `examples/ppo_bench.rs` | PPO on CartPole with separate actor and critic networks |
-| `examples/ppo_cartpole.rs` | PPO training metrics through `PPOLogger` |
-| `examples/ppo_mujoco.rs` | Continuous PPO on a feature-selected MuJoCo environment with progress, terminal plots, and TensorBoard logs under `runs/ppo_mujoco` |
-| `examples/sac_cartpole.rs` | Discrete SAC variant on CartPole |
-| `examples/sac_mujoco.rs` | Continuous SAC on a feature-selected MuJoCo environment |
-| `examples/ddpg_mujoco.rs` | DDPG on a feature-selected MuJoCo environment with optimization and episode graphs |
-| `examples/td3_mujoco.rs` | TD3 on a feature-selected MuJoCo environment with optimization and episode graphs |
-| `examples/dqn_cartpole.rs` | DQN training metrics and episode graphs through `DQNLogger` |
-| `examples/rendered_lunar_lander_ppo.rs` | PPO on LunarLander with rendering and learning-rate schedules |
-
-## Core Concepts
-
-ModuRL is organized around a few public building blocks:
-
-- `Agent`: an agent that can `act` from observations and `learn` from a
-  vectorized environment.
-- `Gym`: a single environment interface.
-- `VectorizedGym`: a batched environment interface used by training loops.
-- `Space`: a contract for sampling, validating, and converting policy outputs
-  into environment actions.
-- `Distribution`: a policy distribution used by probabilistic policies.
-- `ParameterSchedule`: a scalar schedule for values such as PPO clipping and
-  learning rates.
-
-These APIs are intentionally explicit. Users are expected to understand tensor
-shapes, Candle devices, and the model modules they pass into agents.
-
-## Feature Flags
+The core `modurl` crate has no default features.
 
 | Feature | Purpose |
 | --- | --- |
 | `cuda` | Enable Candle CUDA support |
 | `cudnn` | Enable Candle cuDNN support |
 | `metal` | Enable Candle Metal support |
-| `multithreading` | Enable multithreaded vectorized environment support |
+| `mkl` | Enable Candle's Intel MKL backend |
+| `multithreading` | Enable multithreaded vectorized environments |
+
+Workspace crates expose additional features for rendering and environment
+selection. Check the relevant crate manifest before combining them.
 
 ## Documentation
 
-The documentation surface is organized as follows:
+- The [ModuRL Guide](https://modurl.github.io/ModuRL/dev/) teaches complete
+  workflows and the concepts behind them.
+- The [environment guides](https://modurl.github.io/ModuRL/dev/environments.html)
+  cover vectorized environments and implementing a custom `Gym`.
+- The [training-run guides](https://modurl.github.io/ModuRL/dev/understand-ppo-training.html)
+  explain the metrics emitted by PPO, SAC, deterministic actor-critic, and
+  value-based agents.
+- Rustdoc contains the precise contracts for public traits, structs, and
+  builders.
 
-- README: short project overview, status, and first successful path.
-- mdBook: user guide, concepts, examples, and tensor/device contracts.
-- rustdoc: precise API contracts for public traits, structs, and builders.
+## Contributing
 
-## License
+Issues and pull requests are welcome. Because the public API is still evolving,
+open an [issue](https://github.com/ModuRL/ModuRL/issues) before starting a large
+change so its direction can be discussed first.
 
-ModuRL is licensed under the MIT License. See [`LICENSE`](LICENSE).
+The main local checks mirror the workspace CI:
+
+```sh
+cargo fmt --all --check
+cargo test --locked -p modurl -p modurl_gym
+cargo test --locked --all-targets -p examples
+```
+
+## Licensing
+
+Licensing is defined per crate, not once for the entire workspace:
+
+- `modurl`, `modurl_gym`, `modurl_logger`, and the unpublished `examples`
+  package use the repository's [MIT License](LICENSE).
+- `modurl_mojoco` is available under its own
+  [MIT License](crates/modurl_mojoco/LICENSE). Its native MuJoCo dependency is
+  Apache-2.0, and its Gymnasium-derived environment models are MIT-licensed.
+  See the [MuJoCo third-party notices](crates/modurl_mojoco/THIRD_PARTY_LICENSES.md)
+  for redistribution requirements.
+- `modurl_ale` is
+  [GPL-2.0-only](crates/modurl_ale/LICENSE) because it contains and links the
+  GPL-covered ALE/Stella native code. Distributed binaries that use this crate
+  must comply with GPL-2.0. See the
+  [ALE third-party notices](crates/modurl_ale/THIRD_PARTY_LICENSES.md).
+
+Where a crate provides its own license file, use that license rather than
+assuming the repository-level MIT license applies. Dependencies and bundled
+third-party components remain subject to their own terms. This summary is not
+legal advice.
