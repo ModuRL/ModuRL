@@ -10,6 +10,11 @@ path = "examples/ppo_mujoco.rs"
 required-features = ["mujoco-environment"]
 
 [[example]]
+name = "a2c_mujoco"
+path = "examples/a2c_mujoco.rs"
+required-features = ["mujoco-environment"]
+
+[[example]]
 name = "sac_mujoco"
 path = "examples/sac_mujoco.rs"
 required-features = ["mujoco-environment"]

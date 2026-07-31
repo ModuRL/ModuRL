@@ -1,5 +1,6 @@
 use crate::gym::VectorizedGym;
 use candle_core::Tensor;
+pub mod a2c;
 pub mod deterministic_actor_critic;
 pub mod ppo;
 pub mod q_learning;

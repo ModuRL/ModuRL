@@ -146,15 +146,19 @@ pub struct PPOMujocoGrapher {
 
 impl PPOMujocoGrapher {
     pub fn new(total_timesteps: usize, environment_name: &str) -> Self {
+        Self::new_with_run_name(total_timesteps, environment_name, "ppo_mujoco")
+    }
+
+    fn new_with_run_name(total_timesteps: usize, environment_name: &str, run_name: &str) -> Self {
         let aggregation = AggregationConfig::new(Aggregation::mean().with_rolling_window(10));
-        let tensorboard_log_dir = tensorboard_log_dir(environment_name);
+        let tensorboard_log_dir = tensorboard_log_dir(run_name, environment_name);
         let tensorboard = TensorBoardLogger::new(&tensorboard_log_dir, aggregation.clone())
             .expect("failed to create the TensorBoard event file");
         println!(
             "TensorBoard log directory: {}",
             tensorboard_log_dir.display()
         );
-        println!("View all runs with: tensorboard --logdir runs/ppo_mujoco");
+        println!("View all runs with: tensorboard --logdir runs/{run_name}");
 
         Self {
             timestep: 0,
@@ -197,12 +201,12 @@ impl PPOMujocoGrapher {
     }
 }
 
-fn tensorboard_log_dir(environment_name: &str) -> PathBuf {
+fn tensorboard_log_dir(run_name: &str, environment_name: &str) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time must be after the Unix epoch")
         .as_secs();
-    PathBuf::from("runs").join("ppo_mujoco").join(format!(
+    PathBuf::from("runs").join(run_name).join(format!(
         "{environment_name}-{timestamp}-{}",
         std::process::id()
     ))
@@ -270,6 +274,36 @@ impl PPOLogger<RawRewardInfo<()>> for PPOMujocoGrapher {
             self.running_episode_returns[episode.environment_index] = 0.0;
             self.progress();
         }
+    }
+}
+
+pub struct A2CMujocoGrapher {
+    inner: PPOMujocoGrapher,
+}
+
+impl A2CMujocoGrapher {
+    pub fn new(total_timesteps: usize, environment_name: &str) -> Self {
+        Self {
+            inner: PPOMujocoGrapher::new_with_run_name(
+                total_timesteps,
+                environment_name,
+                "a2c_mujoco",
+            ),
+        }
+    }
+
+    pub fn display(self) {
+        self.inner.display();
+    }
+}
+
+impl A2CLogger<RawRewardInfo<()>> for A2CMujocoGrapher {
+    fn log(&mut self, info: &A2CLogEntry<'_>) {
+        self.inner.log(info.inner);
+    }
+
+    fn log_collection(&mut self, info: &A2CCollectionLogEntry<'_, RawRewardInfo<()>>) {
+        self.inner.log_collection(info.inner);
     }
 }
 
