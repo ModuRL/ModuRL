@@ -640,11 +640,11 @@ impl experience::Experience for SACExperience {
     type Error = candle_core::Error;
 
     fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
-        let device = experiences
+        let first = experiences
             .first()
-            .expect("cannot batch an empty SAC replay sample")
-            .state
-            .device();
+            .expect("cannot batch an empty SAC replay sample");
+        let device = first.state.device();
+        let dtype = first.state.dtype();
         Ok(SACOptimizationBatch {
             states: experience::stack_tensor_field(experiences, |experience| {
                 experience.state.clone()
@@ -661,28 +661,32 @@ impl experience::Experience for SACExperience {
                     .map(|experience| experience.reward)
                     .collect::<Vec<_>>(),
                 device,
-            )?,
+            )?
+            .to_dtype(dtype)?,
             terminated: Tensor::new(
                 experiences
                     .iter()
                     .map(|experience| experience.terminated)
                     .collect::<Vec<_>>(),
                 device,
-            )?,
+            )?
+            .to_dtype(dtype)?,
             collection_policy_entropies: Tensor::new(
                 experiences
                     .iter()
                     .map(|experience| experience.collection_policy_entropy)
                     .collect::<Vec<_>>(),
                 device,
-            )?,
+            )?
+            .to_dtype(dtype)?,
             entropy_change_weights: Tensor::new(
                 experiences
                     .iter()
                     .map(|experience| experience.entropy_change_weight)
                     .collect::<Vec<_>>(),
                 device,
-            )?,
+            )?
+            .to_dtype(dtype)?,
         })
     }
 }
@@ -876,6 +880,7 @@ where
     device_strategy: ReplayDeviceStrategy,
     optimization_steps: usize,
     logger: Option<&'a mut dyn SACLogger<I>>,
+    dtype: DType,
     _errors: std::marker::PhantomData<(GE, fn() -> I)>,
 }
 
@@ -925,7 +930,9 @@ where
         samples: NonZeroUsize,
         /// Total collected transitions over which parameter schedules run.
         training_horizon: usize,
+        #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, SACError<PE, GE, SE>> {
+        assert!(dtype.is_float(), "SAC compute dtype must be floating-point");
         let aggregation_mode = aggregation_mode
             .or(stabilization_configuration.aggregation_mode)
             .unwrap_or(SACCriticAggregationMode::Min);
@@ -963,6 +970,7 @@ where
             device_strategy,
             optimization_steps: 0,
             logger,
+            dtype,
             _errors: std::marker::PhantomData,
         })
     }
@@ -1044,9 +1052,10 @@ where
         &mut self,
         observation: &Tensor,
     ) -> Result<Tensor, SACError<PE, GE, SE>> {
+        let observation = observation.to_dtype(self.dtype)?;
         let latent = self
             .policy
-            .mode(observation)
+            .mode(&observation)
             .map_err(SACError::PolicyError)?;
         self.action_space
             .tensor_from_neurons(&latent)
@@ -1056,9 +1065,10 @@ where
     /// Samples environment actions `[batch, ...action_shape]` for observations
     /// `[batch, ...observation_shape]`.
     fn stochastic_action(&self, observation: &Tensor) -> Result<Tensor, SACError<PE, GE, SE>> {
+        let observation = observation.to_dtype(self.dtype)?;
         let latent = self
             .policy
-            .sample(observation)
+            .sample(&observation)
             .map_err(SACError::PolicyError)?;
         self.action_space
             .tensor_from_neurons(&latent)
@@ -1073,7 +1083,12 @@ where
                     .map_err(SACError::SpaceError)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Tensor::stack(&actions, 0)?)
+        let actions = Tensor::stack(&actions, 0)?;
+        if actions.dtype().is_float() {
+            Ok(actions.to_dtype(self.dtype)?)
+        } else {
+            Ok(actions)
+        }
     }
 
     /// Returns scalar alpha shaped `[]` on the same device and with the same
@@ -1113,6 +1128,9 @@ where
             &mut batch.entropy_change_weights,
         ] {
             *element = element.to_device(&optimization_device)?;
+        }
+        if batch.actions.dtype().is_float() {
+            batch.actions = batch.actions.to_dtype(self.dtype)?;
         }
         Ok(Some(batch))
     }
@@ -1473,7 +1491,10 @@ where
         num_timesteps: usize,
     ) -> Result<(), SACError<PE, GE, SE>> {
         let mut elapsed_timesteps = 0usize;
-        let mut observations = env.reset().map_err(SACError::GymError)?;
+        let mut observations = env
+            .reset()
+            .map_err(SACError::GymError)?
+            .to_dtype(self.dtype)?;
         let environment_count = env.num_envs();
         let mut episodes = SACEpisodeTracker::new(environment_count);
 
@@ -1491,7 +1512,7 @@ where
                 uses_random_actions,
             )?;
             let step = env.step(actions.clone()).map_err(SACError::GymError)?;
-            let transition_next_states = step.transition_next_states()?;
+            let transition_next_states = step.transition_next_states()?.to_dtype(self.dtype)?;
             let VectorizedStepInfo {
                 states: reset_next_states,
                 rewards,
@@ -1524,7 +1545,7 @@ where
             }
 
             elapsed_timesteps += environment_count;
-            observations = reset_next_states;
+            observations = reset_next_states.to_dtype(self.dtype)?;
             self.logger.log_collection(&SACCollectionLogEntry {
                 collection_rewards,
                 infos,

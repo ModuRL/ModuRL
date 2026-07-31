@@ -7,7 +7,7 @@
 use std::{fmt::Debug, marker::PhantomData, ops::Deref};
 
 use bon::bon;
-use candle_core::{IndexOp, Tensor};
+use candle_core::{DType, IndexOp, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
 use super::{
@@ -280,11 +280,11 @@ impl experience::Experience for DeterministicExperience {
     type Error = candle_core::Error;
 
     fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
-        let device = experiences
+        let first = experiences
             .first()
-            .expect("cannot batch an empty deterministic replay sample")
-            .state
-            .device();
+            .expect("cannot batch an empty deterministic replay sample");
+        let device = first.state.device();
+        let dtype = first.state.dtype();
         Ok(DeterministicBatch {
             states: experience::stack_tensor_field(experiences, |item| item.state.clone())?,
             next_states: experience::stack_tensor_field(experiences, |item| {
@@ -297,14 +297,16 @@ impl experience::Experience for DeterministicExperience {
                     .map(|item| item.reward)
                     .collect::<Vec<_>>(),
                 device,
-            )?,
+            )?
+            .to_dtype(dtype)?,
             terminated: Tensor::new(
                 experiences
                     .iter()
                     .map(|item| item.terminated)
                     .collect::<Vec<_>>(),
                 device,
-            )?,
+            )?
+            .to_dtype(dtype)?,
         })
     }
 }
@@ -356,6 +358,7 @@ where
     schedule_progress: ScheduleProgress,
     device_strategy: ReplayDeviceStrategy,
     optimization_steps: usize,
+    dtype: DType,
     _errors: PhantomData<GE>,
 }
 
@@ -388,7 +391,12 @@ where
         #[builder(default = 1)] update_frequency: usize,
         #[builder(default = 1_000)] training_start: usize,
         training_horizon: usize,
+        #[builder(default = DType::F32)] dtype: DType,
     ) -> DeterministicActorCriticResult<Self, GE, SE> {
+        assert!(
+            dtype.is_float(),
+            "deterministic actor-critic compute dtype must be floating-point"
+        );
         DeterministicActorCriticConfigurationValidator::validate_configuration()
             .critic_count_requirement(strategy.critic_count_requirement())
             .actual_critic_count(critics.len())
@@ -427,6 +435,7 @@ where
             schedule_progress: ScheduleProgress::new(training_horizon),
             device_strategy,
             optimization_steps: 0,
+            dtype,
             _errors: PhantomData,
         })
     }
@@ -574,7 +583,8 @@ where
         &self,
         observation: &Tensor,
     ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        let actions = self.online_actor.forward(observation)?;
+        let observation = observation.to_dtype(self.dtype)?;
+        let actions = self.online_actor.forward(&observation)?;
         Ok(self.action_space.tensor_from_neurons(&actions)?)
     }
 
@@ -584,7 +594,8 @@ where
         &self,
         observation: &Tensor,
     ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        let actions = self.online_actor.forward(observation)?;
+        let observation = observation.to_dtype(self.dtype)?;
+        let actions = self.online_actor.forward(&observation)?;
         let actions = add_gaussian_noise(&actions, self.exploration_noise, None)?;
         Ok(self.action_space.tensor_from_neurons(&actions)?)
     }
@@ -599,7 +610,7 @@ where
                     .sample(&self.device_strategy.optimization_device())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Tensor::stack(&actions, 0)?)
+        Ok(Tensor::stack(&actions, 0)?.to_dtype(self.dtype)?)
     }
 
     fn sample_batch(
@@ -623,6 +634,7 @@ where
         ] {
             *tensor = tensor.to_device(&optimization_device)?;
         }
+        batch.actions = batch.actions.to_dtype(self.dtype)?;
         Ok(Some(batch))
     }
 
@@ -827,7 +839,8 @@ where
         let mut elapsed_timesteps = 0;
         let mut observations = env
             .reset()
-            .map_err(DeterministicActorCriticError::GymError)?;
+            .map_err(DeterministicActorCriticError::GymError)?
+            .to_dtype(self.dtype)?;
         let environment_count = env.num_envs();
         let mut episodes = EpisodeTracker::new(environment_count);
         while elapsed_timesteps < num_timesteps {
@@ -840,7 +853,7 @@ where
             let step = env
                 .step(actions.clone())
                 .map_err(DeterministicActorCriticError::GymError)?;
-            let transition_next_states = step.transition_next_states()?;
+            let transition_next_states = step.transition_next_states()?.to_dtype(self.dtype)?;
             let VectorizedStepInfo {
                 states: reset_next_states,
                 rewards,
@@ -872,7 +885,7 @@ where
                 }
             }
             elapsed_timesteps += environment_count;
-            observations = reset_next_states;
+            observations = reset_next_states.to_dtype(self.dtype)?;
             logger.log_collection(&DeterministicActorCriticCollectionLogEntry {
                 collection_rewards,
                 infos,
@@ -895,8 +908,9 @@ fn add_gaussian_noise(
     if standard_deviation == 0.0 {
         return Ok(values.clone());
     }
-    let mut noise =
-        (Tensor::randn(0.0f32, 1.0, values.shape(), values.device())? * standard_deviation)?;
+    let mut noise = (Tensor::randn(0.0f32, 1.0, values.shape(), values.device())?
+        .to_dtype(values.dtype())?
+        * standard_deviation)?;
     if let Some(clip) = clip {
         noise = noise.clamp(-clip, clip)?;
     }

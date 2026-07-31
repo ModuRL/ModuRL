@@ -1,5 +1,5 @@
 use bon::bon;
-use candle_core::{D, IndexOp, Tensor};
+use candle_core::{D, DType, IndexOp, Tensor};
 use candle_nn::{Optimizer, loss};
 use std::marker::PhantomData;
 
@@ -449,6 +449,7 @@ where
     gradient_clip: f32,
     current_states: Option<Tensor>,
     episode_tracker: PPOEpisodeTracker,
+    dtype: DType,
     _phantom: PhantomData<GE>,
 }
 
@@ -486,10 +487,12 @@ where
         training_horizon: usize,
         logging_info: Option<&'a mut dyn PPOLogger<I>>,
         device: candle_core::Device,
+        #[builder(default = DType::F32)] dtype: DType,
     ) -> Self {
         if batch_size > 0 {
             assert!(batch_size > 0);
         }
+        assert!(dtype.is_float(), "PPO compute dtype must be floating-point");
 
         Self {
             clipped,
@@ -512,6 +515,7 @@ where
             gradient_clip,
             current_states: None,
             episode_tracker: PPOEpisodeTracker::new(0),
+            dtype,
             _phantom: PhantomData,
         }
     }
@@ -675,9 +679,13 @@ where
         next_truncateds: &candle_core::Tensor,
         bootstrapped_values: &candle_core::Tensor,
     ) -> Result<candle_core::Tensor, candle_core::Error> {
-        let device = rewards.device();
-        let gamma_tensor = Tensor::new(self.gamma, device)?.to_dtype(values.dtype())?;
-        let gae_lambda_tensor = Tensor::new(self.gae_lambda, device)?.to_dtype(values.dtype())?;
+        let device = values.device();
+        let rewards = rewards.to_dtype(self.dtype)?;
+        let next_dones = next_dones.to_dtype(self.dtype)?;
+        let next_truncateds = next_truncateds.to_dtype(self.dtype)?;
+        let bootstrapped_values = bootstrapped_values.to_dtype(self.dtype)?;
+        let gamma_tensor = Tensor::new(self.gamma, device)?.to_dtype(self.dtype)?;
+        let gae_lambda_tensor = Tensor::new(self.gae_lambda, device)?.to_dtype(self.dtype)?;
 
         let values = values.squeeze(D::Minus1)?;
         let mut advantages = vec![];
@@ -690,7 +698,7 @@ where
             let mut env_advantages = vec![];
 
             let mut next_value = bootstrapped_values.i(env_idx)?.detach();
-            let mut gae = Tensor::new(0.0f32, device)?;
+            let mut gae = Tensor::zeros((), self.dtype, device)?;
             // Compute GAE backwards through the trajectory
             for i in (0..env_rewards.shape().dims()[0]).rev() {
                 let same_episode =
@@ -1053,11 +1061,12 @@ where
         &mut self,
         observation: &Tensor,
     ) -> Result<Tensor, PPOError<AE, GE, SE>> {
+        let observation = observation.to_dtype(self.dtype)?;
         let latent_states = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
-                shared_info.shared_network.forward(observation)?
+                shared_info.shared_network.forward(&observation)?
             }
-            PPONetworkInfo::Separate(_) => observation.clone(),
+            PPONetworkInfo::Separate(_) => observation,
         };
         let network = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => &shared_info.actor_head,
@@ -1087,7 +1096,8 @@ where
             states
         } else {
             env.reset().map_err(PPOError::GymError)?
-        };
+        }
+        .to_dtype(self.dtype)?;
         let environment_count = env.num_envs();
         self.rollout_buffer = RolloutBuffer::new(
             self.mini_batch_size / environment_count,
@@ -1115,7 +1125,7 @@ where
             let step_info = env
                 .step(collection_action.environment_actions.clone())
                 .map_err(PPOError::GymError)?;
-            let training_next_states = step_info.transition_next_states()?;
+            let training_next_states = step_info.transition_next_states()?.to_dtype(self.dtype)?;
             let VectorizedStepInfo {
                 states: reset_or_next_states,
                 rewards,
@@ -1146,7 +1156,7 @@ where
                     .log_probs(collection_action.log_probs)
                     .build(),
             );
-            *next_states = reset_or_next_states;
+            *next_states = reset_or_next_states.to_dtype(self.dtype)?;
         }
 
         Ok(self.rollout_buffer.len() * environment_count)
@@ -1180,11 +1190,12 @@ where
     /// Selects environment actions `[batch, ...action_shape]` for observations
     /// `[batch, ...observation_shape]`.
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
+        let observation = observation.to_dtype(self.dtype)?;
         let latent_states = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
-                shared_info.shared_network.forward(observation)?
+                shared_info.shared_network.forward(&observation)?
             }
-            PPONetworkInfo::Separate(ref mut _separate_info) => observation.clone(),
+            PPONetworkInfo::Separate(ref mut _separate_info) => observation,
         };
         let neurons = self.act_neurons(&latent_states)?;
         let actions = self

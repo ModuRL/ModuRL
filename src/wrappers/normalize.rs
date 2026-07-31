@@ -70,6 +70,7 @@ impl<G> NormalizeObservationGym<G> {
     fn normalize(&mut self, observation: &Tensor) -> candle_core::Result<Tensor> {
         let shape = observation.shape().clone();
         let device = observation.device().clone();
+        let dtype = observation.dtype();
         let values = observation
             .to_dtype(DType::F32)
             .and_then(|tensor| tensor.to_device(&Device::Cpu))
@@ -93,6 +94,7 @@ impl<G> NormalizeObservationGym<G> {
             })
             .collect::<Vec<_>>();
         Tensor::from_vec(normalized, shape, &Device::Cpu)
+            .and_then(|tensor| tensor.to_dtype(dtype))
             .and_then(|tensor| tensor.to_device(&device))
     }
 }

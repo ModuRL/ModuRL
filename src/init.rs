@@ -9,7 +9,7 @@ use candle_nn::{Conv2d, Conv2dConfig, Linear, VarBuilder};
 /// `gain`) and zero-initialized bias, registered in the given VarBuilder.
 pub fn linear_ortho(in_dim: usize, out_dim: usize, gain: f64, vb: VarBuilder) -> Result<Linear> {
     let device = vb.device();
-    let weight_init = orthogonal_init(&[out_dim, in_dim], gain, device)?;
+    let weight_init = orthogonal_init(&[out_dim, in_dim], gain, device)?.to_dtype(vb.dtype())?;
 
     let weight = vb.get((out_dim, in_dim), "weight")?;
     weight.slice_set(&weight_init, 0, 0)?;
@@ -30,7 +30,7 @@ pub fn conv2d_ortho(
     vb: VarBuilder,
 ) -> Result<Conv2d> {
     let weight_shape = [out_channels, in_channels, kernel_size, kernel_size];
-    let weight_init = orthogonal_init(&weight_shape, gain, vb.device())?;
+    let weight_init = orthogonal_init(&weight_shape, gain, vb.device())?.to_dtype(vb.dtype())?;
 
     let weight = vb.get(&weight_shape, "weight")?;
     weight.slice_set(&weight_init, 0, 0)?;
@@ -197,5 +197,16 @@ mod tests {
         assert_eq!(bias.dims(), &[5]);
         let bias_values: Vec<f32> = bias.to_vec1().unwrap();
         assert_eq!(bias_values, vec![0.0; 5]);
+    }
+
+    #[test]
+    fn linear_ortho_uses_var_builder_dtype() {
+        let device = Device::Cpu;
+        let var_map = candle_nn::VarMap::new();
+        let vb = candle_nn::VarBuilder::from_varmap(&var_map, candle_core::DType::F64, &device);
+        let layer = linear_ortho(3, 2, 1.0, vb).unwrap();
+
+        assert_eq!(layer.weight().dtype(), candle_core::DType::F64);
+        assert_eq!(layer.bias().unwrap().dtype(), candle_core::DType::F64);
     }
 }

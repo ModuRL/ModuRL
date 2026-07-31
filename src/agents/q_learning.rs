@@ -1,5 +1,5 @@
 use bon::bon;
-use candle_core::{Error, IndexOp, Tensor};
+use candle_core::{DType, Error, IndexOp, Tensor};
 use candle_nn::{Optimizer, VarMap};
 use std::{marker::PhantomData, ops::Deref};
 
@@ -182,11 +182,11 @@ impl experience::Experience for QLearningExperience {
     type Error = candle_core::Error;
 
     fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
-        let device = experiences
+        let first = experiences
             .first()
-            .expect("cannot batch an empty Q-learning replay sample")
-            .state
-            .device();
+            .expect("cannot batch an empty Q-learning replay sample");
+        let device = first.state.device();
+        let dtype = first.state.dtype();
         Ok(QLearningBatch {
             states: experience::stack_tensor_field(experiences, |experience| {
                 experience.state.clone()
@@ -203,14 +203,16 @@ impl experience::Experience for QLearningExperience {
                     .map(|experience| experience.reward)
                     .collect::<Vec<_>>(),
                 device,
-            )?,
+            )?
+            .to_dtype(dtype)?,
             next_dones: Tensor::new(
                 experiences
                     .iter()
                     .map(|experience| experience.next_done)
                     .collect::<Vec<_>>(),
                 device,
-            )?,
+            )?
+            .to_dtype(dtype)?,
         })
     }
 }
@@ -238,6 +240,7 @@ where
     update_frequency: usize,
     training_start: usize,
     device_strategy: ReplayDeviceStrategy,
+    dtype: DType,
     optimization_steps: usize,
     _phantom: PhantomData<(GE, T)>,
 }
@@ -270,7 +273,12 @@ where
         #[builder(default = 1000)] training_start: usize,
         training_horizon: usize,
         device_strategy: ReplayDeviceStrategy,
+        #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, QAgentError<GE, SE>> {
+        assert!(
+            dtype.is_float(),
+            "Q-learning compute dtype must be floating-point"
+        );
         let initial_epsilon = epsilon_schedule.value(0.0);
         let final_epsilon = epsilon_schedule.value(1.0);
         QLearningConfigurationValidator::validate_configuration()
@@ -305,6 +313,7 @@ where
             update_frequency,
             training_start,
             device_strategy,
+            dtype,
             optimization_steps: 0,
             _phantom: PhantomData,
         };
@@ -331,8 +340,9 @@ where
     /// Selects scalar discrete actions shaped `[batch]` for observations shaped
     /// `[batch, ...observation_shape]`.
     pub(crate) fn act(&mut self, observation: &Tensor) -> Result<Tensor, QAgentError<GE, SE>> {
+        let observation = observation.to_dtype(self.dtype)?;
         Ok(epsilon_greedy_actions(
-            observation,
+            &observation,
             self.current_epsilon,
             &self.action_space,
             |observations| self.online_q_network.forward(observations),
@@ -500,7 +510,10 @@ where
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, SE>> {
         let mut elapsed_timesteps = 0;
-        let mut observations = env.reset().map_err(QAgentError::GymError)?;
+        let mut observations = env
+            .reset()
+            .map_err(QAgentError::GymError)?
+            .to_dtype(self.dtype)?;
         let environment_count = env.num_envs();
         let mut episodes = QEpisodeTracker::new(environment_count);
 
@@ -511,7 +524,8 @@ where
             )?;
             let actions = self.act(&observations)?;
             let step_info = env.step(actions.clone()).map_err(QAgentError::GymError)?;
-            let transition_next_states = step_info.transition_next_states()?;
+            let transition_next_states =
+                step_info.transition_next_states()?.to_dtype(self.dtype)?;
             let VectorizedStepInfo {
                 states: reset_next_states,
                 rewards,
@@ -535,7 +549,7 @@ where
                 },
                 &mut episodes,
             )?;
-            observations = reset_next_states;
+            observations = reset_next_states.to_dtype(self.dtype)?;
             let collection_timestep = first_timestep.saturating_add(environment_count);
             let collection_entry = QCollectionLogEntry {
                 collection_rewards,

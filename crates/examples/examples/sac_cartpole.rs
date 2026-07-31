@@ -7,6 +7,8 @@ use modurl_gym::classic_control::cartpole::CartPoleV1;
 mod graphers;
 use graphers::SACGrapher;
 
+const DTYPE: DType = DType::F32;
+
 fn sac_mlp(
     vb: VarBuilder<'_>,
     input_size: usize,
@@ -37,14 +39,14 @@ fn discrete_critic<'a>(
     device: &Device,
 ) -> Result<SACCritic<'a, AdamW>, SACCriticError> {
     let online = sac_mlp(
-        VarBuilder::from_varmap(online_vars, DType::F32, device),
+        VarBuilder::from_varmap(online_vars, DTYPE, device),
         observation_size,
         action_count,
         1.0,
         "mlp",
     )?;
     let target = sac_mlp(
-        VarBuilder::from_varmap(target_vars, DType::F32, device),
+        VarBuilder::from_varmap(target_vars, DTYPE, device),
         observation_size,
         action_count,
         1.0,
@@ -84,7 +86,7 @@ fn main() {
 
     let actor_vars = VarMap::new();
     let actor = sac_mlp(
-        VarBuilder::from_varmap(&actor_vars, DType::F32, &device),
+        VarBuilder::from_varmap(&actor_vars, DTYPE, &device),
         observation_size,
         action_count,
         0.01,
@@ -118,7 +120,7 @@ fn main() {
     )
     .unwrap();
 
-    let log_alpha = Var::from_vec(vec![0.0f32], (), &device).unwrap();
+    let log_alpha = Var::zeros((), DTYPE, &device).unwrap();
     let alpha_optimizer =
         AdamW::new(vec![log_alpha.clone()], optimizer_parameters.clone()).unwrap();
     // Begin near the categorical default, then let the ordinary parameter
@@ -133,6 +135,7 @@ fn main() {
     let mut grapher = SACGrapher::new();
 
     let mut agent = SACAgent::builder()
+        .dtype(DTYPE)
         .policy(Box::new(policy))
         .actor_optimizer(actor_optimizer)
         .critics(vec![critic_1, critic_2])

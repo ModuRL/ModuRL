@@ -24,31 +24,35 @@ pub(crate) fn clip_gradients(
     // Sort the scalar norm contributions before summing because floating-point
     // addition is not associative. Tensor IDs are allocation-dependent and
     // therefore are not a deterministic ordering across runs.
-    let mut norm_sqrs: Vec<f32> = vec![];
+    let mut norm_sqrs: Vec<f64> = vec![];
 
     for id in variable_ids {
         if let Some(grad) = grad_store.get_id(id) {
-            let norm_sq = grad.sqr()?.sum_all()?.to_scalar::<f32>()?;
+            let norm_sq = grad
+                .sqr()?
+                .sum_all()?
+                .to_dtype(candle_core::DType::F64)?
+                .to_scalar::<f64>()?;
             norm_sqrs.push(norm_sq);
             grads.push((id, grad.clone()));
         }
     }
 
-    norm_sqrs.sort_by(f32::total_cmp);
-    let total_norm_sq = norm_sqrs.into_iter().sum::<f32>();
+    norm_sqrs.sort_by(f64::total_cmp);
+    let total_norm_sq = norm_sqrs.into_iter().sum::<f64>();
 
     let total_norm = total_norm_sq.sqrt();
-    if total_norm > max_norm {
+    if total_norm > f64::from(max_norm) {
         // Match PyTorch's clip_grad_norm_ denominator, including its epsilon.
-        let scale = max_norm / (total_norm + 1e-6);
+        let scale = f64::from(max_norm) / (total_norm + 1e-6);
         for (id, grad) in &grads {
-            let scale_t = Tensor::new(scale, grad.device())?;
+            let scale_t = Tensor::new(scale, grad.device())?.to_dtype(grad.dtype())?;
             let clipped = grad.broadcast_mul(&scale_t)?;
             grad_store.insert_id(*id, clipped);
         }
     }
 
-    Ok(total_norm)
+    Ok(total_norm as f32)
 }
 
 /// Normalizes `t` over all elements while preserving its arbitrary shape

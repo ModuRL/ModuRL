@@ -1,4 +1,4 @@
-use candle_core::{Module, Tensor};
+use candle_core::{DType, Module, Tensor};
 use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 
@@ -7,6 +7,7 @@ mod graphers;
 use graphers::PPOMujocoGrapher;
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
+const DTYPE: DType = DType::F32;
 
 #[cfg(not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d")))]
 compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
@@ -81,7 +82,7 @@ fn main() {
     let action_size = action_shape.iter().product();
 
     let actor_vars = VarMap::new();
-    let actor_vb = VarBuilder::from_varmap(&actor_vars, candle_core::DType::F32, &device);
+    let actor_vb = VarBuilder::from_varmap(&actor_vars, DTYPE, &device);
     let actor = GaussianParameterModule {
         // The mean network returns action_size values. GaussianParameterModule
         // appends another action_size values for log_std.
@@ -108,11 +109,7 @@ fn main() {
     let critic = MLP::builder()
         .input_size(observation_size)
         .output_size(1)
-        .vb(VarBuilder::from_varmap(
-            &critic_vars,
-            candle_core::DType::F32,
-            &device,
-        ))
+        .vb(VarBuilder::from_varmap(&critic_vars, DTYPE, &device))
         .hidden_layer_sizes(vec![64, 64])
         .activation(Box::new(Tensor::tanh))
         .initializer(Box::new(OrthogonalMLPInitializer {
@@ -149,6 +146,7 @@ fn main() {
     let mut grapher = PPOMujocoGrapher::new(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
     {
         let mut agent = PPOAgent::builder()
+            .dtype(DTYPE)
             .action_space(action_space)
             .network_info(networks)
             .batch_size(2_048)

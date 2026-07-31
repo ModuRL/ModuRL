@@ -93,37 +93,46 @@ impl Space for BoxSpace {
     /// Samples one environment action shaped `self.shape()`.
     fn sample(&self, device: &Device) -> Result<Tensor, Self::Error> {
         let mut values = vec![];
+        let dtype = self.low.dtype();
 
-        // flatten the low and high tensors
-        let low = self.low.flatten_all().expect("Failed to flatten tensor.");
-        let high = self.high.flatten_all().expect("Failed to flatten tensor.");
-        // we might be losing some precision here, but it's fine for now.
-        let rng_bases = Tensor::rand(0.0_f32, 1.0_f32, low.shape(), device)?;
+        // Perform host-side sampling in F64 so F64-backed spaces retain their
+        // precision. The final sample still uses the space's declared dtype.
+        let low = self
+            .low
+            .to_dtype(candle_core::DType::F64)?
+            .flatten_all()
+            .expect("Failed to flatten tensor.");
+        let high = self
+            .high
+            .to_dtype(candle_core::DType::F64)?
+            .flatten_all()
+            .expect("Failed to flatten tensor.");
+        let rng_bases = Tensor::rand(0.0_f64, 1.0_f64, low.shape(), device)?;
         for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
             let mut low = low
                 .get(i)
                 .expect("Failed to get value.")
-                .to_vec0::<f32>()
-                .expect("Failed to convert to f32.");
+                .to_vec0::<f64>()
+                .expect("Failed to convert to f64.");
             let mut high = high
                 .get(i)
                 .expect("Failed to get value.")
-                .to_vec0::<f32>()
-                .expect("Failed to convert to f32.");
-            low = finitize(low);
-            high = finitize(high);
+                .to_vec0::<f64>()
+                .expect("Failed to convert to f64.");
+            low = finitize(low, dtype);
+            high = finitize(high, dtype);
 
             let rng_base = rng_bases
                 .get(i)
                 .expect("Failed to get value.")
-                .to_vec0::<f32>()
-                .expect("Failed to convert to f32.");
+                .to_vec0::<f64>()
+                .expect("Failed to convert to f64.");
             let adjusted_range = high - low;
             let rand_num = low + adjusted_range * rng_base;
 
             values.push(rand_num);
         }
-        Tensor::from_vec(values, low.shape(), device)
+        Tensor::from_vec(values, low.shape(), device)?.to_dtype(dtype)
     }
 
     /// Tests one environment action `x` shaped `self.shape()`.
@@ -133,26 +142,37 @@ impl Space for BoxSpace {
         if *x.shape() != *self.low.shape() {
             return false;
         }
-        let low = self.low.flatten_all().expect("Failed to flatten tensor.");
-        let high = self.high.flatten_all().expect("Failed to flatten tensor.");
-        let x = x.flatten_all().expect("Failed to flatten tensor.");
+        let low = self
+            .low
+            .to_dtype(candle_core::DType::F64)
+            .and_then(|tensor| tensor.flatten_all())
+            .expect("Failed to flatten tensor.");
+        let high = self
+            .high
+            .to_dtype(candle_core::DType::F64)
+            .and_then(|tensor| tensor.flatten_all())
+            .expect("Failed to flatten tensor.");
+        let x = x
+            .to_dtype(candle_core::DType::F64)
+            .and_then(|tensor| tensor.flatten_all())
+            .expect("Failed to flatten tensor.");
         // So inefficient :*(
         for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
             let low = low
                 .get(i)
                 .expect("Failed to get value.")
-                .to_vec0::<f32>()
-                .expect("Failed to convert to f32.");
+                .to_vec0::<f64>()
+                .expect("Failed to convert to f64.");
             let high = high
                 .get(i)
                 .expect("Failed to get value.")
-                .to_vec0::<f32>()
-                .expect("Failed to convert to f32.");
+                .to_vec0::<f64>()
+                .expect("Failed to convert to f64.");
             let value = x
                 .get(i)
                 .expect("Failed to get value.")
-                .to_vec0::<f32>()
-                .expect("Failed to convert to f32.");
+                .to_vec0::<f64>()
+                .expect("Failed to convert to f64.");
             if value < low || value > high {
                 return false;
             }
@@ -220,12 +240,17 @@ impl BoxSpace {
 // This way random_range can work with f32::INFINITY and f32::NEG_INFINITY.
 // We just return f32::MAX / 2.0 and f32::MIN / 2.0 respectively.
 // It's pretty dumb, but it lies and says min and max aren't finite otherwise.
-fn finitize(value: f32) -> f32 {
-    if value == f32::INFINITY {
-        return f32::MAX / 2.0;
+fn finitize(value: f64, dtype: candle_core::DType) -> f64 {
+    let finite_limit = if dtype == candle_core::DType::F64 {
+        f64::MAX / 2.0
+    } else {
+        f64::from(f32::MAX / 2.0)
+    };
+    if value == f64::INFINITY {
+        return finite_limit;
     }
-    if value == f32::NEG_INFINITY {
-        return f32::MIN / 2.0;
+    if value == f64::NEG_INFINITY {
+        return -finite_limit;
     }
     value
 }
@@ -278,5 +303,19 @@ mod tests {
 
         assert_eq!(sample.dtype(), candle_core::DType::F32);
         assert!(space.contains(&sample));
+    }
+
+    #[test]
+    fn box_space_preserves_f64_sampling_and_boundary_precision() {
+        let low = Tensor::new(&[0.0_f64], &Device::Cpu).unwrap();
+        let high = Tensor::new(&[1.0_f64], &Device::Cpu).unwrap();
+        let space = BoxSpace::new(low, high);
+
+        let sample = space.sample(&Device::Cpu).unwrap();
+        let just_outside = Tensor::new(&[1.0_f64 + 1e-12], &Device::Cpu).unwrap();
+
+        assert_eq!(sample.dtype(), candle_core::DType::F64);
+        assert!(space.contains(&sample));
+        assert!(!space.contains(&just_outside));
     }
 }
