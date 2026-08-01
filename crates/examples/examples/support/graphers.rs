@@ -10,7 +10,39 @@ use std::{
 use candle_core::{D, Device, Tensor};
 use modurl::prelude::*;
 use modurl_logger::{Aggregation, AggregationConfig, Logger, TensorBoardLogger, TerminalLogger};
-use modurl_mojoco::SumoAntsInfo;
+
+const DIAGNOSTIC_SMOOTHING_WINDOW: usize = 10;
+const LOSS_SMOOTHING_WINDOW: usize = 100;
+const REWARD_SMOOTHING_WINDOW: usize = 25;
+const EPISODE_SMOOTHING_WINDOW: usize = 100;
+const EPISODE_RETURN_METRIC: &str = "Episode Return";
+const EPISODE_LENGTH_METRIC: &str = "Episode Length";
+
+fn standard_aggregation() -> AggregationConfig {
+    AggregationConfig::new(Aggregation::mean().with_rolling_window(DIAGNOSTIC_SMOOTHING_WINDOW))
+}
+
+fn with_metric_window(
+    mut config: AggregationConfig,
+    metrics: &[&str],
+    rolling_window: usize,
+) -> AggregationConfig {
+    for metric in metrics {
+        config = config.with_override(
+            *metric,
+            Aggregation::mean().with_rolling_window(rolling_window),
+        );
+    }
+    config
+}
+
+fn with_episode_smoothing(config: AggregationConfig) -> AggregationConfig {
+    with_metric_window(
+        config,
+        &[EPISODE_RETURN_METRIC, EPISODE_LENGTH_METRIC],
+        EPISODE_SMOOTHING_WINDOW,
+    )
+}
 
 pub struct DQNGrapher {
     terminal: TerminalLogger,
@@ -18,24 +50,13 @@ pub struct DQNGrapher {
 
 impl DQNGrapher {
     pub fn new() -> Self {
+        let aggregation = with_episode_smoothing(with_metric_window(
+            standard_aggregation(),
+            &["DQN Loss"],
+            LOSS_SMOOTHING_WINDOW,
+        ));
         Self {
-            terminal: TerminalLogger::new(
-                AggregationConfig::new(Aggregation::mean())
-                    .with_override("DQN Loss", Aggregation::mean().with_rolling_window(100))
-                    .with_override(
-                        "Mean Selected Q-Value",
-                        Aggregation::mean().with_rolling_window(100),
-                    )
-                    .with_override(
-                        "Episode Return",
-                        Aggregation::mean().with_rolling_window(25),
-                    )
-                    .with_override(
-                        "Episode Length",
-                        Aggregation::mean().with_rolling_window(25),
-                    ),
-            )
-            .with_live_updates(),
+            terminal: TerminalLogger::new(aggregation).with_live_updates(),
         }
     }
 
@@ -69,8 +90,8 @@ impl DQNLogger for DQNGrapher {
                 .log(
                     episode.collection_timestep,
                     &[
-                        ("Episode Return", &episode_return),
-                        ("Episode Length", &episode_length),
+                        (EPISODE_RETURN_METRIC, &episode_return),
+                        (EPISODE_LENGTH_METRIC, &episode_length),
                     ],
                 )
                 .unwrap();
@@ -84,11 +105,13 @@ pub struct PPOGrapher {
 
 impl PPOGrapher {
     pub fn new() -> Self {
+        let aggregation = with_episode_smoothing(with_metric_window(
+            standard_aggregation(),
+            &["Actor Loss", "Critic Loss"],
+            LOSS_SMOOTHING_WINDOW,
+        ));
         Self {
-            terminal: TerminalLogger::new(AggregationConfig::new(
-                Aggregation::mean().with_rolling_window(5),
-            ))
-            .with_live_updates(),
+            terminal: TerminalLogger::new(aggregation).with_live_updates(),
         }
     }
 
@@ -126,8 +149,8 @@ impl PPOLogger for PPOGrapher {
                 .log(
                     episode.collection_timestep,
                     &[
-                        ("Episode Returns", &episode_return),
-                        ("Episode Lengths", &episode_length),
+                        (EPISODE_RETURN_METRIC, &episode_return),
+                        (EPISODE_LENGTH_METRIC, &episode_length),
                     ],
                 )
                 .unwrap();
@@ -151,7 +174,15 @@ impl PPOMujocoGrapher {
     }
 
     fn new_with_run_name(total_timesteps: usize, environment_name: &str, run_name: &str) -> Self {
-        let aggregation = AggregationConfig::new(Aggregation::mean().with_rolling_window(10));
+        let aggregation = with_episode_smoothing(with_metric_window(
+            with_metric_window(
+                standard_aggregation(),
+                &["Actor Loss", "Critic Loss"],
+                LOSS_SMOOTHING_WINDOW,
+            ),
+            &["Mean Raw Step Reward"],
+            REWARD_SMOOTHING_WINDOW,
+        ));
         let tensorboard_log_dir = tensorboard_log_dir(run_name, environment_name);
         let tensorboard = TensorBoardLogger::new(&tensorboard_log_dir, aggregation.clone())
             .expect("failed to create the TensorBoard event file");
@@ -223,12 +254,6 @@ impl MujocoRewardInfo for RawRewardInfo<()> {
     }
 }
 
-impl MujocoRewardInfo for SumoAntsInfo {
-    fn raw_reward(&self, collection_reward: f32) -> f32 {
-        collection_reward
-    }
-}
-
 impl<I: MujocoRewardInfo> PPOLogger<I> for PPOMujocoGrapher {
     fn log(&mut self, info: &PPOLogEntry) {
         let new_timestep = info.timestep != self.timestep;
@@ -288,9 +313,13 @@ impl<I: MujocoRewardInfo> PPOLogger<I> for PPOMujocoGrapher {
                 &Device::Cpu,
             )
             .unwrap();
+            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
             self.log_metrics(
                 episode.collection_timestep,
-                &[("Episodic Return", &episode_return)],
+                &[
+                    (EPISODE_RETURN_METRIC, &episode_return),
+                    (EPISODE_LENGTH_METRIC, &episode_length),
+                ],
             );
             self.running_episode_returns[episode.environment_index] = 0.0;
             self.progress();
@@ -336,29 +365,15 @@ pub struct SACGrapher {
 
 impl SACGrapher {
     pub fn new() -> Self {
-        let aggregation = AggregationConfig::new(Aggregation::mean())
-            .with_override("Critic Loss", Aggregation::mean().with_rolling_window(100))
-            .with_override("Actor Loss", Aggregation::mean().with_rolling_window(100))
-            .with_override(
-                "Entropy Change Loss",
-                Aggregation::mean().with_rolling_window(100),
-            )
-            .with_override(
-                "Expected Soft Q",
-                Aggregation::mean().with_rolling_window(10),
-            )
-            .with_override(
-                "Mean Soft Bellman Target",
-                Aggregation::mean().with_rolling_window(10),
-            )
-            .with_override(
-                "Episode Return",
-                Aggregation::mean().with_rolling_window(25),
-            )
-            .with_override(
-                "Episode Length",
-                Aggregation::mean().with_rolling_window(25),
-            );
+        let aggregation = with_episode_smoothing(with_metric_window(
+            with_metric_window(
+                standard_aggregation(),
+                &["Critic Loss", "Actor Loss", "Entropy Change Loss"],
+                LOSS_SMOOTHING_WINDOW,
+            ),
+            &["Mean Collection Reward"],
+            REWARD_SMOOTHING_WINDOW,
+        ));
         Self {
             terminal: TerminalLogger::new(aggregation).with_live_updates(),
         }
@@ -459,8 +474,8 @@ impl<I> SACLogger<I> for SACGrapher {
                 .log(
                     entry.collection_timestep,
                     &[
-                        ("Episode Return", &episode_return),
-                        ("Episode Length", &episode_length),
+                        (EPISODE_RETURN_METRIC, &episode_return),
+                        (EPISODE_LENGTH_METRIC, &episode_length),
                     ],
                 )
                 .unwrap();
@@ -476,23 +491,15 @@ pub struct DeterministicActorCriticGrapher {
 
 impl DeterministicActorCriticGrapher {
     pub fn new() -> Self {
-        let aggregation = AggregationConfig::new(Aggregation::mean())
-            .with_override("Critic Loss", Aggregation::mean().with_rolling_window(100))
-            .with_override("Actor Loss", Aggregation::mean().with_rolling_window(100))
-            .with_override("Mean Replay Q", Aggregation::mean().with_rolling_window(10))
-            .with_override("Mean Policy Q", Aggregation::mean().with_rolling_window(10))
-            .with_override(
-                "Mean Bellman Target",
-                Aggregation::mean().with_rolling_window(10),
-            )
-            .with_override(
-                "Episode Return",
-                Aggregation::mean().with_rolling_window(25),
-            )
-            .with_override(
-                "Episode Length",
-                Aggregation::mean().with_rolling_window(25),
-            );
+        let aggregation = with_episode_smoothing(with_metric_window(
+            with_metric_window(
+                standard_aggregation(),
+                &["Critic Loss", "Actor Loss"],
+                LOSS_SMOOTHING_WINDOW,
+            ),
+            &["Mean Collection Reward"],
+            REWARD_SMOOTHING_WINDOW,
+        ));
         Self {
             terminal: TerminalLogger::new(aggregation).with_live_updates(),
         }
@@ -569,8 +576,8 @@ impl DeterministicActorCriticGrapher {
                 .log(
                     entry.collection_timestep,
                     &[
-                        ("Episode Return", &episode_return),
-                        ("Episode Length", &episode_length),
+                        (EPISODE_RETURN_METRIC, &episode_return),
+                        (EPISODE_LENGTH_METRIC, &episode_length),
                     ],
                 )
                 .unwrap();
@@ -605,6 +612,54 @@ impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_smoothing_windows_have_expected_lengths() {
+        let aggregation = with_episode_smoothing(with_metric_window(
+            with_metric_window(standard_aggregation(), &["loss"], LOSS_SMOOTHING_WINDOW),
+            &["reward"],
+            REWARD_SMOOTHING_WINDOW,
+        ));
+        let mut logger = TerminalLogger::new(aggregation);
+        for timestep in 0..=100 {
+            let value = Tensor::new(timestep as f32, &Device::Cpu).unwrap();
+            logger
+                .log(
+                    timestep,
+                    &[
+                        ("diagnostic", &value),
+                        ("loss", &value),
+                        ("reward", &value),
+                        (EPISODE_RETURN_METRIC, &value),
+                        (EPISODE_LENGTH_METRIC, &value),
+                    ],
+                )
+                .unwrap();
+        }
+        logger.finish().unwrap();
+
+        assert_eq!(logger.series("diagnostic").unwrap().last().unwrap().1, 95.5);
+        assert_eq!(logger.series("loss").unwrap().last().unwrap().1, 50.5);
+        assert_eq!(logger.series("reward").unwrap().last().unwrap().1, 88.0);
+        assert_eq!(
+            logger
+                .series(EPISODE_RETURN_METRIC)
+                .unwrap()
+                .last()
+                .unwrap()
+                .1,
+            50.5
+        );
+        assert_eq!(
+            logger
+                .series(EPISODE_LENGTH_METRIC)
+                .unwrap()
+                .last()
+                .unwrap()
+                .1,
+            50.5
+        );
+    }
 
     #[test]
     fn deterministic_grapher_uses_batch_timestep_for_completed_episodes() {

@@ -13,14 +13,12 @@ TD3-specific choices.
 
 ## Run the TD3 Example
 
-The example supports Ant, HalfCheetah, Hopper, Humanoid, SumoAnts, and Walker2d:
+The example supports Ant, HalfCheetah, Hopper, and Walker2d:
 
 ```sh
 cargo run --release -p examples --example td3_mujoco --features ant
 cargo run --release -p examples --example td3_mujoco --features half-cheetah
 cargo run --release -p examples --example td3_mujoco --features hopper
-cargo run --release -p examples --example td3_mujoco --features humanoid
-cargo run --release -p examples --example td3_mujoco --features sumo-ants
 cargo run --release -p examples --example td3_mujoco --features walker2d
 ```
 

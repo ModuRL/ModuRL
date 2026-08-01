@@ -13,16 +13,8 @@ Start with [Getting Started](./getting-started.md) for the complete CartPole
 program. Then read [Understand a PPO Training Run](./understand-ppo-training.md)
 before changing its configuration.
 
-The continuous-control example can also train a shared policy through
-competitive SumoAnts self-play:
-
-```console
-cargo run --release -p examples --example ppo_mujoco --features sumo-ants
-```
-
-Both Ant player rows use the same actor and critic while interacting in one
-MuJoCo simulation. The other supported features are `ant`, `half-cheetah`,
-`hopper`, `humanoid`, and `walker2d`.
+The continuous-control example supports `ant`, `half-cheetah`, `hopper`, and
+`walker2d`. Enable exactly one environment feature when running it.
 
 PPO can use any compatible `Distribution` implementation. ModuRL currently
 supplies categorical and Gaussian distributions, and applications can define

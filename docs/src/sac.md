@@ -13,14 +13,12 @@ Concepts](./core-concepts.md).
 
 ## Run Continuous SAC
 
-The example supports Ant, HalfCheetah, Hopper, Humanoid, SumoAnts, and Walker2d:
+The example supports Ant, HalfCheetah, Hopper, and Walker2d:
 
 ```sh
 cargo run --release -p examples --example sac_mujoco --features ant
 cargo run --release -p examples --example sac_mujoco --features half-cheetah
 cargo run --release -p examples --example sac_mujoco --features hopper
-cargo run --release -p examples --example sac_mujoco --features humanoid
-cargo run --release -p examples --example sac_mujoco --features sumo-ants
 cargo run --release -p examples --example sac_mujoco --features walker2d
 ```
 

@@ -28,8 +28,6 @@ of the supported environment features:
 cargo run -p examples --example a2c_mujoco --features ant
 cargo run -p examples --example a2c_mujoco --features half-cheetah
 cargo run -p examples --example a2c_mujoco --features hopper
-cargo run -p examples --example a2c_mujoco --features humanoid
-cargo run -p examples --example a2c_mujoco --features sumo-ants
 cargo run -p examples --example a2c_mujoco --features walker2d
 ```
 

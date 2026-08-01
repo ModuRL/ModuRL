@@ -42,7 +42,6 @@ fn main() {
     println!("Environment: {ENVIRONMENT_NAME}");
     println!("Using device: {device:?}");
 
-    #[cfg(not(feature = "sumo-ants"))]
     let env = NormalizeRewardGym::new(
         NormalizeObservationGym::new(RecordRawRewardGym::new(TimeLimitGym::new(
             mujoco::build_environment(&device),
@@ -52,10 +51,7 @@ fn main() {
         0.99,
     )
     .with_clip(10.0);
-    #[cfg(not(feature = "sumo-ants"))]
     let mut env = VectorizedGymWrapper::from(vec![env]);
-    #[cfg(feature = "sumo-ants")]
-    let mut env = mujoco::build_environment(&device);
     let observation_size = env.observation_space().shape()[0];
     let action_space = env.action_space();
     let action_shape = action_space.shape();

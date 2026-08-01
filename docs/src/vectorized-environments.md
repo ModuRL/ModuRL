@@ -106,9 +106,5 @@ Rows are ordered first by inner gym and then by that gym's own row order.
 gyms must expose the same observation and action shapes, and each inner gym
 keeps responsibility for its own auto-reset behavior.
 
-The MuJoCo training examples stack four `SumoAnts` games. They run headless
-with `--features sumo-ants`; use `--features sumo-ants,rendering` to render the
-first game while the other three remain headless.
-
 Next, read [Build a Custom Gym Environment](./custom-gym-environment.md) to
 provide your own single-environment implementation.

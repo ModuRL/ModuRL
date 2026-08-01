@@ -67,13 +67,10 @@ fn main() {
     println!("Environment: {ENVIRONMENT_NAME}");
     println!("Using device: {device:?}");
 
-    #[cfg(not(feature = "sumo-ants"))]
     let mut env = VectorizedGymWrapper::from(vec![TimeLimitGym::new(
         mujoco::build_environment(&device),
         1_000,
     )]);
-    #[cfg(feature = "sumo-ants")]
-    let mut env = mujoco::build_environment(&device);
     let observation_space = env.observation_space();
     let environment_action_space = env.action_space();
     let observation_size = observation_space.shape()[0];
