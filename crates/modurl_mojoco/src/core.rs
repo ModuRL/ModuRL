@@ -83,6 +83,14 @@ impl MujocoCore {
         self.data.ctrl().len()
     }
 
+    pub(crate) fn nbody(&self) -> usize {
+        self.data.cfrc_ext().len()
+    }
+
+    pub(crate) fn body_position(&self, body_index: usize) -> [f64; 3] {
+        self.data.xpos()[body_index]
+    }
+
     pub(crate) fn dt(&self) -> f64 {
         self.data.model_opt().timestep * self.frame_skip as f64
     }
@@ -160,7 +168,10 @@ impl MujocoCore {
         self.set_state(&qpos, &qvel)
     }
 
-    pub(crate) fn reset_half_cheetah(&mut self, noise_scale: f64) -> Result<(), MujocoError> {
+    pub(crate) fn reset_uniform_positions_normal_velocities(
+        &mut self,
+        noise_scale: f64,
+    ) -> Result<(), MujocoError> {
         if noise_scale == 0.0 {
             let qpos = self.initial_qpos.clone();
             let qvel = self.initial_qvel.clone();
@@ -182,8 +193,48 @@ impl MujocoCore {
         self.set_state(&qpos, &qvel)
     }
 
+    pub(crate) fn mass_center_xy(&self) -> [f64; 2] {
+        let masses = self.data.model().body_mass();
+        let positions = self.data.xipos();
+        let total_mass = masses.iter().sum::<f64>();
+        let mut center = [0.0; 2];
+        for (mass, position) in masses.iter().zip(positions) {
+            center[0] += mass * position[0];
+            center[1] += mass * position[1];
+        }
+        center[0] /= total_mass;
+        center[1] /= total_mass;
+        center
+    }
+
+    pub(crate) fn cinert(&self) -> &[[f64; 10]] {
+        self.data.cinert()
+    }
+
+    pub(crate) fn cvel(&self) -> &[[f64; 6]] {
+        self.data.cvel()
+    }
+
+    pub(crate) fn qfrc_actuator(&self) -> &[f64] {
+        self.data.qfrc_actuator()
+    }
+
+    pub(crate) fn cfrc_ext(&self) -> &[[f64; 6]] {
+        self.data.cfrc_ext()
+    }
+
     /// Advances MuJoCo with one actuator vector `action` shaped `[nu]`.
     pub(crate) fn step(&mut self, action: &Tensor) -> Result<Vec<f64>, MujocoError> {
+        self.step_bounded(action, -1.0, 1.0)
+    }
+
+    /// Advances MuJoCo with one bounded actuator vector `action` shaped `[nu]`.
+    pub(crate) fn step_bounded(
+        &mut self,
+        action: &Tensor,
+        minimum: f64,
+        maximum: f64,
+    ) -> Result<Vec<f64>, MujocoError> {
         if action.rank() != 1 || action.dims()[0] != self.nu() {
             return Err(MujocoError::InvalidInput(format!(
                 "action shape mismatch: expected ({},), got {:?}",
@@ -200,11 +251,11 @@ impl MujocoCore {
         let values = action.to_dtype(DType::F64)?.to_vec1::<f64>()?;
         if !values
             .iter()
-            .all(|value| value.is_finite() && (-1.0..=1.0).contains(value))
+            .all(|value| value.is_finite() && (minimum..=maximum).contains(value))
         {
-            return Err(MujocoError::InvalidInput(
-                "actions must be finite and within [-1, 1]".into(),
-            ));
+            return Err(MujocoError::InvalidInput(format!(
+                "actions must be finite and within [{minimum}, {maximum}]"
+            )));
         }
         self.data
             .ctrl_mut()
@@ -246,10 +297,18 @@ impl MujocoCore {
     }
 
     pub(crate) fn action_space(&self) -> Box<dyn Space<Error = candle_core::Error>> {
+        self.action_space_bounded(-1.0, 1.0)
+    }
+
+    pub(crate) fn action_space_bounded(
+        &self,
+        minimum: f64,
+        maximum: f64,
+    ) -> Box<dyn Space<Error = candle_core::Error>> {
         Box::new(BoxSpace::new_with_universal_bounds(
             vec![self.nu()],
-            -1.0,
-            1.0,
+            minimum as f32,
+            maximum as f32,
             &self.device,
         ))
     }
@@ -262,6 +321,13 @@ impl MujocoCore {
             vec![self.nq() + self.nv() - usize::from(exclude_x)],
             &self.device,
         ))
+    }
+
+    pub(crate) fn unbounded_observation_space(
+        &self,
+        size: usize,
+    ) -> Box<dyn Space<Error = candle_core::Error>> {
+        Box::new(BoxSpace::new_unbounded(vec![size], &self.device))
     }
 }
 

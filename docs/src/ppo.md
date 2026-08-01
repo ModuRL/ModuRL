@@ -21,8 +21,8 @@ cargo run --release -p examples --example ppo_mujoco --features sumo-ants
 ```
 
 Both Ant player rows use the same actor and critic while interacting in one
-MuJoCo simulation. The other supported features are `half-cheetah`, `hopper`,
-and `walker2d`.
+MuJoCo simulation. The other supported features are `ant`, `half-cheetah`,
+`hopper`, `humanoid`, and `walker2d`.
 
 PPO can use any compatible `Distribution` implementation. ModuRL currently
 supplies categorical and Gaussian distributions, and applications can define

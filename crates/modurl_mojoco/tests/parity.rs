@@ -1,6 +1,6 @@
 use candle_core::{Device, Tensor};
 use modurl::gym::Gym;
-use modurl_mojoco::{HalfCheetahV5, HopperV5, MujocoError, Walker2dV5};
+use modurl_mojoco::{AntV5, HalfCheetahV5, HopperV5, HumanoidV5, MujocoError, Walker2dV5};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -36,7 +36,19 @@ impl ParityEnvironment for HalfCheetahV5 {
     }
 }
 
+impl ParityEnvironment for AntV5 {
+    fn set_exact_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<Tensor, MujocoError> {
+        self.set_state(qpos, qvel)
+    }
+}
+
 impl ParityEnvironment for HopperV5 {
+    fn set_exact_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<Tensor, MujocoError> {
+        self.set_state(qpos, qvel)
+    }
+}
+
+impl ParityEnvironment for HumanoidV5 {
     fn set_exact_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<Tensor, MujocoError> {
         self.set_state(qpos, qvel)
     }
@@ -104,10 +116,30 @@ fn half_cheetah_matches_gymnasium_v5() {
 }
 
 #[test]
+fn ant_matches_gymnasium_v5() {
+    check_parity(
+        include_str!("../python_tests/ant/trajectory.json"),
+        AntV5::builder().build().unwrap(),
+        1e-5,
+        1e-5,
+    );
+}
+
+#[test]
 fn hopper_matches_gymnasium_v5() {
     check_parity(
         include_str!("../python_tests/hopper/trajectory.json"),
         HopperV5::builder().build().unwrap(),
+        1e-5,
+        1e-5,
+    );
+}
+
+#[test]
+fn humanoid_matches_gymnasium_v5() {
+    check_parity(
+        include_str!("../python_tests/humanoid/trajectory.json"),
+        HumanoidV5::builder().build().unwrap(),
         1e-5,
         1e-5,
     );

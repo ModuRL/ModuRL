@@ -3,20 +3,26 @@
 //! The environments use MuJoCo for physics through [`mujoco_rs`] and expose
 //! ModuRL's [`modurl::gym::Gym`] and [`modurl::gym::MultiGym`] interfaces.
 
+mod ant;
 mod core;
 mod half_cheetah;
 mod hopper;
+mod humanoid;
 mod sumo_ants;
 mod walker2d;
 
+pub use ant::AntV5;
 pub use half_cheetah::HalfCheetahV5;
 pub use hopper::HopperV5;
+pub use humanoid::HumanoidV5;
 pub use sumo_ants::{SumoAnts, SumoAntsInfo};
 pub use walker2d::Walker2dV5;
 
 /// Convenient imports for applications using this crate.
 pub mod prelude {
-    pub use crate::{HalfCheetahV5, HopperV5, MujocoError, SumoAnts, SumoAntsInfo, Walker2dV5};
+    pub use crate::{
+        AntV5, HalfCheetahV5, HopperV5, HumanoidV5, MujocoError, SumoAnts, SumoAntsInfo, Walker2dV5,
+    };
     pub use modurl::gym::{Gym, MultiGym, MultiGymStepInfo, ResetInfo, StepInfo};
 }
 

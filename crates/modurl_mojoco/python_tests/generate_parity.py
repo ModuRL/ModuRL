@@ -16,8 +16,13 @@ import numpy as np
 
 ROOT = Path(__file__).parent
 ENVIRONMENTS = {
+    # Stop before the first foot impact; see the Humanoid note below.
+    "ant": ("Ant-v5", 3),
     "half_cheetah": ("HalfCheetah-v5", 20),
     "hopper": ("Hopper-v5", 20),
+    # Stop before the first foot impact; contact-force magnitudes can differ
+    # across the official Python and mujoco-rs MuJoCo binary versions.
+    "humanoid": ("Humanoid-v5", 8),
     # Stop before the first simultaneous two-foot impact. That degenerate
     # contact can legitimately choose different solvers/orderings across the
     # official Python and mujoco-rs binary builds of the same engine version.

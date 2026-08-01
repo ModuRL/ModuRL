@@ -1,6 +1,6 @@
 use candle_core::{DType, Device, Tensor};
 use modurl::gym::{Gym, MultiGym, StackedMultiGym};
-use modurl_mojoco::{HalfCheetahV5, HopperV5, SumoAnts, Walker2dV5};
+use modurl_mojoco::{AntV5, HalfCheetahV5, HopperV5, HumanoidV5, SumoAnts, Walker2dV5};
 
 const SUMO_INITIAL_QPOS: [f64; 30] = [
     -1.0, 0.0, 0.65, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, -1.0, 0.0, 1.0, 1.0, 0.0, 0.65,
@@ -9,6 +9,12 @@ const SUMO_INITIAL_QPOS: [f64; 30] = [
 
 #[test]
 fn default_shapes_match_gymnasium() {
+    let mut ant = AntV5::builder().build().unwrap();
+    let ant_observation = ant.reset().unwrap();
+    assert_eq!(ant_observation.state.dims(), &[105]);
+    assert_eq!(ant_observation.state.dtype(), DType::F32);
+    assert_eq!(ant.action_space().shape(), vec![8]);
+
     let mut half_cheetah = HalfCheetahV5::builder().build().unwrap();
     let half_cheetah_observation = half_cheetah.reset().unwrap();
     assert_eq!(half_cheetah_observation.state.dims(), &[17]);
@@ -21,6 +27,12 @@ fn default_shapes_match_gymnasium() {
     assert_eq!(hopper_observation.state.dtype(), DType::F32);
     assert_eq!(hopper.action_space().shape(), vec![3]);
 
+    let mut humanoid = HumanoidV5::builder().build().unwrap();
+    let humanoid_observation = humanoid.reset().unwrap();
+    assert_eq!(humanoid_observation.state.dims(), &[348]);
+    assert_eq!(humanoid_observation.state.dtype(), DType::F32);
+    assert_eq!(humanoid.action_space().shape(), vec![17]);
+
     let mut walker = Walker2dV5::builder().build().unwrap();
     let walker_observation = walker.reset().unwrap();
     assert_eq!(walker_observation.state.dims(), &[17]);
@@ -30,6 +42,12 @@ fn default_shapes_match_gymnasium() {
 
 #[test]
 fn sampled_actions_are_f32_and_can_step_every_environment() {
+    let mut ant = AntV5::builder().build().unwrap();
+    ant.reset().unwrap();
+    let action = ant.action_space().sample(&Device::Cpu).unwrap();
+    assert_eq!(action.dtype(), DType::F32);
+    assert_eq!(ant.step(action).unwrap().state.dtype(), DType::F32);
+
     let mut half_cheetah = HalfCheetahV5::builder().build().unwrap();
     half_cheetah.reset().unwrap();
     let action = half_cheetah.action_space().sample(&Device::Cpu).unwrap();
@@ -41,6 +59,12 @@ fn sampled_actions_are_f32_and_can_step_every_environment() {
     let action = hopper.action_space().sample(&Device::Cpu).unwrap();
     assert_eq!(action.dtype(), DType::F32);
     assert_eq!(hopper.step(action).unwrap().state.dtype(), DType::F32);
+
+    let mut humanoid = HumanoidV5::builder().build().unwrap();
+    humanoid.reset().unwrap();
+    let action = humanoid.action_space().sample(&Device::Cpu).unwrap();
+    assert_eq!(action.dtype(), DType::F32);
+    assert_eq!(humanoid.step(action).unwrap().state.dtype(), DType::F32);
 
     let mut walker = Walker2dV5::builder().build().unwrap();
     walker.reset().unwrap();
@@ -70,6 +94,15 @@ fn invalid_action_is_reported_without_mutating() {
 
 #[test]
 fn builders_expose_gymnasium_configuration() {
+    let mut ant = AntV5::builder()
+        .reset_noise_scale(0.0)
+        .exclude_current_positions_from_observation(false)
+        .include_cfrc_ext_in_observation(false)
+        .build()
+        .unwrap();
+    assert_eq!(ant.reset().unwrap().state.dims(), &[29]);
+    assert_eq!(ant.observation_space().shape(), vec![29]);
+
     let mut half_cheetah = HalfCheetahV5::builder()
         .reset_noise_scale(0.0)
         .exclude_current_positions_from_observation(false)
@@ -89,6 +122,17 @@ fn builders_expose_gymnasium_configuration() {
         .unwrap();
     let action = Tensor::zeros(3, candle_core::DType::F32, &Device::Cpu).unwrap();
     assert!(!hopper.step(action).unwrap().done);
+
+    let mut humanoid = HumanoidV5::builder()
+        .reset_noise_scale(0.0)
+        .include_cinert_in_observation(false)
+        .include_cvel_in_observation(false)
+        .include_qfrc_actuator_in_observation(false)
+        .include_cfrc_ext_in_observation(false)
+        .build()
+        .unwrap();
+    assert_eq!(humanoid.reset().unwrap().state.dims(), &[45]);
+    assert_eq!(humanoid.observation_space().shape(), vec![45]);
 }
 
 #[test]
@@ -101,6 +145,18 @@ fn builders_reject_invalid_configuration() {
     );
     assert!(HopperV5::builder().frame_skip(0).build().is_err());
     assert!(
+        AntV5::builder()
+            .contact_force_range((1.0, -1.0))
+            .build()
+            .is_err()
+    );
+    assert!(
+        HumanoidV5::builder()
+            .healthy_z_range((2.0, 1.0))
+            .build()
+            .is_err()
+    );
+    assert!(
         Walker2dV5::builder()
             .healthy_z_range((2.0, 1.0))
             .build()
@@ -110,6 +166,15 @@ fn builders_reject_invalid_configuration() {
     assert!(SumoAnts::builder().ring_radius(0.0).build().is_err());
     assert!(SumoAnts::builder().player_count(1).build().is_err());
     assert!(SumoAnts::builder().player_count(9).build().is_err());
+}
+
+#[test]
+fn humanoid_rejects_actions_outside_its_model_bounds() {
+    let mut humanoid = HumanoidV5::builder().build().unwrap();
+    humanoid.reset().unwrap();
+    let action = Tensor::full(0.5_f32, 17, &Device::Cpu).unwrap();
+
+    assert!(humanoid.step(action).is_err());
 }
 
 #[test]
@@ -236,8 +301,10 @@ fn sumo_ants_truncates_at_its_shared_time_limit() {
 #[cfg(feature = "rendering")]
 #[test]
 fn rendering_can_be_configured_on_every_builder() {
+    AntV5::builder().render(false).build().unwrap();
     HalfCheetahV5::builder().render(false).build().unwrap();
     HopperV5::builder().render(false).build().unwrap();
+    HumanoidV5::builder().render(false).build().unwrap();
     Walker2dV5::builder().render(false).build().unwrap();
     SumoAnts::builder().render(false).build().unwrap();
 }

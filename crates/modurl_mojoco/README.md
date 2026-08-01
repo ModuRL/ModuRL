@@ -4,8 +4,10 @@ Native Rust MuJoCo environments for [ModuRL](https://github.com/ModuRL/ModuRL), 
 
 Implemented Gymnasium v5 environments:
 
+- `AntV5` — observation `(105,)`, action `(8,)`
 - `HalfCheetahV5` — observation `(17,)`, action `(6,)`
 - `HopperV5` — observation `(11,)`, action `(3,)`
+- `HumanoidV5` — observation `(348,)`, action `(17,)`
 - `Walker2dV5` — observation `(17,)`, action `(6,)`
 
 Also included:
@@ -81,7 +83,7 @@ by all opponents in cyclic player order. A fall or ring-out ends the round for
 every row; eliminated players lose and all surviving players win. The shared
 time limit also truncates and resets every row together.
 
-The 1,000-step Gymnasium time limit is intentionally not built into the three
+The 1,000-step Gymnasium time limit is intentionally not built into the five
 Gymnasium-compatible environments; apply it in an environment wrapper.
 `SumoAnts` instead owns one shared configurable time limit because its players
 must truncate and reset together.
@@ -102,8 +104,8 @@ environment.reset()?;
 # Ok::<(), Box<dyn std::error::Error>>(());
 ```
 
-The same `.render(true)` option is available on `HopperV5`, `Walker2dV5`, and
-`SumoAnts`.
+The same `.render(true)` option is available on `AntV5`, `HopperV5`,
+`HumanoidV5`, `Walker2dV5`, and `SumoAnts`.
 The viewer updates after resets, exact state changes, and simulation steps. Closing
 the window stops rendering while leaving the environment usable. Interactive
 viewers should be created on the application's main thread. Without the
@@ -120,7 +122,7 @@ license and third-party notice files beside Cargo output automatically.
 
 ## Parity tests
 
-`python_tests/generate_parity.py` creates deterministic Gymnasium v5 fixtures using MuJoCo 3.9. Ordinary Rust tests use the committed JSON and therefore do not require Python:
+`python_tests/generate_parity.py` creates deterministic Gymnasium v5 fixtures and records the Gymnasium and MuJoCo versions used. Ordinary Rust tests use the committed JSON and therefore do not require Python:
 
 ```powershell
 cargo test

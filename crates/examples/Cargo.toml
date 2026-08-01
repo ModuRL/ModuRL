@@ -41,8 +41,10 @@ candle-nn = "0.11.0"
 
 [features]
 default = []
+ant = ["mujoco-environment"]
 half-cheetah = ["mujoco-environment"]
 hopper = ["mujoco-environment"]
+humanoid = ["mujoco-environment"]
 mujoco-environment = []
 sumo-ants = ["mujoco-environment"]
 walker2d = ["mujoco-environment"]
