@@ -12,8 +12,8 @@ Implemented Gymnasium v5 environments:
 
 Also included:
 
-- `SumoAnts` — shared-world competitive self-play with `N` Ant players,
-  observations `(N, 29 * N)`, and actions `(N, 8)`
+- `SumoAnts` — an OpenAI `sumo-ants-v0` compatibility environment with two
+  players, observations `(2, 137)`, and actions `(2, 8)`
 
 ## Installation
 
@@ -59,18 +59,16 @@ let environment = HopperV5::builder()
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`SumoAnts` implements `MultiGym` directly. Its batch rows are players in
-one MuJoCo simulation, not independent simulations. The player count defaults
-to two and can be set from two through eight:
+`SumoAnts` implements `MultiGym` directly. Its two batch rows are the two
+players in one MuJoCo simulation, not independent simulations:
 
 ```rust
 let mut environment = SumoAnts::builder()
     .device(&Device::Cpu)
-    .player_count(4)
     .build()?;
-let observations = environment.reset()?; // [4, 116]
+let observations = environment.reset()?; // [2, 137]
 let actions = candle_core::Tensor::zeros(
-    (4, 8),
+    (2, 8),
     candle_core::DType::F32,
     &Device::Cpu,
 )?;
@@ -78,15 +76,20 @@ let transition = environment.step(actions)?;
 # Ok::<(), Box<dyn std::error::Error>>(());
 ```
 
-Every observation presents the acting player's proprioception first, followed
-by all opponents in cyclic player order. A fall or ring-out ends the round for
-every row; eliminated players lose and all surviving players win. The shared
-time limit also truncates and resets every row together.
+Every observation contains the acting Ant's position, velocity, clipped contact
+forces, the opponent position and relative XY position, torso orientation,
+ring distances, and remaining steps. A fall or ring-out ends the round for both
+rows. The losing Ant receives `-1000`; the survivor receives `+1000` only if the
+Ants touched during the match, matching the original winner rule. At 500 steps,
+both players receive `-1000` and the match terminates.
+
+The rendered Ants and arena are fully opaque. The original environment used
+partial alpha for both; opacity is the only intentional visual deviation.
 
 The 1,000-step Gymnasium time limit is intentionally not built into the five
 Gymnasium-compatible environments; apply it in an environment wrapper.
-`SumoAnts` instead owns one shared configurable time limit because its players
-must truncate and reset together.
+`SumoAnts` instead owns the original shared 500-step terminal condition because
+its players must terminate and reset together.
 
 ## Rendering
 

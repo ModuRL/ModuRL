@@ -66,13 +66,13 @@ independent simulations. The environment must consume every player's action
 before it advances the shared world and must keep termination and reset
 behavior consistent across those rows.
 
-`SumoAnts` from `modurl_mojoco` uses this design. `player_count` Ants occupy one
-MuJoCo simulation, while the leading tensor dimension identifies the players:
+`SumoAnts` from `modurl_mojoco` uses this design. It matches the original
+two-player `sumo-ants-v0`; the leading tensor dimension identifies the players:
 
 ```rust,ignore
-let mut env = SumoAnts::builder().player_count(4).build()?;
-let states = env.reset()?; // [4, 116]
-let actions = agent.act(&states)?; // [4, 8]
+let mut env = SumoAnts::builder().build()?;
+let states = env.reset()?; // [2, 137]
+let actions = agent.act(&states)?; // [2, 8]
 let step = env.step(actions)?; // advances one shared MuJoCo game
 ```
 
@@ -89,14 +89,14 @@ batch. For example, four two-player `SumoAnts` games become eight batch rows:
 ```rust,ignore
 let games = (0..4)
     .map(|seed| {
-        let mut game = SumoAnts::builder().player_count(2).build()?;
+        let mut game = SumoAnts::builder().build()?;
         game.seed(seed);
         Ok(game)
     })
     .collect::<Result<Vec<_>, MujocoError>>()?;
 let mut env = StackedMultiGym::try_new(games)?;
 
-let states = env.reset()?; // [8, 58]
+let states = env.reset()?; // [8, 137]
 let actions = agent.act(&states)?; // [8, 8]
 let step = env.step(actions)?; // steps each shared game once
 ```

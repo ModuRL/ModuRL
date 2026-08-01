@@ -91,6 +91,31 @@ impl MujocoCore {
         self.data.xpos()[body_index]
     }
 
+    pub(crate) fn body_orientation(&self, body_index: usize) -> [f64; 9] {
+        self.data.xmat()[body_index]
+    }
+
+    pub(crate) fn contacts(&self) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
+        self.data
+            .contact()
+            .iter()
+            .map(|contact| (contact.geom1 as usize, contact.geom2 as usize, contact.dist))
+    }
+
+    pub(crate) fn set_geom_radius(&mut self, geom_index: usize, radius: f64) {
+        // SAFETY: changing a compiled geom's size is supported by MuJoCo. The
+        // model remains owned by this data instance and the geom index was
+        // established when the environment's XML was built.
+        unsafe {
+            self.data.model_mut().geom_size_mut()[geom_index][0] = radius;
+        }
+        self.data.forward();
+    }
+
+    pub(crate) fn random_uniform(&mut self, minimum: f64, maximum: f64) -> f64 {
+        self.rng.random_range(minimum..maximum)
+    }
+
     pub(crate) fn dt(&self) -> f64 {
         self.data.model_opt().timestep * self.frame_skip as f64
     }
@@ -135,35 +160,6 @@ impl MujocoCore {
             .initial_qvel
             .iter()
             .map(|value| value + self.rng.random_range(-noise_scale..noise_scale))
-            .collect::<Vec<_>>();
-        self.set_state(&qpos, &qvel)
-    }
-
-    pub(crate) fn reset_uniform_from(
-        &mut self,
-        initial_qpos: &[f64],
-        initial_qvel: &[f64],
-        noise_scale: f64,
-    ) -> Result<(), MujocoError> {
-        if initial_qpos.len() != self.nq() || initial_qvel.len() != self.nv() {
-            return Err(MujocoError::InvalidInput(format!(
-                "initial state shape mismatch: expected qpos ({},) and qvel ({},), got ({},) and ({},)",
-                self.nq(),
-                self.nv(),
-                initial_qpos.len(),
-                initial_qvel.len()
-            )));
-        }
-        if noise_scale == 0.0 {
-            return self.set_state(initial_qpos, initial_qvel);
-        }
-        let qpos = initial_qpos
-            .iter()
-            .map(|value| value + self.rng.random_range(-noise_scale..=noise_scale))
-            .collect::<Vec<_>>();
-        let qvel = initial_qvel
-            .iter()
-            .map(|value| value + self.rng.random_range(-noise_scale..=noise_scale))
             .collect::<Vec<_>>();
         self.set_state(&qpos, &qvel)
     }
