@@ -48,6 +48,7 @@ fn main() {
     let mut env = VectorizedGymWrapper::from(vec![env]);
     #[cfg(feature = "sumo-ants")]
     let mut env = mujoco::build_environment(&device);
+    let rollout_batch_size = 5 * env.num_envs();
     let observation_size = env.observation_space().shape()[0];
     let action_space = env.action_space();
     let action_shape = action_space.shape();
@@ -114,7 +115,7 @@ fn main() {
         .action_space(action_space)
         .network_info(networks)
         // SB3 A2C collects five steps from each environment per update.
-        .batch_size(if cfg!(feature = "sumo-ants") { 10 } else { 5 })
+        .batch_size(rollout_batch_size)
         .training_horizon(TOTAL_TIMESTEPS)
         .logging_info(&mut grapher)
         .device(device)

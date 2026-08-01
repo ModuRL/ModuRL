@@ -44,7 +44,7 @@ default = []
 half-cheetah = ["mujoco-environment"]
 hopper = ["mujoco-environment"]
 mujoco-environment = []
-sumo-ants = ["mujoco-environment", "modurl_mojoco/rendering"]
+sumo-ants = ["mujoco-environment"]
 walker2d = ["mujoco-environment"]
 cuda = [
     "modurl/cuda",

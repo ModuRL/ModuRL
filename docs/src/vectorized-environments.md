@@ -81,5 +81,34 @@ same policy to every player and provides self-play without creating duplicate
 physics simulations. `SumoAnts` ends and resets every player row together when
 the first Ant falls or leaves the ring, or when the shared time limit expires.
 
+## Stack Several Batched Environments
+
+`StackedMultiGym` combines several homogeneous `MultiGym` values into one flat
+batch. For example, four two-player `SumoAnts` games become eight batch rows:
+
+```rust,ignore
+let games = (0..4)
+    .map(|seed| {
+        let mut game = SumoAnts::builder().player_count(2).build()?;
+        game.seed(seed);
+        Ok(game)
+    })
+    .collect::<Result<Vec<_>, MujocoError>>()?;
+let mut env = StackedMultiGym::try_new(games)?;
+
+let states = env.reset()?; // [8, 58]
+let actions = agent.act(&states)?; // [8, 8]
+let step = env.step(actions)?; // steps each shared game once
+```
+
+Rows are ordered first by inner gym and then by that gym's own row order.
+`group_offsets()` maps the flattened rows back to their inner gyms. All inner
+gyms must expose the same observation and action shapes, and each inner gym
+keeps responsibility for its own auto-reset behavior.
+
+The MuJoCo training examples stack four `SumoAnts` games. They run headless
+with `--features sumo-ants`; use `--features sumo-ants,rendering` to render the
+first game while the other three remain headless.
+
 Next, read [Build a Custom Gym Environment](./custom-gym-environment.md) to
 provide your own single-environment implementation.

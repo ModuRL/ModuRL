@@ -60,10 +60,20 @@ pub fn build_environment(device: &Device) -> SelectedEnvironment {
 }
 
 #[cfg(feature = "sumo-ants")]
-pub fn build_environment(device: &Device) -> modurl_mojoco::SumoAnts {
-    modurl_mojoco::SumoAnts::builder()
-        .device(device)
-        .render(true)
-        .build()
-        .unwrap()
+pub fn build_environment(
+    device: &Device,
+) -> modurl::gym::StackedMultiGym<modurl_mojoco::SumoAnts, modurl_mojoco::SumoAntsInfo> {
+    const GAME_COUNT: usize = 4;
+
+    let games = (0..GAME_COUNT)
+        .map(|game_index| {
+            let builder = modurl_mojoco::SumoAnts::builder().device(device);
+            #[cfg(feature = "rendering")]
+            let builder = builder.render(game_index == 0);
+            let mut game = builder.build().unwrap();
+            game.seed(game_index as u64);
+            game
+        })
+        .collect();
+    modurl::gym::StackedMultiGym::try_new(games).unwrap()
 }

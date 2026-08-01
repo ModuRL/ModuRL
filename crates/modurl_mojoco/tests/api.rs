@@ -1,5 +1,5 @@
 use candle_core::{DType, Device, Tensor};
-use modurl::gym::{Gym, MultiGym};
+use modurl::gym::{Gym, MultiGym, StackedMultiGym};
 use modurl_mojoco::{HalfCheetahV5, HopperV5, SumoAnts, Walker2dV5};
 
 const SUMO_INITIAL_QPOS: [f64; 30] = [
@@ -151,6 +151,34 @@ fn sumo_ants_player_count_controls_the_shared_batch() {
     assert_eq!(transition.states.dims(), &[3, 87]);
     assert_eq!(transition.rewards.dims(), &[3]);
     assert_eq!(transition.infos.len(), 3);
+}
+
+#[test]
+fn stacked_sumo_ants_flattens_games_and_players_into_one_batch() {
+    let games = vec![
+        SumoAnts::builder().reset_noise_scale(0.0).build().unwrap(),
+        SumoAnts::builder().reset_noise_scale(0.0).build().unwrap(),
+    ];
+    let mut environment = StackedMultiGym::try_new(games).unwrap();
+
+    assert_eq!(environment.num_groups(), 2);
+    assert_eq!(environment.num_envs(), 4);
+    assert_eq!(environment.group_offsets(), &[0, 2, 4]);
+    assert_eq!(environment.reset().unwrap().dims(), &[4, 58]);
+
+    let actions = Tensor::zeros((4, 8), DType::F32, &Device::Cpu).unwrap();
+    let transition = environment.step(actions).unwrap();
+    assert_eq!(transition.states.dims(), &[4, 58]);
+    assert_eq!(transition.rewards.dims(), &[4]);
+    assert_eq!(transition.infos.len(), 4);
+    assert_eq!(
+        transition
+            .infos
+            .iter()
+            .map(|info| info.player_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 0, 1]
+    );
 }
 
 #[test]
