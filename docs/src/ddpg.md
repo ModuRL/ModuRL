@@ -15,6 +15,7 @@ The example supports HalfCheetah, Hopper, and Walker2d:
 ```sh
 cargo run --release -p examples --example ddpg_mujoco --features half-cheetah
 cargo run --release -p examples --example ddpg_mujoco --features hopper
+cargo run --release -p examples --example ddpg_mujoco --features sumo-ants
 cargo run --release -p examples --example ddpg_mujoco --features walker2d
 ```
 

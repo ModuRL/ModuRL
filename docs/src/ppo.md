@@ -1,7 +1,7 @@
 # PPO
 
 `PPOAgent` is a ModuRL agent that implements Proximal Policy Optimization
-(PPO). It collects transitions from a `VectorizedGym`, then updates a stochastic
+(PPO). It collects transitions from a `MultiGym`, then updates a stochastic
 policy and a value model from that experience.
 
 The getting-started program uses the separate-network PPO configuration. It
@@ -12,6 +12,17 @@ one shared model followed by separate policy and value heads.
 Start with [Getting Started](./getting-started.md) for the complete CartPole
 program. Then read [Understand a PPO Training Run](./understand-ppo-training.md)
 before changing its configuration.
+
+The continuous-control example can also train a shared policy through
+competitive SumoAnts self-play:
+
+```console
+cargo run --release -p examples --example ppo_mujoco --features sumo-ants
+```
+
+Both Ant player rows use the same actor and critic while interacting in one
+MuJoCo simulation. The other supported features are `half-cheetah`, `hopper`,
+and `walker2d`.
 
 PPO can use any compatible `Distribution` implementation. ModuRL currently
 supplies categorical and Gaussian distributions, and applications can define

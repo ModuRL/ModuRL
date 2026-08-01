@@ -77,7 +77,7 @@ from earlier versions of the policy.
 ## Read Collection Metrics
 
 `QCollectionLogEntry` describes the newest environment interaction, not a
-sample from replay. The agent emits it after every call to `VectorizedGym::step`,
+sample from replay. The agent emits it after every call to `MultiGym::step`,
 including during replay warm-up.
 
 - `collection_rewards`: one reward for each inner environment from the latest

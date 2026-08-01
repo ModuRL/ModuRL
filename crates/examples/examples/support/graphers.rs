@@ -10,6 +10,7 @@ use std::{
 use candle_core::{D, Device, Tensor};
 use modurl::prelude::*;
 use modurl_logger::{Aggregation, AggregationConfig, Logger, TensorBoardLogger, TerminalLogger};
+use modurl_mojoco::SumoAntsInfo;
 
 pub struct DQNGrapher {
     terminal: TerminalLogger,
@@ -212,7 +213,23 @@ fn tensorboard_log_dir(run_name: &str, environment_name: &str) -> PathBuf {
     ))
 }
 
-impl PPOLogger<RawRewardInfo<()>> for PPOMujocoGrapher {
+pub trait MujocoRewardInfo {
+    fn raw_reward(&self, collection_reward: f32) -> f32;
+}
+
+impl MujocoRewardInfo for RawRewardInfo<()> {
+    fn raw_reward(&self, _collection_reward: f32) -> f32 {
+        self.raw_reward.expect("step info must have a raw reward")
+    }
+}
+
+impl MujocoRewardInfo for SumoAntsInfo {
+    fn raw_reward(&self, collection_reward: f32) -> f32 {
+        collection_reward
+    }
+}
+
+impl<I: MujocoRewardInfo> PPOLogger<I> for PPOMujocoGrapher {
     fn log(&mut self, info: &PPOLogEntry) {
         let new_timestep = info.timestep != self.timestep;
         if new_timestep {
@@ -249,14 +266,18 @@ impl PPOLogger<RawRewardInfo<()>> for PPOMujocoGrapher {
         }
     }
 
-    fn log_collection(&mut self, info: &PPOCollectionLogEntry<RawRewardInfo<()>>) {
+    fn log_collection(&mut self, info: &PPOCollectionLogEntry<I>) {
         if self.running_episode_returns.len() != info.infos.len() {
             self.running_episode_returns = vec![0.0; info.infos.len()];
         }
-        for (episode_return, env_info) in self.running_episode_returns.iter_mut().zip(&info.infos) {
-            let raw_reward = env_info
-                .raw_reward
-                .expect("step info must have a raw reward");
+        let collection_rewards = info.collection_rewards.to_vec1::<f32>().unwrap();
+        for ((episode_return, env_info), collection_reward) in self
+            .running_episode_returns
+            .iter_mut()
+            .zip(&info.infos)
+            .zip(collection_rewards)
+        {
+            let raw_reward = env_info.raw_reward(collection_reward);
             self.raw_reward_sum += raw_reward;
             self.raw_reward_samples += 1;
             *episode_return += raw_reward;
@@ -297,13 +318,13 @@ impl A2CMujocoGrapher {
     }
 }
 
-impl A2CLogger<RawRewardInfo<()>> for A2CMujocoGrapher {
+impl<I: MujocoRewardInfo> A2CLogger<I> for A2CMujocoGrapher {
     fn log(&mut self, info: &A2CLogEntry) {
-        self.inner.log(info);
+        <PPOMujocoGrapher as PPOLogger<I>>::log(&mut self.inner, info);
     }
 
-    fn log_collection(&mut self, info: &A2CCollectionLogEntry<RawRewardInfo<()>>) {
-        self.inner.log_collection(info);
+    fn log_collection(&mut self, info: &A2CCollectionLogEntry<I>) {
+        <PPOMujocoGrapher as PPOLogger<I>>::log_collection(&mut self.inner, info);
     }
 }
 
@@ -546,7 +567,7 @@ impl DeterministicActorCriticGrapher {
             let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
             self.terminal
                 .log(
-                    episode.collection_timestep,
+                    entry.collection_timestep,
                     &[
                         ("Episode Return", &episode_return),
                         ("Episode Length", &episode_length),
@@ -578,5 +599,45 @@ impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
 
     fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
         self.log_collection(entry);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_grapher_uses_batch_timestep_for_completed_episodes() {
+        let mut grapher = DeterministicActorCriticGrapher::new();
+        let update_metric = Tensor::new(1.0_f32, &Device::Cpu).unwrap();
+        grapher
+            .terminal
+            .log(6_000, &[("Update", &update_metric)])
+            .unwrap();
+
+        grapher.log_collection(&DeterministicActorCriticCollectionLogEntry {
+            collection_rewards: Tensor::zeros(2, candle_core::DType::F32, &Device::Cpu).unwrap(),
+            infos: vec![(), ()],
+            collection_timestep: 6_000,
+            completed_episodes: vec![
+                DeterministicActorCriticEpisodeLogEntry {
+                    environment_index: 0,
+                    episode_return: 1.0,
+                    episode_length: 10,
+                    terminated: true,
+                    truncated: false,
+                    collection_timestep: 5_999,
+                },
+                DeterministicActorCriticEpisodeLogEntry {
+                    environment_index: 1,
+                    episode_return: -1.0,
+                    episode_length: 10,
+                    terminated: true,
+                    truncated: false,
+                    collection_timestep: 6_000,
+                },
+            ],
+            replay_len: 6_000,
+        });
     }
 }

@@ -1,6 +1,6 @@
 # Use Vectorized Environments
 
-`VectorizedGym` steps several environments with one batch of actions. PPO uses
+`MultiGym` steps several environments with one batch of actions. PPO uses
 this interface so one rollout step can collect several transitions.
 
 `VectorizedGymWrapper` turns a `Vec<G>` of ordinary `Gym` values into a
@@ -17,7 +17,7 @@ let mut env = VectorizedGymWrapper::from(envs);
 
 Before a manual loop, call `reset` once to receive one initial observation per
 inner environment. Pass that batch to `Agent::act`, then pass the returned batch
-of actions to `VectorizedGym::step`.
+of actions to `MultiGym::step`.
 
 ```rust,ignore
 let mut states = env.reset()?;
@@ -58,6 +58,28 @@ for the following action-selection step.
 
 `PPOAgent::learn` handles this distinction while it collects experience. You
 only need it when you write a loop that consumes transitions yourself.
+
+## Use One Shared World for Several Players
+
+A custom `MultiGym` can use batch rows for coupled players instead of
+independent simulations. The environment must consume every player's action
+before it advances the shared world and must keep termination and reset
+behavior consistent across those rows.
+
+`SumoAnts` from `modurl_mojoco` uses this design. `player_count` Ants occupy one
+MuJoCo simulation, while the leading tensor dimension identifies the players:
+
+```rust,ignore
+let mut env = SumoAnts::builder().player_count(4).build()?;
+let states = env.reset()?; // [4, 116]
+let actions = agent.act(&states)?; // [4, 8]
+let step = env.step(actions)?; // advances one shared MuJoCo game
+```
+
+For a shared-policy agent, acting on the whole observation batch applies the
+same policy to every player and provides self-play without creating duplicate
+physics simulations. `SumoAnts` ends and resets every player row together when
+the first Ant falls or leaves the ring, or when the shared time limit expires.
 
 Next, read [Build a Custom Gym Environment](./custom-gym-environment.md) to
 provide your own single-environment implementation.

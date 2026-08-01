@@ -53,9 +53,9 @@ this crate into GPL software.
 
 ## Gymnasium environment models
 
-The XML models in `assets/` are adapted from Gymnasium, copyright Farama
-Foundation contributors and originally developed in OpenAI Gym. Gymnasium is
-distributed under the MIT License:
+The XML models in `assets/` and the generated Ant bodies used by `SumoAnts` are
+adapted from Gymnasium, copyright Farama Foundation contributors and originally
+developed in OpenAI Gym. Gymnasium is distributed under the MIT License:
 
 > Permission is hereby granted, free of charge, to any person obtaining a copy
 > of this software and associated documentation files (the "Software"), to deal

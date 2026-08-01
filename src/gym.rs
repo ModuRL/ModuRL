@@ -22,22 +22,25 @@ pub trait Gym<I = ()> {
     fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
 }
 
-/// A vectorized version of Gym that can handle multiple environments in parallel.
-/// Actors take this as input.
-/// This is automatically implemented for any Gym.
-/// Reset is called automatically when an environment is done.
-pub trait VectorizedGym<I = ()> {
+/// A batched environment interface used by actors.
+///
+/// Most implementations batch independent environments. A custom
+/// implementation may instead batch coupled players from one shared world, as
+/// long as it accepts and returns one consistently ordered row per slot.
+/// [`VectorizedGymWrapper`] provides the independent-environment form for any
+/// [`Gym`]. Reset is called automatically when an environment is done.
+pub trait MultiGym<I = ()> {
     type Error;
     type SpaceError;
 
-    /// Steps every environment with batched environment actions. Discrete
+    /// Steps every batch slot with batched environment actions. Discrete
     /// actions are `[num_envs]`; box actions are
     /// `[num_envs, ...action_space().shape()]`.
-    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error>;
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error>;
     fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     fn num_envs(&self) -> usize;
-    /// Resets all environments and returns the initial states.
+    /// Resets all batch slots and returns their initial states.
     /// Only needs to be called once at the start of training.
     fn reset(&mut self) -> Result<Tensor, Self::Error>;
 }
@@ -78,7 +81,7 @@ pub struct StepInfo<I = ()> {
 }
 
 #[derive(Debug, Clone)]
-pub struct VectorizedStepInfo<I = ()> {
+pub struct MultiGymStepInfo<I = ()> {
     pub states: Tensor,
     pub rewards: Tensor,
     pub infos: Vec<I>,
@@ -88,7 +91,7 @@ pub struct VectorizedStepInfo<I = ()> {
     pub terminal_states: Vec<Option<Tensor>>,
 }
 
-impl<I> VectorizedStepInfo<I> {
+impl<I> MultiGymStepInfo<I> {
     pub fn transition_next_states(&self) -> candle_core::Result<Tensor> {
         let env_count = self.dones.len();
         let state_chunks = self.states.chunk(env_count, 0)?;
@@ -135,7 +138,7 @@ where
     }
 }
 
-impl<G, I> VectorizedGym<I> for VectorizedGymWrapper<G, I>
+impl<G, I> MultiGym<I> for VectorizedGymWrapper<G, I>
 where
     G: Gym<I>,
     G::Error: std::fmt::Debug,
@@ -145,7 +148,7 @@ where
 
     /// Steps with discrete actions `[num_envs]` or box actions
     /// `[num_envs, ...action_shape]`.
-    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error> {
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
         let env_count = self.envs.len();
         let actions: Vec<Tensor> = action.chunk(env_count, 0)?;
         // this keeps the dimension for env count it's just 1 now so we squeeze it later
@@ -182,7 +185,7 @@ where
         let states = Tensor::stack(&states, 0)?;
         let rewards = Tensor::from_vec(rewards, &[env_count], states.device())?;
 
-        Ok(VectorizedStepInfo {
+        Ok(MultiGymStepInfo {
             states,
             rewards,
             infos,
@@ -293,7 +296,7 @@ where
 }
 
 #[cfg(feature = "multithreading")]
-impl<G, O, A, SE, I> VectorizedGym<I> for MultithreadedVectorizedGymWrapper<G, O, A, SE, I>
+impl<G, O, A, SE, I> MultiGym<I> for MultithreadedVectorizedGymWrapper<G, O, A, SE, I>
 where
     G: Gym<I> + 'static,
     G::Error: Send + Sync + std::fmt::Debug,
@@ -307,7 +310,7 @@ where
 
     /// Steps with discrete actions `[num_envs]` or box actions
     /// `[num_envs, ...action_shape]`.
-    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error> {
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
         let batch_size = self.envs.len();
         let actions: Vec<Tensor> = action.chunk(batch_size, 0)?;
         let mut step_info_recievers = Vec::with_capacity(batch_size);
@@ -348,7 +351,7 @@ where
         let states = Tensor::stack(&states, 0)?;
         let rewards = Tensor::from_vec(rewards, &[batch_size], states.device())?;
 
-        Ok(VectorizedStepInfo {
+        Ok(MultiGymStepInfo {
             states,
             rewards,
             infos,

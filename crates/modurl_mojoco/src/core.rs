@@ -131,6 +131,35 @@ impl MujocoCore {
         self.set_state(&qpos, &qvel)
     }
 
+    pub(crate) fn reset_uniform_from(
+        &mut self,
+        initial_qpos: &[f64],
+        initial_qvel: &[f64],
+        noise_scale: f64,
+    ) -> Result<(), MujocoError> {
+        if initial_qpos.len() != self.nq() || initial_qvel.len() != self.nv() {
+            return Err(MujocoError::InvalidInput(format!(
+                "initial state shape mismatch: expected qpos ({},) and qvel ({},), got ({},) and ({},)",
+                self.nq(),
+                self.nv(),
+                initial_qpos.len(),
+                initial_qvel.len()
+            )));
+        }
+        if noise_scale == 0.0 {
+            return self.set_state(initial_qpos, initial_qvel);
+        }
+        let qpos = initial_qpos
+            .iter()
+            .map(|value| value + self.rng.random_range(-noise_scale..=noise_scale))
+            .collect::<Vec<_>>();
+        let qvel = initial_qvel
+            .iter()
+            .map(|value| value + self.rng.random_range(-noise_scale..=noise_scale))
+            .collect::<Vec<_>>();
+        self.set_state(&qpos, &qvel)
+    }
+
     pub(crate) fn reset_half_cheetah(&mut self, noise_scale: f64) -> Result<(), MujocoError> {
         if noise_scale == 0.0 {
             let qpos = self.initial_qpos.clone();

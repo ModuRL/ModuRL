@@ -16,7 +16,7 @@ use crate::{
         experience,
         experience_replay::{ExperienceReplay, ExperienceReplayError},
     },
-    gym::{VectorizedGym, VectorizedStepInfo},
+    gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ExpectationPolicy,
     objectives::{bellman_targets, clipped_value_loss},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
@@ -1487,7 +1487,7 @@ where
 
     fn learn_inner(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         num_timesteps: usize,
     ) -> Result<(), SACError<PE, GE, SE>> {
         let mut elapsed_timesteps = 0usize;
@@ -1513,7 +1513,7 @@ where
             )?;
             let step = env.step(actions.clone()).map_err(SACError::GymError)?;
             let transition_next_states = step.transition_next_states()?.to_dtype(self.dtype)?;
-            let VectorizedStepInfo {
+            let MultiGymStepInfo {
                 states: reset_next_states,
                 rewards,
                 infos,
@@ -1579,7 +1579,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.learn_inner(env, num_timesteps)

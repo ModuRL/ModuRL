@@ -1,21 +1,23 @@
 //! Gymnasium-compatible MuJoCo environments for [ModuRL](https://github.com/ModuRL/ModuRL).
 //!
 //! The environments use MuJoCo for physics through [`mujoco_rs`] and expose
-//! ModuRL's [`modurl::gym::Gym`] interface.
+//! ModuRL's [`modurl::gym::Gym`] and [`modurl::gym::MultiGym`] interfaces.
 
 mod core;
 mod half_cheetah;
 mod hopper;
+mod sumo_ants;
 mod walker2d;
 
 pub use half_cheetah::HalfCheetahV5;
 pub use hopper::HopperV5;
+pub use sumo_ants::{SumoAnts, SumoAntsInfo};
 pub use walker2d::Walker2dV5;
 
 /// Convenient imports for applications using this crate.
 pub mod prelude {
-    pub use crate::{HalfCheetahV5, HopperV5, MujocoError, Walker2dV5};
-    pub use modurl::gym::{Gym, ResetInfo, StepInfo};
+    pub use crate::{HalfCheetahV5, HopperV5, MujocoError, SumoAnts, SumoAntsInfo, Walker2dV5};
+    pub use modurl::gym::{Gym, MultiGym, MultiGymStepInfo, ResetInfo, StepInfo};
 }
 
 /// Errors returned while constructing or stepping an environment.

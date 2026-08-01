@@ -19,7 +19,7 @@ use crate::{
         experience,
         experience_replay::{ExperienceReplay, ExperienceReplayError},
     },
-    gym::{VectorizedGym, VectorizedStepInfo},
+    gym::{MultiGym, MultiGymStepInfo},
     objectives::bellman_targets,
     parameter_schedule::ScheduleProgress,
     spaces::{BoxSpace, Space},
@@ -832,7 +832,7 @@ where
 
     pub(crate) fn learn<I>(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         num_timesteps: usize,
         logger: &mut dyn DeterministicActorCriticLogger<I>,
     ) -> Result<(), DeterministicActorCriticError<GE, SE>> {
@@ -854,7 +854,7 @@ where
                 .step(actions.clone())
                 .map_err(DeterministicActorCriticError::GymError)?;
             let transition_next_states = step.transition_next_states()?.to_dtype(self.dtype)?;
-            let VectorizedStepInfo {
+            let MultiGymStepInfo {
                 states: reset_next_states,
                 rewards,
                 infos,

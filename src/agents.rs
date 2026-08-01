@@ -1,4 +1,4 @@
-use crate::gym::VectorizedGym;
+use crate::gym::MultiGym;
 use candle_core::Tensor;
 pub mod a2c;
 pub mod deterministic_actor_critic;
@@ -22,7 +22,7 @@ pub trait Agent<I = ()> {
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error>;
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
+        env: &mut dyn MultiGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error>;
 }

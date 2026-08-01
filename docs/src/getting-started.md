@@ -54,7 +54,7 @@ use modurl_gym::classic_control::cartpole::CartPoleV1;
 ```
 
 `modurl::prelude::*` brings the common ModuRL traits and training types into
-scope. `Agent` and `VectorizedGym` are traits that make `.learn()`,
+scope. `Agent` and `MultiGym` are traits that make `.learn()`,
 `.observation_space()`, and `.action_space()` available.
 
 ### A Few Terms

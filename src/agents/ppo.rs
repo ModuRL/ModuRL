@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 
 use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
-    gym::{VectorizedGym, VectorizedStepInfo},
+    gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ProbabilisticPolicy,
     objectives::clipped_value_loss,
     parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
@@ -1090,7 +1090,7 @@ where
     /// which collection should resume.
     fn prepare_rollout_collection(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
     ) -> Result<Tensor, PPOError<AE, GE, SE>> {
         let states = if let Some(states) = self.current_states.take() {
             states
@@ -1115,7 +1115,7 @@ where
     /// `[environment_count, ...observation_shape]` after each environment step.
     fn collect_rollout(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         next_states: &mut Tensor,
     ) -> Result<usize, PPOError<AE, GE, SE>> {
         let environment_count = env.num_envs();
@@ -1126,7 +1126,7 @@ where
                 .step(collection_action.environment_actions.clone())
                 .map_err(PPOError::GymError)?;
             let training_next_states = step_info.transition_next_states()?.to_dtype(self.dtype)?;
-            let VectorizedStepInfo {
+            let MultiGymStepInfo {
                 states: reset_or_next_states,
                 rewards,
                 infos,
@@ -1207,7 +1207,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
+        env: &mut dyn MultiGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
     ) -> Result<(), PPOError<AE, GE, SE>> {
         let mut elapsed_timesteps = 0;
@@ -1229,7 +1229,7 @@ mod tests {
     use super::*;
     use crate::{
         distributions::CategoricalDistribution,
-        gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
+        gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         spaces::Discrete,
     };
@@ -1436,7 +1436,7 @@ mod schedule_tests {
             test_support::{CountingOptimizer, FixedEnv},
         },
         distributions::{CategoricalDistribution, GaussianDistribution},
-        gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
+        gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymWrapper},
         models::{
             MLP,
             probabilistic_model::{ProbabilisticPolicyModel, ProbabilisticPolicyModelError},

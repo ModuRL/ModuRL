@@ -22,7 +22,7 @@ use super::{
     },
 };
 use crate::{
-    gym::VectorizedGym, models::probabilistic_model::ProbabilisticPolicy,
+    gym::MultiGym, models::probabilistic_model::ProbabilisticPolicy,
     parameter_schedule::ParameterSchedule, spaces::Space,
 };
 
@@ -264,7 +264,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps).map_err(A2CError::from)

@@ -44,9 +44,26 @@ default = []
 half-cheetah = ["mujoco-environment"]
 hopper = ["mujoco-environment"]
 mujoco-environment = []
+sumo-ants = ["mujoco-environment", "modurl_mojoco/rendering"]
 walker2d = ["mujoco-environment"]
-cuda = ["modurl/cuda", "modurl_gym/cuda", "modurl_mojoco/cuda", "candle-core/cuda"]
-cudnn = ["modurl/cudnn", "modurl_gym/cudnn", "modurl_mojoco/cudnn", "candle-core/cudnn"]
-metal = ["modurl/metal", "modurl_gym/metal", "modurl_mojoco/metal", "candle-core/metal"]
+cuda = [
+    "modurl/cuda",
+    "modurl_gym/cuda",
+    "modurl_mojoco/cuda",
+    "candle-core/cuda",
+]
+cudnn = [
+    "modurl/cudnn",
+    "modurl_gym/cudnn",
+    "modurl_mojoco/cudnn",
+    "candle-core/cudnn",
+]
+metal = [
+    "modurl/metal",
+    "modurl_gym/metal",
+    "modurl_mojoco/metal",
+    "candle-core/metal",
+]
 multithreading = ["modurl/multithreading"]
 mkl = ["modurl/mkl", "modurl_gym/mkl", "modurl_mojoco/mkl", "candle-core/mkl"]
+rendering = ["modurl_gym/rendering", "modurl_mojoco/rendering"]

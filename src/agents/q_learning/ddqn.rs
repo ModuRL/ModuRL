@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     agents::{Agent, ReplayDeviceStrategy},
-    gym::VectorizedGym,
+    gym::MultiGym,
     objectives::bellman_targets,
     parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, Space},
@@ -157,7 +157,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
+        env: &mut dyn MultiGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)
@@ -173,7 +173,7 @@ mod tests {
             q_learning::QLearningTarget,
             test_support::{CountingOptimizer, FixedEnv},
         },
-        gym::{VectorizedGym, VectorizedGymWrapper},
+        gym::{MultiGym, VectorizedGymWrapper},
         models::MLP,
         parameter_schedule::ConstantSchedule,
         spaces::Discrete,

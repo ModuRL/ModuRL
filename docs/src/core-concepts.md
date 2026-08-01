@@ -29,7 +29,7 @@ A single environment implements the `Gym` interface. It can reset, accept an
 action, and return the next observation and reward.
 
 Training usually needs more than one transition at a time, so ModuRL also uses
-vectorized environments. A `VectorizedGym` behaves like a batch of environments.
+vectorized environments. A `MultiGym` behaves like a batch of environments.
 When the agent sends one batch of actions, the vectorized environment steps each
 inner environment and returns a batch of results.
 
@@ -37,11 +37,11 @@ inner environment and returns a batch of results.
 example. It turns several single environments into one vectorized environment.
 With the `multithreading` feature enabled,
 `MultithreadedVectorizedGymWrapper` can step the inner environments on worker
-threads. Applications can also implement the public `VectorizedGym` trait when
+threads. Applications can also implement the public `MultiGym` trait when
 they need a different way to manage or step a batch of environments.
 
 Vectorized environments auto-reset each inner environment when it returns
-`done` or `truncated`. The `states` field in `VectorizedStepInfo` contains the
+`done` or `truncated`. The `states` field in `MultiGymStepInfo` contains the
 next state to continue training from. If an inner environment ended, that next
 state is already the reset state for the next episode.
 

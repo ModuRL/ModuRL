@@ -5,33 +5,12 @@ use modurl::prelude::*;
 #[path = "support/graphers.rs"]
 mod graphers;
 use graphers::DeterministicActorCriticGrapher;
+#[path = "support/mujoco.rs"]
+mod mujoco;
+use mujoco::ENVIRONMENT_NAME;
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
 const DTYPE: DType = DType::F32;
-
-#[cfg(not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d")))]
-compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
-
-#[cfg(any(
-    all(feature = "half-cheetah", feature = "hopper"),
-    all(feature = "half-cheetah", feature = "walker2d"),
-    all(feature = "hopper", feature = "walker2d"),
-))]
-compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
-
-#[cfg(feature = "half-cheetah")]
-use modurl_mojoco::HalfCheetahV5 as SelectedEnvironment;
-#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
-use modurl_mojoco::HopperV5 as SelectedEnvironment;
-#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
-use modurl_mojoco::Walker2dV5 as SelectedEnvironment;
-
-#[cfg(feature = "half-cheetah")]
-const ENVIRONMENT_NAME: &str = "HalfCheetah-v5";
-#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
-const ENVIRONMENT_NAME: &str = "Hopper-v5";
-#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
-const ENVIRONMENT_NAME: &str = "Walker2d-v5";
 
 fn actor(
     variables: &VarMap,
@@ -88,13 +67,13 @@ fn main() {
     println!("Environment: {ENVIRONMENT_NAME}");
     println!("Using device: {device:?}");
 
+    #[cfg(not(feature = "sumo-ants"))]
     let mut env = VectorizedGymWrapper::from(vec![TimeLimitGym::new(
-        SelectedEnvironment::builder()
-            .device(&device)
-            .build()
-            .unwrap(),
+        mujoco::build_environment(&device),
         1_000,
     )]);
+    #[cfg(feature = "sumo-ants")]
+    let mut env = mujoco::build_environment(&device);
     let observation_space = env.observation_space();
     let environment_action_space = env.action_space();
     let observation_size = observation_space.shape()[0];

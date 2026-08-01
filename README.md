@@ -50,10 +50,10 @@ behind small public contracts:
 
 - **Agents coordinate training.** An `Agent` owns the algorithm loop and brings
   together models, optimizers, schedules, rollout or replay storage, action
-  selection, and update logic. It learns against `VectorizedGym`, not a
+  selection, and update logic. It learns against `MultiGym`, not a
   concrete environment type.
 - **Single and batched environments are separate boundaries.** `Gym` describes
-  one environment. `VectorizedGym` describes batched collection. The supplied
+  one environment. `MultiGym` describes batched collection. The supplied
   synchronous and multithreaded wrappers auto-reset completed environments
   while preserving their terminal observations.
 - **Models produce tensors; policies give them meaning.** Candle modules remain
@@ -129,7 +129,7 @@ the other supported algorithms and environments.
 | --- | --- | --- |
 | `modurl` | Agents, models, distributions, buffers, spaces, schedules, and environment traits | MIT |
 | `modurl_gym` | CartPole, Mountain Car, LunarLander, rendering, and Gym utilities | MIT |
-| `modurl_mojoco` | HalfCheetah, Hopper, and Walker2d MuJoCo environments | MIT; third-party notices apply |
+| `modurl_mojoco` | HalfCheetah, Hopper, Walker2d, and shared-world SumoAnts MuJoCo environments | MIT; third-party notices apply |
 | `modurl_ale` | Atari Learning Environment integration and wrappers | GPL-2.0-only |
 | `modurl_logger` | Terminal graphs and TensorBoard event logging | MIT |
 | `examples` | Runnable training programs; not published as a crate | MIT |

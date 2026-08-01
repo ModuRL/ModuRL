@@ -8,6 +8,11 @@ Implemented Gymnasium v5 environments:
 - `HopperV5` — observation `(11,)`, action `(3,)`
 - `Walker2dV5` — observation `(17,)`, action `(6,)`
 
+Also included:
+
+- `SumoAnts` — shared-world competitive self-play with `N` Ant players,
+  observations `(N, 29 * N)`, and actions `(N, 8)`
+
 ## Installation
 
 MuJoCo 3.9 is automatically downloaded by `mujoco-rs` on Windows and Linux. A clone of this repository works without extra configuration because [`.cargo/config.toml`](../../.cargo/config.toml) supplies a project-local cache. On Windows, this crate's build script also copies `mujoco.dll` next to Cargo-built executables and tests.
@@ -52,7 +57,34 @@ let environment = HopperV5::builder()
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The 1,000-step Gymnasium time limit is intentionally not built into the environments; apply it in an environment wrapper.
+`SumoAnts` implements `MultiGym` directly. Its batch rows are players in
+one MuJoCo simulation, not independent simulations. The player count defaults
+to two and can be set from two through eight:
+
+```rust
+let mut environment = SumoAnts::builder()
+    .device(&Device::Cpu)
+    .player_count(4)
+    .build()?;
+let observations = environment.reset()?; // [4, 116]
+let actions = candle_core::Tensor::zeros(
+    (4, 8),
+    candle_core::DType::F32,
+    &Device::Cpu,
+)?;
+let transition = environment.step(actions)?;
+# Ok::<(), Box<dyn std::error::Error>>(());
+```
+
+Every observation presents the acting player's proprioception first, followed
+by all opponents in cyclic player order. A fall or ring-out ends the round for
+every row; eliminated players lose and all surviving players win. The shared
+time limit also truncates and resets every row together.
+
+The 1,000-step Gymnasium time limit is intentionally not built into the three
+Gymnasium-compatible environments; apply it in an environment wrapper.
+`SumoAnts` instead owns one shared configurable time limit because its players
+must truncate and reset together.
 
 ## Rendering
 
@@ -70,7 +102,8 @@ environment.reset()?;
 # Ok::<(), Box<dyn std::error::Error>>(());
 ```
 
-The same `.render(true)` option is available on `HopperV5` and `Walker2dV5`.
+The same `.render(true)` option is available on `HopperV5`, `Walker2dV5`, and
+`SumoAnts`.
 The viewer updates after resets, exact state changes, and simulation steps. Closing
 the window stops rendering while leaving the environment usable. Interactive
 viewers should be created on the application's main thread. Without the
