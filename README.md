@@ -87,7 +87,7 @@ every tensor backend.
 | Algorithms | PPO, A2C, SAC, DDPG, TD3, DQN, and Double DQN |
 | Policies and models | Categorical and Gaussian policies, transformed distributions, MLPs, dueling networks, and user-supplied Candle modules |
 | Experience | Rollout buffers, replay buffers, configurable replay devices, and parameter schedules |
-| Environments | Single, vectorized, and multithreaded interfaces; CartPole, Mountain Car, LunarLander, MuJoCo, and Atari integrations |
+| Environments | Single, vectorized, and multithreaded interfaces; Acrobot, BipedalWalker, CartPole, LunarLander, Mountain Car, Pendulum, MuJoCo, and Atari integrations |
 | Wrappers | Time limits, observation and reward normalization, reward clipping, frame stacking, max-and-skip, and raw reward recording |
 | Backends | CPU, CUDA, cuDNN, Metal, and MKL through Candle |
 | Logging | Algorithm-specific hooks, terminal graphs, and TensorBoard event output |
@@ -128,7 +128,7 @@ the other supported algorithms and environments.
 | Crate | Purpose | License |
 | --- | --- | --- |
 | `modurl` | Agents, models, distributions, buffers, spaces, schedules, and environment traits | MIT |
-| `modurl_gym` | CartPole, Mountain Car, LunarLander, rendering, and Gym utilities | MIT |
+| `modurl_gym` | Acrobot, BipedalWalker, CartPole, LunarLander, Mountain Car, Pendulum, rendering, and Gym utilities | MIT |
 | `modurl_mojoco` | Ant, HalfCheetah, Hopper, Humanoid, Walker2d, and shared-world SumoAnts MuJoCo environments | MIT; third-party notices apply |
 | `modurl_ale` | Atari Learning Environment integration and wrappers | GPL-2.0-only |
 | `modurl_logger` | Terminal graphs and TensorBoard event logging | MIT |

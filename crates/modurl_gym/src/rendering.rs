@@ -34,8 +34,11 @@ impl Renderer {
     }
 
     pub fn rect(&mut self, x: usize, y: usize, rw: usize, rh: usize, color: u32) {
-        let x_end = (x + rw).min(self.w);
-        let y_end = (y + rh).min(self.h);
+        if x >= self.w || y >= self.h || rw == 0 || rh == 0 {
+            return;
+        }
+        let x_end = x.saturating_add(rw).min(self.w);
+        let y_end = y.saturating_add(rh).min(self.h);
 
         for row in y..y_end {
             let start = row * self.w + x;
@@ -103,6 +106,27 @@ impl Renderer {
                 if dx * dx + dy * dy <= radius_sq {
                     self.buffer[y * self.w + x] = color;
                 }
+            }
+        }
+    }
+
+    pub fn line(&mut self, start: (f32, f32), end: (f32, f32), width: usize, color: u32) {
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as usize;
+        let half = width / 2;
+        for step in 0..=steps {
+            let fraction = step as f32 / steps as f32;
+            let x = (start.0 + dx * fraction).round() as isize;
+            let y = (start.1 + dy * fraction).round() as isize;
+            if x >= 0 && y >= 0 {
+                self.rect(
+                    (x as usize).saturating_sub(half),
+                    (y as usize).saturating_sub(half),
+                    width.max(1),
+                    width.max(1),
+                    color,
+                );
             }
         }
     }
