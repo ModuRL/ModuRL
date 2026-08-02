@@ -14,6 +14,8 @@ Also included:
 
 - `SumoAnts` — an OpenAI `sumo-ants-v0` compatibility environment with two
   players, observations `(2, 137)`, and actions `(2, 8)`
+- `SumoHumans` — an OpenAI `sumo-humans-v0` compatibility environment with two
+  players, observations `(2, 395)`, and actions `(2, 17)`
 
 ## Installation
 
@@ -59,8 +61,8 @@ let environment = HopperV5::builder()
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`SumoAnts` implements `MultiGym` directly. Its two batch rows are the two
-players in one MuJoCo simulation, not independent simulations:
+`SumoAnts` and `SumoHumans` implement `MultiGym` directly. Their two batch rows
+are the two players in one MuJoCo simulation, not independent simulations:
 
 ```rust
 let mut environment = SumoAnts::builder()
@@ -83,13 +85,18 @@ rows. The losing Ant receives `-1000`; the survivor receives `+1000` only if the
 Ants touched during the match, matching the original winner rule. At 500 steps,
 both players receive `-1000` and the match terminates.
 
+`SumoHumans` follows the same shared-match contract with the original
+HumanoidFighter observation and reward layout. Each player controls 17
+actuators and observes its own dynamics, the opponent pose and relative
+position, torso orientation, ring distances, and remaining steps.
+
 The rendered Ants and arena are fully opaque. The original environment used
 partial alpha for both; opacity is the only intentional visual deviation.
 
 The 1,000-step Gymnasium time limit is intentionally not built into the five
 Gymnasium-compatible environments; apply it in an environment wrapper.
-`SumoAnts` instead owns the original shared 500-step terminal condition because
-its players must terminate and reset together.
+The sumo environments instead own the original shared 500-step terminal
+condition because their players must terminate and reset together.
 
 ## Rendering
 
@@ -108,7 +115,7 @@ environment.reset()?;
 ```
 
 The same `.render(true)` option is available on `AntV5`, `HopperV5`,
-`HumanoidV5`, `Walker2dV5`, and `SumoAnts`.
+`HumanoidV5`, `Walker2dV5`, `SumoAnts`, and `SumoHumans`.
 The viewer updates after resets, exact state changes, and simulation steps. Closing
 the window stops rendering while leaving the environment usable. Interactive
 viewers should be created on the application's main thread. Without the

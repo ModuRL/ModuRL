@@ -9,6 +9,7 @@ mod half_cheetah;
 mod hopper;
 mod humanoid;
 mod sumo_ants;
+mod sumo_humans;
 mod walker2d;
 
 pub use ant::AntV5;
@@ -16,12 +17,14 @@ pub use half_cheetah::HalfCheetahV5;
 pub use hopper::HopperV5;
 pub use humanoid::HumanoidV5;
 pub use sumo_ants::{SumoAnts, SumoAntsInfo};
+pub use sumo_humans::{SumoHumans, SumoHumansInfo};
 pub use walker2d::Walker2dV5;
 
 /// Convenient imports for applications using this crate.
 pub mod prelude {
     pub use crate::{
-        AntV5, HalfCheetahV5, HopperV5, HumanoidV5, MujocoError, SumoAnts, SumoAntsInfo, Walker2dV5,
+        AntV5, HalfCheetahV5, HopperV5, HumanoidV5, MujocoError, SumoAnts, SumoAntsInfo,
+        SumoHumans, SumoHumansInfo, Walker2dV5,
     };
     pub use modurl::gym::{Gym, MultiGym, MultiGymStepInfo, ResetInfo, StepInfo};
 }

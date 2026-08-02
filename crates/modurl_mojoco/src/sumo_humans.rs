@@ -10,21 +10,24 @@ use crate::{
     core::{MujocoCore, validate_noise_scale},
 };
 
+const MODEL: &str = include_str!("../assets/sumo_humans.xml");
 const PLAYER_COUNT: usize = 2;
-const ACTION_SIZE: usize = 8;
-const QPOS_SIZE: usize = 15;
-const QVEL_SIZE: usize = 14;
+const ACTION_SIZE: usize = 17;
+const QPOS_SIZE: usize = 24;
+const QVEL_SIZE: usize = 23;
 const BODIES_PER_PLAYER: usize = 13;
-const GEOMS_PER_PLAYER: usize = 13;
-const OBSERVATION_SIZE: usize = 137;
+const GEOMS_PER_PLAYER: usize = 18;
+const OBSERVATION_SIZE: usize = 395;
 const ARENA_GEOM_INDEX: usize = 3;
 const FIRST_PLAYER_GEOM_INDEX: usize = 4;
 const ARENA_HEIGHT: f64 = 0.5;
+const ACTION_MINIMUM: f64 = -0.4;
+const ACTION_MAXIMUM: f64 = 0.4;
 const GOAL_REWARD: f64 = 1_000.0;
 
-/// Per-player metadata from a [`SumoAnts`] transition.
+/// Per-player metadata from a [`SumoHumans`] transition.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SumoAntsInfo {
+pub struct SumoHumansInfo {
     /// The row in the observation and action batches.
     pub player_index: usize,
     /// The player's torso distance from the center of the ring.
@@ -37,11 +40,11 @@ pub struct SumoAntsInfo {
     pub reward_contact: f32,
     /// The standing or fallen survival component.
     pub reward_survive: f32,
-    /// The complete non-terminal AntFighter movement reward.
+    /// The complete non-terminal HumanoidFighter movement reward.
     pub reward_move: f32,
     /// The terminal goal-reward component.
     pub reward_remaining: f32,
-    /// Whether the AntFighter's own standing test marked it done.
+    /// Whether the HumanoidFighter's own standing test marked it done.
     pub agent_done: bool,
     /// Whether this player received the original environment's winner flag.
     pub won: bool,
@@ -49,12 +52,12 @@ pub struct SumoAntsInfo {
     pub lost: bool,
 }
 
-/// A compatibility port of OpenAI's two-player `sumo-ants-v0` environment.
+/// A compatibility port of OpenAI's two-player `sumo-humans-v0` environment.
 ///
 /// The two batch rows are the two players in one shared match. The model,
 /// reset distribution, observations, rewards, contact-gated winner bonus, and
 /// 500-step terminal condition follow the original Gym environment.
-pub struct SumoAnts {
+pub struct SumoHumans {
     core: MujocoCore,
     device: Device,
     min_radius: f64,
@@ -69,14 +72,14 @@ pub struct SumoAnts {
 }
 
 #[bon]
-impl SumoAnts {
-    /// Creates a two-player `sumo-ants-v0` compatible environment.
+impl SumoHumans {
+    /// Creates a two-player `sumo-humans-v0` compatible environment.
     #[builder]
     pub fn new(
         #[builder(default = &Device::Cpu)] device: &Device,
         #[builder(default = 5)] frame_skip: usize,
-        #[builder(default = 2.5)] min_radius: f64,
-        #[builder(default = 4.5)] max_radius: f64,
+        #[builder(default = 1.5)] min_radius: f64,
+        #[builder(default = 3.5)] max_radius: f64,
         #[builder(default = 0.1)] reset_noise_scale: f64,
         #[builder(default = 1.0)] move_reward_weight: f64,
         #[builder(default = 500)] max_episode_steps: usize,
@@ -106,14 +109,14 @@ impl SumoAnts {
             ));
         }
 
-        let core = MujocoCore::new(&build_model(), frame_skip, device, render)?;
+        let core = MujocoCore::new(MODEL, frame_skip, device, render)?;
         if core.nq() != PLAYER_COUNT * QPOS_SIZE
             || core.nv() != PLAYER_COUNT * QVEL_SIZE
             || core.nu() != PLAYER_COUNT * ACTION_SIZE
             || core.nbody() != 1 + PLAYER_COUNT * BODIES_PER_PLAYER
         {
             return Err(MujocoError::InvalidInput(format!(
-                "SumoAnts model shape mismatch: got nq={}, nv={}, nu={}, nbody={}",
+                "SumoHumans model shape mismatch: got nq={}, nv={}, nu={}, nbody={}",
                 core.nq(),
                 core.nv(),
                 core.nu(),
@@ -213,6 +216,21 @@ impl SumoAnts {
                 observation.extend_from_slice(&qpos[self_qpos..self_qpos + QPOS_SIZE]);
                 observation.extend_from_slice(&qvel[self_qvel..self_qvel + QVEL_SIZE]);
                 observation.extend(
+                    self.core.cinert()[body_start..body_start + BODIES_PER_PLAYER]
+                        .iter()
+                        .flatten()
+                        .copied(),
+                );
+                observation.extend(
+                    self.core.cvel()[body_start..body_start + BODIES_PER_PLAYER]
+                        .iter()
+                        .flatten()
+                        .copied(),
+                );
+                observation.extend_from_slice(
+                    &self.core.qfrc_actuator()[self_qvel..self_qvel + QVEL_SIZE],
+                );
+                observation.extend(
                     self.core.cfrc_ext()[body_start..body_start + BODIES_PER_PLAYER]
                         .iter()
                         .flatten()
@@ -243,15 +261,15 @@ impl SumoAnts {
     }
 
     fn fallen(&self, player: usize) -> bool {
-        self.core.qpos()[player * QPOS_SIZE + 2] <= ARENA_HEIGHT + 0.3
+        self.core.qpos()[player * QPOS_SIZE + 2] <= ARENA_HEIGHT + 0.5
     }
 
     fn agent_done(&self, player: usize) -> bool {
-        self.core.qpos()[player * QPOS_SIZE + 2] <= ARENA_HEIGHT + 0.28
+        self.core.qpos()[player * QPOS_SIZE + 2] <= ARENA_HEIGHT + 0.5
     }
 
     fn standing(&self, player: usize) -> bool {
-        self.core.qpos()[player * QPOS_SIZE + 2] >= ARENA_HEIGHT + 0.28
+        self.core.qpos()[player * QPOS_SIZE + 2] >= ARENA_HEIGHT + 1.0
     }
 
     fn past_arena(&self, player: usize) -> bool {
@@ -281,19 +299,21 @@ impl SumoAnts {
     }
 }
 
-impl MultiGym<SumoAntsInfo> for SumoAnts {
+impl MultiGym<SumoHumansInfo> for SumoHumans {
     type Error = MujocoError;
     type SpaceError = candle_core::Error;
 
-    /// Steps both players with one action batch shaped `[2, 8]`.
-    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<SumoAntsInfo>, Self::Error> {
+    /// Steps both players with one action batch shaped `[2, 17]`.
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<SumoHumansInfo>, Self::Error> {
         if action.dims() != [PLAYER_COUNT, ACTION_SIZE] {
             return Err(MujocoError::InvalidInput(format!(
                 "action shape mismatch: expected ({PLAYER_COUNT}, {ACTION_SIZE}), got {:?}",
                 action.dims()
             )));
         }
-        let action_values = self.core.step_bounded(&action.flatten_all()?, -1.0, 1.0)?;
+        let action_values =
+            self.core
+                .step_bounded(&action.flatten_all()?, ACTION_MINIMUM, ACTION_MAXIMUM)?;
         self.episode_steps += 1;
         self.core.render()?;
 
@@ -367,7 +387,7 @@ impl MultiGym<SumoAntsInfo> for SumoAnts {
             let survive = if self.standing(player) { 5.0 } else { -5.0 };
             let move_reward = center_reward - control_cost - contact_cost + survive;
             rewards[player] = goal_rewards[player] + self.move_reward_weight * move_reward;
-            infos.push(SumoAntsInfo {
+            infos.push(SumoHumansInfo {
                 player_index: player,
                 distance_from_center: distances[player] as f32,
                 reward_center: center_reward as f32,
@@ -413,8 +433,8 @@ impl MultiGym<SumoAntsInfo> for SumoAnts {
     fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
         Box::new(BoxSpace::new_with_universal_bounds(
             vec![ACTION_SIZE],
-            -1.0,
-            1.0,
+            ACTION_MINIMUM as f32,
+            ACTION_MAXIMUM as f32,
             &self.device,
         ))
     }
@@ -426,103 +446,6 @@ impl MultiGym<SumoAntsInfo> for SumoAnts {
     fn reset(&mut self) -> Result<Tensor, Self::Error> {
         self.reset_game()
     }
-}
-
-fn build_model() -> String {
-    let mut model = String::from(
-        r#"<mujoco model="sumo_ants">
-  <compiler angle="degree" coordinate="local" inertiafromgeom="true"/>
-  <option integrator="RK4" timestep="0.003" solver="PGS" iterations="1000"/>
-  <default>
-    <joint armature="1" damping="1" limited="true"/>
-    <default class="ant">
-      <joint armature="1" damping="1" limited="true"/>
-      <geom conaffinity="1" condim="3" density="5.0" friction="1 0.5 0.5" margin="0.01" rgba="0.8 0.6 0.4 1"/>
-    </default>
-  </default>
-  <asset>
-    <texture builtin="gradient" height="100" rgb1="1 1 1" rgb2="0 0 0" type="skybox" width="100"/>
-    <texture builtin="flat" height="1278" mark="cross" markrgb="1 1 1" name="texgeom" random="0.01" rgb1="0.1 0.5 0.1" rgb2="0.1 0.4 0.1" type="cube" width="127"/>
-    <texture builtin="checker" height="100" name="texplane" rgb1="0 0.5 0.5" rgb2="0 0.6 0.6" type="2d" width="100"/>
-    <material name="MatPlane" reflectance="0.5" shininess="1" specular="1" texrepeat="60 60" texture="texplane"/>
-    <material name="geom" texture="texgeom" texuniform="true"/>
-  </asset>
-  <worldbody>
-    <light cutoff="100" diffuse="1 1 1" dir="0 0 -1.3" directional="true" exponent="1" pos="0 0 1.3" specular=".1 .1 .1"/>
-    <geom contype="1" conaffinity="1" friction="1 .1 .1" condim="3" material="MatPlane" name="floor" pos="0 0 0" rgba="0.8 0.9 0.8 1" size="20 20 0.125" type="plane"/>
-    <geom fromto="4 -5 0 4 5 0" name="rightgoal" rgba="0.6 0 0 0" size=".03" type="cylinder"/>
-    <geom fromto="-4 -5 0 -4 5 0" name="leftgoal" rgba="0.6 0 0 0" size=".03" type="cylinder"/>
-    <geom conaffinity="1" condim="3" contype="1" friction="1 .1 .1" name="arena" size="4.5 .25" type="cylinder" pos="0 0 .25" rgba="0.3 0.3 0.5 1"/>
-"#,
-    );
-    model.push_str(&ant_body(0, -1.0));
-    model.push_str(&ant_body(1, 1.0));
-    model.push_str("  </worldbody>\n  <actuator>\n");
-    for player in 0..PLAYER_COUNT {
-        for joint in [
-            "hip_4", "ankle_4", "hip_1", "ankle_1", "hip_2", "ankle_2", "hip_3", "ankle_3",
-        ] {
-            model.push_str(&format!(
-                "    <motor ctrllimited=\"true\" ctrlrange=\"-1 1\" joint=\"agent{player}_{joint}\" gear=\"150\"/>\n"
-            ));
-        }
-    }
-    model.push_str("  </actuator>\n</mujoco>\n");
-    model
-}
-
-fn ant_body(player: usize, x: f64) -> String {
-    format!(
-        r#"    <body name="agent{player}_torso" pos="{x} 0 2.5" euler="0 0 180" childclass="ant">
-      <geom name="agent{player}_torso_geom" pos="0 0 0" size="0.25" type="sphere"/>
-      <joint armature="0" damping="0" limited="false" margin="0.01" name="agent{player}_root" pos="0 0 0" range="-30 30" type="free"/>
-      <body name="agent{player}_front_left_leg" pos="0 0 0">
-        <geom fromto="0 0 0 .2 .2 0" name="agent{player}_aux_1_geom" size=".08" type="capsule"/>
-        <body name="agent{player}_aux_1" pos=".2 .2 0">
-          <joint axis="0 0 1" name="agent{player}_hip_1" pos="0 0 0" range="-30 30" type="hinge"/>
-          <geom fromto="0 0 0 .2 .2 0" name="agent{player}_left_leg_geom" size=".08" type="capsule"/>
-          <body pos=".2 .2 0">
-            <joint axis="-1 1 0" name="agent{player}_ankle_1" pos="0 0 0" range="30 70" type="hinge"/>
-            <geom fromto="0 0 0 .4 .4 0" name="agent{player}_left_ankle_geom" size=".08" type="capsule"/>
-          </body>
-        </body>
-      </body>
-      <body name="agent{player}_front_right_leg" pos="0 0 0">
-        <geom fromto="0 0 0 -.2 .2 0" name="agent{player}_aux_2_geom" size=".08" type="capsule"/>
-        <body name="agent{player}_aux_2" pos="-.2 .2 0">
-          <joint axis="0 0 1" name="agent{player}_hip_2" pos="0 0 0" range="-30 30" type="hinge"/>
-          <geom fromto="0 0 0 -.2 .2 0" name="agent{player}_right_leg_geom" size=".08" type="capsule"/>
-          <body pos="-.2 .2 0">
-            <joint axis="1 1 0" name="agent{player}_ankle_2" pos="0 0 0" range="-70 -30" type="hinge"/>
-            <geom fromto="0 0 0 -.4 .4 0" name="agent{player}_right_ankle_geom" size=".08" type="capsule"/>
-          </body>
-        </body>
-      </body>
-      <body name="agent{player}_back_leg" pos="0 0 0">
-        <geom fromto="0 0 0 -.2 -.2 0" name="agent{player}_aux_3_geom" size=".08" type="capsule"/>
-        <body name="agent{player}_aux_3" pos="-.2 -.2 0">
-          <joint axis="0 0 1" name="agent{player}_hip_3" pos="0 0 0" range="-30 30" type="hinge"/>
-          <geom fromto="0 0 0 -.2 -.2 0" name="agent{player}_back_leg_geom" size=".08" type="capsule"/>
-          <body pos="-.2 -.2 0">
-            <joint axis="-1 1 0" name="agent{player}_ankle_3" pos="0 0 0" range="-70 -30" type="hinge"/>
-            <geom fromto="0 0 0 -.4 -.4 0" name="agent{player}_third_ankle_geom" size=".08" type="capsule"/>
-          </body>
-        </body>
-      </body>
-      <body name="agent{player}_right_back_leg" pos="0 0 0">
-        <geom fromto="0 0 0 .2 -.2 0" name="agent{player}_aux_4_geom" size=".08" type="capsule"/>
-        <body name="agent{player}_aux_4" pos=".2 -.2 0">
-          <joint axis="0 0 1" name="agent{player}_hip_4" pos="0 0 0" range="-30 30" type="hinge"/>
-          <geom fromto="0 0 0 .2 -.2 0" name="agent{player}_rightback_leg_geom" size=".08" type="capsule"/>
-          <body pos=".2 -.2 0">
-            <joint axis="1 1 0" name="agent{player}_ankle_4" pos="0 0 0" range="30 70" type="hinge"/>
-            <geom fromto="0 0 0 .4 -.4 0" name="agent{player}_fourth_ankle_geom" size=".08" type="capsule"/>
-          </body>
-        </body>
-      </body>
-    </body>
-"#
-    )
 }
 
 fn validate_positive(name: &str, value: f64) -> Result<(), MujocoError> {
@@ -540,24 +463,27 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use modurl::gym::MultiGym;
 
-    use super::SumoAnts;
+    use super::SumoHumans;
 
     #[test]
     fn survivor_bonus_requires_and_uses_the_contact_latch() {
-        let mut environment = SumoAnts::builder()
-            .min_radius(4.5)
-            .max_radius(4.5)
+        let mut environment = SumoHumans::builder()
+            .min_radius(3.5)
+            .max_radius(3.5)
             .reset_noise_scale(0.0)
             .build()
             .unwrap();
-        let qpos = [
-            5.0, 0.0, 2.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-            2.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        ];
-        environment.set_state(&qpos, &[0.0; 28]).unwrap();
+        let mut qpos = [0.0; 48];
+        qpos[0] = 4.0;
+        qpos[2] = 2.5;
+        qpos[3] = 1.0;
+        qpos[24] = 1.0;
+        qpos[26] = 2.5;
+        qpos[30] = 1.0;
+        environment.set_state(&qpos, &[0.0; 46]).unwrap();
         environment.agent_contacts = true;
 
-        let actions = Tensor::zeros((2, 8), DType::F32, &Device::Cpu).unwrap();
+        let actions = Tensor::zeros((2, 17), DType::F32, &Device::Cpu).unwrap();
         let transition = environment.step(actions).unwrap();
 
         assert_eq!(transition.infos[0].reward_remaining, -1_000.0);

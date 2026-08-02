@@ -1,10 +1,16 @@
 use candle_core::{DType, Device, Tensor};
 use modurl::gym::{Gym, MultiGym, StackedMultiGym};
-use modurl_mojoco::{AntV5, HalfCheetahV5, HopperV5, HumanoidV5, SumoAnts, Walker2dV5};
+use modurl_mojoco::{AntV5, HalfCheetahV5, HopperV5, HumanoidV5, SumoAnts, SumoHumans, Walker2dV5};
 
 const SUMO_INITIAL_QPOS: [f64; 30] = [
     -1.0, 0.0, 2.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.5, 0.0,
     0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+];
+
+const SUMO_HUMANS_INITIAL_QPOS: [f64; 48] = [
+    -2.0, 0.0, 2.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 2.5, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
 ];
 
 #[test]
@@ -171,6 +177,15 @@ fn builders_reject_invalid_configuration() {
             .build()
             .is_err()
     );
+    assert!(SumoHumans::builder().max_episode_steps(0).build().is_err());
+    assert!(SumoHumans::builder().min_radius(0.0).build().is_err());
+    assert!(
+        SumoHumans::builder()
+            .min_radius(3.5)
+            .max_radius(1.5)
+            .build()
+            .is_err()
+    );
 }
 
 #[test]
@@ -203,6 +218,127 @@ fn sumo_ants_batches_two_players_from_one_shared_game() {
     assert_eq!(transition.dones, vec![false, false]);
     assert_eq!(transition.truncateds, vec![false, false]);
     assert!(transition.terminal_states.iter().all(Option::is_none));
+}
+
+#[test]
+fn sumo_humans_batches_two_players_from_one_shared_game() {
+    let mut environment = SumoHumans::builder()
+        .reset_noise_scale(0.0)
+        .build()
+        .unwrap();
+
+    let observations = environment.reset().unwrap();
+    assert_eq!(environment.num_envs(), 2);
+    assert_eq!(observations.dims(), &[2, 395]);
+    assert_eq!(observations.dtype(), DType::F32);
+    assert_eq!(environment.observation_space().shape(), vec![395]);
+    assert_eq!(environment.action_space().shape(), vec![17]);
+
+    let actions = Tensor::zeros((2, 17), DType::F32, &Device::Cpu).unwrap();
+    let transition = environment.step(actions).unwrap();
+    assert_eq!(transition.states.dims(), &[2, 395]);
+    assert_eq!(transition.rewards.dims(), &[2]);
+    assert_eq!(transition.infos.len(), 2);
+    assert_eq!(transition.infos[0].player_index, 0);
+    assert_eq!(transition.infos[1].player_index, 1);
+    assert_eq!(transition.dones, vec![false, false]);
+    assert_eq!(transition.truncateds, vec![false, false]);
+    assert!(transition.terminal_states.iter().all(Option::is_none));
+}
+
+#[test]
+fn sumo_humans_observation_and_reward_layout_match_the_original() {
+    let mut environment = SumoHumans::builder()
+        .min_radius(3.5)
+        .max_radius(3.5)
+        .reset_noise_scale(0.0)
+        .build()
+        .unwrap();
+    environment.seed(7);
+
+    let observations = environment.reset().unwrap().to_vec2::<f32>().unwrap();
+    assert_eq!(observations[0][2], 2.5);
+    assert_eq!(observations[1][2], 2.5);
+    assert_eq!(observations[0][391], 3.5);
+    assert_eq!(observations[1][391], 3.5);
+    assert_eq!(observations[0][394], 500.0);
+    assert_eq!(observations[1][394], 500.0);
+    assert_eq!(&observations[0][356..380], &observations[1][0..24]);
+    assert_eq!(&observations[1][356..380], &observations[0][0..24]);
+    assert!((observations[0][380] - (observations[1][0] - observations[0][0])).abs() < 1e-6);
+    assert!((observations[0][381] - (observations[1][1] - observations[0][1])).abs() < 1e-6);
+
+    let actions = Tensor::zeros((2, 17), DType::F32, &Device::Cpu).unwrap();
+    let transition = environment.step(actions).unwrap();
+    let rewards = transition.rewards.to_vec1::<f32>().unwrap();
+    for (reward, info) in rewards.iter().zip(&transition.infos) {
+        assert!((reward - (info.reward_move + info.reward_remaining)).abs() < 1e-4);
+        assert!(
+            (info.reward_move
+                - (info.reward_center - info.reward_ctrl - info.reward_contact
+                    + info.reward_survive))
+                .abs()
+                < 1e-4
+        );
+        assert_eq!(info.reward_ctrl, 0.0);
+    }
+    assert_eq!(transition.states.to_vec2::<f32>().unwrap()[0][394], 499.0);
+}
+
+#[test]
+fn sumo_humans_rejects_out_of_bounds_and_malformed_actions() {
+    let mut environment = SumoHumans::builder().build().unwrap();
+    environment.reset().unwrap();
+
+    let malformed = Tensor::zeros(34, DType::F32, &Device::Cpu).unwrap();
+    assert!(environment.step(malformed).is_err());
+    let out_of_bounds = Tensor::full(0.5_f32, (2, 17), &Device::Cpu).unwrap();
+    assert!(environment.step(out_of_bounds).is_err());
+}
+
+#[test]
+fn sumo_humans_terminates_and_resets_both_players_together() {
+    let mut environment = SumoHumans::builder()
+        .reset_noise_scale(0.0)
+        .build()
+        .unwrap();
+    let mut qpos = SUMO_HUMANS_INITIAL_QPOS;
+    qpos[0] = 4.0;
+    environment.set_state(&qpos, &[0.0; 46]).unwrap();
+
+    let actions = Tensor::zeros((2, 17), DType::F32, &Device::Cpu).unwrap();
+    let transition = environment.step(actions).unwrap();
+
+    assert_eq!(transition.dones, vec![true, true]);
+    assert_eq!(transition.truncateds, vec![false, false]);
+    assert!(transition.terminal_states.iter().all(Option::is_some));
+    assert!(transition.infos[0].lost);
+    assert!(!transition.infos[1].won);
+    assert_eq!(transition.infos[0].reward_remaining, -1_000.0);
+    assert_eq!(transition.infos[1].reward_remaining, 0.0);
+    assert_eq!(transition.states.dims(), &[2, 395]);
+}
+
+#[test]
+fn sumo_humans_terminates_at_its_original_shared_time_limit() {
+    let mut environment = SumoHumans::builder()
+        .reset_noise_scale(0.0)
+        .max_episode_steps(1)
+        .build()
+        .unwrap();
+    environment.reset().unwrap();
+
+    let actions = Tensor::zeros((2, 17), DType::F32, &Device::Cpu).unwrap();
+    let transition = environment.step(actions).unwrap();
+
+    assert_eq!(transition.dones, vec![true, true]);
+    assert_eq!(transition.truncateds, vec![false, false]);
+    assert!(
+        transition
+            .infos
+            .iter()
+            .all(|info| info.reward_remaining == -1_000.0)
+    );
 }
 
 #[test]
@@ -372,4 +508,5 @@ fn rendering_can_be_configured_on_every_builder() {
     HumanoidV5::builder().render(false).build().unwrap();
     Walker2dV5::builder().render(false).build().unwrap();
     SumoAnts::builder().render(false).build().unwrap();
+    SumoHumans::builder().render(false).build().unwrap();
 }

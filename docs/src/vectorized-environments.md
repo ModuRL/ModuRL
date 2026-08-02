@@ -66,8 +66,9 @@ independent simulations. The environment must consume every player's action
 before it advances the shared world and must keep termination and reset
 behavior consistent across those rows.
 
-`SumoAnts` from `modurl_mojoco` uses this design. It matches the original
-two-player `sumo-ants-v0`; the leading tensor dimension identifies the players:
+`SumoAnts` and `SumoHumans` from `modurl_mojoco` use this design. They match the
+original two-player `sumo-ants-v0` and `sumo-humans-v0` environments; the
+leading tensor dimension identifies the players:
 
 ```rust,ignore
 let mut env = SumoAnts::builder().build()?;
@@ -78,8 +79,9 @@ let step = env.step(actions)?; // advances one shared MuJoCo game
 
 For a shared-policy agent, acting on the whole observation batch applies the
 same policy to every player and provides self-play without creating duplicate
-physics simulations. `SumoAnts` ends and resets every player row together when
-the first Ant falls or leaves the ring, or when the shared time limit expires.
+physics simulations. Both sumo environments end and reset every player row
+together when the first fighter falls or leaves the ring, or when the shared
+time limit expires.
 
 ## Stack Several Batched Environments
 
