@@ -3,7 +3,7 @@ import json
 import os
 import numpy as np
 
-def test_gym(env, output_dir=None, custom_reset=None, custom_info=None):
+def test_gym(env, output_dir=None, custom_reset=None, custom_info=None, actions=None):
     if custom_reset is not None:
         obs, info, env = custom_reset(env)
     else:
@@ -13,8 +13,13 @@ def test_gym(env, output_dir=None, custom_reset=None, custom_info=None):
     inputs = []
     outputs = []
 
-    for _ in range(100):
-        action = env.action_space.sample()
+    transition_actions = actions if actions is not None else [None] * 100
+    for prescribed_action in transition_actions:
+        action = (
+            env.action_space.sample()
+            if prescribed_action is None
+            else prescribed_action
+        )
 
         inputs.append(int(action))
         

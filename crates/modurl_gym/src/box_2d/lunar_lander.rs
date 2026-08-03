@@ -1576,6 +1576,11 @@ mod tests {
                 contact_detector.borrow_mut().legs_ground_contact[0] = leg0_contact;
                 contact_detector.borrow_mut().legs_ground_contact[1] = leg1_contact;
             }
+
+            self.prev_shaping = info
+                .get("prev_shaping")
+                .and_then(|value| value.as_f64())
+                .map(|value| value as f32);
         }
     }
 
@@ -1674,9 +1679,56 @@ mod tests {
         test_gym_against_python(
             "lunar_lander",
             LunarLanderV3::default(),
-            // Not an AMAZING tolerance, but I think close enough to give the same value in reinforcement learning
-            Some(Tolerances::new(5.0, 0.2)),
+            Some(Tolerances::new(0.1, 1e-3)),
         );
+    }
+
+    #[test]
+    fn lunar_lander_sequence_matches_python() {
+        #[derive(serde::Deserialize)]
+        struct Output {
+            observation: Vec<f32>,
+            reward: f32,
+            done: bool,
+            truncated: bool,
+        }
+
+        let inputs: Vec<u32> =
+            serde_json::from_str(include_str!("../../python_tests/lunar_lander/inputs.json"))
+                .unwrap();
+        let outputs: Vec<Output> =
+            serde_json::from_str(include_str!("../../python_tests/lunar_lander/output.json"))
+                .unwrap();
+
+        let mut environment = LunarLanderV3::default();
+        environment.reset_deterministic().unwrap();
+        for (index, (&action, expected)) in inputs.iter().zip(&outputs).enumerate() {
+            let actual = environment
+                .step(Tensor::from_vec(vec![action], vec![], &Device::Cpu).unwrap())
+                .unwrap();
+            let observation = actual.state.to_vec1::<f32>().unwrap();
+            for (component, &expected) in expected.observation.iter().enumerate() {
+                assert!(
+                    (observation[component] - expected).abs() <= 5e-3,
+                    "sequential step {index}, observation {component}: {} != {expected}",
+                    observation[component]
+                );
+            }
+            assert!(
+                (actual.reward - expected.reward).abs() <= 0.5,
+                "sequential step {index}, reward: {} != {}",
+                actual.reward,
+                expected.reward
+            );
+            assert_eq!(actual.done, expected.done, "sequential step {index}");
+            assert_eq!(
+                actual.truncated, expected.truncated,
+                "sequential step {index}"
+            );
+            if expected.done && index + 1 < inputs.len() {
+                environment.reset_deterministic().unwrap();
+            }
+        }
     }
 
     #[cfg(feature = "rendering")]

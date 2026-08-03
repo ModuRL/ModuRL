@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,6 +23,21 @@ INITIAL = np.array([
     0.0,                       # leg2_contact: not touching
 ])
 
+
+class ZeroDispersionGenerator:
+    """Preserve RNG APIs while fixing the engine dispersion parity input."""
+
+    def __init__(self, generator):
+        self.generator = generator
+
+    def uniform(self, low=0.0, high=1.0, size=None):
+        if size is None:
+            return 0.0
+        return np.zeros(size)
+
+    def __getattr__(self, name):
+        return getattr(self.generator, name)
+
 def custom_reset(env):
     """
     Custom reset function that sets the lunar lander to a deterministic initial state
@@ -31,6 +47,9 @@ def custom_reset(env):
     obs, info = env.reset(seed=42, options={})
     
     unwrapped = env.unwrapped
+    # The Rust deterministic fixture also uses zero engine dispersion. Keeping
+    # this input identical isolates physics-engine differences from RNG output.
+    unwrapped.np_random = ZeroDispersionGenerator(unwrapped.np_random)
     
     # Override terrain to match Rust deterministic terrain
     # In Rust, we set all terrain heights to h/8.0 = (VIEWPORT_H/SCALE)/8.0
@@ -75,7 +94,7 @@ def custom_reset(env):
             # Position legs relative to lander (matching Rust implementation)
             i_f = -1.0 if i == 0 else 1.0
             leg_x = INITIAL[0] - i_f * LEG_AWAY
-            leg_y = INITIAL[1] - LEG_DOWN
+            leg_y = INITIAL[1]
             
             leg.position = (leg_x, leg_y)
             leg.angle = INITIAL[4] + i_f * 0.05
@@ -202,5 +221,13 @@ if __name__ == "__main__":
     import gymnasium as gym
     # Get the directory where this script is located
     current_dir = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(current_dir, "inputs.json")) as inputs_file:
+        actions = json.load(inputs_file)
     env = gym.make("LunarLander-v3")
-    test_gym(env, output_dir=current_dir, custom_reset=custom_reset, custom_info=custom_info)
+    test_gym(
+        env,
+        output_dir=current_dir,
+        custom_reset=custom_reset,
+        custom_info=custom_info,
+        actions=actions,
+    )
