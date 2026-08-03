@@ -747,6 +747,51 @@ where
         }
     }
 
+    /// Adds the bootstrap value for each truncated transition to its reward.
+    /// GAE still stops at the truncation boundary, so the terminal value is
+    /// included exactly once.
+    /// `rewards` is `[environment_count]`, `transition_next_states` is
+    /// `[environment_count, ...state_shape]`, and `truncateds` has
+    /// `environment_count` entries.
+    fn bootstrap_truncated_rewards(
+        &mut self,
+        rewards: &Tensor,
+        transition_next_states: &Tensor,
+        truncateds: &[bool],
+    ) -> Result<Tensor, PPOError<AE, GE, SE>> {
+        let truncated_indices = truncateds
+            .iter()
+            .enumerate()
+            .filter_map(|(index, truncated)| truncated.then_some(index as u32))
+            .collect::<Vec<_>>();
+        if truncated_indices.is_empty() {
+            return Ok(rewards.to_dtype(self.dtype)?);
+        }
+
+        let truncation_count = truncated_indices.len();
+        let truncated_indices = Tensor::from_vec(
+            truncated_indices,
+            truncation_count,
+            transition_next_states.device(),
+        )?;
+        let truncated_next_states = transition_next_states.index_select(&truncated_indices, 0)?;
+
+        let latent_states = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                shared_info.shared_network.forward(&truncated_next_states)?
+            }
+            PPONetworkInfo::Separate(_) => truncated_next_states,
+        };
+        let terminal_values = self
+            .critic_network_forward(&latent_states)?
+            .flatten_all()?
+            .detach();
+        let terminal_bootstrap = (terminal_values.to_dtype(self.dtype)? * self.gamma as f64)?;
+        Ok(rewards
+            .to_dtype(self.dtype)?
+            .index_add(&truncated_indices, &terminal_bootstrap, 0)?)
+    }
+
     /// Evaluates `actions` `[batch, ...action_shape]` for latent or raw
     /// `states` `[batch, ...state_shape]`, returning two `[batch]` tensors.
     fn actor_network_log_prob_and_entropy(
@@ -854,8 +899,8 @@ where
         } else {
             loss::mse(&values, &returns)?
         };
-        // The 0.5 factor is from the original PPO paper
-        let final_critic_loss = (((self.vf_coef * 0.5) as f64) * critic_loss.clone())?;
+        // Match SB3 PPO: value_loss = vf_coef * mean_squared_error.
+        let final_critic_loss = ((self.vf_coef as f64) * critic_loss)?;
 
         if let Some(logging_info) = &mut self.logging_info {
             let log_entry = PPOLogEntry {
@@ -1128,7 +1173,7 @@ where
             let training_next_states = step_info.transition_next_states()?.to_dtype(self.dtype)?;
             let MultiGymStepInfo {
                 states: reset_or_next_states,
-                rewards,
+                rewards: collection_rewards,
                 infos,
                 dones: next_dones,
                 truncateds,
@@ -1139,18 +1184,23 @@ where
                 .elapsed_steps()
                 .saturating_add(self.rollout_buffer.len() * environment_count);
             self.log_collection(
-                &rewards,
+                &collection_rewards,
                 infos,
                 &next_dones,
                 &truncateds,
                 first_collection_timestep,
+            )?;
+            let training_rewards = self.bootstrap_truncated_rewards(
+                &collection_rewards,
+                &training_next_states,
+                &truncateds,
             )?;
             self.rollout_buffer.add(
                 PPOExperience::builder()
                     .states(states)
                     .next_states(training_next_states)
                     .actions(collection_action.policy_actions.detach())
-                    .rewards(rewards)
+                    .rewards(training_rewards)
                     .next_dones(next_dones)
                     .truncateds(truncateds)
                     .log_probs(collection_action.log_probs)

@@ -169,12 +169,11 @@ impl DifferentiableExpectation for GaussianDistribution {
         }
         let actions = Tensor::stack(&actions, 1)?;
         let log_probabilities = Tensor::stack(&log_probabilities, 1)?;
-        let weights = Tensor::ones(
+        let weights = (Tensor::ones(
             log_probabilities.shape(),
             log_probabilities.dtype(),
             log_probabilities.device(),
-        )?
-        .affine(1.0 / sample_count as f64, 0.0)?;
+        )? * (1.0 / sample_count as f64))?;
         Ok(ExpectationTerms::new(actions, log_probabilities, weights)?)
     }
 
