@@ -361,7 +361,7 @@ impl Gym for MountainCarV0 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Testable, test_gym_against_python};
+    use crate::testing::check_discrete_parity;
     use Gym;
 
     #[test]
@@ -425,7 +425,7 @@ mod tests {
         assert!(!done);
     }
 
-    impl Testable for MountainCarV0 {
+    impl MountainCarV0 {
         fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error> {
             // Set deterministic initial state for testing (matches Python test with options={"low": 0.0, "high": 0.0})
             self.state = Tensor::from_vec(vec![0.0f32, 0.0], vec![2], &Device::Cpu)
@@ -440,10 +440,12 @@ mod tests {
     }
 
     #[test]
-    fn test_mountain_car_against_python() {
-        test_gym_against_python(
+    fn parity() {
+        check_discrete_parity(
             "mountain_car",
             MountainCarV0::builder().build().unwrap(),
+            MountainCarV0::reset_deterministic,
+            MountainCarV0::set_state,
             None,
         );
     }

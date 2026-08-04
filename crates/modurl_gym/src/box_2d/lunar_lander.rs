@@ -1220,7 +1220,7 @@ impl Gym for LunarLanderV3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Testable, Tolerances, test_gym_against_python};
+    use crate::testing::{Tolerances, check_discrete_parity};
 
     impl LunarLanderV3 {
         fn get_current_state(&self) -> Result<Tensor, candle_core::Error> {
@@ -1262,7 +1262,7 @@ mod tests {
         }
     }
 
-    impl Testable for LunarLanderV3 {
+    impl LunarLanderV3 {
         fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error> {
             // Do a deterministic reset that controls all random elements
             self.destroy();
@@ -1682,16 +1682,18 @@ mod tests {
     }
 
     #[test]
-    fn test_lunar_lander_against_python() {
-        test_gym_against_python(
+    fn parity_transitions() {
+        check_discrete_parity(
             "lunar_lander",
             LunarLanderV3::builder().build().unwrap(),
+            LunarLanderV3::reset_deterministic,
+            LunarLanderV3::set_state,
             Some(Tolerances::new(0.1, 1e-3)),
         );
     }
 
     #[test]
-    fn lunar_lander_sequence_matches_python() {
+    fn parity_sequence() {
         #[derive(serde::Deserialize)]
         struct Output {
             observation: Vec<f32>,

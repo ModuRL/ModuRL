@@ -369,7 +369,7 @@ impl Gym for CartPoleV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Testable, test_gym_against_python};
+    use crate::testing::check_discrete_parity;
     use Gym;
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         assert!(done);
     }
 
-    impl Testable for CartPoleV1 {
+    impl CartPoleV1 {
         fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error> {
             self.steps_beyond_terminated = None;
             self.steps_since_reset = 0;
@@ -466,8 +466,14 @@ mod tests {
     }
 
     #[test]
-    fn test_cartpole_against_python() {
-        test_gym_against_python("cartpole", CartPoleV1::builder().build().unwrap(), None);
+    fn parity() {
+        check_discrete_parity(
+            "cartpole",
+            CartPoleV1::builder().build().unwrap(),
+            CartPoleV1::reset_deterministic,
+            CartPoleV1::set_state,
+            None,
+        );
     }
 
     #[cfg(feature = "rendering")]

@@ -1,5 +1,0 @@
-python python_tests\cartpole\cartpole.py
-python python_tests\mountain_car\mountain_car.py
-python python_tests\lunar_lander\lunar_lander.py
-python python_tests\generate_classic_control_parity.py
-python python_tests\generate_bipedal_walker_parity.py

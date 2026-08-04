@@ -781,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_terrain_sequence_matches_gymnasium_v3() {
+    fn parity_sequence() {
         let fixture: Fixture = serde_json::from_str(include_str!(
             "../../python_tests/bipedal_walker/trajectory.json"
         ))
@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_terrain_transitions_match_gymnasium_v3() {
+    fn parity_transitions() {
         let fixture: Fixture = serde_json::from_str(include_str!(
             "../../python_tests/bipedal_walker/trajectory.json"
         ))

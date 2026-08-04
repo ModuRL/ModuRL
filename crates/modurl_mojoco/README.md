@@ -91,16 +91,35 @@ license and third-party notice files beside Cargo output automatically.
 
 ## Parity tests
 
-`python_tests/generate_parity.py` creates deterministic Gymnasium v5 fixtures and records the Gymnasium and MuJoCo versions used. Ordinary Rust tests use the committed JSON and therefore do not require Python:
+The Python parity runner regenerates fixtures and executes the matching Rust
+tests. Pass one environment name to focus the entire workflow on it. For
+example, from this crate's directory:
 
 ```powershell
-cargo test
+python python_tests/parity.py ant
 ```
 
-Regenerate fixtures only with matching dependencies:
+That command regenerates `ant/trajectory.json` with Gymnasium, then runs the
+exact `ant` Rust parity test. To run the Rust test against the existing fixture
+without requiring Python dependencies:
+
+```powershell
+python python_tests/parity.py ant --rust-only
+```
+
+List the supported names or run every environment by omitting the name:
+
+```powershell
+python python_tests/parity.py --list
+python python_tests/parity.py
+```
+
+Install the pinned reference dependencies before regenerating fixtures:
 
 ```powershell
 python -m pip install gymnasium==1.2.1 mujoco==3.9.0
-python python_tests/generate_parity.py
-cargo test --test parity
 ```
+
+Use `--generate-only` when you only want to refresh fixture JSON. Ordinary
+`cargo test` uses the committed fixtures and therefore does not require Python
+or Gymnasium.

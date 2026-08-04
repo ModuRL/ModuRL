@@ -12,12 +12,6 @@ struct ExpectedOutput {
     info: Option<serde_json::Value>,
 }
 
-pub(crate) trait Testable {
-    fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error>;
-    /// Restores one unbatched environment state shaped `observation_shape`.
-    fn set_state(&mut self, state: Tensor, extra_info: Option<serde_json::Value>);
-}
-
 pub(crate) struct Tolerances {
     reward_tol: f32,
     obs_tol: f32,
@@ -32,12 +26,14 @@ impl Tolerances {
     }
 }
 
-pub(crate) fn test_gym_against_python<T, E>(
+pub(crate) fn check_discrete_parity<T, E>(
     folder: &str,
-    mut env: T,
+    mut environment: T,
+    reset: fn(&mut T) -> Result<Tensor, candle_core::Error>,
+    set_state: fn(&mut T, Tensor, Option<serde_json::Value>),
     tolerances: Option<Tolerances>,
 ) where
-    T: Gym<Error = E> + Testable,
+    T: Gym<Error = E>,
     E: std::fmt::Debug,
 {
     let tolerances = tolerances.unwrap_or(Tolerances {
@@ -63,20 +59,27 @@ pub(crate) fn test_gym_against_python<T, E>(
     let expected_outputs: Vec<ExpectedOutput> =
         serde_json::from_str(&outputs_json).expect("Failed to parse output.json");
 
-    env.reset_deterministic()
-        .expect("Failed to reset environment");
+    assert!(!inputs.is_empty(), "Inputs should not be empty");
+    assert!(!expected_outputs.is_empty(), "Outputs should not be empty");
+    assert_eq!(
+        inputs.len(),
+        expected_outputs.len(),
+        "Input and output lengths should match"
+    );
+
+    reset(&mut environment).expect("Failed to reset environment");
 
     for i in 0..inputs.len() {
         let action = inputs[i];
         let action_tensor = Tensor::from_vec(vec![action], vec![], &Device::Cpu)
             .expect("Failed to create action tensor");
 
-        if i == 0 || expected_outputs[i - 1].done {
-            env.reset_deterministic()
-                .expect("Failed to reset environment");
+        if i == 0 || expected_outputs[i - 1].done || expected_outputs[i - 1].truncated {
+            reset(&mut environment).expect("Failed to reset environment");
         } else {
             let state_dim = expected_outputs[i - 1].observation.len();
-            env.set_state(
+            set_state(
+                &mut environment,
                 Tensor::from_vec(
                     expected_outputs[i - 1].observation.clone(),
                     vec![state_dim],
@@ -87,7 +90,9 @@ pub(crate) fn test_gym_against_python<T, E>(
             );
         }
 
-        let step_info = env.step(action_tensor).expect("Failed to step environment");
+        let step_info = environment
+            .step(action_tensor)
+            .expect("Failed to step environment");
 
         let expected = &expected_outputs[i];
 
@@ -136,15 +141,4 @@ pub(crate) fn test_gym_against_python<T, E>(
             );
         }
     }
-
-    assert!(!inputs.is_empty(), "Inputs should not be empty");
-    assert!(
-        !expected_outputs.is_empty(),
-        "Expected outputs should not be empty"
-    );
-    assert_eq!(
-        inputs.len(),
-        expected_outputs.len(),
-        "Input and output lengths should match"
-    );
 }

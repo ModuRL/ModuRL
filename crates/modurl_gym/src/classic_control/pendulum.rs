@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_gymnasium_v1() {
+    fn parity() {
         let transitions: Vec<Transition> =
             serde_json::from_str(include_str!("../../python_tests/pendulum/trajectory.json"))
                 .unwrap();
