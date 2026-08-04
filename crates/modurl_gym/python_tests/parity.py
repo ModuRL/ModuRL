@@ -21,6 +21,8 @@ CRATE_ROOT = ROOT.parent
 REPOSITORY_ROOT = CRATE_ROOT.parents[1]
 EXPECTED_GYMNASIUM_VERSION = "1.2.1"
 EXPECTED_PYBOX2D_VERSION = "2.3.5"
+PARITY_STEPS = 64
+BIPEDAL_WALKER_ROLLOUT_STEPS = 8
 
 
 def reference_modules(*, box2d: bool = False):
@@ -63,13 +65,16 @@ def write_json(path: Path, value) -> None:
 def generate_discrete_rollout(
     name: str,
     gymnasium_id: str,
+    action_count: int,
     *,
     reset: Callable | None = None,
     extract_info: Callable | None = None,
 ) -> None:
-    gym, _, _ = reference_modules(box2d=name == "lunar_lander")
+    gym, np, _ = reference_modules(box2d=name == "lunar_lander")
     target = ROOT / name
-    actions = json.loads((target / "inputs.json").read_text(encoding="utf-8"))
+    actions = np.arange(PARITY_STEPS, dtype=np.int64) % action_count
+    np.random.default_rng(123).shuffle(actions)
+    actions = actions.tolist()
     environment = gym.make(gymnasium_id)
 
     def reset_environment():
@@ -96,15 +101,16 @@ def generate_discrete_rollout(
     finally:
         environment.close()
 
+    write_json(target / "inputs.json", actions)
     write_json(target / "output.json", outputs)
 
 
 def generate_cartpole() -> None:
-    generate_discrete_rollout("cartpole", "CartPole-v1")
+    generate_discrete_rollout("cartpole", "CartPole-v1", 2)
 
 
 def generate_mountain_car() -> None:
-    generate_discrete_rollout("mountain_car", "MountainCar-v0")
+    generate_discrete_rollout("mountain_car", "MountainCar-v0", 3)
 
 
 def generate_pendulum() -> None:
@@ -112,12 +118,12 @@ def generate_pendulum() -> None:
     environment = gym.make("Pendulum-v1").unwrapped
     transitions = []
     try:
-        for index in range(24):
+        for index in range(PARITY_STEPS):
             state = np.array(
                 [np.sin(index * 0.47) * np.pi, np.cos(index * 0.31) * 7.5],
                 dtype=np.float64,
             )
-            action = np.array([2.5 * np.sin(index * 0.73)], dtype=np.float32)
+            action = np.array([1.75 * np.sin(index * 0.73)], dtype=np.float32)
             environment.state = state.copy()
             observation, reward, _, _, _ = environment.step(action)
             transitions.append(
@@ -138,7 +144,7 @@ def generate_acrobot() -> None:
     environment = gym.make("Acrobot-v1").unwrapped
     transitions = []
     try:
-        for index in range(30):
+        for index in range(PARITY_STEPS):
             state = np.array(
                 [
                     np.sin(index * 0.29) * 2.8,
@@ -306,6 +312,7 @@ def generate_lunar_lander() -> None:
     generate_discrete_rollout(
         "lunar_lander",
         "LunarLander-v3",
+        4,
         reset=reset_lunar_lander,
         extract_info=lunar_lander_info,
     )
@@ -331,12 +338,18 @@ class DeterministicRng:
 
 def generate_bipedal_walker() -> None:
     gym, np, box2d = reference_modules(box2d=True)
-    transition_actions = [
-        np.zeros(4, dtype=np.float32),
-        np.array([0.1, 0.1, 0.1, 0.1], dtype=np.float32),
-        np.array([-0.1, -0.1, -0.1, -0.1], dtype=np.float32),
-        np.array([0.2, -0.2, 0.2, -0.2], dtype=np.float32),
-    ]
+    transition_actions = []
+    for step in range(PARITY_STEPS):
+        amplitude = 0.02 + 0.18 * step / (PARITY_STEPS - 1)
+        if step % 3 == 0:
+            action = np.full(4, amplitude, dtype=np.float32)
+        elif step % 3 == 1:
+            action = np.full(4, -amplitude, dtype=np.float32)
+        else:
+            action = np.array(
+                [amplitude, -amplitude, amplitude, -amplitude], dtype=np.float32
+            )
+        transition_actions.append(action)
     initial_observation = None
     observations = []
     rewards = []
@@ -355,7 +368,7 @@ def generate_bipedal_walker() -> None:
         finally:
             environment.close()
 
-    sequential_actions = [
+    rollout_pattern = [
         np.zeros(4, dtype=np.float32),
         np.full(4, 0.01, dtype=np.float32),
         np.full(4, -0.01, dtype=np.float32),
@@ -365,6 +378,7 @@ def generate_bipedal_walker() -> None:
         np.array([0.02, 0.0, 0.02, 0.0], dtype=np.float32),
         np.array([-0.02, 0.0, -0.02, 0.0], dtype=np.float32),
     ]
+    sequential_actions = rollout_pattern[:BIPEDAL_WALKER_ROLLOUT_STEPS]
     sequential_observations = []
     sequential_rewards = []
     sequential_terminated = []
@@ -484,7 +498,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     args = parse_args(arguments)
     if args.list:
         for name, case in ENVIRONMENTS.items():
-            print(f"{name:<16} {case.gymnasium_id}")
+            print(f"{name:<16} {case.gymnasium_id:<19} {PARITY_STEPS} transitions")
         return 0
 
     all_environments = args.environment == "all"

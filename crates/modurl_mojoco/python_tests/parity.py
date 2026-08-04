@@ -20,23 +20,20 @@ CRATE_ROOT = ROOT.parent
 REPOSITORY_ROOT = CRATE_ROOT.parents[1]
 EXPECTED_GYMNASIUM_VERSION = "1.2.1"
 EXPECTED_MUJOCO_VERSION = "3.9.0"
+PARITY_STEPS = 64
 
 
 @dataclass(frozen=True)
 class ParityCase:
     gymnasium_id: str
-    steps: int
 
 
 ENVIRONMENTS = {
-    "ant": ParityCase("Ant-v5", 50),
-    "half_cheetah": ParityCase("HalfCheetah-v5", 20),
-    "hopper": ParityCase("Hopper-v5", 20),
-    "humanoid": ParityCase("Humanoid-v5", 50),
-    # Stop before the first simultaneous two-foot impact. That degenerate
-    # contact can legitimately choose different solvers/orderings across the
-    # official Python and mujoco-rs binary builds of the same engine version.
-    "walker2d": ParityCase("Walker2d-v5", 12),
+    "ant": ParityCase("Ant-v5"),
+    "half_cheetah": ParityCase("HalfCheetah-v5"),
+    "hopper": ParityCase("Hopper-v5"),
+    "humanoid": ParityCase("Humanoid-v5"),
+    "walker2d": ParityCase("Walker2d-v5"),
 }
 
 
@@ -77,7 +74,7 @@ def generate(name: str, case: ParityCase) -> Path:
 
         actions = []
         states = []
-        for step in range(case.steps):
+        for step in range(PARITY_STEPS):
             states.append(
                 {
                     "qpos": env.data.qpos.copy().tolist(),
@@ -186,7 +183,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
     args = parse_args(arguments)
     if args.list:
         for name, case in ENVIRONMENTS.items():
-            print(f"{name:<13} {case.gymnasium_id}")
+            print(f"{name:<13} {case.gymnasium_id:<18} {PARITY_STEPS} transitions")
         return 0
 
     all_environments = args.environment == "all"

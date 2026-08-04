@@ -123,3 +123,24 @@ python -m pip install gymnasium==1.2.1 mujoco==3.9.0
 Use `--generate-only` when you only want to refresh fixture JSON. Ordinary
 `cargo test` uses the committed fixtures and therefore does not require Python
 or Gymnasium.
+
+Every environment uses the same public baseline of 64 reference transitions.
+The runner prints that count with `--list`, and the Rust tests reject fixtures
+with any other length.
+
+Each fixture follows the same procedure: Gymnasium produces a deterministic
+64-step reference trajectory, then every recorded state/action pair is compared
+as a one-step transition from a clean solver state.
+
+| Environment | Baseline | Observation tolerance | Reward tolerance | Additional check |
+| --- | ---: | ---: | ---: | --- |
+| Ant | 64 transitions | `1e-5` | `1e-5` | Contact-force observations must be exercised |
+| HalfCheetah | 64 transitions | `1e-5` | `1e-5` | None |
+| Hopper | 64 transitions | `1e-5` | `1e-5` | None |
+| Humanoid | 64 transitions | `1e-5` | `1e-5` | Contact-force observations must be exercised |
+| Walker2d | 64 transitions | `4e-3` positions; `6.6e-1` impact velocities | `2e-2` | Includes simultaneous foot impacts |
+
+Observation bounds also include one `f32` conversion epsilon scaled by the
+reference value. Walker2d keeps all impact transitions in the baseline; its
+velocity-only allowance accounts for solver-order differences between the
+official Python and `mujoco-rs` binary builds instead of shortening the fixture.

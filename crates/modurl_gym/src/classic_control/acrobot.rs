@@ -295,6 +295,7 @@ fn wrap(mut value: f64, minimum: f64, maximum: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::PARITY_STEPS;
 
     #[derive(serde::Deserialize)]
     struct Transition {
@@ -310,6 +311,7 @@ mod tests {
         let transitions: Vec<Transition> =
             serde_json::from_str(include_str!("../../python_tests/acrobot/trajectory.json"))
                 .unwrap();
+        assert_eq!(transitions.len(), PARITY_STEPS);
         let mut environment = AcrobotV1::builder().build().unwrap();
         for (index, transition) in transitions.iter().enumerate() {
             environment.set_raw_state(transition.state);

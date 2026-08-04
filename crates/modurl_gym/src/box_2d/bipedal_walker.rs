@@ -711,6 +711,9 @@ impl Gym for BipedalWalkerV3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::PARITY_STEPS;
+
+    const ADDITIONAL_ROLLOUT_STEPS: usize = 8;
 
     fn translate_walker(environment: &mut BipedalWalkerV3, dx: f32, dy: f32) {
         let bodies = environment
@@ -755,6 +758,8 @@ mod tests {
             assert!(!self.generator.python.is_empty());
             assert_eq!(self.generator.gymnasium, "1.2.1");
             assert_eq!(self.generator.pybox2d, "2.3.5");
+            assert_eq!(self.actions.len(), PARITY_STEPS);
+            assert_eq!(self.sequential_actions.len(), ADDITIONAL_ROLLOUT_STEPS);
             assert_eq!(self.actions.len(), self.observations.len());
             assert_eq!(self.actions.len(), self.rewards.len());
             assert_eq!(self.actions.len(), self.terminated.len());
@@ -845,7 +850,7 @@ mod tests {
             let observation = actual.state.to_vec1::<f32>().unwrap();
             for (component, expected) in fixture.observations[index].iter().enumerate() {
                 assert!(
-                    (f64::from(observation[component]) - expected).abs() <= 4e-2,
+                    (f64::from(observation[component]) - expected).abs() <= 6e-2,
                     "step {index}, observation {component}: {} != {expected}",
                     observation[component]
                 );

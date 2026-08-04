@@ -176,6 +176,7 @@ impl Gym for PendulumV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::PARITY_STEPS;
 
     #[derive(serde::Deserialize)]
     struct Transition {
@@ -190,6 +191,7 @@ mod tests {
         let transitions: Vec<Transition> =
             serde_json::from_str(include_str!("../../python_tests/pendulum/trajectory.json"))
                 .unwrap();
+        assert_eq!(transitions.len(), PARITY_STEPS);
         let mut environment = PendulumV1::builder().build().unwrap();
         for (index, transition) in transitions.iter().enumerate() {
             environment.set_raw_state(transition.state);

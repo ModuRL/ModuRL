@@ -3,6 +3,8 @@
 use candle_core::{Device, Tensor};
 use modurl::gym::Gym;
 
+pub(crate) const PARITY_STEPS: usize = 64;
+
 #[derive(serde::Deserialize)]
 struct ExpectedOutput {
     observation: Vec<f32>,
@@ -59,8 +61,7 @@ pub(crate) fn check_discrete_parity<T, E>(
     let expected_outputs: Vec<ExpectedOutput> =
         serde_json::from_str(&outputs_json).expect("Failed to parse output.json");
 
-    assert!(!inputs.is_empty(), "Inputs should not be empty");
-    assert!(!expected_outputs.is_empty(), "Outputs should not be empty");
+    assert_eq!(inputs.len(), PARITY_STEPS, "Unexpected parity input count");
     assert_eq!(
         inputs.len(),
         expected_outputs.len(),
@@ -102,6 +103,12 @@ pub(crate) fn check_discrete_parity<T, E>(
             .to_vec1::<f32>()
             .expect("Failed to convert state to vector");
 
+        assert_eq!(
+            actual_obs.len(),
+            expected.observation.len(),
+            "Mismatch at step {i}: observation lengths differ"
+        );
+
         if (step_info.reward - expected.reward).abs() > tolerances.reward_tol {
             panic!(
                 "Mismatch at step {}: expected reward {}, got {}, expected obs {:?}, got {:?}",
@@ -126,11 +133,7 @@ pub(crate) fn check_discrete_parity<T, E>(
         );
 
         // verify observation matches expected (within a tolerance)
-        for (j, actual) in actual_obs
-            .iter()
-            .enumerate()
-            .take(expected.observation.len())
-        {
+        for (j, actual) in actual_obs.iter().enumerate() {
             assert!(
                 (*actual - expected.observation[j]).abs() < tolerances.obs_tol,
                 "Mismatch at step {}, observation index {}: expected {}, got {}",

@@ -1220,7 +1220,7 @@ impl Gym for LunarLanderV3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Tolerances, check_discrete_parity};
+    use crate::testing::{PARITY_STEPS, Tolerances, check_discrete_parity};
 
     impl LunarLanderV3 {
         fn get_current_state(&self) -> Result<Tensor, candle_core::Error> {
@@ -1713,6 +1713,7 @@ mod tests {
             outputs.len(),
             "fixture input/output length mismatch"
         );
+        assert_eq!(inputs.len(), PARITY_STEPS);
 
         let mut environment = LunarLanderV3::builder().build().unwrap();
         environment.reset_deterministic().unwrap();
