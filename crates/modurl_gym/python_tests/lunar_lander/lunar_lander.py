@@ -31,9 +31,10 @@ class ZeroDispersionGenerator:
         self.generator = generator
 
     def uniform(self, low=0.0, high=1.0, size=None):
+        midpoint = (low + high) / 2.0
         if size is None:
-            return 0.0
-        return np.zeros(size)
+            return float(midpoint)
+        return np.full(size, midpoint, dtype=np.float64)
 
     def __getattr__(self, name):
         return getattr(self.generator, name)
@@ -51,18 +52,11 @@ def custom_reset(env):
     # this input identical isolates physics-engine differences from RNG output.
     unwrapped.np_random = ZeroDispersionGenerator(unwrapped.np_random)
     
-    # Override terrain to match Rust deterministic terrain
-    # In Rust, we set all terrain heights to h/8.0 = (VIEWPORT_H/SCALE)/8.0
+    # Both implementations share the central helipad height used by this
+    # fixture. The generated trajectory remains on that plateau; it does not
+    # claim parity for the surrounding randomized terrain.
     h = VIEWPORT_H / SCALE
-    fixed_terrain_height = h / 8.0
-    
-    # Override terrain heights - helipad_y is guaranteed to exist
-    # Set helipad_y to match Rust: h/4.0
     unwrapped.helipad_y = h / 4.0
-    
-    # Terrain generation method may or may not exist, so we check for it
-    if hasattr(unwrapped, '_generate_terrain'):
-        print("Found terrain generation method - attempting to override")
     
     # Override the physics state to match our deterministic values
     

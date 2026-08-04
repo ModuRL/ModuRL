@@ -67,6 +67,14 @@ pub enum SACCriticError {
     NoCriticValues,
 }
 
+impl std::fmt::Display for SACCriticError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for SACCriticError {}
+
 impl From<candle_core::Error> for SACCriticError {
     fn from(error: candle_core::Error) -> Self {
         Self::TensorError(error)
@@ -597,6 +605,14 @@ pub enum SACConfigurationError {
     ZeroTrainingHorizon,
 }
 
+impl std::fmt::Display for SACConfigurationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for SACConfigurationError {}
+
 #[derive(Debug)]
 pub enum SACError<PE, GE, SE>
 where
@@ -611,6 +627,14 @@ where
     CriticError(SACCriticError),
     ConfigurationError(SACConfigurationError),
 }
+
+impl<PE: Debug, GE: Debug, SE: Debug> std::fmt::Display for SACError<PE, GE, SE> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl<PE: Debug, GE: Debug, SE: Debug> std::error::Error for SACError<PE, GE, SE> {}
 
 impl<PE: Debug, GE: Debug, SE: Debug> From<candle_core::Error> for SACError<PE, GE, SE> {
     fn from(value: candle_core::Error) -> Self {

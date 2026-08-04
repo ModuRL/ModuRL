@@ -1,4 +1,9 @@
 {
+  "generator": {
+    "python": "3.11.4",
+    "gymnasium": "1.2.1",
+    "pybox2d": "2.3.5"
+  },
   "initial_observation": [
     0.0027475962415337563,
     0.0,

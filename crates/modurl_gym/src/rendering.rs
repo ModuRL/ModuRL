@@ -18,15 +18,14 @@ pub struct Flag {
 }
 
 impl Renderer {
-    pub fn new(w: usize, h: usize, title: &str) -> Self {
-        let window = Window::new(title, w, h, WindowOptions::default()).expect("create window");
-
-        Self {
+    pub fn new(w: usize, h: usize, title: &str) -> Result<Self, minifb::Error> {
+        let window = Window::new(title, w, h, WindowOptions::default())?;
+        Ok(Self {
             window,
             buffer: vec![0; w * h],
             w,
             h,
-        }
+        })
     }
 
     pub fn clear(&mut self, color: u32) {
@@ -47,10 +46,12 @@ impl Renderer {
         }
     }
 
-    pub fn present(&mut self) {
-        self.window
-            .update_with_buffer(&self.buffer, self.w, self.h)
-            .unwrap();
+    pub fn present(&mut self) -> Result<(), minifb::Error> {
+        if self.window.is_open() {
+            self.window
+                .update_with_buffer(&self.buffer, self.w, self.h)?;
+        }
+        Ok(())
     }
 
     pub fn is_open(&self) -> bool {
@@ -104,6 +105,52 @@ impl Renderer {
                 let dx = x as isize - center_x as isize;
                 let dy = y as isize - center_y as isize;
                 if dx * dx + dy * dy <= radius_sq {
+                    self.buffer[y * self.w + x] = color;
+                }
+            }
+        }
+    }
+
+    pub fn polygon(&mut self, points: &[(f32, f32)], color: u32) {
+        if points.len() < 3 {
+            return;
+        }
+        let min_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f32::INFINITY, f32::min)
+            .max(0.0) as usize;
+        let max_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .min(self.w.saturating_sub(1) as f32) as usize;
+        let min_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f32::INFINITY, f32::min)
+            .max(0.0) as usize;
+        let max_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .min(self.h.saturating_sub(1) as f32) as usize;
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let mut inside = false;
+                let mut previous = points.len() - 1;
+                for current in 0..points.len() {
+                    let (xi, yi) = points[current];
+                    let (xj, yj) = points[previous];
+                    if ((yi > py) != (yj > py)) && px < (xj - xi) * (py - yi) / (yj - yi) + xi {
+                        inside = !inside;
+                    }
+                    previous = current;
+                }
+                if inside {
                     self.buffer[y * self.w + x] = color;
                 }
             }

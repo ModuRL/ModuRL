@@ -10,13 +10,6 @@ Implemented Gymnasium v5 environments:
 - `HumanoidV5` — observation `(348,)`, action `(17,)`
 - `Walker2dV5` — observation `(17,)`, action `(6,)`
 
-Also included:
-
-- `SumoAnts` — an OpenAI `sumo-ants-v0` compatibility environment with two
-  players, observations `(2, 137)`, and actions `(2, 8)`
-- `SumoHumans` — an OpenAI `sumo-humans-v0` compatibility environment with two
-  players, observations `(2, 395)`, and actions `(2, 17)`
-
 ## Installation
 
 MuJoCo 3.9 is automatically downloaded by `mujoco-rs` on Windows and Linux. A clone of this repository works without extra configuration because [`.cargo/config.toml`](../../.cargo/config.toml) supplies a project-local cache. On Windows, this crate's build script also copies `mujoco.dll` next to Cargo-built executables and tests.
@@ -61,42 +54,8 @@ let environment = HopperV5::builder()
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`SumoAnts` and `SumoHumans` implement `MultiGym` directly. Their two batch rows
-are the two players in one MuJoCo simulation, not independent simulations:
-
-```rust
-let mut environment = SumoAnts::builder()
-    .device(&Device::Cpu)
-    .build()?;
-let observations = environment.reset()?; // [2, 137]
-let actions = candle_core::Tensor::zeros(
-    (2, 8),
-    candle_core::DType::F32,
-    &Device::Cpu,
-)?;
-let transition = environment.step(actions)?;
-# Ok::<(), Box<dyn std::error::Error>>(());
-```
-
-Every observation contains the acting Ant's position, velocity, clipped contact
-forces, the opponent position and relative XY position, torso orientation,
-ring distances, and remaining steps. A fall or ring-out ends the round for both
-rows. The losing Ant receives `-1000`; the survivor receives `+1000` only if the
-Ants touched during the match, matching the original winner rule. At 500 steps,
-both players receive `-1000` and the match terminates.
-
-`SumoHumans` follows the same shared-match contract with the original
-HumanoidFighter observation and reward layout. Each player controls 17
-actuators and observes its own dynamics, the opponent pose and relative
-position, torso orientation, ring distances, and remaining steps.
-
-The rendered Ants and arena are fully opaque. The original environment used
-partial alpha for both; opacity is the only intentional visual deviation.
-
 The 1,000-step Gymnasium time limit is intentionally not built into the five
 Gymnasium-compatible environments; apply it in an environment wrapper.
-The sumo environments instead own the original shared 500-step terminal
-condition because their players must terminate and reset together.
 
 ## Rendering
 
@@ -115,7 +74,7 @@ environment.reset()?;
 ```
 
 The same `.render(true)` option is available on `AntV5`, `HopperV5`,
-`HumanoidV5`, `Walker2dV5`, `SumoAnts`, and `SumoHumans`.
+`HumanoidV5`, and `Walker2dV5`.
 The viewer updates after resets, exact state changes, and simulation steps. Closing
 the window stops rendering while leaving the environment usable. Interactive
 viewers should be created on the application's main thread. Without the

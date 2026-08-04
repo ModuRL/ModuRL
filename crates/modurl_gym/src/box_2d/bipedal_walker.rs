@@ -1,5 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
+use crate::EnvironmentError;
 use bon::bon;
 use box2d_rs::{
     b2_body::{B2body, B2bodyDef, B2bodyType, BodyPtr},
@@ -137,7 +138,7 @@ impl BipedalWalkerV3 {
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
-    ) -> Self {
+    ) -> Result<Self, EnvironmentError> {
         let low = vec![
             -std::f32::consts::PI,
             -5.0,
@@ -176,7 +177,7 @@ impl BipedalWalkerV3 {
         .into_iter()
         .chain(std::iter::repeat_n(1.0, 10))
         .collect::<Vec<_>>();
-        Self {
+        Ok(Self {
             world: None,
             terrain: Vec::new(),
             terrain_points: Vec::new(),
@@ -188,22 +189,29 @@ impl BipedalWalkerV3 {
             device: device.clone(),
             action_space: BoxSpace::new_with_universal_bounds(vec![4], -1.0, 1.0, device),
             observation_space: BoxSpace::new(
-                Tensor::from_vec(low, 24, device).unwrap(),
-                Tensor::from_vec(high, 24, device).unwrap(),
+                Tensor::from_vec(low, 24, device)?,
+                Tensor::from_vec(high, 24, device)?,
             ),
             #[cfg(feature = "rendering")]
-            renderer: render.then(|| {
-                crate::rendering::Renderer::new(
-                    VIEWPORT_W as usize,
-                    VIEWPORT_H as usize,
-                    "Bipedal Walker",
-                )
-            }),
-        }
+            renderer: render
+                .then(|| {
+                    crate::rendering::Renderer::new(
+                        VIEWPORT_W as usize,
+                        VIEWPORT_H as usize,
+                        "Bipedal Walker",
+                    )
+                })
+                .transpose()?,
+        })
     }
 
-    fn random_uniform(&self, low: f32, high: f32) -> Result<f32, candle_core::Error> {
-        Tensor::rand(low, high, (), &self.device)?.to_vec0()
+    fn random_uniform(&self, low: f32, high: f32) -> Result<f32, EnvironmentError> {
+        if !low.is_finite() || !high.is_finite() || low >= high {
+            return Err(EnvironmentError::InvalidConfiguration(
+                "BipedalWalker received an invalid random-sampling range",
+            ));
+        }
+        Ok(Tensor::rand(low, high, (), &self.device)?.to_vec0::<f32>()?)
     }
 
     fn clear_world(&mut self) {
@@ -300,7 +308,7 @@ impl BipedalWalkerV3 {
             .create_joint(&B2JointDefEnum::RevoluteJoint(definition))
     }
 
-    fn reset_internal(&mut self, deterministic: bool) -> Result<Tensor, candle_core::Error> {
+    fn reset_internal(&mut self, deterministic: bool) -> Result<Tensor, EnvironmentError> {
         self.clear_world();
         let world = B2world::<WalkerUserData>::new(B2vec2::new(0.0, -10.0));
         let detector = Rc::new(RefCell::new(WalkerContactDetector::default()));
@@ -431,17 +439,23 @@ impl BipedalWalkerV3 {
         Ok(self.step(zero_action)?.state)
     }
 
-    fn joint_state(joint: &B2jointPtr<WalkerUserData>) -> (f32, f32) {
+    fn joint_state(joint: &B2jointPtr<WalkerUserData>) -> Result<(f32, f32), EnvironmentError> {
         let joint = joint.borrow();
         match joint.as_derived() {
             JointAsDerived::ERevoluteJoint(joint) => {
-                (joint.get_joint_angle(), joint.get_joint_speed())
+                Ok((joint.get_joint_angle(), joint.get_joint_speed()))
             }
-            _ => unreachable!("walker joints are revolute"),
+            _ => Err(EnvironmentError::InvalidPhysicsState(
+                "BipedalWalker motor joint is not revolute",
+            )),
         }
     }
 
-    fn drive_joint(joint: &B2jointPtr<WalkerUserData>, action: f32, speed: f32) {
+    fn drive_joint(
+        joint: &B2jointPtr<WalkerUserData>,
+        action: f32,
+        speed: f32,
+    ) -> Result<(), EnvironmentError> {
         let direction = if action > 0.0 {
             1.0
         } else if action < 0.0 {
@@ -454,14 +468,23 @@ impl BipedalWalkerV3 {
             JointAsDerivedMut::ERevoluteJoint(joint) => {
                 joint.set_motor_speed(speed * direction);
                 joint.set_max_motor_torque(MOTORS_TORQUE * action.abs().clamp(0.0, 1.0));
+                Ok(())
             }
-            _ => unreachable!("walker joints are revolute"),
+            _ => Err(EnvironmentError::InvalidPhysicsState(
+                "BipedalWalker motor joint is not revolute",
+            )),
         }
     }
 
-    fn lidar_fractions(&self, origin: B2vec2) -> [f32; 10] {
-        let world = self.world.as_ref().unwrap().borrow();
-        std::array::from_fn(|index| {
+    fn lidar_fractions(&self, origin: B2vec2) -> Result<[f32; 10], EnvironmentError> {
+        let world = self
+            .world
+            .as_ref()
+            .ok_or(EnvironmentError::NotInitialized(
+                "call reset before reading BipedalWalker lidar",
+            ))?
+            .borrow();
+        Ok(std::array::from_fn(|index| {
             let mut closest = 1.0_f32;
             let endpoint = B2vec2::new(
                 origin.x + (1.5 * index as f32 / 10.0).sin() * LIDAR_RANGE,
@@ -480,16 +503,19 @@ impl BipedalWalkerV3 {
                 endpoint,
             );
             closest
-        })
+        }))
     }
 
     #[cfg(feature = "rendering")]
-    fn render(&mut self) {
+    fn render(&mut self) -> Result<(), EnvironmentError> {
         let Some(renderer) = &mut self.renderer else {
-            return;
+            return Ok(());
         };
+        if !renderer.is_open() {
+            return Ok(());
+        }
         let Some(hull) = &self.hull else {
-            return;
+            return Ok(());
         };
         let scroll = hull.borrow().get_position().x - VIEWPORT_W / SCALE / 5.0;
         let to_screen =
@@ -519,7 +545,22 @@ impl BipedalWalkerV3 {
                 color,
             );
         };
-        draw_body(renderer, hull, 32.0 / SCALE, 8.5 / SCALE, 0x7F33E5);
+        {
+            let hull = hull.borrow();
+            let center = hull.get_position();
+            let angle = hull.get_angle();
+            let cos = angle.cos();
+            let sin = angle.sin();
+            let points = HULL_POLY
+                .iter()
+                .map(|(x, y)| {
+                    let x = x / SCALE;
+                    let y = y / SCALE;
+                    to_screen((center.x + x * cos - y * sin, center.y + x * sin + y * cos))
+                })
+                .collect::<Vec<_>>();
+            renderer.polygon(&points, 0x7F33E5);
+        }
         for (index, leg) in self.legs.iter().enumerate() {
             draw_body(
                 renderer,
@@ -533,53 +574,58 @@ impl BipedalWalkerV3 {
                 if index < 2 { 0xB26698 } else { 0x804C70 },
             );
         }
-        renderer.present();
+        renderer.present()?;
+        Ok(())
     }
 
     #[cfg(test)]
-    fn reset_flat_for_test(&mut self) -> Result<Tensor, candle_core::Error> {
+    fn reset_flat_for_test(&mut self) -> Result<Tensor, EnvironmentError> {
         self.reset_internal(true)
     }
 }
 
-impl Default for BipedalWalkerV3 {
-    fn default() -> Self {
-        Self::builder().build()
-    }
-}
-
 impl Gym for BipedalWalkerV3 {
-    type Error = candle_core::Error;
+    type Error = EnvironmentError;
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         let state = self.reset_internal(false)?;
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
         Ok(ResetInfo { state, info: () })
     }
 
     /// Steps with one continuous motor-control vector `action` shaped `[4]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        assert!(
-            self.hull.is_some(),
-            "call reset before stepping BipedalWalker"
-        );
+        if self.hull.is_none() || self.world.is_none() || self.joints.len() != 4 {
+            return Err(EnvironmentError::NotInitialized(
+                "call reset before stepping BipedalWalker",
+            ));
+        }
+        if action.dims() != [4] || !action.dtype().is_float() {
+            return Err(EnvironmentError::InvalidAction(
+                "BipedalWalker actions must be a floating-point tensor shaped [4]",
+            ));
+        }
         let action = action.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-        assert_eq!(action.len(), 4, "BipedalWalker actions must have shape [4]");
         for (index, speed) in [SPEED_HIP, SPEED_KNEE, SPEED_HIP, SPEED_KNEE]
             .into_iter()
             .enumerate()
         {
-            Self::drive_joint(&self.joints[index], action[index], speed);
+            Self::drive_joint(&self.joints[index], action[index], speed)?;
         }
-        self.world
-            .as_ref()
-            .unwrap()
-            .borrow_mut()
-            .step(1.0 / FPS, 6 * 30, 2 * 30);
+        let world = self.world.as_ref().ok_or(EnvironmentError::NotInitialized(
+            "call reset before stepping BipedalWalker",
+        ))?;
+        world.borrow_mut().step(1.0 / FPS, 6 * 30, 2 * 30);
 
-        let hull = self.hull.as_ref().unwrap().borrow();
+        let hull = self
+            .hull
+            .as_ref()
+            .ok_or(EnvironmentError::NotInitialized(
+                "call reset before stepping BipedalWalker",
+            ))?
+            .borrow();
         let position = hull.get_position();
         let velocity = hull.get_linear_velocity();
         let angle = hull.get_angle();
@@ -589,14 +635,16 @@ impl Gym for BipedalWalkerV3 {
             .joints
             .iter()
             .map(Self::joint_state)
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         let contacts = self
             .contact_detector
             .as_ref()
-            .unwrap()
+            .ok_or(EnvironmentError::NotInitialized(
+                "call reset before stepping BipedalWalker",
+            ))?
             .borrow()
             .lower_leg_contacts;
-        let lidar = self.lidar_fractions(position);
+        let lidar = self.lidar_fractions(position)?;
         let mut state = vec![
             angle,
             2.0 * angular_velocity / FPS,
@@ -624,7 +672,14 @@ impl Gym for BipedalWalkerV3 {
             .iter()
             .map(|value| 0.00035 * MOTORS_TORQUE * value.abs().clamp(0.0, 1.0))
             .sum::<f32>();
-        let game_over = self.contact_detector.as_ref().unwrap().borrow().game_over;
+        let game_over = self
+            .contact_detector
+            .as_ref()
+            .ok_or(EnvironmentError::NotInitialized(
+                "call reset before stepping BipedalWalker",
+            ))?
+            .borrow()
+            .game_over;
         let mut done = false;
         if game_over || position.x < 0.0 {
             reward = -100.0;
@@ -634,7 +689,7 @@ impl Gym for BipedalWalkerV3 {
             done = true;
         }
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
         Ok(StepInfo {
             state: Tensor::from_vec(state, 24, &self.device)?,
             reward,
@@ -676,6 +731,7 @@ mod tests {
 
     #[derive(serde::Deserialize)]
     struct Fixture {
+        generator: FixtureGenerator,
         initial_observation: Vec<f64>,
         actions: Vec<[f32; 4]>,
         observations: Vec<Vec<f64>>,
@@ -687,13 +743,51 @@ mod tests {
         sequential_terminated: Vec<bool>,
     }
 
+    #[derive(serde::Deserialize)]
+    struct FixtureGenerator {
+        python: String,
+        gymnasium: String,
+        pybox2d: String,
+    }
+
+    impl Fixture {
+        fn validate(&self) {
+            assert!(!self.generator.python.is_empty());
+            assert_eq!(self.generator.gymnasium, "1.2.1");
+            assert_eq!(self.generator.pybox2d, "2.3.5");
+            assert_eq!(self.actions.len(), self.observations.len());
+            assert_eq!(self.actions.len(), self.rewards.len());
+            assert_eq!(self.actions.len(), self.terminated.len());
+            assert_eq!(
+                self.sequential_actions.len(),
+                self.sequential_observations.len()
+            );
+            assert_eq!(self.sequential_actions.len(), self.sequential_rewards.len());
+            assert_eq!(
+                self.sequential_actions.len(),
+                self.sequential_terminated.len()
+            );
+            assert!(
+                self.observations
+                    .iter()
+                    .all(|observation| observation.len() == 24)
+            );
+            assert!(
+                self.sequential_observations
+                    .iter()
+                    .all(|observation| observation.len() == 24)
+            );
+        }
+    }
+
     #[test]
     fn flat_terrain_sequence_matches_gymnasium_v3() {
         let fixture: Fixture = serde_json::from_str(include_str!(
             "../../python_tests/bipedal_walker/trajectory.json"
         ))
         .unwrap();
-        let mut environment = BipedalWalkerV3::default();
+        fixture.validate();
+        let mut environment = BipedalWalkerV3::builder().build().unwrap();
         environment.reset_flat_for_test().unwrap();
         for index in 0..fixture.sequential_actions.len() {
             let action =
@@ -726,7 +820,8 @@ mod tests {
             "../../python_tests/bipedal_walker/trajectory.json"
         ))
         .unwrap();
-        let mut environment = BipedalWalkerV3::default();
+        fixture.validate();
+        let mut environment = BipedalWalkerV3::builder().build().unwrap();
         let initial = environment
             .reset_flat_for_test()
             .unwrap()
@@ -763,7 +858,7 @@ mod tests {
 
     #[test]
     fn default_spaces_match_gymnasium() {
-        let mut environment = BipedalWalkerV3::default();
+        let mut environment = BipedalWalkerV3::builder().build().unwrap();
         assert_eq!(environment.reset_flat_for_test().unwrap().dims(), &[24]);
         assert_eq!(environment.action_space().shape(), vec![4]);
         assert_eq!(environment.observation_space().shape(), vec![24]);
@@ -771,7 +866,7 @@ mod tests {
 
     #[test]
     fn standard_terrain_is_uneven_and_zero_control_falls() {
-        let mut environment = BipedalWalkerV3::default();
+        let mut environment = BipedalWalkerV3::builder().build().unwrap();
         assert_eq!(environment.reset().unwrap().state.dims(), &[24]);
         let heights = environment
             .terrain_points
@@ -799,7 +894,7 @@ mod tests {
 
     #[test]
     fn ground_contacts_clear_after_walker_is_lifted() {
-        let mut environment = BipedalWalkerV3::default();
+        let mut environment = BipedalWalkerV3::builder().build().unwrap();
         let initial = environment
             .reset_flat_for_test()
             .unwrap()
@@ -819,7 +914,7 @@ mod tests {
 
     #[test]
     fn crossing_course_end_terminates_without_fall_penalty() {
-        let mut environment = BipedalWalkerV3::default();
+        let mut environment = BipedalWalkerV3::builder().build().unwrap();
         environment.reset_flat_for_test().unwrap();
         translate_walker(&mut environment, TERRAIN_LENGTH as f32 * TERRAIN_STEP, 10.0);
         let transition = environment
@@ -836,6 +931,7 @@ mod tests {
         BipedalWalkerV3::builder()
             .render(true)
             .build()
+            .unwrap()
             .reset_flat_for_test()
             .unwrap();
     }

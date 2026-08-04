@@ -169,6 +169,8 @@ where
 /// this wrapper returns states shaped `[B0 + B1 + ..., ...]`. Actions are
 /// sliced back into those same contiguous ranges before each inner gym is
 /// stepped. Inner gyms retain responsibility for their own auto-reset logic.
+/// If an inner gym returns an error, earlier groups may already have advanced;
+/// callers must reset the stack before using it again.
 pub struct StackedMultiGym<G, I = ()>
 where
     G: MultiGym<I>,
@@ -193,6 +195,7 @@ where
         let action_shape = first.action_space().shape();
         let mut group_offsets = Vec::with_capacity(gyms.len() + 1);
         group_offsets.push(0);
+        let mut total_batch_size = 0;
 
         for (gym_index, gym) in gyms.iter().enumerate() {
             let batch_size = gym.num_envs();
@@ -218,7 +221,8 @@ where
                 });
             }
 
-            group_offsets.push(group_offsets.last().copied().unwrap() + batch_size);
+            total_batch_size += batch_size;
+            group_offsets.push(total_batch_size);
         }
 
         Ok(Self {
@@ -357,7 +361,6 @@ where
                 &[step.terminal_states.len()],
                 vec![batch_size],
             )?;
-
             states.push(step.states);
             rewards.push(step.rewards);
             infos.extend(step.infos);
@@ -385,7 +388,7 @@ where
     }
 
     fn num_envs(&self) -> usize {
-        *self.group_offsets.last().unwrap()
+        self.group_offsets.last().copied().unwrap_or(0)
     }
 
     fn reset(&mut self) -> Result<Tensor, Self::Error> {

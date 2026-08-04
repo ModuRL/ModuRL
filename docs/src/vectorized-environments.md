@@ -8,7 +8,7 @@ vectorized environment:
 
 ```rust,ignore
 let envs = (0..4)
-    .map(|_| CartPoleV1::builder().device(&device).build())
+    .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
     .collect::<Vec<_>>();
 let mut env = VectorizedGymWrapper::from(envs);
 ```
@@ -66,40 +66,38 @@ independent simulations. The environment must consume every player's action
 before it advances the shared world and must keep termination and reset
 behavior consistent across those rows.
 
-`SumoAnts` and `SumoHumans` from `modurl_mojoco` use this design. They match the
-original two-player `sumo-ants-v0` and `sumo-humans-v0` environments; the
-leading tensor dimension identifies the players:
+For example, a custom two-player game can expose players as the leading tensor
+dimension:
 
 ```rust,ignore
-let mut env = SumoAnts::builder().build()?;
-let states = env.reset()?; // [2, 137]
-let actions = agent.act(&states)?; // [2, 8]
-let step = env.step(actions)?; // advances one shared MuJoCo game
+let mut env = CoupledGame::new()?;
+let states = env.reset()?; // [players, ...observation_shape]
+let actions = agent.act(&states)?; // [players, ...action_shape]
+let step = env.step(actions)?; // advances the shared game once
 ```
 
 For a shared-policy agent, acting on the whole observation batch applies the
 same policy to every player and provides self-play without creating duplicate
-physics simulations. Both sumo environments end and reset every player row
-together when the first fighter falls or leaves the ring, or when the shared
-time limit expires.
+physics simulations. A coupled implementation should end and reset every
+player row together whenever the shared episode ends.
 
 ## Stack Several Batched Environments
 
 `StackedMultiGym` combines several homogeneous `MultiGym` values into one flat
-batch. For example, four two-player `SumoAnts` games become eight batch rows:
+batch. For example, four two-player games become eight batch rows:
 
 ```rust,ignore
 let games = (0..4)
     .map(|seed| {
-        let mut game = SumoAnts::builder().build()?;
+        let mut game = CoupledGame::new()?;
         game.seed(seed);
         Ok(game)
     })
-    .collect::<Result<Vec<_>, MujocoError>>()?;
+    .collect::<Result<Vec<_>, GameError>>()?;
 let mut env = StackedMultiGym::try_new(games)?;
 
-let states = env.reset()?; // [8, 137]
-let actions = agent.act(&states)?; // [8, 8]
+let states = env.reset()?; // [8, ...observation_shape]
+let actions = agent.act(&states)?; // [8, ...action_shape]
 let step = env.step(actions)?; // steps each shared game once
 ```
 

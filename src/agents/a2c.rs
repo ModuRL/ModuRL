@@ -18,7 +18,8 @@ pub use super::ppo::{
 use super::{
     Agent,
     ppo::{
-        FakeOptimizer, PPOAgent, PPOError, PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
+        FakeOptimizer, PPOAgent, PPOConfigurationError, PPOError, PPONetworkInfo,
+        SeparatePPONetwork, SharedPPONetwork,
     },
 };
 use crate::{
@@ -37,6 +38,45 @@ where
     GymError(GE),
     TensorError(candle_core::Error),
     SpaceError(SE),
+    ConfigurationError(PPOConfigurationError),
+    MismatchedTerminationBatch { dones: usize, truncateds: usize },
+    MissingPreparedRollout,
+    MissingOldValues,
+}
+
+impl<AE, GE, SE> std::fmt::Display for A2CError<AE, GE, SE>
+where
+    AE: Debug,
+    GE: Debug,
+    SE: Debug,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PolicyError(error) => write!(formatter, "A2C policy error: {error:?}"),
+            Self::GymError(error) => write!(formatter, "A2C environment error: {error:?}"),
+            Self::TensorError(error) => write!(formatter, "A2C tensor error: {error}"),
+            Self::SpaceError(error) => write!(formatter, "A2C action-space error: {error:?}"),
+            Self::ConfigurationError(error) => write!(formatter, "{error}"),
+            Self::MismatchedTerminationBatch { dones, truncateds } => write!(
+                formatter,
+                "A2C termination batch has {dones} done flags and {truncateds} truncation flags"
+            ),
+            Self::MissingPreparedRollout => {
+                formatter.write_str("A2C rollout was not prepared before optimization")
+            }
+            Self::MissingOldValues => {
+                formatter.write_str("A2C value clipping requires rollout-time value predictions")
+            }
+        }
+    }
+}
+
+impl<AE, GE, SE> std::error::Error for A2CError<AE, GE, SE>
+where
+    AE: Debug,
+    GE: Debug,
+    SE: Debug,
+{
 }
 
 impl<AE, GE, SE> From<PPOError<AE, GE, SE>> for A2CError<AE, GE, SE>
@@ -51,6 +91,12 @@ where
             PPOError::GymError(error) => Self::GymError(error),
             PPOError::TensorError(error) => Self::TensorError(error),
             PPOError::SpaceError(error) => Self::SpaceError(error),
+            PPOError::ConfigurationError(error) => Self::ConfigurationError(error),
+            PPOError::MismatchedTerminationBatch { dones, truncateds } => {
+                Self::MismatchedTerminationBatch { dones, truncateds }
+            }
+            PPOError::MissingPreparedRollout => Self::MissingPreparedRollout,
+            PPOError::MissingOldValues => Self::MissingOldValues,
         }
     }
 }
@@ -197,9 +243,7 @@ where
         logging_info: Option<&'a mut dyn A2CLogger<I>>,
         device: candle_core::Device,
         #[builder(default = candle_core::DType::F32)] dtype: candle_core::DType,
-    ) -> Self {
-        assert!(batch_size > 0, "A2C batch_size must be greater than zero");
-
+    ) -> Result<Self, PPOConfigurationError> {
         let inner = PPOAgent::builder()
             .action_space(action_space)
             .network_info(network_info.inner)
@@ -219,9 +263,9 @@ where
             .maybe_logging_info(logging_info)
             .device(device)
             .dtype(dtype)
-            .build();
+            .build()?;
 
-        Self { inner }
+        Ok(Self { inner })
     }
 
     pub fn set_learning_rate(&mut self, lr: f64) {
@@ -358,7 +402,8 @@ mod tests {
             .training_horizon(4)
             .logging_info(&mut logger)
             .device(device.clone())
-            .build();
+            .build()
+            .unwrap();
 
         agent.learn(&mut env, 2).unwrap();
         let observations = Tensor::zeros((2, 4), DType::F32, &device).unwrap();

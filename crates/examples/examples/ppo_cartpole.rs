@@ -30,7 +30,7 @@ fn ppo_cartpole() {
 
     let mut envs = vec![];
     for _ in 0..8 {
-        let env = CartPoleV1::builder().device(&device).build();
+        let env = CartPoleV1::builder().device(&device).build().unwrap();
         envs.push(env);
     }
     let mut vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
@@ -115,7 +115,8 @@ fn ppo_cartpole() {
         .training_horizon(100_000)
         .device(device)
         .logging_info(&mut logger)
-        .build();
+        .build()
+        .unwrap();
 
     agent.learn(&mut vec_env, 100_000).unwrap();
 

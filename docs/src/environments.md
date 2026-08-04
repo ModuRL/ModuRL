@@ -22,5 +22,14 @@ The getting-started example uses `CartPoleV1` for individual environments and
 `BipedalWalkerV3` implements the standard environment with uneven grass terrain;
 the hardcore obstacle variant is not included.
 
+These structs expose Gymnasium's unwrapped dynamics. Registry time limits are
+applied explicitly with `TimeLimitGym`: use 500 steps for `AcrobotV1`, 200 for
+`PendulumV1`, and the registry horizon appropriate to the other environment.
+Keeping the limit in a wrapper makes truncation visible and composable.
+
+`modurl_mojoco` provides the Gymnasium v5 `AntV5`, `HalfCheetahV5`, `HopperV5`,
+`HumanoidV5`, and `Walker2dV5` environments. See that crate's README for model,
+installation, metadata, and parity details.
+
 Read [Use Vectorized Environments](./vectorized-environments.md) before writing
 manual training or evaluation loops. Read [Build a Custom Gym Environment](./custom-gym-environment.md) when you need a new environment type.

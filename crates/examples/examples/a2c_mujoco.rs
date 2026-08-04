@@ -4,7 +4,7 @@ use modurl::prelude::*;
 
 #[path = "support/graphers.rs"]
 mod graphers;
-use graphers::A2CMujocoGrapher;
+use graphers::MujocoOnPolicyGrapher;
 #[path = "support/mujoco.rs"]
 mod mujoco;
 use mujoco::ENVIRONMENT_NAME;
@@ -105,7 +105,7 @@ fn main() {
             .build(),
     );
 
-    let mut grapher = A2CMujocoGrapher::new(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
+    let mut grapher = MujocoOnPolicyGrapher::a2c(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
     let mut agent = A2CAgent::builder()
         .dtype(DTYPE)
         .action_space(action_space)
@@ -115,7 +115,8 @@ fn main() {
         .training_horizon(TOTAL_TIMESTEPS)
         .logging_info(&mut grapher)
         .device(device)
-        .build();
+        .build()
+        .unwrap();
 
     agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
     grapher.display();

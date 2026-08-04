@@ -21,6 +21,8 @@ use modurl::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::EnvironmentError;
+
 #[cfg(feature = "rendering")]
 use crate::rendering::{Flag, Renderer};
 
@@ -268,12 +270,12 @@ impl LunarLanderV3 {
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
-    ) -> Self {
-        assert!(
-            -12.0 < gravity && gravity < 0.0,
-            "gravity (current value: {}) must be between -12 and 0",
-            gravity
-        );
+    ) -> Result<Self, EnvironmentError> {
+        if !gravity.is_finite() || gravity <= -12.0 || gravity >= 0.0 {
+            return Err(EnvironmentError::InvalidConfiguration(
+                "LunarLander gravity must be between -12 and 0",
+            ));
+        }
 
         if !(0.0..=20.0).contains(&wind_power) {
             eprintln!(
@@ -289,7 +291,7 @@ impl LunarLanderV3 {
             );
         }
 
-        Self {
+        Ok(Self {
             gravity,
             enable_wind,
             wind_power,
@@ -313,16 +315,10 @@ impl LunarLanderV3 {
             deterministic_mode: false,
             device,
             #[cfg(feature = "rendering")]
-            renderer: if render {
-                Some(Renderer::new(
-                    VIEWPORT_W as usize,
-                    VIEWPORT_H as usize,
-                    "Lunar Lander",
-                ))
-            } else {
-                None
-            },
-        }
+            renderer: render
+                .then(|| Renderer::new(VIEWPORT_W as usize, VIEWPORT_H as usize, "Lunar Lander"))
+                .transpose()?,
+        })
     }
 
     fn random_uniform(&self, low: f32, high: f32) -> Result<f32, candle_core::Error> {
@@ -361,7 +357,7 @@ impl LunarLanderV3 {
     }
 
     #[cfg(feature = "rendering")]
-    fn render(&mut self) {
+    fn render(&mut self) -> Result<(), EnvironmentError> {
         if let Some(renderer) = &mut self.renderer
             && renderer.is_open()
         {
@@ -385,8 +381,9 @@ impl LunarLanderV3 {
             Self::render_particles_static(renderer, particles);
             Self::render_lander_static(renderer, lander);
 
-            renderer.present();
+            renderer.present()?;
         }
+        Ok(())
     }
 
     #[cfg(feature = "rendering")]
@@ -705,14 +702,8 @@ impl LunarLanderV3 {
     }
 }
 
-impl Default for LunarLanderV3 {
-    fn default() -> Self {
-        LunarLanderV3::builder().build()
-    }
-}
-
 impl Gym for LunarLanderV3 {
-    type Error = candle_core::Error;
+    type Error = EnvironmentError;
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
@@ -890,7 +881,12 @@ impl Gym for LunarLanderV3 {
 
             // Create revolute joint connecting leg to lander
             let mut joint_def = B2revoluteJointDef::default();
-            joint_def.base.body_a = Some(self.lander.as_ref().unwrap().clone());
+            joint_def.base.body_a = Some(
+                self.lander
+                    .as_ref()
+                    .expect("reset creates the LunarLander body before its legs")
+                    .clone(),
+            );
             joint_def.base.body_b = Some(leg.clone());
             joint_def.local_anchor_a = B2vec2::new(0.0, 0.0);
             joint_def.local_anchor_b = B2vec2::new(i_f * LEG_AWAY / SCALE, LEG_DOWN / SCALE);
@@ -916,7 +912,7 @@ impl Gym for LunarLanderV3 {
         let step_info = self.step(Tensor::from_vec(vec![0u32], vec![], &self.device)?)?;
 
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
 
         Ok(ResetInfo {
             state: step_info.state,
@@ -926,9 +922,20 @@ impl Gym for LunarLanderV3 {
 
     /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        assert!(self.lander.is_some(), "You forgot to call reset()");
-        let world = self.world.as_ref().unwrap().clone();
-        let lander = self.lander.as_ref().unwrap().clone();
+        let world = self
+            .world
+            .as_ref()
+            .ok_or(EnvironmentError::NotInitialized(
+                "call reset before stepping LunarLander",
+            ))?
+            .clone();
+        let lander = self
+            .lander
+            .as_ref()
+            .ok_or(EnvironmentError::NotInitialized(
+                "call reset before stepping LunarLander",
+            ))?
+            .clone();
 
         let action_u32 = action.to_vec0::<u32>()?;
 
@@ -1165,7 +1172,7 @@ impl Gym for LunarLanderV3 {
         }
 
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
 
         Ok(StepInfo {
             state: state_tensor,
@@ -1586,14 +1593,14 @@ mod tests {
 
     #[test]
     fn test_lunar_lander_reset() {
-        let mut env = LunarLanderV3::default();
+        let mut env = LunarLanderV3::builder().build().unwrap();
         let state = env.reset().expect("Failed to reset environment");
         assert_eq!(state.state.dims(), &[8]);
     }
 
     #[test]
     fn test_lunar_lander_step() {
-        let mut env = LunarLanderV3::default();
+        let mut env = LunarLanderV3::builder().build().unwrap();
         env.reset().expect("Failed to reset environment");
 
         let action = Tensor::from_vec(vec![0u32], vec![], &Device::Cpu)
@@ -1606,7 +1613,7 @@ mod tests {
 
     #[test]
     fn test_lunar_lander_actions() {
-        let mut env = LunarLanderV3::default();
+        let mut env = LunarLanderV3::builder().build().unwrap();
         env.reset().expect("Failed to reset environment");
 
         // Test all four discrete actions
@@ -1623,7 +1630,7 @@ mod tests {
 
     #[test]
     fn test_lunar_lander_with_wind() {
-        let mut env = LunarLanderV3::builder().enable_wind(true).build();
+        let mut env = LunarLanderV3::builder().enable_wind(true).build().unwrap();
         env.reset().expect("Failed to reset environment");
 
         // Test with wind enabled
@@ -1637,7 +1644,7 @@ mod tests {
 
     #[test]
     fn test_lunar_lander_deterministic_reset() {
-        let mut env = LunarLanderV3::default();
+        let mut env = LunarLanderV3::builder().build().unwrap();
         let state1 = env
             .reset_deterministic()
             .expect("Failed to reset deterministically");
@@ -1678,7 +1685,7 @@ mod tests {
     fn test_lunar_lander_against_python() {
         test_gym_against_python(
             "lunar_lander",
-            LunarLanderV3::default(),
+            LunarLanderV3::builder().build().unwrap(),
             Some(Tolerances::new(0.1, 1e-3)),
         );
     }
@@ -1699,14 +1706,24 @@ mod tests {
         let outputs: Vec<Output> =
             serde_json::from_str(include_str!("../../python_tests/lunar_lander/output.json"))
                 .unwrap();
+        assert_eq!(
+            inputs.len(),
+            outputs.len(),
+            "fixture input/output length mismatch"
+        );
 
-        let mut environment = LunarLanderV3::default();
+        let mut environment = LunarLanderV3::builder().build().unwrap();
         environment.reset_deterministic().unwrap();
         for (index, (&action, expected)) in inputs.iter().zip(&outputs).enumerate() {
             let actual = environment
                 .step(Tensor::from_vec(vec![action], vec![], &Device::Cpu).unwrap())
                 .unwrap();
             let observation = actual.state.to_vec1::<f32>().unwrap();
+            assert_eq!(
+                observation.len(),
+                expected.observation.len(),
+                "sequential step {index}, observation length mismatch"
+            );
             for (component, &expected) in expected.observation.iter().enumerate() {
                 assert!(
                     (observation[component] - expected).abs() <= 5e-3,
@@ -1725,7 +1742,7 @@ mod tests {
                 actual.truncated, expected.truncated,
                 "sequential step {index}"
             );
-            if expected.done && index + 1 < inputs.len() {
+            if (expected.done || expected.truncated) && index + 1 < inputs.len() {
                 environment.reset_deterministic().unwrap();
             }
         }
@@ -1734,7 +1751,7 @@ mod tests {
     #[cfg(feature = "rendering")]
     #[test]
     fn test_lunar_lander_rendering() {
-        let mut env = LunarLanderV3::builder().render(true).build();
+        let mut env = LunarLanderV3::builder().render(true).build().unwrap();
         env.reset().expect("Failed to reset environment");
 
         // Step a few times and render, cycling through different actions to test particle rendering
@@ -1766,8 +1783,8 @@ mod tests {
 
     #[test]
     fn test_lunar_lander_deterministic_reset_with_wind() {
-        let mut env1 = LunarLanderV3::builder().enable_wind(true).build();
-        let mut env2 = LunarLanderV3::builder().enable_wind(true).build();
+        let mut env1 = LunarLanderV3::builder().enable_wind(true).build().unwrap();
+        let mut env2 = LunarLanderV3::builder().enable_wind(true).build().unwrap();
 
         let state1 = env1.reset_deterministic().expect("Failed to reset env1");
         let state2 = env2.reset_deterministic().expect("Failed to reset env2");

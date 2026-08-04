@@ -1,5 +1,6 @@
 use std::f64::consts::PI;
 
+use crate::EnvironmentError;
 use bon::bon;
 use candle_core::{DType, Device, Tensor};
 use modurl::{
@@ -28,22 +29,41 @@ impl PendulumV1 {
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
-    ) -> Self {
-        assert!(gravity.is_finite(), "gravity must be finite");
+    ) -> Result<Self, EnvironmentError> {
+        if !gravity.is_finite() {
+            return Err(EnvironmentError::InvalidConfiguration(
+                "gravity must be finite",
+            ));
+        }
+        Self::from_config(
+            device,
+            gravity,
+            #[cfg(feature = "rendering")]
+            render,
+        )
+    }
+
+    fn from_config(
+        device: &Device,
+        gravity: f64,
+        #[cfg(feature = "rendering")] render: bool,
+    ) -> Result<Self, EnvironmentError> {
         let action_space = BoxSpace::new_with_universal_bounds(vec![1], -2.0, 2.0, device);
         let observation_space = BoxSpace::new(
-            Tensor::from_vec(vec![-1.0_f32, -1.0, -8.0], 3, device).unwrap(),
-            Tensor::from_vec(vec![1.0_f32, 1.0, 8.0], 3, device).unwrap(),
+            Tensor::from_vec(vec![-1.0_f32, -1.0, -8.0], 3, device)?,
+            Tensor::from_vec(vec![1.0_f32, 1.0, 8.0], 3, device)?,
         );
-        Self {
+        Ok(Self {
             state: [0.0; 2],
             gravity,
             device: device.clone(),
             action_space,
             observation_space,
             #[cfg(feature = "rendering")]
-            renderer: render.then(|| crate::rendering::Renderer::new(500, 500, "Pendulum")),
-        }
+            renderer: render
+                .then(|| crate::rendering::Renderer::new(500, 500, "Pendulum"))
+                .transpose()?,
+        })
     }
 
     fn observation(&self) -> Result<Tensor, candle_core::Error> {
@@ -59,10 +79,13 @@ impl PendulumV1 {
     }
 
     #[cfg(feature = "rendering")]
-    fn render(&mut self) {
+    fn render(&mut self) -> Result<(), EnvironmentError> {
         let Some(renderer) = &mut self.renderer else {
-            return;
+            return Ok(());
         };
+        if !renderer.is_open() {
+            return Ok(());
+        }
         renderer.clear(0xFFFFFF);
         let center = 250.0_f32;
         let length = 113.6_f32;
@@ -86,7 +109,8 @@ impl PendulumV1 {
         );
         renderer.draw_circle(center as usize, center as usize, 6, 0x000000);
         renderer.draw_circle(end.0 as usize, end.1 as usize, 11, 0xCC4D4D);
-        renderer.present();
+        renderer.present()?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -95,14 +119,8 @@ impl PendulumV1 {
     }
 }
 
-impl Default for PendulumV1 {
-    fn default() -> Self {
-        Self::builder().build()
-    }
-}
-
 impl Gym for PendulumV1 {
-    type Error = candle_core::Error;
+    type Error = EnvironmentError;
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
@@ -112,7 +130,7 @@ impl Gym for PendulumV1 {
             -1.0 + f64::from(random[1]) * 2.0,
         ];
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
         Ok(ResetInfo {
             state: self.observation()?,
             info: (),
@@ -121,8 +139,12 @@ impl Gym for PendulumV1 {
 
     /// Steps with one continuous torque vector `action` shaped `[1]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
+        if action.dims() != [1] || !action.dtype().is_float() {
+            return Err(EnvironmentError::InvalidAction(
+                "Pendulum actions must be a floating-point tensor shaped [1]",
+            ));
+        }
         let action = action.to_dtype(DType::F64)?.to_vec1::<f64>()?;
-        assert_eq!(action.len(), 1, "Pendulum actions must have shape [1]");
         let torque = action[0].clamp(-2.0, 2.0);
         let [theta, theta_dot] = self.state;
         let normalized = ((theta + PI).rem_euclid(2.0 * PI)) - PI;
@@ -132,7 +154,7 @@ impl Gym for PendulumV1 {
         new_theta_dot = new_theta_dot.clamp(-8.0, 8.0);
         self.state = [theta + new_theta_dot * 0.05, new_theta_dot];
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
         Ok(StepInfo {
             state: self.observation()?,
             reward: -cost as f32,
@@ -168,7 +190,7 @@ mod tests {
         let transitions: Vec<Transition> =
             serde_json::from_str(include_str!("../../python_tests/pendulum/trajectory.json"))
                 .unwrap();
-        let mut environment = PendulumV1::default();
+        let mut environment = PendulumV1::builder().build().unwrap();
         for (index, transition) in transitions.iter().enumerate() {
             environment.set_raw_state(transition.state);
             let action = Tensor::from_vec(vec![transition.action], 1, &Device::Cpu).unwrap();
@@ -188,7 +210,7 @@ mod tests {
 
     #[test]
     fn default_spaces_match_gymnasium() {
-        let mut environment = PendulumV1::default();
+        let mut environment = PendulumV1::builder().build().unwrap();
         assert_eq!(environment.reset().unwrap().state.dims(), &[3]);
         assert_eq!(environment.action_space().shape(), vec![1]);
         assert_eq!(environment.observation_space().shape(), vec![3]);
@@ -197,6 +219,11 @@ mod tests {
     #[cfg(feature = "rendering")]
     #[test]
     fn rendering_can_be_enabled() {
-        PendulumV1::builder().render(true).build().reset().unwrap();
+        PendulumV1::builder()
+            .render(true)
+            .build()
+            .unwrap()
+            .reset()
+            .unwrap();
     }
 }

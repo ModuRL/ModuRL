@@ -21,7 +21,7 @@ fn ppo_cartpole() {
 
     let mut envs = vec![];
     for _ in 0..8 {
-        let env = CartPoleV1::builder().device(&device).build();
+        let env = CartPoleV1::builder().device(&device).build().unwrap();
         envs.push(env);
     }
     let mut vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
@@ -103,7 +103,8 @@ fn ppo_cartpole() {
         .num_epochs(10)
         .training_horizon(1_000_000)
         .device(device)
-        .build();
+        .build()
+        .unwrap();
 
     let start = std::time::Instant::now();
     for _ in 0..10 {

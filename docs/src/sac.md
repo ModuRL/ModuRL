@@ -22,7 +22,9 @@ cargo run --release -p examples --example sac_mujoco --features hopper
 cargo run --release -p examples --example sac_mujoco --features walker2d
 ```
 
-Enable exactly one environment feature. The program selects CUDA when it is
+Normally enable one environment feature; add `rendering` to it to open a
+viewer. Additive builds with several environment features select `ant`,
+`half-cheetah`, `hopper`, then `walker2d`. The program selects CUDA when it is
 available and otherwise uses the CPU. It trains for one million collected
 transitions, then displays terminal graphs for episode performance and SAC
 diagnostics.

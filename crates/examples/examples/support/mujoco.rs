@@ -10,18 +10,9 @@ compile_error!(
     "enable exactly one MuJoCo environment feature: ant, half-cheetah, hopper, or walker2d"
 );
 
-#[cfg(any(
-    all(feature = "ant", feature = "half-cheetah"),
-    all(feature = "ant", feature = "hopper"),
-    all(feature = "ant", feature = "walker2d"),
-    all(feature = "half-cheetah", feature = "hopper"),
-    all(feature = "half-cheetah", feature = "walker2d"),
-    all(feature = "hopper", feature = "walker2d"),
-))]
-compile_error!(
-    "enable exactly one MuJoCo environment feature: ant, half-cheetah, hopper, or walker2d"
-);
-
+// Cargo features are additive. When several environment features are enabled
+// (for example by `--all-features`), select the first in this documented
+// priority order so every example remains buildable.
 #[cfg(feature = "ant")]
 use modurl_mojoco::AntV5 as SelectedEnvironment;
 #[cfg(all(not(feature = "ant"), feature = "half-cheetah"))]

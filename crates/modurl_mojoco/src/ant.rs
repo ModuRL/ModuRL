@@ -12,6 +12,19 @@ use crate::{
 
 const MODEL: &str = include_str!("../assets/ant.xml");
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AntV5Info {
+    pub x_position: f32,
+    pub y_position: f32,
+    pub distance_from_origin: f32,
+    pub x_velocity: Option<f32>,
+    pub y_velocity: Option<f32>,
+    pub reward_forward: Option<f32>,
+    pub reward_ctrl: Option<f32>,
+    pub reward_contact: Option<f32>,
+    pub reward_survive: Option<f32>,
+}
+
 /// Gymnasium-compatible `Ant-v5` with the default model.
 pub struct AntV5 {
     core: MujocoCore,
@@ -129,40 +142,65 @@ impl AntV5 {
         }
         self.core.tensor(&observation)
     }
+
+    fn info(&self) -> AntV5Info {
+        let x = self.core.qpos()[0];
+        let y = self.core.qpos()[1];
+        AntV5Info {
+            x_position: x as f32,
+            y_position: y as f32,
+            distance_from_origin: x.hypot(y) as f32,
+            x_velocity: None,
+            y_velocity: None,
+            reward_forward: None,
+            reward_ctrl: None,
+            reward_contact: None,
+            reward_survive: None,
+        }
+    }
 }
 
-impl Gym for AntV5 {
+impl Gym<AntV5Info> for AntV5 {
     type Error = MujocoError;
     type SpaceError = candle_core::Error;
 
-    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+    fn reset(&mut self) -> Result<ResetInfo<AntV5Info>, Self::Error> {
         self.core
             .reset_uniform_positions_normal_velocities(self.reset_noise_scale)?;
         self.core.render()?;
         Ok(ResetInfo {
             state: self.observation()?,
-            info: (),
+            info: self.info(),
         })
     }
 
     /// Steps with one continuous actuator vector shaped `[8]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        let x_before = self.core.body_position(1)[0];
+    fn step(&mut self, action: Tensor) -> Result<StepInfo<AntV5Info>, Self::Error> {
+        let position_before = self.core.body_position(1);
         let action = self.core.step(&action)?;
-        let x_velocity = (self.core.body_position(1)[0] - x_before) / self.core.dt();
+        let position_after = self.core.body_position(1);
+        let x_velocity = (position_after[0] - position_before[0]) / self.core.dt();
+        let y_velocity = (position_after[1] - position_before[1]) / self.core.dt();
         let healthy = self.is_healthy();
         let control_cost = self.control_cost_weight * action.iter().map(|x| x * x).sum::<f64>();
-        let reward = self.forward_reward_weight * x_velocity
-            + if healthy { self.healthy_reward } else { 0.0 }
-            - control_cost
-            - self.contact_cost();
+        let forward_reward = self.forward_reward_weight * x_velocity;
+        let survive_reward = if healthy { self.healthy_reward } else { 0.0 };
+        let contact_cost = self.contact_cost();
+        let reward = forward_reward + survive_reward - control_cost - contact_cost;
         self.core.render()?;
+        let mut info = self.info();
+        info.x_velocity = Some(x_velocity as f32);
+        info.y_velocity = Some(y_velocity as f32);
+        info.reward_forward = Some(forward_reward as f32);
+        info.reward_ctrl = Some(-control_cost as f32);
+        info.reward_contact = Some(-contact_cost as f32);
+        info.reward_survive = Some(survive_reward as f32);
         Ok(StepInfo {
             state: self.observation()?,
             reward: reward as f32,
             done: !healthy && self.terminate_when_unhealthy,
             truncated: false,
-            info: (),
+            info,
         })
     }
 

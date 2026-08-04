@@ -91,29 +91,12 @@ impl MujocoCore {
         self.data.xpos()[body_index]
     }
 
-    pub(crate) fn body_orientation(&self, body_index: usize) -> [f64; 9] {
-        self.data.xmat()[body_index]
+    pub(crate) fn tendon_lengths(&self) -> &[f64] {
+        self.data.ten_length()
     }
 
-    pub(crate) fn contacts(&self) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
-        self.data
-            .contact()
-            .iter()
-            .map(|contact| (contact.geom1 as usize, contact.geom2 as usize, contact.dist))
-    }
-
-    pub(crate) fn set_geom_radius(&mut self, geom_index: usize, radius: f64) {
-        // SAFETY: changing a compiled geom's size is supported by MuJoCo. The
-        // model remains owned by this data instance and the geom index was
-        // established when the environment's XML was built.
-        unsafe {
-            self.data.model_mut().geom_size_mut()[geom_index][0] = radius;
-        }
-        self.data.forward();
-    }
-
-    pub(crate) fn random_uniform(&mut self, minimum: f64, maximum: f64) -> f64 {
-        self.rng.random_range(minimum..maximum)
+    pub(crate) fn tendon_velocities(&self) -> &[f64] {
+        self.data.ten_velocity()
     }
 
     pub(crate) fn dt(&self) -> f64 {
@@ -261,6 +244,11 @@ impl MujocoCore {
         for _ in 0..self.frame_skip {
             self.data.step();
         }
+        // MuJoCo does not populate center-of-mass external forces during a
+        // normal step unless a sensor requests them. Gymnasium explicitly
+        // runs this pass after simulation, so do the same before environments
+        // read `cfrc_ext` for observations and contact costs.
+        self.data.rne_post_constraint();
         Ok(values)
     }
 
@@ -341,11 +329,11 @@ pub(crate) fn validate_range(
     name: &str,
     (minimum, maximum): (f64, f64),
 ) -> Result<(), MujocoError> {
-    if !minimum.is_nan() && !maximum.is_nan() && minimum < maximum {
+    if !minimum.is_nan() && !maximum.is_nan() && minimum <= maximum {
         Ok(())
     } else {
         Err(MujocoError::InvalidInput(format!(
-            "{name} must have a non-NaN minimum smaller than its maximum"
+            "{name} must have a non-NaN minimum no greater than its maximum"
         )))
     }
 }

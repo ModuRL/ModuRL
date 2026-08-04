@@ -61,11 +61,17 @@ fn main() {
         LunarLanderV3::builder()
             .render(true)
             .device(device.clone())
-            .build(),
+            .build()
+            .unwrap(),
     );
     let mut envs = vec![env1];
     for _ in 0..15 {
-        let env = DebugLunarLander::new(LunarLanderV3::builder().device(device.clone()).build());
+        let env = DebugLunarLander::new(
+            LunarLanderV3::builder()
+                .device(device.clone())
+                .build()
+                .unwrap(),
+        );
         envs.push(env);
     }
 
@@ -149,7 +155,8 @@ fn main() {
         .num_epochs(4)
         .training_horizon(10_000_000)
         .device(device)
-        .build();
+        .build()
+        .unwrap();
 
     agent.learn(&mut env, 10_000_000).unwrap();
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import platform
 from pathlib import Path
 
+import Box2D
 import gymnasium as gym
 import numpy as np
 
@@ -72,6 +74,11 @@ if __name__ == "__main__":
     (target / "trajectory.json").write_text(
         json.dumps(
             {
+                "generator": {
+                    "python": platform.python_version(),
+                    "gymnasium": gym.__version__,
+                    "pybox2d": getattr(Box2D, "__version__", "unknown"),
+                },
                 "initial_observation": initial_observation.tolist(),
                 "actions": [action.tolist() for action in transition_actions],
                 "observations": observations,

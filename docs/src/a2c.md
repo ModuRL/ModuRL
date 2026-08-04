@@ -33,3 +33,9 @@ cargo run -p examples --example a2c_mujoco --features walker2d
 
 Choose one command for the environment you want to train. Read
 [PPO](./ppo.md) for the underlying on-policy training model.
+
+Add `rendering` alongside the environment feature to open a viewer, for
+example `--features ant,rendering`. A2C writes TensorBoard events below
+`runs/a2c_mujoco/` and also displays terminal graphs. If several environment
+features are enabled by an additive feature build, the example uses `ant`,
+`half-cheetah`, `hopper`, then `walker2d` as its selection priority.

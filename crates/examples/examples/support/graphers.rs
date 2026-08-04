@@ -158,7 +158,7 @@ impl PPOLogger for PPOGrapher {
     }
 }
 
-pub struct PPOMujocoGrapher {
+pub struct MujocoOnPolicyGrapher {
     timestep: usize,
     total_timesteps: usize,
     terminal: TerminalLogger,
@@ -168,12 +168,16 @@ pub struct PPOMujocoGrapher {
     running_episode_returns: Vec<f32>,
 }
 
-impl PPOMujocoGrapher {
-    pub fn new(total_timesteps: usize, environment_name: &str) -> Self {
-        Self::new_with_run_name(total_timesteps, environment_name, "ppo_mujoco")
+impl MujocoOnPolicyGrapher {
+    pub fn ppo(total_timesteps: usize, environment_name: &str) -> Self {
+        Self::new(total_timesteps, environment_name, "ppo_mujoco")
     }
 
-    fn new_with_run_name(total_timesteps: usize, environment_name: &str, run_name: &str) -> Self {
+    pub fn a2c(total_timesteps: usize, environment_name: &str) -> Self {
+        Self::new(total_timesteps, environment_name, "a2c_mujoco")
+    }
+
+    fn new(total_timesteps: usize, environment_name: &str, run_name: &str) -> Self {
         let aggregation = with_episode_smoothing(with_metric_window(
             with_metric_window(
                 standard_aggregation(),
@@ -227,7 +231,7 @@ impl PPOMujocoGrapher {
     }
 
     /// Logs named scalar metric tensors, each shaped `[]`.
-    fn log_metrics(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) {
+    fn log_terminal_and_tensorboard(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) {
         self.terminal.log(timestep, metrics).unwrap();
         self.tensorboard.log(timestep, metrics).unwrap();
     }
@@ -244,17 +248,7 @@ fn tensorboard_log_dir(run_name: &str, environment_name: &str) -> PathBuf {
     ))
 }
 
-pub trait MujocoRewardInfo {
-    fn raw_reward(&self, collection_reward: f32) -> f32;
-}
-
-impl MujocoRewardInfo for RawRewardInfo<()> {
-    fn raw_reward(&self, _collection_reward: f32) -> f32 {
-        self.raw_reward.expect("step info must have a raw reward")
-    }
-}
-
-impl<I: MujocoRewardInfo> PPOLogger<I> for PPOMujocoGrapher {
+impl<I> PPOLogger<RawRewardInfo<I>> for MujocoOnPolicyGrapher {
     fn log(&mut self, info: &PPOLogEntry) {
         let new_timestep = info.timestep != self.timestep;
         if new_timestep {
@@ -265,7 +259,10 @@ impl<I: MujocoRewardInfo> PPOLogger<I> for PPOMujocoGrapher {
                     &Device::Cpu,
                 )
                 .unwrap();
-                self.log_metrics(info.timestep, &[("Mean Raw Step Reward", &mean_raw_reward)]);
+                self.log_terminal_and_tensorboard(
+                    info.timestep,
+                    &[("Mean Raw Step Reward", &mean_raw_reward)],
+                );
             }
             self.raw_reward_sum = 0.0;
             self.raw_reward_samples = 0;
@@ -276,7 +273,7 @@ impl<I: MujocoRewardInfo> PPOLogger<I> for PPOMujocoGrapher {
         let entropy = info.entropy.mean_all().unwrap();
         let kl_divergence = info.kl_divergence.mean_all().unwrap();
         let explained_variance = info.explained_variance.mean_all().unwrap();
-        self.log_metrics(
+        self.log_terminal_and_tensorboard(
             info.timestep,
             &[
                 ("Actor Loss", &actor_loss),
@@ -291,18 +288,14 @@ impl<I: MujocoRewardInfo> PPOLogger<I> for PPOMujocoGrapher {
         }
     }
 
-    fn log_collection(&mut self, info: &PPOCollectionLogEntry<I>) {
+    fn log_collection(&mut self, info: &PPOCollectionLogEntry<RawRewardInfo<I>>) {
         if self.running_episode_returns.len() != info.infos.len() {
             self.running_episode_returns = vec![0.0; info.infos.len()];
         }
-        let collection_rewards = info.collection_rewards.to_vec1::<f32>().unwrap();
-        for ((episode_return, env_info), collection_reward) in self
-            .running_episode_returns
-            .iter_mut()
-            .zip(&info.infos)
-            .zip(collection_rewards)
-        {
-            let raw_reward = env_info.raw_reward(collection_reward);
+        for (episode_return, env_info) in self.running_episode_returns.iter_mut().zip(&info.infos) {
+            let raw_reward = env_info
+                .raw_reward
+                .expect("RecordRawRewardGym attaches every raw step reward");
             self.raw_reward_sum += raw_reward;
             self.raw_reward_samples += 1;
             *episode_return += raw_reward;
@@ -314,7 +307,7 @@ impl<I: MujocoRewardInfo> PPOLogger<I> for PPOMujocoGrapher {
             )
             .unwrap();
             let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
-            self.log_metrics(
+            self.log_terminal_and_tensorboard(
                 episode.collection_timestep,
                 &[
                     (EPISODE_RETURN_METRIC, &episode_return),
@@ -324,36 +317,6 @@ impl<I: MujocoRewardInfo> PPOLogger<I> for PPOMujocoGrapher {
             self.running_episode_returns[episode.environment_index] = 0.0;
             self.progress();
         }
-    }
-}
-
-pub struct A2CMujocoGrapher {
-    inner: PPOMujocoGrapher,
-}
-
-impl A2CMujocoGrapher {
-    pub fn new(total_timesteps: usize, environment_name: &str) -> Self {
-        Self {
-            inner: PPOMujocoGrapher::new_with_run_name(
-                total_timesteps,
-                environment_name,
-                "a2c_mujoco",
-            ),
-        }
-    }
-
-    pub fn display(self) {
-        self.inner.display();
-    }
-}
-
-impl<I: MujocoRewardInfo> A2CLogger<I> for A2CMujocoGrapher {
-    fn log(&mut self, info: &A2CLogEntry) {
-        <PPOMujocoGrapher as PPOLogger<I>>::log(&mut self.inner, info);
-    }
-
-    fn log_collection(&mut self, info: &A2CCollectionLogEntry<I>) {
-        <PPOMujocoGrapher as PPOLogger<I>>::log_collection(&mut self.inner, info);
     }
 }
 
@@ -467,6 +430,8 @@ impl<I> SACLogger<I> for SACGrapher {
                 .unwrap();
         }
 
+        // Update metrics may already have advanced this monotonic logger, so
+        // completed episodes are intentionally recorded at the batch time.
         for episode in &entry.completed_episodes {
             let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
             let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
@@ -555,7 +520,7 @@ impl DeterministicActorCriticGrapher {
             .unwrap();
     }
 
-    fn log_collection<I>(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+    fn log_collection_metrics<I>(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
         if entry
             .collection_timestep
             .is_multiple_of(DETERMINISTIC_ACTOR_CRITIC_UPDATE_LOG_INTERVAL)
@@ -569,6 +534,8 @@ impl DeterministicActorCriticGrapher {
                 .unwrap();
         }
 
+        // See the SAC grapher: completed episodes use the enclosing batch time
+        // because optimization metrics may already have advanced the logger.
         for episode in &entry.completed_episodes {
             let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
             let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
@@ -595,7 +562,7 @@ impl<I> DDPGLogger<I> for DeterministicActorCriticGrapher {
     }
 
     fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
-        self.log_collection(entry);
+        self.log_collection_metrics(entry);
     }
 }
 
@@ -605,7 +572,7 @@ impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
     }
 
     fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
-        self.log_collection(entry);
+        self.log_collection_metrics(entry);
     }
 }
 
@@ -670,7 +637,7 @@ mod tests {
             .log(6_000, &[("Update", &update_metric)])
             .unwrap();
 
-        grapher.log_collection(&DeterministicActorCriticCollectionLogEntry {
+        grapher.log_collection_metrics(&DeterministicActorCriticCollectionLogEntry {
             collection_rewards: Tensor::zeros(2, candle_core::DType::F32, &Device::Cpu).unwrap(),
             infos: vec![(), ()],
             collection_timestep: 6_000,
@@ -694,5 +661,12 @@ mod tests {
             ],
             replay_len: 6_000,
         });
+        grapher.terminal.finish().unwrap();
+        let returns = grapher.terminal.series(EPISODE_RETURN_METRIC).unwrap();
+        let lengths = grapher.terminal.series(EPISODE_LENGTH_METRIC).unwrap();
+        assert_eq!(returns.last().unwrap().0, 6_000);
+        assert_eq!(lengths.last().unwrap().0, 6_000);
+        assert_eq!(returns.last().unwrap().1, 0.0);
+        assert_eq!(lengths.last().unwrap().1, 10.0);
     }
 }

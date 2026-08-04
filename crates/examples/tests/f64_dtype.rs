@@ -26,7 +26,9 @@ fn mlp(
 }
 
 fn cartpole() -> VectorizedGymWrapper<CartPoleV1> {
-    VectorizedGymWrapper::from(vec![CartPoleV1::builder().device(&Device::Cpu).build()])
+    VectorizedGymWrapper::from(vec![
+        CartPoleV1::builder().device(&Device::Cpu).build().unwrap(),
+    ])
 }
 
 #[test]
@@ -131,7 +133,8 @@ fn ppo_updates_f64_networks_from_native_f32_observations() {
         .training_horizon(4)
         .device(Device::Cpu)
         .dtype(DTYPE)
-        .build();
+        .build()
+        .unwrap();
 
     agent.learn(&mut env, 4).unwrap();
     assert!(
@@ -169,7 +172,8 @@ fn a2c_updates_f64_networks_from_native_f32_observations() {
         .training_horizon(4)
         .device(Device::Cpu)
         .dtype(DTYPE)
-        .build();
+        .build()
+        .unwrap();
 
     agent.learn(&mut env, 4).unwrap();
 }

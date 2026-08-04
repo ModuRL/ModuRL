@@ -1,5 +1,6 @@
 use std::f64::consts::PI;
 
+use crate::EnvironmentError;
 use bon::bon;
 use candle_core::{Device, Tensor};
 use modurl::{
@@ -9,6 +10,14 @@ use modurl::{
 
 const MAX_VELOCITY_1: f64 = 4.0 * PI;
 const MAX_VELOCITY_2: f64 = 9.0 * PI;
+const LINK_MASS_1: f64 = 1.0;
+const LINK_MASS_2: f64 = 1.0;
+const LINK_LENGTH_1: f64 = 1.0;
+const LINK_COM_1: f64 = 0.5;
+const LINK_COM_2: f64 = 0.5;
+const LINK_MOI: f64 = 1.0;
+const GRAVITY: f64 = 9.8;
+const DT: f64 = 0.2;
 
 /// Gymnasium-compatible `Acrobot-v1` underactuated control environment.
 pub struct AcrobotV1 {
@@ -33,11 +42,27 @@ impl AcrobotV1 {
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
-    ) -> Self {
-        assert!(
-            torque_noise_max.is_finite() && torque_noise_max >= 0.0,
-            "torque_noise_max must be finite and non-negative"
-        );
+    ) -> Result<Self, EnvironmentError> {
+        if !torque_noise_max.is_finite() || torque_noise_max < 0.0 {
+            return Err(EnvironmentError::InvalidConfiguration(
+                "torque_noise_max must be finite and non-negative",
+            ));
+        }
+        Self::from_config(
+            device,
+            use_nips_dynamics,
+            torque_noise_max,
+            #[cfg(feature = "rendering")]
+            render,
+        )
+    }
+
+    fn from_config(
+        device: &Device,
+        use_nips_dynamics: bool,
+        torque_noise_max: f64,
+        #[cfg(feature = "rendering")] render: bool,
+    ) -> Result<Self, EnvironmentError> {
         let high = vec![
             1.0_f32,
             1.0,
@@ -47,19 +72,21 @@ impl AcrobotV1 {
             MAX_VELOCITY_2 as f32,
         ];
         let low = high.iter().map(|value| -*value).collect::<Vec<_>>();
-        Self {
+        Ok(Self {
             state: [0.0; 4],
             use_nips_dynamics,
             torque_noise_max,
             device: device.clone(),
             action_space: Discrete::new(3),
             observation_space: BoxSpace::new(
-                Tensor::from_vec(low, 6, device).unwrap(),
-                Tensor::from_vec(high, 6, device).unwrap(),
+                Tensor::from_vec(low, 6, device)?,
+                Tensor::from_vec(high, 6, device)?,
             ),
             #[cfg(feature = "rendering")]
-            renderer: render.then(|| crate::rendering::Renderer::new(500, 500, "Acrobot")),
-        }
+            renderer: render
+                .then(|| crate::rendering::Renderer::new(500, 500, "Acrobot"))
+                .transpose()?,
+        })
     }
 
     fn observation(&self) -> Result<Tensor, candle_core::Error> {
@@ -79,23 +106,28 @@ impl AcrobotV1 {
 
     fn derivatives(&self, state: [f64; 5]) -> [f64; 5] {
         let [theta1, theta2, dtheta1, dtheta2, torque] = state;
-        let d1 = 1.0 * 0.5_f64.powi(2)
-            + 1.0 * (1.0_f64.powi(2) + 0.5_f64.powi(2) + 2.0 * 1.0 * 0.5 * theta2.cos())
-            + 1.0
-            + 1.0;
-        let d2 = 1.0 * (0.5_f64.powi(2) + 1.0 * 0.5 * theta2.cos()) + 1.0;
-        let phi2 = 1.0 * 0.5 * 9.8 * (theta1 + theta2 - PI / 2.0).cos();
-        let phi1 = -0.5 * dtheta2.powi(2) * theta2.sin()
-            - 2.0 * 1.0 * 1.0 * 0.5 * dtheta2 * dtheta1 * theta2.sin()
-            + (1.0 * 0.5 + 1.0 * 1.0) * 9.8 * (theta1 - PI / 2.0).cos()
+        let d1 = LINK_MASS_1 * LINK_COM_1.powi(2)
+            + LINK_MASS_2
+                * (LINK_LENGTH_1.powi(2)
+                    + LINK_COM_2.powi(2)
+                    + 2.0 * LINK_LENGTH_1 * LINK_COM_2 * theta2.cos())
+            + 2.0 * LINK_MOI;
+        let d2 = LINK_MASS_2 * (LINK_COM_2.powi(2) + LINK_LENGTH_1 * LINK_COM_2 * theta2.cos())
+            + LINK_MOI;
+        let phi2 = LINK_MASS_2 * LINK_COM_2 * GRAVITY * (theta1 + theta2 - PI / 2.0).cos();
+        let phi1 = -LINK_MASS_2 * LINK_LENGTH_1 * LINK_COM_2 * dtheta2.powi(2) * theta2.sin()
+            - 2.0 * LINK_MASS_2 * LINK_LENGTH_1 * LINK_COM_2 * dtheta2 * dtheta1 * theta2.sin()
+            + (LINK_MASS_1 * LINK_COM_1 + LINK_MASS_2 * LINK_LENGTH_1)
+                * GRAVITY
+                * (theta1 - PI / 2.0).cos()
             + phi2;
         let extra = if self.use_nips_dynamics {
             0.0
         } else {
-            1.0 * 1.0 * 0.5 * dtheta1.powi(2) * theta2.sin()
+            LINK_MASS_2 * LINK_LENGTH_1 * LINK_COM_2 * dtheta1.powi(2) * theta2.sin()
         };
         let ddtheta2 = (torque + d2 / d1 * phi1 - extra - phi2)
-            / (1.0 * 0.5_f64.powi(2) + 1.0 - d2.powi(2) / d1);
+            / (LINK_MASS_2 * LINK_COM_2.powi(2) + LINK_MOI - d2.powi(2) / d1);
         let ddtheta1 = -(d2 * ddtheta2 + phi1) / d1;
         [dtheta1, dtheta2, ddtheta1, ddtheta2, 0.0]
     }
@@ -105,11 +137,11 @@ impl AcrobotV1 {
             std::array::from_fn(|index| base[index] + scale * delta[index])
         };
         let k1 = self.derivatives(state);
-        let k2 = self.derivatives(scale_add(state, k1, 0.1));
-        let k3 = self.derivatives(scale_add(state, k2, 0.1));
-        let k4 = self.derivatives(scale_add(state, k3, 0.2));
+        let k2 = self.derivatives(scale_add(state, k1, DT / 2.0));
+        let k3 = self.derivatives(scale_add(state, k2, DT / 2.0));
+        let k4 = self.derivatives(scale_add(state, k3, DT));
         std::array::from_fn(|index| {
-            state[index] + 0.2 / 6.0 * (k1[index] + 2.0 * k2[index] + 2.0 * k3[index] + k4[index])
+            state[index] + DT / 6.0 * (k1[index] + 2.0 * k2[index] + 2.0 * k3[index] + k4[index])
         })
     }
 
@@ -131,20 +163,24 @@ impl AcrobotV1 {
     }
 
     #[cfg(feature = "rendering")]
-    fn render(&mut self) {
+    fn render(&mut self) -> Result<(), EnvironmentError> {
         let center = (250.0_f32, 250.0_f32);
         let scale = 113.6_f32;
         let [first, second] = self.link_endpoints(center, scale);
         let Some(renderer) = &mut self.renderer else {
-            return;
+            return Ok(());
         };
+        if !renderer.is_open() {
+            return Ok(());
+        }
         renderer.clear(0xFFFFFF);
         Self::draw_link(renderer, center, first, 0x00CCCC);
         Self::draw_link(renderer, first, second, 0x00CCCC);
         renderer.draw_circle(center.0 as usize, center.1 as usize, 11, 0xCCCC00);
         renderer.draw_circle(first.0 as usize, first.1 as usize, 11, 0xCCCC00);
         renderer.rect(0, (center.1 - scale) as usize, 500, 2, 0x000000);
-        renderer.present();
+        renderer.present()?;
+        Ok(())
     }
 
     #[cfg(feature = "rendering")]
@@ -173,21 +209,15 @@ impl AcrobotV1 {
     }
 }
 
-impl Default for AcrobotV1 {
-    fn default() -> Self {
-        Self::builder().build()
-    }
-}
-
 impl Gym for AcrobotV1 {
-    type Error = candle_core::Error;
+    type Error = EnvironmentError;
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         let random = Tensor::rand(-0.1_f32, 0.1, 4, &self.device)?.to_vec1::<f32>()?;
         self.state = std::array::from_fn(|index| f64::from(random[index]));
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
         Ok(ResetInfo {
             state: self.observation()?,
             info: (),
@@ -196,8 +226,17 @@ impl Gym for AcrobotV1 {
 
     /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        assert!(self.action_space.contains(&action));
+        if !action.dims().is_empty() || action.dtype() != candle_core::DType::U32 {
+            return Err(EnvironmentError::InvalidAction(
+                "Acrobot actions must be scalar u32 values in 0..3",
+            ));
+        }
         let mut torque = f64::from(action.to_vec0::<u32>()?) - 1.0;
+        if !(-1.0..=1.0).contains(&torque) {
+            return Err(EnvironmentError::InvalidAction(
+                "Acrobot actions must be scalar u32 values in 0..3",
+            ));
+        }
         if self.torque_noise_max > 0.0 {
             let noise = Tensor::rand(
                 -self.torque_noise_max as f32,
@@ -223,7 +262,7 @@ impl Gym for AcrobotV1 {
         ];
         let done = self.terminal();
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
         Ok(StepInfo {
             state: self.observation()?,
             reward: if done { 0.0 } else { -1.0 },
@@ -271,7 +310,7 @@ mod tests {
         let transitions: Vec<Transition> =
             serde_json::from_str(include_str!("../../python_tests/acrobot/trajectory.json"))
                 .unwrap();
-        let mut environment = AcrobotV1::default();
+        let mut environment = AcrobotV1::builder().build().unwrap();
         for (index, transition) in transitions.iter().enumerate() {
             environment.set_raw_state(transition.state);
             let action = Tensor::from_vec(vec![transition.action], (), &Device::Cpu).unwrap();
@@ -292,7 +331,7 @@ mod tests {
 
     #[test]
     fn default_spaces_match_gymnasium() {
-        let mut environment = AcrobotV1::default();
+        let mut environment = AcrobotV1::builder().build().unwrap();
         assert_eq!(environment.reset().unwrap().state.dims(), &[6]);
         assert_eq!(environment.action_space().shape(), vec![3]);
         assert_eq!(environment.observation_space().shape(), vec![6]);
@@ -300,7 +339,7 @@ mod tests {
 
     #[test]
     fn zero_angles_render_links_vertically_downward() {
-        let environment = AcrobotV1::default();
+        let environment = AcrobotV1::builder().build().unwrap();
         let [first, second] = environment.link_endpoints((250.0, 250.0), 100.0);
         assert_eq!(first, (250.0, 350.0));
         assert_eq!(second, (250.0, 450.0));
@@ -309,6 +348,11 @@ mod tests {
     #[cfg(feature = "rendering")]
     #[test]
     fn rendering_can_be_enabled() {
-        AcrobotV1::builder().render(true).build().reset().unwrap();
+        AcrobotV1::builder()
+            .render(true)
+            .build()
+            .unwrap()
+            .reset()
+            .unwrap();
     }
 }

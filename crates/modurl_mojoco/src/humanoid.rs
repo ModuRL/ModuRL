@@ -14,6 +14,21 @@ const MODEL: &str = include_str!("../assets/humanoid.xml");
 const ACTION_MINIMUM: f64 = -0.4;
 const ACTION_MAXIMUM: f64 = 0.4;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct HumanoidV5Info {
+    pub x_position: f32,
+    pub y_position: f32,
+    pub tendon_length: Vec<f32>,
+    pub tendon_velocity: Vec<f32>,
+    pub distance_from_origin: f32,
+    pub x_velocity: Option<f32>,
+    pub y_velocity: Option<f32>,
+    pub reward_forward: Option<f32>,
+    pub reward_ctrl: Option<f32>,
+    pub reward_contact: Option<f32>,
+    pub reward_survive: Option<f32>,
+}
+
 /// Gymnasium-compatible `Humanoid-v5` with the default model.
 pub struct HumanoidV5 {
     core: MujocoCore,
@@ -137,42 +152,75 @@ impl HumanoidV5 {
         }
         self.core.tensor(&observation)
     }
+
+    fn info(&self) -> HumanoidV5Info {
+        let x = self.core.qpos()[0];
+        let y = self.core.qpos()[1];
+        HumanoidV5Info {
+            x_position: x as f32,
+            y_position: y as f32,
+            tendon_length: self
+                .core
+                .tendon_lengths()
+                .iter()
+                .map(|value| *value as f32)
+                .collect(),
+            tendon_velocity: self
+                .core
+                .tendon_velocities()
+                .iter()
+                .map(|value| *value as f32)
+                .collect(),
+            distance_from_origin: x.hypot(y) as f32,
+            x_velocity: None,
+            y_velocity: None,
+            reward_forward: None,
+            reward_ctrl: None,
+            reward_contact: None,
+            reward_survive: None,
+        }
+    }
 }
 
-impl Gym for HumanoidV5 {
+impl Gym<HumanoidV5Info> for HumanoidV5 {
     type Error = MujocoError;
     type SpaceError = candle_core::Error;
 
-    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+    fn reset(&mut self) -> Result<ResetInfo<HumanoidV5Info>, Self::Error> {
         self.core.reset_uniform(self.reset_noise_scale)?;
         self.core.render()?;
         Ok(ResetInfo {
             state: self.observation()?,
-            info: (),
+            info: self.info(),
         })
     }
 
     /// Steps with one continuous actuator vector shaped `[17]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
+    fn step(&mut self, action: Tensor) -> Result<StepInfo<HumanoidV5Info>, Self::Error> {
         let position_before = self.core.mass_center_xy();
-        let action = self
-            .core
-            .step_bounded(&action, ACTION_MINIMUM, ACTION_MAXIMUM)?;
+        let action = self.core.step(&action)?;
         let position_after = self.core.mass_center_xy();
         let x_velocity = (position_after[0] - position_before[0]) / self.core.dt();
         let healthy = self.is_healthy();
         let control_cost = self.control_cost_weight * action.iter().map(|x| x * x).sum::<f64>();
-        let reward = self.forward_reward_weight * x_velocity
-            + if healthy { self.healthy_reward } else { 0.0 }
-            - control_cost
-            - self.contact_cost();
+        let forward_reward = self.forward_reward_weight * x_velocity;
+        let survive_reward = if healthy { self.healthy_reward } else { 0.0 };
+        let contact_cost = self.contact_cost();
+        let reward = forward_reward + survive_reward - control_cost - contact_cost;
         self.core.render()?;
+        let mut info = self.info();
+        info.x_velocity = Some(x_velocity as f32);
+        info.y_velocity = Some(((position_after[1] - position_before[1]) / self.core.dt()) as f32);
+        info.reward_forward = Some(forward_reward as f32);
+        info.reward_ctrl = Some(-control_cost as f32);
+        info.reward_contact = Some(-contact_cost as f32);
+        info.reward_survive = Some(survive_reward as f32);
         Ok(StepInfo {
             state: self.observation()?,
             reward: reward as f32,
             done: !healthy && self.terminate_when_unhealthy,
             truncated: false,
-            info: (),
+            info,
         })
     }
 

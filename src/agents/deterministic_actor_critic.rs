@@ -68,6 +68,14 @@ pub enum DeterministicActorCriticConfigurationError {
     },
 }
 
+impl std::fmt::Display for DeterministicActorCriticConfigurationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for DeterministicActorCriticConfigurationError {}
+
 /// DDPG and TD3 construction or training failure.
 #[derive(Debug)]
 pub enum DeterministicActorCriticError<GE, SE>
@@ -93,6 +101,14 @@ where
     /// The action or observation space returned an error.
     SpaceError(SE),
 }
+
+impl<GE: Debug, SE: Debug> std::fmt::Display for DeterministicActorCriticError<GE, SE> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl<GE: Debug, SE: Debug> std::error::Error for DeterministicActorCriticError<GE, SE> {}
 
 /// Result type returned by DDPG and TD3 construction and training operations.
 pub type DeterministicActorCriticResult<T, GE, SE> =

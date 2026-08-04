@@ -18,8 +18,8 @@ pub use crate::agents::{
         td3::{TD3Agent, TD3Logger},
     },
     ppo::{
-        PPOAgent, PPOCollectionLogEntry, PPOEpisodeLogEntry, PPOError, PPOLogEntry, PPOLogger,
-        PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
+        PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
+        PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
     },
     q_learning::{
         QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError, QLogEntry,

@@ -94,7 +94,7 @@ environments and wrap them as one vectorized environment:
 
 ```rust,ignore
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build())
+        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
         .collect::<Vec<_>>();
     let mut env = VectorizedGymWrapper::from(envs);
 ```
@@ -212,7 +212,7 @@ Finally, build the `PPOAgent` and run learning:
         .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .training_horizon(10_000)
         .device(device)
-        .build();
+        .build().unwrap();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
     println!("Training complete.");
@@ -250,7 +250,7 @@ fn main() {
     let device = Device::Cpu;
 
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build())
+        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
         .collect::<Vec<_>>();
     let mut env = VectorizedGymWrapper::from(envs);
 
@@ -309,7 +309,7 @@ fn main() {
         .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .training_horizon(10_000)
         .device(device)
-        .build();
+        .build().unwrap();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
     println!("Training complete.");

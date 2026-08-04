@@ -4,7 +4,7 @@ use modurl::prelude::*;
 
 #[path = "support/graphers.rs"]
 mod graphers;
-use graphers::PPOMujocoGrapher;
+use graphers::MujocoOnPolicyGrapher;
 #[path = "support/mujoco.rs"]
 mod mujoco;
 use mujoco::ENVIRONMENT_NAME;
@@ -119,7 +119,7 @@ fn main() {
             .build(),
     );
 
-    let mut grapher = PPOMujocoGrapher::new(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
+    let mut grapher = MujocoOnPolicyGrapher::ppo(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
     {
         let mut agent = PPOAgent::builder()
             .dtype(DTYPE)
@@ -138,7 +138,8 @@ fn main() {
             .training_horizon(TOTAL_TIMESTEPS)
             .logging_info(&mut grapher)
             .device(device)
-            .build();
+            .build()
+            .unwrap();
 
         agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
     }

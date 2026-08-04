@@ -29,7 +29,7 @@ use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::Cpu;
-    let mut env = CartPoleV1::builder().device(&device).build();
+    let mut env = CartPoleV1::builder().device(&device).build().unwrap();
 
     let observation = env.reset()?.state;
     let action = env.action_space().sample(&device)?;
@@ -129,7 +129,7 @@ the other supported algorithms and environments.
 | --- | --- | --- |
 | `modurl` | Agents, models, distributions, buffers, spaces, schedules, and environment traits | MIT |
 | `modurl_gym` | Acrobot, BipedalWalker, CartPole, LunarLander, Mountain Car, Pendulum, rendering, and Gym utilities | MIT |
-| `modurl_mojoco` | Ant, HalfCheetah, Hopper, Humanoid, Walker2d, SumoAnts, and SumoHumans MuJoCo environments | MIT; third-party notices apply |
+| `modurl_mojoco` | Ant, HalfCheetah, Hopper, Humanoid, and Walker2d MuJoCo environments | MIT; third-party notices apply |
 | `modurl_ale` | Atari Learning Environment integration and wrappers | GPL-2.0-only |
 | `modurl_logger` | Terminal graphs and TensorBoard event logging | MIT |
 | `examples` | Runnable training programs; not published as a crate | MIT |

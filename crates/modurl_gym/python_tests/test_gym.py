@@ -32,7 +32,7 @@ def test_gym(env, output_dir=None, custom_reset=None, custom_info=None, actions=
             "info": info if custom_info is None else custom_info(env, info, obs)
         })
         
-        if done:
+        if done or truncated:
             if custom_reset is not None:
                 obs, _, env = custom_reset(env)
             else:

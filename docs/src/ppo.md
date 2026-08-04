@@ -14,7 +14,11 @@ program. Then read [Understand a PPO Training Run](./understand-ppo-training.md)
 before changing its configuration.
 
 The continuous-control example supports `ant`, `half-cheetah`, `hopper`, and
-`walker2d`. Enable exactly one environment feature when running it.
+`walker2d`. Normally enable one environment feature; `rendering` may be added
+to that feature to open a viewer. Cargo features are additive, so builds that
+enable several environment features use the priority `ant`, `half-cheetah`,
+`hopper`, then `walker2d`. PPO writes TensorBoard events below
+`runs/ppo_mujoco/` and also displays terminal graphs.
 
 PPO can use any compatible `Distribution` implementation. ModuRL currently
 supplies categorical and Gaussian distributions, and applications can define
