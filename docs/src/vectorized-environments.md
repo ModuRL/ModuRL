@@ -106,5 +106,29 @@ Rows are ordered first by inner gym and then by that gym's own row order.
 gyms must expose the same observation and action shapes, and each inner gym
 keeps responsibility for its own auto-reset behavior.
 
+With the `multithreading` feature enabled,
+`MultithreadedStackedMultiGym` runs each inner `MultiGym` on a persistent
+worker thread. Pass constructors so every inner gym is created on the thread
+that owns it, together with representative observation and action spaces:
+
+```rust,ignore
+let constructors = (0..4)
+    .map(|seed| move || {
+        let mut game = CoupledGame::new().unwrap();
+        game.seed(seed);
+        game
+    })
+    .collect();
+let mut env = MultithreadedStackedMultiGym::try_new(
+    constructors,
+    observation_space,
+    action_space,
+)?;
+```
+
+The whole inner gym remains one unit of work, so coupled player rows are never
+split across threads. If an inner gym returns an error, reset the complete
+stack before stepping it again.
+
 Next, read [Build a Custom Gym Environment](./custom-gym-environment.md) to
 provide your own single-environment implementation.

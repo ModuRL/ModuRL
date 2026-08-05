@@ -114,7 +114,7 @@ The core `modurl` crate has no default Cargo features.
 
 | Feature | Purpose |
 | --- | --- |
-| `multithreading` | Enable multithreaded vectorized environments |
+| `multithreading` | Enable multithreaded vectorized and stacked environments |
 | `cuda` | Enable Candle CUDA support |
 | `cudnn` | Enable Candle cuDNN support |
 | `metal` | Enable Candle Metal support |

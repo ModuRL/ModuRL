@@ -548,6 +548,379 @@ where
 use std::{fmt::Debug, sync::mpsc, thread};
 
 #[cfg(feature = "multithreading")]
+struct MultiGymMetadata {
+    num_envs: usize,
+    observation_shape: Vec<usize>,
+    action_shape: Vec<usize>,
+}
+
+#[cfg(feature = "multithreading")]
+enum MultiGymCmd<E, I> {
+    Step(Tensor, mpsc::Sender<Result<MultiGymStepInfo<I>, E>>),
+    Reset(mpsc::Sender<Result<Tensor, E>>),
+}
+
+#[cfg(feature = "multithreading")]
+struct MultiGymHandle<E, I> {
+    tx: mpsc::Sender<MultiGymCmd<E, I>>,
+}
+
+#[cfg(feature = "multithreading")]
+impl<E, I> MultiGymHandle<E, I> {
+    /// Sends one group action batch shaped `[group_size, ...action_shape]`.
+    fn step(&self, action: Tensor) -> mpsc::Receiver<Result<MultiGymStepInfo<I>, E>> {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.tx
+            .send(MultiGymCmd::Step(action, response_tx))
+            .unwrap();
+        response_rx
+    }
+
+    fn reset(&self) -> mpsc::Receiver<Result<Tensor, E>> {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.tx.send(MultiGymCmd::Reset(response_tx)).unwrap();
+        response_rx
+    }
+}
+
+#[cfg(feature = "multithreading")]
+/// Flattens several homogeneous [`MultiGym`] values and steps each one on a
+/// persistent worker thread.
+///
+/// Each constructor runs inside the worker that permanently owns its gym. A
+/// whole inner gym is the unit of parallel work, so coupled batch rows remain
+/// together. If an operation fails after dispatch, call [`MultiGym::reset`]
+/// before stepping again.
+pub struct MultithreadedStackedMultiGym<G, O, A, SE, I = ()>
+where
+    G: MultiGym<I> + 'static,
+    G::Error: Send + Debug + 'static,
+    SE: Debug,
+    A: Space<Error = SE> + Clone + 'static,
+    O: Space<Error = SE> + Clone + 'static,
+    I: Send + 'static,
+{
+    groups: Vec<MultiGymHandle<G::Error, I>>,
+    group_offsets: Vec<usize>,
+    observation_shape: Vec<usize>,
+    obs_space: O,
+    action_space: A,
+    _phantom: std::marker::PhantomData<fn() -> (G, SE)>,
+}
+
+#[cfg(feature = "multithreading")]
+impl<G, O, A, SE, I> MultithreadedStackedMultiGym<G, O, A, SE, I>
+where
+    G: MultiGym<I> + 'static,
+    G::Error: Send + Debug + 'static,
+    SE: Debug,
+    A: Space<Error = SE> + Clone + 'static,
+    O: Space<Error = SE> + Clone + 'static,
+    I: Send + 'static,
+{
+    /// Creates one persistent worker per inner gym constructor.
+    pub fn try_new<F>(
+        gym_constructors: Vec<F>,
+        obs_space: O,
+        action_space: A,
+    ) -> Result<Self, StackedMultiGymError<G::Error>>
+    where
+        F: FnOnce() -> G + Send + 'static,
+    {
+        if gym_constructors.is_empty() {
+            return Err(StackedMultiGymError::Empty);
+        }
+
+        let pending_workers: Vec<_> = gym_constructors
+            .into_iter()
+            .map(start_multi_gym_thread::<G, F, I>)
+            .collect();
+        let observation_shape = obs_space.shape();
+        let action_shape = action_space.shape();
+        let mut groups = Vec::with_capacity(pending_workers.len());
+        let mut group_offsets = Vec::with_capacity(pending_workers.len() + 1);
+        group_offsets.push(0);
+        let mut total_batch_size = 0;
+
+        for (gym_index, (group, metadata_rx)) in pending_workers.into_iter().enumerate() {
+            let metadata = metadata_rx.recv().expect(
+                "failed to receive metadata, this was probably caused by a panic in the gym thread",
+            );
+            if metadata.num_envs == 0 {
+                return Err(StackedMultiGymError::EmptyInner { gym_index });
+            }
+            if metadata.observation_shape != observation_shape {
+                return Err(StackedMultiGymError::IncompatibleObservationShape {
+                    gym_index,
+                    expected: observation_shape,
+                    actual: metadata.observation_shape,
+                });
+            }
+            if metadata.action_shape != action_shape {
+                return Err(StackedMultiGymError::IncompatibleActionShape {
+                    gym_index,
+                    expected: action_shape,
+                    actual: metadata.action_shape,
+                });
+            }
+
+            total_batch_size += metadata.num_envs;
+            group_offsets.push(total_batch_size);
+            groups.push(group);
+        }
+
+        Ok(Self {
+            groups,
+            group_offsets,
+            observation_shape,
+            obs_space,
+            action_space,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+    /// Returns cumulative flattened row offsets, including zero and the total.
+    pub fn group_offsets(&self) -> &[usize] {
+        &self.group_offsets
+    }
+
+    /// Returns the number of independently stepped inner gyms.
+    pub fn num_groups(&self) -> usize {
+        self.groups.len()
+    }
+
+    fn expected_batch_size(&self, gym_index: usize) -> usize {
+        self.group_offsets[gym_index + 1] - self.group_offsets[gym_index]
+    }
+
+    fn validate_output_shape(
+        &self,
+        gym_index: usize,
+        field: &'static str,
+        actual: &[usize],
+        expected: Vec<usize>,
+    ) -> Result<(), StackedMultiGymError<G::Error>> {
+        if actual != expected {
+            return Err(StackedMultiGymError::InvalidOutputShape {
+                gym_index,
+                field,
+                expected,
+                actual: actual.to_vec(),
+            });
+        }
+        Ok(())
+    }
+
+    fn assemble_steps(
+        &self,
+        steps: Vec<MultiGymStepInfo<I>>,
+    ) -> Result<MultiGymStepInfo<I>, StackedMultiGymError<G::Error>> {
+        let total_batch_size = self.num_envs();
+        let mut states = Vec::with_capacity(steps.len());
+        let mut rewards = Vec::with_capacity(steps.len());
+        let mut infos = Vec::with_capacity(total_batch_size);
+        let mut dones = Vec::with_capacity(total_batch_size);
+        let mut truncateds = Vec::with_capacity(total_batch_size);
+        let mut terminal_states = Vec::with_capacity(total_batch_size);
+
+        for (gym_index, step) in steps.into_iter().enumerate() {
+            let batch_size = self.expected_batch_size(gym_index);
+            let mut expected_state_shape = Vec::with_capacity(self.observation_shape.len() + 1);
+            expected_state_shape.push(batch_size);
+            expected_state_shape.extend_from_slice(&self.observation_shape);
+            self.validate_output_shape(
+                gym_index,
+                "states",
+                step.states.dims(),
+                expected_state_shape,
+            )?;
+            self.validate_output_shape(
+                gym_index,
+                "rewards",
+                step.rewards.dims(),
+                vec![batch_size],
+            )?;
+            self.validate_output_shape(gym_index, "infos", &[step.infos.len()], vec![batch_size])?;
+            self.validate_output_shape(gym_index, "dones", &[step.dones.len()], vec![batch_size])?;
+            self.validate_output_shape(
+                gym_index,
+                "truncateds",
+                &[step.truncateds.len()],
+                vec![batch_size],
+            )?;
+            self.validate_output_shape(
+                gym_index,
+                "terminal_states",
+                &[step.terminal_states.len()],
+                vec![batch_size],
+            )?;
+
+            states.push(step.states);
+            rewards.push(step.rewards);
+            infos.extend(step.infos);
+            dones.extend(step.dones);
+            truncateds.extend(step.truncateds);
+            terminal_states.extend(step.terminal_states);
+        }
+
+        Ok(MultiGymStepInfo {
+            states: Tensor::cat(&states, 0)?,
+            rewards: Tensor::cat(&rewards, 0)?,
+            infos,
+            dones,
+            truncateds,
+            terminal_states,
+        })
+    }
+}
+
+#[cfg(feature = "multithreading")]
+impl<G, O, A, SE, I> MultiGym<I> for MultithreadedStackedMultiGym<G, O, A, SE, I>
+where
+    G: MultiGym<I> + 'static,
+    G::Error: Send + Debug + 'static,
+    SE: Debug,
+    A: Space<Error = SE> + Clone + 'static,
+    O: Space<Error = SE> + Clone + 'static,
+    I: Send + 'static,
+{
+    type Error = StackedMultiGymError<G::Error>;
+    type SpaceError = SE;
+
+    /// Steps with actions shaped `[total_batch_size, ...action_shape]`.
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
+        let total_batch_size = self.num_envs();
+        let actual_batch_size = action.dims().first().copied();
+        if actual_batch_size != Some(total_batch_size) {
+            return Err(StackedMultiGymError::InvalidActionBatch {
+                expected: total_batch_size,
+                actual: actual_batch_size,
+            });
+        }
+
+        // Finish every fallible slice before any worker is allowed to advance.
+        let actions = (0..self.groups.len())
+            .map(|gym_index| {
+                let start = self.group_offsets[gym_index];
+                action.narrow(0, start, self.expected_batch_size(gym_index))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let receivers = self
+            .groups
+            .iter()
+            .zip(actions)
+            .map(|(group, action)| group.step(action))
+            .collect::<Vec<_>>();
+        let replies = receivers
+            .into_iter()
+            .enumerate()
+            .map(|(gym_index, receiver)| {
+                receiver
+                    .recv()
+                    .expect("failed to receive step info, this was probably caused by a panic in the gym thread")
+                    .map_err(|error| StackedMultiGymError::Inner { gym_index, error })
+            })
+            .collect::<Vec<_>>();
+        let mut steps = Vec::with_capacity(replies.len());
+        for reply in replies {
+            steps.push(reply?);
+        }
+
+        self.assemble_steps(steps)
+    }
+
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        Box::new(self.obs_space.clone())
+    }
+
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        Box::new(self.action_space.clone())
+    }
+
+    fn num_envs(&self) -> usize {
+        self.group_offsets.last().copied().unwrap_or(0)
+    }
+
+    fn reset(&mut self) -> Result<Tensor, Self::Error> {
+        let receivers = self
+            .groups
+            .iter()
+            .map(MultiGymHandle::reset)
+            .collect::<Vec<_>>();
+        let replies = receivers
+            .into_iter()
+            .enumerate()
+            .map(|(gym_index, receiver)| {
+                receiver
+                    .recv()
+                    .expect("failed to receive reset info, this was probably caused by a panic in the gym thread")
+                    .map_err(|error| StackedMultiGymError::Inner { gym_index, error })
+            })
+            .collect::<Vec<_>>();
+        let mut states = Vec::with_capacity(replies.len());
+        for reply in replies {
+            states.push(reply?);
+        }
+
+        for (gym_index, state) in states.iter().enumerate() {
+            let batch_size = self.expected_batch_size(gym_index);
+            let mut expected_shape = Vec::with_capacity(self.observation_shape.len() + 1);
+            expected_shape.push(batch_size);
+            expected_shape.extend_from_slice(&self.observation_shape);
+            self.validate_output_shape(gym_index, "reset states", state.dims(), expected_shape)?;
+        }
+
+        Tensor::cat(&states, 0).map_err(StackedMultiGymError::Batch)
+    }
+}
+
+#[cfg(feature = "multithreading")]
+fn start_multi_gym_thread<G, F, I>(
+    make_gym: F,
+) -> (
+    MultiGymHandle<G::Error, I>,
+    mpsc::Receiver<MultiGymMetadata>,
+)
+where
+    F: FnOnce() -> G + Send + 'static,
+    G: MultiGym<I> + 'static,
+    G::Error: Send + 'static,
+    I: Send + 'static,
+{
+    let (metadata_tx, metadata_rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut gym = make_gym();
+        let metadata = MultiGymMetadata {
+            num_envs: gym.num_envs(),
+            observation_shape: gym.observation_space().shape(),
+            action_shape: gym.action_space().shape(),
+        };
+        if metadata_tx.send(metadata).is_err() {
+            return;
+        }
+
+        while let Ok(command) = rx.recv() {
+            match command {
+                MultiGymCmd::Step(action, response_tx) => {
+                    response_tx.send(gym.step(action)).expect(
+                        "failed to send step response, this was probably caused by a panic in the caller",
+                    );
+                }
+                MultiGymCmd::Reset(response_tx) => {
+                    response_tx.send(gym.reset()).expect(
+                        "failed to send reset response, this was probably caused by a panic in the caller",
+                    );
+                }
+            }
+        }
+    });
+
+    (MultiGymHandle { tx }, metadata_rx)
+}
+
+#[cfg(feature = "multithreading")]
 pub struct MultithreadedVectorizedGymWrapper<G, O, A, SE, I = ()>
 where
     G: Gym<I> + 'static,
@@ -883,6 +1256,69 @@ mod tests {
         action_size: usize,
         fail_step: bool,
         step_count: usize,
+    }
+
+    #[cfg(feature = "multithreading")]
+    #[derive(Default)]
+    struct ConcurrencyGateState {
+        entered: usize,
+        released: bool,
+    }
+
+    #[cfg(feature = "multithreading")]
+    struct BlockingBatchedEnv {
+        gate: std::sync::Arc<(std::sync::Mutex<ConcurrencyGateState>, std::sync::Condvar)>,
+    }
+
+    #[cfg(feature = "multithreading")]
+    impl MultiGym for BlockingBatchedEnv {
+        type Error = candle_core::Error;
+        type SpaceError = candle_core::Error;
+
+        /// Blocks after receiving one action batch shaped `[1, 1]`.
+        fn step(&mut self, _action: Tensor) -> Result<MultiGymStepInfo, Self::Error> {
+            let (lock, ready) = &*self.gate;
+            let mut state = lock.lock().unwrap();
+            state.entered += 1;
+            ready.notify_all();
+            while !state.released {
+                state = ready.wait(state).unwrap();
+            }
+            drop(state);
+
+            Ok(MultiGymStepInfo {
+                states: Tensor::zeros((1, 1), candle_core::DType::F32, &candle_core::Device::Cpu)?,
+                rewards: Tensor::zeros(1, candle_core::DType::F32, &candle_core::Device::Cpu)?,
+                infos: vec![()],
+                dones: vec![false],
+                truncateds: vec![false],
+                terminal_states: vec![None],
+            })
+        }
+
+        fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(crate::spaces::BoxSpace::new_unbounded(
+                vec![1],
+                &candle_core::Device::Cpu,
+            ))
+        }
+
+        fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(crate::spaces::BoxSpace::new_with_universal_bounds(
+                vec![1],
+                -1.0,
+                1.0,
+                &candle_core::Device::Cpu,
+            ))
+        }
+
+        fn num_envs(&self) -> usize {
+            1
+        }
+
+        fn reset(&mut self) -> Result<Tensor, Self::Error> {
+            Tensor::zeros((1, 1), candle_core::DType::F32, &candle_core::Device::Cpu)
+        }
     }
 
     impl BatchedDummyEnv {
@@ -1291,5 +1727,107 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "multithreading")]
+    #[test]
+    fn multithreaded_stacked_multi_gym_matches_flattened_order() {
+        let constructors = [(10, 2), (20, 3)]
+            .into_iter()
+            .map(|(group, batch_size)| move || BatchedDummyEnv::new(group, batch_size))
+            .collect();
+        let obs_space = crate::spaces::BoxSpace::new_unbounded(vec![3], &candle_core::Device::Cpu);
+        let action_space = crate::spaces::BoxSpace::new_with_universal_bounds(
+            vec![1],
+            -1.0,
+            1.0,
+            &candle_core::Device::Cpu,
+        );
+        let mut env =
+            MultithreadedStackedMultiGym::try_new(constructors, obs_space, action_space).unwrap();
+
+        assert_eq!(env.num_groups(), 2);
+        assert_eq!(env.num_envs(), 5);
+        assert_eq!(env.group_offsets(), &[0, 2, 5]);
+        assert_eq!(env.reset().unwrap().dims(), &[5, 3]);
+
+        let actions = Tensor::from_vec(
+            vec![0.0_f32, 0.1, 0.2, 0.3, 0.4],
+            &[5, 1],
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+        let step = env.step(actions).unwrap();
+
+        assert_eq!(
+            step.states.to_vec2::<f32>().unwrap(),
+            vec![
+                vec![10.0, 0.0, 0.0],
+                vec![10.0, 1.0, 0.1],
+                vec![20.0, 0.0, 0.2],
+                vec![20.0, 1.0, 0.3],
+                vec![20.0, 2.0, 0.4],
+            ]
+        );
+        assert_eq!(
+            step.rewards.to_vec1::<f32>().unwrap(),
+            vec![0.0, 0.1, 0.2, 0.3, 0.4]
+        );
+        assert_eq!(step.dones, vec![false, true, false, false, true]);
+        assert!(step.terminal_states[1].is_some());
+        assert!(step.terminal_states[4].is_some());
+    }
+
+    #[cfg(feature = "multithreading")]
+    #[test]
+    fn multithreaded_stacked_multi_gym_steps_groups_concurrently() {
+        let gate = std::sync::Arc::new((
+            std::sync::Mutex::new(ConcurrencyGateState::default()),
+            std::sync::Condvar::new(),
+        ));
+        let constructors = (0..2)
+            .map(|_| {
+                let gate = gate.clone();
+                move || BlockingBatchedEnv { gate }
+            })
+            .collect();
+        let obs_space = crate::spaces::BoxSpace::new_unbounded(vec![1], &candle_core::Device::Cpu);
+        let action_space = crate::spaces::BoxSpace::new_with_universal_bounds(
+            vec![1],
+            -1.0,
+            1.0,
+            &candle_core::Device::Cpu,
+        );
+        let mut env =
+            MultithreadedStackedMultiGym::try_new(constructors, obs_space, action_space).unwrap();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let actions =
+                Tensor::zeros((2, 1), candle_core::DType::F32, &candle_core::Device::Cpu).unwrap();
+            let _ = result_tx.send(env.step(actions));
+        });
+
+        let (lock, ready) = &*gate;
+        let state = lock.lock().unwrap();
+        let (mut state, _) = ready
+            .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| {
+                state.entered < 2
+            })
+            .unwrap();
+        let entered_before_release = state.entered;
+        state.released = true;
+        ready.notify_all();
+        drop(state);
+
+        assert_eq!(
+            entered_before_release, 2,
+            "both inner gyms should enter step before either is released"
+        );
+        let step = result_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("threaded stack did not finish after releasing its workers")
+            .unwrap();
+        assert_eq!(step.states.dims(), &[2, 1]);
     }
 }

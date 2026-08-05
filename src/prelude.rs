@@ -40,12 +40,12 @@ pub use crate::distributions::{
     GaussianDistribution, GaussianDistributionError, TanhTransform, TransformedDistribution,
     TransformedDistributionError,
 };
-#[cfg(feature = "multithreading")]
-pub use crate::gym::MultithreadedVectorizedGymWrapper;
 pub use crate::gym::{
     Gym, MultiGym, MultiGymStepInfo, ResetInfo, StackedMultiGym, StackedMultiGymError, StepInfo,
     VectorizedGymError, VectorizedGymWrapper,
 };
+#[cfg(feature = "multithreading")]
+pub use crate::gym::{MultithreadedStackedMultiGym, MultithreadedVectorizedGymWrapper};
 pub use crate::models::{
     DefaultMLPInitializer, DuelingMLP, MLP, MLPInitializer, OrthogonalMLPInitializer,
     probabilistic_model::ExpectationPolicy, probabilistic_model::ProbabilisticPolicy,
