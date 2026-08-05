@@ -44,41 +44,6 @@ where
     MissingOldValues,
 }
 
-impl<AE, GE, SE> std::fmt::Display for A2CError<AE, GE, SE>
-where
-    AE: Debug,
-    GE: Debug,
-    SE: Debug,
-{
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PolicyError(error) => write!(formatter, "A2C policy error: {error:?}"),
-            Self::GymError(error) => write!(formatter, "A2C environment error: {error:?}"),
-            Self::TensorError(error) => write!(formatter, "A2C tensor error: {error}"),
-            Self::SpaceError(error) => write!(formatter, "A2C action-space error: {error:?}"),
-            Self::ConfigurationError(error) => write!(formatter, "{error}"),
-            Self::MismatchedTerminationBatch { dones, truncateds } => write!(
-                formatter,
-                "A2C termination batch has {dones} done flags and {truncateds} truncation flags"
-            ),
-            Self::MissingPreparedRollout => {
-                formatter.write_str("A2C rollout was not prepared before optimization")
-            }
-            Self::MissingOldValues => {
-                formatter.write_str("A2C value clipping requires rollout-time value predictions")
-            }
-        }
-    }
-}
-
-impl<AE, GE, SE> std::error::Error for A2CError<AE, GE, SE>
-where
-    AE: Debug,
-    GE: Debug,
-    SE: Debug,
-{
-}
-
 impl<AE, GE, SE> From<PPOError<AE, GE, SE>> for A2CError<AE, GE, SE>
 where
     AE: Debug,

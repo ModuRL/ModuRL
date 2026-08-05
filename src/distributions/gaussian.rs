@@ -32,24 +32,6 @@ pub enum GaussianDistributionError {
     InvalidOutputWidth { output_width: usize },
 }
 
-impl std::fmt::Display for GaussianDistributionError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TensorError(error) => error.fmt(formatter),
-            Self::ActionShapeTooLarge => formatter.write_str("Gaussian action shape is too large"),
-            Self::ZeroActionDimension => {
-                formatter.write_str("Gaussian action dimensions must be nonzero")
-            }
-            Self::InvalidOutputWidth { output_width } => write!(
-                formatter,
-                "Gaussian parameter width must be positive and even, got {output_width}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for GaussianDistributionError {}
-
 impl From<candle_core::Error> for GaussianDistributionError {
     fn from(error: candle_core::Error) -> Self {
         Self::TensorError(error)

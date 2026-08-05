@@ -1,6 +1,4 @@
-use std::error::Error;
 use std::ffi::CString;
-use std::fmt;
 use std::fs::File;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -54,28 +52,6 @@ pub enum AtariGymError {
     IoError(std::io::Error),
     InvalidRomPath(PathBuf),
     CandleError(candle_core::Error),
-}
-
-impl fmt::Display for AtariGymError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::IoError(error) => write!(formatter, "failed to read ROM: {error}"),
-            Self::InvalidRomPath(path) => {
-                write!(formatter, "invalid ROM path: {}", path.display())
-            }
-            Self::CandleError(error) => write!(formatter, "tensor error: {error}"),
-        }
-    }
-}
-
-impl Error for AtariGymError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::IoError(error) => Some(error),
-            Self::CandleError(error) => Some(error),
-            Self::InvalidRomPath(_) => None,
-        }
-    }
 }
 
 #[bon]

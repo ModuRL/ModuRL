@@ -33,7 +33,7 @@ let mut environment = HalfCheetahV5::builder().device(&Device::Cpu).build()?;
 let observation = environment.reset()?.state;
 let action = environment.action_space().sample(&Device::Cpu)?;
 let transition = environment.step(action)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), MujocoError>(())
 ```
 
 Every builder defaults to the corresponding Gymnasium v5 configuration. The
@@ -51,7 +51,7 @@ let environment = HopperV5::builder()
     .reset_noise_scale(0.005)
     .exclude_current_positions_from_observation(false)
     .build()?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), MujocoError>(())
 ```
 
 The 1,000-step Gymnasium time limit is intentionally not built into the five
@@ -70,7 +70,7 @@ Then opt an environment into rendering through its builder:
 ```rust
 let mut environment = HalfCheetahV5::builder().render(true).build()?;
 environment.reset()?;
-# Ok::<(), Box<dyn std::error::Error>>(());
+# Ok::<(), MujocoError>(())
 ```
 
 The same `.render(true)` option is available on `AntV5`, `HopperV5`,

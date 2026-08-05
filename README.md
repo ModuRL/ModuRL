@@ -25,8 +25,9 @@ The same `Gym` and `Space` traits used by training agents also support direct en
 use candle_core::Device;
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
+use modurl_gym::EnvironmentError;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), EnvironmentError> {
     let device = Device::Cpu;
     let mut env = CartPoleV1::builder().device(&device).build()?;
 

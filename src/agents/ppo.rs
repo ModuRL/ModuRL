@@ -30,34 +30,6 @@ pub enum PPOConfigurationError {
     BatchNotDivisibleByEnvironmentCount,
 }
 
-impl std::fmt::Display for PPOConfigurationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let message = match self {
-            Self::ZeroBatchSize => "PPO batch size must be greater than zero",
-            Self::ZeroMiniBatchSize => "PPO minibatch size must be greater than zero",
-            Self::ZeroEpochs => "PPO epoch count must be greater than zero",
-            Self::ZeroTrainingHorizon => "PPO training horizon must be greater than zero",
-            Self::InvalidGamma => "PPO gamma must be finite and between zero and one",
-            Self::InvalidGaeLambda => "PPO GAE lambda must be finite and between zero and one",
-            Self::InvalidValueCoefficient => {
-                "PPO value-loss coefficient must be finite and nonnegative"
-            }
-            Self::InvalidEntropyCoefficient => {
-                "PPO entropy coefficient must be finite and nonnegative"
-            }
-            Self::InvalidGradientClip => "PPO gradient clip must be finite and positive",
-            Self::InvalidDType => "PPO supports only f32 and f64 tensors",
-            Self::ZeroEnvironments => "PPO requires at least one environment",
-            Self::BatchNotDivisibleByEnvironmentCount => {
-                "PPO batch size must be divisible by the environment count"
-            }
-        };
-        formatter.write_str(message)
-    }
-}
-
-impl std::error::Error for PPOConfigurationError {}
-
 #[derive(Debug)]
 pub enum PPOError<AE, GE, SE>
 where
@@ -73,41 +45,6 @@ where
     MismatchedTerminationBatch { dones: usize, truncateds: usize },
     MissingPreparedRollout,
     MissingOldValues,
-}
-
-impl<AE, GE, SE> std::fmt::Display for PPOError<AE, GE, SE>
-where
-    AE: std::fmt::Debug,
-    GE: std::fmt::Debug,
-    SE: std::fmt::Debug,
-{
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PolicyError(error) => write!(formatter, "PPO policy error: {error:?}"),
-            Self::GymError(error) => write!(formatter, "PPO environment error: {error:?}"),
-            Self::TensorError(error) => write!(formatter, "PPO tensor error: {error}"),
-            Self::SpaceError(error) => write!(formatter, "PPO action-space error: {error:?}"),
-            Self::ConfigurationError(error) => write!(formatter, "{error}"),
-            Self::MismatchedTerminationBatch { dones, truncateds } => write!(
-                formatter,
-                "PPO termination batch has {dones} done flags and {truncateds} truncation flags"
-            ),
-            Self::MissingPreparedRollout => {
-                formatter.write_str("PPO rollout was not prepared before optimization")
-            }
-            Self::MissingOldValues => {
-                formatter.write_str("PPO value clipping requires rollout-time value predictions")
-            }
-        }
-    }
-}
-
-impl<AE, GE, SE> std::error::Error for PPOError<AE, GE, SE>
-where
-    AE: std::fmt::Debug,
-    GE: std::fmt::Debug,
-    SE: std::fmt::Debug,
-{
 }
 
 impl<AE, GE, SE> From<PPOConfigurationError> for PPOError<AE, GE, SE>

@@ -7,6 +7,8 @@ use serde::Deserialize;
 
 const PARITY_STEPS: usize = 64;
 
+type SetState<E> = fn(&mut E, &[f64], &[f64]) -> Result<Tensor, MujocoError>;
+
 #[derive(Deserialize)]
 struct Fixture {
     gymnasium_version: String,
@@ -38,11 +40,12 @@ struct ExpectedStep {
 /// `set_state` receives generalized positions shaped `[nq]` and generalized
 /// velocities shaped `[nv]`, and returns the resulting observation as a flat
 /// `[observation_dim]` tensor.
+#[bon::builder]
 fn check_parity<I, E>(
     fixture_json: &str,
     expected_environment_id: &str,
     mut environment: E,
-    set_state: fn(&mut E, &[f64], &[f64]) -> Result<Tensor, MujocoError>,
+    set_state: SetState<E>,
     observation_tolerance: f64,
     reward_tolerance: f64,
     relaxed_observation_tolerance: Option<(usize, f64)>,
@@ -130,73 +133,66 @@ fn check_parity<I, E>(
 
 #[test]
 fn ant() {
-    check_parity::<AntV5Info, _>(
-        include_str!("../python_tests/ant/trajectory.json"),
-        "Ant-v5",
-        AntV5::builder().build().unwrap(),
-        AntV5::set_state,
-        1e-5,
-        1e-5,
-        None,
-        Some(27),
-    );
+    check_parity::<AntV5Info, _>()
+        .fixture_json(include_str!("../python_tests/ant/trajectory.json"))
+        .expected_environment_id("Ant-v5")
+        .environment(AntV5::builder().build().unwrap())
+        .set_state(AntV5::set_state)
+        .observation_tolerance(1e-5)
+        .reward_tolerance(1e-5)
+        .contact_observation_start(27)
+        .call();
 }
 
 #[test]
 fn half_cheetah() {
-    check_parity::<(), _>(
-        include_str!("../python_tests/half_cheetah/trajectory.json"),
-        "HalfCheetah-v5",
-        HalfCheetahV5::builder().build().unwrap(),
-        HalfCheetahV5::set_state,
-        1e-5,
-        1e-5,
-        None,
-        None,
-    );
+    check_parity::<(), _>()
+        .fixture_json(include_str!("../python_tests/half_cheetah/trajectory.json"))
+        .expected_environment_id("HalfCheetah-v5")
+        .environment(HalfCheetahV5::builder().build().unwrap())
+        .set_state(HalfCheetahV5::set_state)
+        .observation_tolerance(1e-5)
+        .reward_tolerance(1e-5)
+        .call();
 }
 
 #[test]
 fn hopper() {
-    check_parity::<(), _>(
-        include_str!("../python_tests/hopper/trajectory.json"),
-        "Hopper-v5",
-        HopperV5::builder().build().unwrap(),
-        HopperV5::set_state,
-        1e-5,
-        1e-5,
-        None,
-        None,
-    );
+    check_parity::<(), _>()
+        .fixture_json(include_str!("../python_tests/hopper/trajectory.json"))
+        .expected_environment_id("Hopper-v5")
+        .environment(HopperV5::builder().build().unwrap())
+        .set_state(HopperV5::set_state)
+        .observation_tolerance(1e-5)
+        .reward_tolerance(1e-5)
+        .call();
 }
 
 #[test]
 fn humanoid() {
-    check_parity::<HumanoidV5Info, _>(
-        include_str!("../python_tests/humanoid/trajectory.json"),
-        "Humanoid-v5",
-        HumanoidV5::builder().build().unwrap(),
-        HumanoidV5::set_state,
-        1e-5,
-        1e-5,
-        None,
-        Some(270),
-    );
+    check_parity::<HumanoidV5Info, _>()
+        .fixture_json(include_str!("../python_tests/humanoid/trajectory.json"))
+        .expected_environment_id("Humanoid-v5")
+        .environment(HumanoidV5::builder().build().unwrap())
+        .set_state(HumanoidV5::set_state)
+        .observation_tolerance(1e-5)
+        .reward_tolerance(1e-5)
+        .contact_observation_start(270)
+        .call();
 }
 
 #[test]
 fn walker2d() {
-    check_parity::<(), _>(
-        include_str!("../python_tests/walker2d/trajectory.json"),
-        "Walker2d-v5",
-        Walker2dV5::builder().build().unwrap(),
-        Walker2dV5::set_state,
-        4e-3,
-        2e-2,
+    check_parity::<(), _>()
+        .fixture_json(include_str!("../python_tests/walker2d/trajectory.json"))
+        .expected_environment_id("Walker2d-v5")
+        .environment(Walker2dV5::builder().build().unwrap())
+        .set_state(Walker2dV5::set_state)
+        .observation_tolerance(4e-3)
+        .reward_tolerance(2e-2)
         // Walker2d's impact velocities vary across the official Python and
         // mujoco-rs builds. Positions remain tight, while this bound keeps all
         // 64 transitions—including simultaneous foot impacts—in the baseline.
-        Some((8, 6.6e-1)),
-        None,
-    );
+        .relaxed_observation_tolerance((8, 6.6e-1))
+        .call();
 }

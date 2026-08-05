@@ -21,19 +21,6 @@ pub enum CategoricalDistributionError {
     NoCategories,
 }
 
-impl std::fmt::Display for CategoricalDistributionError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TensorError(error) => error.fmt(formatter),
-            Self::NoCategories => {
-                formatter.write_str("categorical distributions require at least one category")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CategoricalDistributionError {}
-
 impl From<candle_core::Error> for CategoricalDistributionError {
     fn from(error: candle_core::Error) -> Self {
         Self::TensorError(error)

@@ -1,5 +1,3 @@
-use std::fmt::{Display, Formatter};
-
 use candle_core::{DType, Device, Tensor};
 
 const MAX_EXACT_F32_INTEGER: u32 = 1 << 24;
@@ -12,26 +10,6 @@ pub enum SamplingError {
     TensorError(candle_core::Error),
 }
 
-impl Display for SamplingError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidInclusiveRange { start, end } => {
-                write!(
-                    formatter,
-                    "invalid inclusive sampling range {start}..={end}"
-                )
-            }
-            Self::InclusiveRangeTooLarge { end, maximum } => write!(
-                formatter,
-                "inclusive sampling range end {end} exceeds the maximum {maximum}"
-            ),
-            Self::TensorError(error) => Display::fmt(error, formatter),
-        }
-    }
-}
-
-impl std::error::Error for SamplingError {}
-
 impl From<candle_core::Error> for SamplingError {
     fn from(error: candle_core::Error) -> Self {
         Self::TensorError(error)
@@ -42,7 +20,12 @@ impl From<SamplingError> for candle_core::Error {
     fn from(error: SamplingError) -> Self {
         match error {
             SamplingError::TensorError(error) => error,
-            error => Self::Msg(error.to_string()),
+            SamplingError::InvalidInclusiveRange { start, end } => {
+                Self::Msg(format!("invalid inclusive sampling range {start}..={end}"))
+            }
+            SamplingError::InclusiveRangeTooLarge { end, maximum } => Self::Msg(format!(
+                "inclusive sampling range end {end} exceeds the maximum {maximum}"
+            )),
         }
     }
 }

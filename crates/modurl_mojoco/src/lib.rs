@@ -39,20 +39,6 @@ pub enum MujocoError {
     InvalidInput(String),
 }
 
-impl std::fmt::Display for MujocoError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Model(error) => write!(f, "failed to load MuJoCo model: {error}"),
-            Self::Tensor(error) => write!(f, "tensor error: {error}"),
-            #[cfg(feature = "rendering")]
-            Self::Viewer(error) => write!(f, "MuJoCo viewer error: {error}"),
-            Self::InvalidInput(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for MujocoError {}
-
 impl From<mujoco_rs::error::MjModelError> for MujocoError {
     fn from(value: mujoco_rs::error::MjModelError) -> Self {
         Self::Model(value)

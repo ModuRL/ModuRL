@@ -13,22 +13,6 @@ pub enum EnvironmentError {
     Rendering(minifb::Error),
 }
 
-impl std::fmt::Display for EnvironmentError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tensor(error) => write!(formatter, "tensor error: {error}"),
-            Self::InvalidConfiguration(message)
-            | Self::InvalidAction(message)
-            | Self::NotInitialized(message)
-            | Self::InvalidPhysicsState(message) => formatter.write_str(message),
-            #[cfg(feature = "rendering")]
-            Self::Rendering(error) => write!(formatter, "rendering error: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for EnvironmentError {}
-
 impl From<candle_core::Error> for EnvironmentError {
     fn from(error: candle_core::Error) -> Self {
         Self::Tensor(error)
