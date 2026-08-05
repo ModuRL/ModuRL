@@ -82,7 +82,7 @@ vectorized step. Each entry reports:
 - `episode_return`: the sum of that episode's rewards
 - `episode_length`: the number of environment steps
 - `terminated`: whether the environment reached a terminal state
-- `truncated`: whether an external limit ended the episode
+- `truncated`: whether the episode was truncated
 - `collection_timestep`: the total collected-transition count at completion
 
 Episode return is the clearest measure of task performance. Compare it across

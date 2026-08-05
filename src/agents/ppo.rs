@@ -163,8 +163,8 @@ impl PPOExperience {
     /// `actions` is `[env_count, ...action_shape]`; `rewards`,
     /// `training_rewards`, and `log_probs` are `[env_count]`. `rewards`
     /// preserves the environment values for logging, while `training_rewards`
-    /// may contain time-limit bootstrapping. Prepared PPO training data is
-    /// added internally after rollout collection.
+    /// may contain bootstrap corrections for nonterminal truncations. Prepared
+    /// PPO training data is added internally after rollout collection.
     #[builder]
     pub fn new(
         states: Tensor,

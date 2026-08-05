@@ -184,7 +184,7 @@ pub struct DeterministicActorCriticEpisodeLogEntry {
     pub episode_length: usize,
     /// Whether the environment terminated the episode.
     pub terminated: bool,
-    /// Whether a time limit or wrapper truncated the episode.
+    /// Whether the episode was truncated.
     pub truncated: bool,
     /// Global collected-transition count at the end of the episode.
     pub collection_timestep: usize,

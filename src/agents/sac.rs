@@ -789,7 +789,7 @@ pub struct SACEpisodeLogEntry {
     pub episode_length: usize,
     /// Whether the environment reached a terminal state.
     pub terminated: bool,
-    /// Whether an external limit truncated the episode.
+    /// Whether the episode was truncated.
     pub truncated: bool,
     /// Total collected transitions when the episode completed.
     pub collection_timestep: usize,
