@@ -2,7 +2,7 @@
 
 [![Workspace CI](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml/badge.svg)](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml)
 
-`ModuRL` is a Rust workspace for building and training deep reinforcement-learning agents with [Candle](https://github.com/huggingface/candle).
+`ModuRL` is a deep reinforcement learning framework for Rust, built on [Candle](https://github.com/huggingface/candle).
 
 It provides training algorithms, environments, models, policy distributions, storage, schedules, and logging. Tensor shapes, devices, networks, and optimizer configuration remain explicit.
 

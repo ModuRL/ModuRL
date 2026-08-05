@@ -33,6 +33,11 @@ struct ExpectedStep {
     truncated: bool,
 }
 
+/// Checks a MuJoCo environment against an exact saved trajectory.
+///
+/// `set_state` receives generalized positions shaped `[nq]` and generalized
+/// velocities shaped `[nv]`, and returns the resulting observation as a flat
+/// `[observation_dim]` tensor.
 fn check_parity<I, E>(
     fixture_json: &str,
     expected_environment_id: &str,

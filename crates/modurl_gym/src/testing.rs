@@ -28,6 +28,11 @@ impl Tolerances {
     }
 }
 
+/// Checks a discrete environment against its saved parity trajectory.
+///
+/// `reset` returns one observation with the environment's observation shape.
+/// `set_state` receives the preceding fixture observation as a flat
+/// `[observation_dim]` tensor.
 pub(crate) fn check_discrete_parity<T, E>(
     folder: &str,
     mut environment: T,
