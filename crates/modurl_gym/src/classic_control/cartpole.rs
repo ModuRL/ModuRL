@@ -5,6 +5,8 @@ use modurl::{
     spaces::{self, Space},
 };
 
+use crate::EnvironmentError;
+
 #[cfg(feature = "rendering")]
 use crate::rendering::Renderer;
 
@@ -41,7 +43,7 @@ impl CartPoleV1 {
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
-    ) -> Self {
+    ) -> Result<Self, EnvironmentError> {
         let gravity = 9.8;
         let masscart = 1.0;
         let masspole = 0.1;
@@ -62,13 +64,13 @@ impl CartPoleV1 {
             f32::INFINITY,
         ];
         let low = high.iter().map(|x| -x).collect::<Vec<_>>();
-        let high = Tensor::from_vec(high, vec![4], device).expect("Failed to create tensor.");
-        let low = Tensor::from_vec(low, vec![4], device).expect("Failed to create tensor.");
+        let high = Tensor::from_vec(high, vec![4], device)?;
+        let low = Tensor::from_vec(low, vec![4], device)?;
 
         let action_space = spaces::Discrete::new(2);
         let observation_space = spaces::BoxSpace::new(low, high);
 
-        Self {
+        Ok(Self {
             gravity,
             masspole,
             total_mass,
@@ -82,27 +84,27 @@ impl CartPoleV1 {
             is_euler,
             action_space,
             observation_space,
-            state: Tensor::zeros(vec![4], candle_core::DType::F32, device)
-                .expect("Failed to create tensor."),
+            state: Tensor::zeros(vec![4], candle_core::DType::F32, device)?,
             steps_since_reset: 0,
             sutton_barto_reward,
             #[cfg(feature = "rendering")]
-            renderer: if render {
-                Some(Renderer::new(600, 400, "CartPole"))
-            } else {
-                None
-            },
-        }
+            renderer: render
+                .then(|| Renderer::new(600, 400, "CartPole"))
+                .transpose()?,
+        })
     }
 
     #[cfg(feature = "rendering")]
-    fn render(&mut self) {
+    fn render(&mut self) -> Result<(), EnvironmentError> {
         if let Some(renderer) = &mut self.renderer {
             let screen_width = renderer.get_width() as f32;
 
             renderer.clear(0xFFFFFF);
 
-            let state_vec = self.state.to_vec1::<f32>().unwrap();
+            let state_vec = self
+                .state
+                .to_vec1::<f32>()
+                .expect("CartPole state is always a rank-one f32 tensor");
             let cart_position = state_vec[0];
             let pole_angle = state_vec[2];
 
@@ -134,8 +136,9 @@ impl CartPoleV1 {
             // Draw the axle (connection point)
             Self::draw_axle(renderer, cart_x, cart_y + axle_offset, pole_width);
 
-            renderer.present();
+            renderer.present()?;
         }
+        Ok(())
     }
 
     #[cfg(feature = "rendering")]
@@ -225,14 +228,8 @@ impl CartPoleV1 {
     }
 }
 
-impl Default for CartPoleV1 {
-    fn default() -> Self {
-        CartPoleV1::builder().build()
-    }
-}
-
 impl Gym for CartPoleV1 {
-    type Error = candle_core::Error;
+    type Error = EnvironmentError;
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
@@ -243,7 +240,7 @@ impl Gym for CartPoleV1 {
         self.steps_since_reset = 0;
 
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
 
         Ok(ResetInfo {
             state: self.state.clone(),
@@ -253,7 +250,11 @@ impl Gym for CartPoleV1 {
 
     /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        assert!(self.action_space.contains(&action));
+        if !self.action_space.contains(&action) {
+            return Err(EnvironmentError::InvalidAction(
+                "CartPole actions must be scalar u32 values in 0..2",
+            ));
+        }
         let state_vec = self.state.to_vec1::<f32>()?;
         let (mut x, mut x_dot, mut theta, mut theta_dot) =
             (state_vec[0], state_vec[1], state_vec[2], state_vec[3]);
@@ -290,8 +291,7 @@ impl Gym for CartPoleV1 {
             vec![x, x_dot, theta, theta_dot],
             vec![4],
             self.state.device(),
-        )
-        .expect("Failed to create tensor.");
+        )?;
         let terminated = x < -self.x_threshold
             || x > self.x_threshold
             || theta < -self.theta_threshold_radians
@@ -311,7 +311,7 @@ impl Gym for CartPoleV1 {
         }
 
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
         if !terminated {
             let reward = if self.sutton_barto_reward { 0.0 } else { 1.0 };
 
@@ -342,8 +342,10 @@ impl Gym for CartPoleV1 {
                 );
             }
             let reward = if self.sutton_barto_reward { -1.0 } else { 0.0 };
-            // We already checked this is Some above, so this is safe.
-            self.steps_beyond_terminated = Some(self.steps_beyond_terminated.unwrap() + 1);
+            let steps_beyond_terminated = self
+                .steps_beyond_terminated
+                .expect("the post-termination branch requires a recorded termination");
+            self.steps_beyond_terminated = Some(steps_beyond_terminated + 1);
 
             Ok(StepInfo {
                 state: self.state.clone(),
@@ -367,12 +369,12 @@ impl Gym for CartPoleV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Testable, test_gym_against_python};
+    use crate::testing::check_discrete_parity;
     use Gym;
 
     #[test]
     fn test_cartpole() {
-        let mut env = CartPoleV1::builder().build();
+        let mut env = CartPoleV1::builder().build().unwrap();
         let state = env.reset().expect("Failed to reset environment.");
         assert_eq!(
             state
@@ -406,21 +408,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_cartpole_invalid_action() {
-        let mut env = CartPoleV1::builder().build();
+        let mut env = CartPoleV1::builder().build().unwrap();
         let _state = env.reset();
-        let _info = env
-            .step(
-                Tensor::from_vec(vec![1_u32], vec![1], &Device::Cpu)
-                    .expect("Failed to create tensor."),
-            )
-            .expect("Failed to step environment.");
+        let error = env
+            .step(Tensor::from_vec(vec![1_u32], vec![1], &Device::Cpu).unwrap())
+            .unwrap_err();
+        assert!(matches!(error, EnvironmentError::InvalidAction(_)));
     }
 
     #[test]
     fn reward_is_one_when_not_terminated() {
-        let mut env = CartPoleV1::builder().build();
+        let mut env = CartPoleV1::builder().build().unwrap();
         env.reset().unwrap();
         let action = Tensor::from_vec(vec![1u32], vec![], &Device::Cpu).unwrap();
         let StepInfo {
@@ -451,11 +450,12 @@ mod tests {
         assert!(done);
     }
 
-    impl Testable for CartPoleV1 {
+    impl CartPoleV1 {
         fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error> {
-            self.reset()?;
-            self.state = Tensor::from_vec(vec![0.0f32, 0.0, 0.0, 0.0], vec![4], &Device::Cpu)
-                .expect("Failed to create tensor.");
+            self.steps_beyond_terminated = None;
+            self.steps_since_reset = 0;
+            self.state =
+                Tensor::from_vec(vec![0.0f32, 0.0, 0.0, 0.0], vec![4], self.state.device())?;
             Ok(self.state.clone())
         }
 
@@ -466,14 +466,20 @@ mod tests {
     }
 
     #[test]
-    fn test_cartpole_against_python() {
-        test_gym_against_python("cartpole", CartPoleV1::builder().build(), None);
+    fn parity() {
+        check_discrete_parity(
+            "cartpole",
+            CartPoleV1::builder().build().unwrap(),
+            CartPoleV1::reset_deterministic,
+            CartPoleV1::set_state,
+            None,
+        );
     }
 
     #[cfg(feature = "rendering")]
     #[test]
     fn test_cartpole_rendering() {
-        let mut env = CartPoleV1::builder().render(true).build();
+        let mut env = CartPoleV1::builder().render(true).build().unwrap();
         let _state = env.reset().expect("Failed to reset environment.");
         let action_space = env.action_space();
         for _ in 0..200 {
@@ -502,7 +508,7 @@ mod tests {
         let mut last_state: Option<Tensor> = None;
         for i in 0..10 {
             device.set_seed(42).unwrap();
-            let mut env = CartPoleV1::builder().device(&device).build();
+            let mut env = CartPoleV1::builder().device(&device).build().unwrap();
             env.reset().unwrap();
             let action_space = env.action_space();
             let mut state = env.state.clone();

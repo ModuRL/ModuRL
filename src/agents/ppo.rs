@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 
 use crate::{
     buffers::{experience, rollout_buffer::RolloutBuffer},
-    gym::{VectorizedGym, VectorizedStepInfo},
+    gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ProbabilisticPolicy,
     objectives::clipped_value_loss,
     parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
@@ -13,6 +13,22 @@ use crate::{
     spaces,
     tensor_operations::{normalize_tensor, tensor_has_nan},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PPOConfigurationError {
+    ZeroBatchSize,
+    ZeroMiniBatchSize,
+    ZeroEpochs,
+    ZeroTrainingHorizon,
+    InvalidGamma,
+    InvalidGaeLambda,
+    InvalidValueCoefficient,
+    InvalidEntropyCoefficient,
+    InvalidGradientClip,
+    InvalidDType,
+    ZeroEnvironments,
+    BatchNotDivisibleByEnvironmentCount,
+}
 
 #[derive(Debug)]
 pub enum PPOError<AE, GE, SE>
@@ -25,6 +41,21 @@ where
     GymError(GE),
     TensorError(candle_core::Error),
     SpaceError(SE),
+    ConfigurationError(PPOConfigurationError),
+    MismatchedTerminationBatch { dones: usize, truncateds: usize },
+    MissingPreparedRollout,
+    MissingOldValues,
+}
+
+impl<AE, GE, SE> From<PPOConfigurationError> for PPOError<AE, GE, SE>
+where
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
+{
+    fn from(error: PPOConfigurationError) -> Self {
+        Self::ConfigurationError(error)
+    }
 }
 
 impl<AE, GE, SE> From<candle_core::Error> for PPOError<AE, GE, SE>
@@ -54,6 +85,7 @@ struct PPOExperience {
     next_states: Tensor,
     actions: Tensor,
     rewards: Tensor,
+    training_rewards: Tensor,
     next_dones: Vec<bool>,
     truncateds: Vec<bool>,
     log_probs: Tensor,
@@ -77,6 +109,7 @@ struct PPORolloutBatch {
     next_states: Tensor,
     actions: Tensor,
     rewards: Tensor,
+    training_rewards: Tensor,
     next_dones: Tensor,
     truncateds: Tensor,
     log_probs: Tensor,
@@ -127,15 +160,18 @@ impl PPOExperience {
     /// Creates one vectorized rollout transition.
     ///
     /// `states` and `next_states` are `[env_count, ...observation_shape]`,
-    /// `actions` is `[env_count, ...action_shape]`, and `rewards` and `log_probs`
-    /// are `[env_count]`. Prepared PPO training data is added
-    /// internally after rollout collection.
+    /// `actions` is `[env_count, ...action_shape]`; `rewards`,
+    /// `training_rewards`, and `log_probs` are `[env_count]`. `rewards`
+    /// preserves the environment values for logging, while `training_rewards`
+    /// may contain bootstrap corrections for nonterminal truncations. Prepared
+    /// PPO training data is added internally after rollout collection.
     #[builder]
     pub fn new(
         states: Tensor,
         next_states: Tensor,
         actions: Tensor,
         rewards: Tensor,
+        training_rewards: Tensor,
         next_dones: Vec<bool>,
         truncateds: Vec<bool>,
         log_probs: Tensor,
@@ -145,6 +181,7 @@ impl PPOExperience {
             next_states,
             actions,
             rewards,
+            training_rewards,
             next_dones,
             truncateds,
             log_probs,
@@ -172,6 +209,9 @@ impl experience::Experience for PPOExperience {
             })?,
             rewards: experience::stack_tensor_field(experiences, |experience| {
                 experience.rewards.clone()
+            })?,
+            training_rewards: experience::stack_tensor_field(experiences, |experience| {
+                experience.training_rewards.clone()
             })?,
             next_dones: experience::stack_bool_field(
                 experiences,
@@ -488,13 +528,39 @@ where
         logging_info: Option<&'a mut dyn PPOLogger<I>>,
         device: candle_core::Device,
         #[builder(default = DType::F32)] dtype: DType,
-    ) -> Self {
-        if batch_size > 0 {
-            assert!(batch_size > 0);
+    ) -> Result<Self, PPOConfigurationError> {
+        if batch_size == 0 {
+            return Err(PPOConfigurationError::ZeroBatchSize);
         }
-        assert!(dtype.is_float(), "PPO compute dtype must be floating-point");
+        if mini_batch_size == 0 {
+            return Err(PPOConfigurationError::ZeroMiniBatchSize);
+        }
+        if num_epochs == 0 {
+            return Err(PPOConfigurationError::ZeroEpochs);
+        }
+        if training_horizon == 0 {
+            return Err(PPOConfigurationError::ZeroTrainingHorizon);
+        }
+        if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
+            return Err(PPOConfigurationError::InvalidGamma);
+        }
+        if !gae_lambda.is_finite() || !(0.0..=1.0).contains(&gae_lambda) {
+            return Err(PPOConfigurationError::InvalidGaeLambda);
+        }
+        if !vf_coef.is_finite() || vf_coef < 0.0 {
+            return Err(PPOConfigurationError::InvalidValueCoefficient);
+        }
+        if !ent_coef.is_finite() || ent_coef < 0.0 {
+            return Err(PPOConfigurationError::InvalidEntropyCoefficient);
+        }
+        if !gradient_clip.is_finite() || gradient_clip <= 0.0 {
+            return Err(PPOConfigurationError::InvalidGradientClip);
+        }
+        if !dtype.is_float() {
+            return Err(PPOConfigurationError::InvalidDType);
+        }
 
-        Self {
+        Ok(Self {
             clipped,
             clip_value_loss,
             gamma,
@@ -517,7 +583,7 @@ where
             episode_tracker: PPOEpisodeTracker::new(0),
             dtype,
             _phantom: PhantomData,
-        }
+        })
     }
 }
 
@@ -538,9 +604,7 @@ where
         let all_states = batch.states.flatten(0, 1)?;
         let all_actions = batch.actions.flatten(0, 1)?;
         let all_log_probs = batch.log_probs.flatten(0, 1)?;
-        let prepared = batch
-            .prepared
-            .expect("PPO advantages must be prepared before optimization");
+        let prepared = batch.prepared.ok_or(PPOError::MissingPreparedRollout)?;
         let all_advantages = prepared.advantages.flatten(0, 1)?;
         let all_returns = prepared.returns.flatten(0, 1)?;
         let all_rewards = batch.rewards.flatten(0, 1)?;
@@ -635,7 +699,7 @@ where
 
         let advantages = self
             .compute_gae(
-                &batch.rewards,
+                &batch.training_rewards,
                 &values_tensor,
                 &batch.next_dones,
                 &batch.truncateds,
@@ -747,6 +811,60 @@ where
         }
     }
 
+    /// Adds the bootstrap value for each truncated transition to its reward.
+    /// GAE still stops at the truncation boundary, so the terminal value is
+    /// included exactly once.
+    /// `rewards` is `[environment_count]`, `transition_next_states` is
+    /// `[environment_count, ...state_shape]`, and both boolean slices have
+    /// `environment_count` entries. A true termination always suppresses
+    /// bootstrapping, even if the transition is also truncated.
+    fn bootstrap_truncated_rewards(
+        &mut self,
+        rewards: &Tensor,
+        transition_next_states: &Tensor,
+        dones: &[bool],
+        truncateds: &[bool],
+    ) -> Result<Tensor, PPOError<AE, GE, SE>> {
+        if dones.len() != truncateds.len() {
+            return Err(PPOError::MismatchedTerminationBatch {
+                dones: dones.len(),
+                truncateds: truncateds.len(),
+            });
+        }
+        let truncated_indices = truncateds
+            .iter()
+            .zip(dones)
+            .enumerate()
+            .filter_map(|(index, (truncated, done))| (*truncated && !*done).then_some(index as u32))
+            .collect::<Vec<_>>();
+        if truncated_indices.is_empty() {
+            return Ok(rewards.to_dtype(self.dtype)?);
+        }
+
+        let truncation_count = truncated_indices.len();
+        let truncated_indices = Tensor::from_vec(
+            truncated_indices,
+            truncation_count,
+            transition_next_states.device(),
+        )?;
+        let truncated_next_states = transition_next_states.index_select(&truncated_indices, 0)?;
+
+        let latent_states = match self.network_info {
+            PPONetworkInfo::Shared(ref mut shared_info) => {
+                shared_info.shared_network.forward(&truncated_next_states)?
+            }
+            PPONetworkInfo::Separate(_) => truncated_next_states,
+        };
+        let terminal_values = self
+            .critic_network_forward(&latent_states)?
+            .flatten_all()?
+            .detach();
+        let terminal_bootstrap = (terminal_values.to_dtype(self.dtype)? * self.gamma as f64)?;
+        Ok(rewards
+            .to_dtype(self.dtype)?
+            .index_add(&truncated_indices, &terminal_bootstrap, 0)?)
+    }
+
     /// Evaluates `actions` `[batch, ...action_shape]` for latent or raw
     /// `states` `[batch, ...state_shape]`, returning two `[batch]` tensors.
     fn actor_network_log_prob_and_entropy(
@@ -848,14 +966,13 @@ where
         let critic_loss = if self.clip_value_loss {
             // PPO2/CleanRL value-loss clipping: bound how far the value estimate
             // may move from its rollout-time value within one update.
-            let old_values = old_values
-                .expect("PPO old values must be prepared when value-loss clipping is enabled");
+            let old_values = old_values.ok_or(PPOError::MissingOldValues)?;
             clipped_value_loss(&values, &returns, &old_values, clip_range as f64)?
         } else {
             loss::mse(&values, &returns)?
         };
-        // The 0.5 factor is from the original PPO paper
-        let final_critic_loss = (((self.vf_coef * 0.5) as f64) * critic_loss.clone())?;
+        // Match SB3 PPO: value_loss = vf_coef * mean_squared_error.
+        let final_critic_loss = ((self.vf_coef as f64) * critic_loss)?;
 
         if let Some(logging_info) = &mut self.logging_info {
             let log_entry = PPOLogEntry {
@@ -1090,7 +1207,7 @@ where
     /// which collection should resume.
     fn prepare_rollout_collection(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
     ) -> Result<Tensor, PPOError<AE, GE, SE>> {
         let states = if let Some(states) = self.current_states.take() {
             states
@@ -1099,6 +1216,12 @@ where
         }
         .to_dtype(self.dtype)?;
         let environment_count = env.num_envs();
+        if environment_count == 0 {
+            return Err(PPOConfigurationError::ZeroEnvironments.into());
+        }
+        if !self.batch_size.is_multiple_of(environment_count) {
+            return Err(PPOConfigurationError::BatchNotDivisibleByEnvironmentCount.into());
+        }
         self.rollout_buffer = RolloutBuffer::new(
             self.mini_batch_size / environment_count,
             states.device().clone(),
@@ -1115,7 +1238,7 @@ where
     /// `[environment_count, ...observation_shape]` after each environment step.
     fn collect_rollout(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         next_states: &mut Tensor,
     ) -> Result<usize, PPOError<AE, GE, SE>> {
         let environment_count = env.num_envs();
@@ -1126,9 +1249,9 @@ where
                 .step(collection_action.environment_actions.clone())
                 .map_err(PPOError::GymError)?;
             let training_next_states = step_info.transition_next_states()?.to_dtype(self.dtype)?;
-            let VectorizedStepInfo {
+            let MultiGymStepInfo {
                 states: reset_or_next_states,
-                rewards,
+                rewards: collection_rewards,
                 infos,
                 dones: next_dones,
                 truncateds,
@@ -1139,18 +1262,25 @@ where
                 .elapsed_steps()
                 .saturating_add(self.rollout_buffer.len() * environment_count);
             self.log_collection(
-                &rewards,
+                &collection_rewards,
                 infos,
                 &next_dones,
                 &truncateds,
                 first_collection_timestep,
+            )?;
+            let training_rewards = self.bootstrap_truncated_rewards(
+                &collection_rewards,
+                &training_next_states,
+                &next_dones,
+                &truncateds,
             )?;
             self.rollout_buffer.add(
                 PPOExperience::builder()
                     .states(states)
                     .next_states(training_next_states)
                     .actions(collection_action.policy_actions.detach())
-                    .rewards(rewards)
+                    .rewards(collection_rewards)
+                    .training_rewards(training_rewards)
                     .next_dones(next_dones)
                     .truncateds(truncateds)
                     .log_probs(collection_action.log_probs)
@@ -1207,7 +1337,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
+        env: &mut dyn MultiGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,
         num_timesteps: usize,
     ) -> Result<(), PPOError<AE, GE, SE>> {
         let mut elapsed_timesteps = 0;
@@ -1229,7 +1359,7 @@ mod tests {
     use super::*;
     use crate::{
         distributions::CategoricalDistribution,
-        gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
+        gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         spaces::Discrete,
     };
@@ -1376,7 +1506,8 @@ mod tests {
                 .num_epochs(10)
                 .training_horizon(10_000)
                 .device(device.clone())
-                .build();
+                .build()
+                .unwrap();
 
             // train for some timesteps
             agent
@@ -1436,7 +1567,7 @@ mod schedule_tests {
             test_support::{CountingOptimizer, FixedEnv},
         },
         distributions::{CategoricalDistribution, GaussianDistribution},
-        gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymWrapper},
+        gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymWrapper},
         models::{
             MLP,
             probabilistic_model::{ProbabilisticPolicyModel, ProbabilisticPolicyModelError},
@@ -1570,6 +1701,63 @@ mod schedule_tests {
     }
 
     #[test]
+    fn simultaneous_termination_and_truncation_does_not_bootstrap() {
+        struct UnitCritic;
+
+        impl candle_core::Module for UnitCritic {
+            /// Returns one value prediction per input row, shaped `[batch, 1]`.
+            fn forward(&self, input: &Tensor) -> candle_core::Result<Tensor> {
+                Tensor::ones((input.dim(0)?, 1), input.dtype(), input.device())
+            }
+        }
+
+        let device = Device::Cpu;
+        let actor_vars = VarMap::new();
+        let actor = MLP::builder()
+            .input_size(4)
+            .output_size(2)
+            .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, &device))
+            .build()
+            .unwrap();
+        let networks = PPONetworkInfo::Separate(
+            SeparatePPONetwork::builder()
+                .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                .actor_network(Box::new(
+                    ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor)),
+                ))
+                .critic_network(Box::new(UnitCritic))
+                .build(),
+        );
+        let mut agent: PPOAgent<
+            '_,
+            CountingOptimizer,
+            CountingOptimizer,
+            ProbabilisticPolicyModelError<crate::distributions::CategoricalDistributionError>,
+            candle_core::Error,
+            candle_core::Error,
+        > = PPOAgent::builder()
+            .action_space(Box::new(Discrete::new(2)))
+            .network_info(networks)
+            .batch_size(2)
+            .mini_batch_size(2)
+            .training_horizon(2)
+            .device(device.clone())
+            .build()
+            .unwrap();
+        let rewards = Tensor::from_vec(vec![1.0_f32, 2.0], 2, &device).unwrap();
+        let next_states = Tensor::zeros((2, 4), DType::F32, &device).unwrap();
+
+        let actual = agent
+            .bootstrap_truncated_rewards(&rewards, &next_states, &[true, false], &[true, true])
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+
+        assert_eq!(actual, vec![1.0, 2.99]);
+    }
+
+    #[test]
     fn collection_logs_report_fresh_rewards_and_completed_episodes() {
         let device = Device::Cpu;
         let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = vec![
@@ -1606,12 +1794,16 @@ mod schedule_tests {
 
         struct CollectionLogger {
             collection_rewards: Vec<Vec<f32>>,
+            optimization_rewards: Vec<Vec<f32>>,
             infos: Vec<Vec<usize>>,
             completed_episodes: Vec<(usize, f32, usize, bool, bool, usize)>,
         }
 
         impl PPOLogger<usize> for CollectionLogger {
-            fn log(&mut self, _entry: &PPOLogEntry) {}
+            fn log(&mut self, entry: &PPOLogEntry) {
+                self.optimization_rewards
+                    .push(entry.rewards.to_vec1::<f32>().unwrap());
+            }
 
             fn log_collection(&mut self, entry: &PPOCollectionLogEntry<usize>) {
                 self.collection_rewards
@@ -1633,6 +1825,7 @@ mod schedule_tests {
 
         let mut logger = CollectionLogger {
             collection_rewards: Vec::new(),
+            optimization_rewards: Vec::new(),
             infos: Vec::new(),
             completed_episodes: Vec::new(),
         };
@@ -1645,13 +1838,18 @@ mod schedule_tests {
             .training_horizon(4)
             .logging_info(&mut logger)
             .device(device)
-            .build();
+            .build()
+            .unwrap();
 
         agent.learn(&mut env, 2).unwrap();
         agent.learn(&mut env, 2).unwrap();
 
         assert_eq!(
             logger.collection_rewards,
+            vec![vec![1.0, 1.0], vec![1.0, 1.0]]
+        );
+        assert_eq!(
+            logger.optimization_rewards,
             vec![vec![1.0, 1.0], vec![1.0, 1.0]]
         );
         assert_eq!(logger.infos, vec![vec![1, 1], vec![2, 2]]);
@@ -1714,7 +1912,8 @@ mod schedule_tests {
             .training_horizon(10)
             .logging_info(&mut logger)
             .device(device.clone())
-            .build();
+            .build()
+            .unwrap();
 
         agent.learn(&mut env, 2).unwrap();
         let observations = agent.current_states.as_ref().unwrap().clone();
@@ -1812,7 +2011,8 @@ mod schedule_tests {
             .clip_value_loss(true)
             .training_horizon(4)
             .device(device.clone())
-            .build();
+            .build()
+            .unwrap();
 
         // Model rollout data as variables, then detach every field at the same
         // boundaries used by optimize(). None of these IDs may survive in the
@@ -1931,7 +2131,8 @@ mod schedule_tests {
             .clip_range(Box::new(LinearSchedule::new(0.2, 0.1)))
             .training_horizon(10)
             .device(device.clone())
-            .build();
+            .build()
+            .unwrap();
 
         agent.learn(&mut env, 2).unwrap();
         assert_eq!(agent.schedule_progress.elapsed_steps(), 2);

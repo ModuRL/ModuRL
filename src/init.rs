@@ -61,7 +61,7 @@ pub fn orthogonal_init(shape: &[usize], gain: f64, device: &Device) -> Result<Te
         qr_decomposition(&random_matrix)?
     };
 
-    q.affine(gain, 0.0)?.reshape(shape)
+    (q * gain)?.reshape(shape)
 }
 
 /// Q factor via modified Gram-Schmidt.

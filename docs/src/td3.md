@@ -13,15 +13,18 @@ TD3-specific choices.
 
 ## Run the TD3 Example
 
-The example supports HalfCheetah, Hopper, and Walker2d:
+The example supports Ant, HalfCheetah, Hopper, and Walker2d:
 
 ```sh
+cargo run --release -p examples --example td3_mujoco --features ant
 cargo run --release -p examples --example td3_mujoco --features half-cheetah
 cargo run --release -p examples --example td3_mujoco --features hopper
 cargo run --release -p examples --example td3_mujoco --features walker2d
 ```
 
-Enable exactly one environment feature. The program selects CUDA when it is
+Normally enable one environment feature; add `rendering` to it to open a
+viewer. Additive builds with several environment features select `ant`,
+`half-cheetah`, `hopper`, then `walker2d`. The program selects CUDA when it is
 available and otherwise uses the CPU. It trains for one million collected
 transitions, then displays terminal graphs for optimization and episode
 metrics.

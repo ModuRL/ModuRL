@@ -5,6 +5,8 @@ use modurl::{
     spaces::{self, Space},
 };
 
+use crate::EnvironmentError;
+
 /// The classic Mountain Car environment.
 /// Converted from the OpenAI Gym Mountain Car environment.
 pub struct MountainCarV0 {
@@ -31,7 +33,7 @@ impl MountainCarV0 {
         #[builder(default = false)]
         render: bool,
         #[builder(default = 0.0)] goal_velocity: f32,
-    ) -> Self {
+    ) -> Result<Self, EnvironmentError> {
         let min_position = -1.2;
         let max_position = 0.6;
         let max_speed = 0.07;
@@ -41,15 +43,14 @@ impl MountainCarV0 {
 
         let low = vec![min_position, -max_speed];
         let high = vec![max_position, max_speed];
-        let low = Tensor::from_vec(low, vec![2], device).expect("Failed to create tensor.");
-        let high = Tensor::from_vec(high, vec![2], device).expect("Failed to create tensor.");
+        let low = Tensor::from_vec(low, vec![2], device)?;
+        let high = Tensor::from_vec(high, vec![2], device)?;
 
         let action_space = spaces::Discrete::new(3);
         let observation_space = spaces::BoxSpace::new(low, high);
 
-        Self {
-            state: Tensor::zeros(vec![2], candle_core::DType::F32, device)
-                .expect("Failed to create tensor."),
+        Ok(Self {
+            state: Tensor::zeros(vec![2], candle_core::DType::F32, device)?,
             action_space,
             observation_space,
             min_position,
@@ -60,16 +61,14 @@ impl MountainCarV0 {
             force,
             gravity,
             #[cfg(feature = "rendering")]
-            renderer: if render {
-                Some(crate::rendering::Renderer::new(600, 400, "Mountain Car"))
-            } else {
-                None
-            },
-        }
+            renderer: render
+                .then(|| crate::rendering::Renderer::new(600, 400, "Mountain Car"))
+                .transpose()?,
+        })
     }
 
     #[cfg(feature = "rendering")]
-    fn render(&mut self) {
+    fn render(&mut self) -> Result<(), EnvironmentError> {
         if let Some(renderer) = &mut self.renderer {
             let screen_width = renderer.get_width() as f32;
             let screen_height = renderer.get_height() as f32;
@@ -83,7 +82,10 @@ impl MountainCarV0 {
             let car_height = 20.0;
             let clearance = 10.0;
 
-            let state_vec = self.state.to_vec1::<f32>().unwrap();
+            let state_vec = self
+                .state
+                .to_vec1::<f32>()
+                .expect("MountainCar state is always a rank-one f32 tensor");
             let pos = state_vec[0];
 
             // Collect all the parameters we need
@@ -112,8 +114,9 @@ impl MountainCarV0 {
             // Draw the goal flag
             Self::draw_goal_flag(renderer, scale, screen_height, goal_position, min_position);
 
-            renderer.present();
+            renderer.present()?;
         }
+        Ok(())
     }
 
     #[cfg(feature = "rendering")]
@@ -280,14 +283,8 @@ struct CarDrawParams {
     max_position: f32,
 }
 
-impl Default for MountainCarV0 {
-    fn default() -> Self {
-        MountainCarV0::builder().build()
-    }
-}
-
 impl Gym for MountainCarV0 {
-    type Error = candle_core::Error;
+    type Error = EnvironmentError;
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
@@ -299,7 +296,7 @@ impl Gym for MountainCarV0 {
         self.state = Tensor::cat(&[position, velocity], 0)?;
 
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
 
         Ok(ResetInfo {
             state: self.state.clone(),
@@ -309,7 +306,11 @@ impl Gym for MountainCarV0 {
 
     /// Steps with one scalar discrete action shaped `[]`.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        assert!(self.action_space.contains(&action));
+        if !self.action_space.contains(&action) {
+            return Err(EnvironmentError::InvalidAction(
+                "MountainCar actions must be scalar u32 values in 0..3",
+            ));
+        }
 
         let state_vec = self.state.to_vec1::<f32>()?;
         let (mut position, mut velocity) = (state_vec[0], state_vec[1]);
@@ -337,7 +338,7 @@ impl Gym for MountainCarV0 {
         let reward = -1.0;
 
         #[cfg(feature = "rendering")]
-        self.render();
+        self.render()?;
 
         Ok(StepInfo {
             state: self.state.clone(),
@@ -360,12 +361,12 @@ impl Gym for MountainCarV0 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Testable, test_gym_against_python};
+    use crate::testing::check_discrete_parity;
     use Gym;
 
     #[test]
     fn test_mountain_car() {
-        let mut env = MountainCarV0::builder().build();
+        let mut env = MountainCarV0::builder().build().unwrap();
         let state = env.reset().expect("Failed to reset environment.");
         assert_eq!(
             state
@@ -399,21 +400,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_mountain_car_invalid_action() {
-        let mut env = MountainCarV0::builder().build();
+        let mut env = MountainCarV0::builder().build().unwrap();
         let _state = env.reset();
-        let _info = env
-            .step(
-                Tensor::from_vec(vec![3_u32], vec![], &Device::Cpu)
-                    .expect("Failed to create tensor."),
-            )
-            .expect("Failed to step environment.");
+        let error = env
+            .step(Tensor::from_vec(vec![3_u32], vec![], &Device::Cpu).unwrap())
+            .unwrap_err();
+        assert!(matches!(error, EnvironmentError::InvalidAction(_)));
     }
 
     #[test]
     fn reward_is_negative_one_when_not_terminated() {
-        let mut env = MountainCarV0::builder().build();
+        let mut env = MountainCarV0::builder().build().unwrap();
         env.reset().unwrap();
         let action = Tensor::from_vec(vec![1u32], vec![], &Device::Cpu).unwrap();
         let StepInfo {
@@ -427,7 +425,7 @@ mod tests {
         assert!(!done);
     }
 
-    impl Testable for MountainCarV0 {
+    impl MountainCarV0 {
         fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error> {
             // Set deterministic initial state for testing (matches Python test with options={"low": 0.0, "high": 0.0})
             self.state = Tensor::from_vec(vec![0.0f32, 0.0], vec![2], &Device::Cpu)
@@ -442,14 +440,20 @@ mod tests {
     }
 
     #[test]
-    fn test_mountain_car_against_python() {
-        test_gym_against_python("mountain_car", MountainCarV0::builder().build(), None);
+    fn parity() {
+        check_discrete_parity(
+            "mountain_car",
+            MountainCarV0::builder().build().unwrap(),
+            MountainCarV0::reset_deterministic,
+            MountainCarV0::set_state,
+            None,
+        );
     }
 
     #[cfg(feature = "rendering")]
     #[test]
     fn test_mountain_car_rendering() {
-        let mut env = MountainCarV0::builder().render(true).build();
+        let mut env = MountainCarV0::builder().render(true).build().unwrap();
         env.reset().unwrap();
         let action_space = env.action_space();
         for _ in 0..200 {
@@ -461,7 +465,7 @@ mod tests {
                 truncated: _,
                 ..
             } = env.step(action).unwrap();
-            env.render();
+            env.render().unwrap();
             if done {
                 break;
             }

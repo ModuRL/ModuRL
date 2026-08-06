@@ -18,8 +18,8 @@ pub use crate::agents::{
         td3::{TD3Agent, TD3Logger},
     },
     ppo::{
-        PPOAgent, PPOCollectionLogEntry, PPOEpisodeLogEntry, PPOError, PPOLogEntry, PPOLogger,
-        PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
+        PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
+        PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
     },
     q_learning::{
         QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError, QLogEntry,
@@ -40,11 +40,12 @@ pub use crate::distributions::{
     GaussianDistribution, GaussianDistributionError, TanhTransform, TransformedDistribution,
     TransformedDistributionError,
 };
-#[cfg(feature = "multithreading")]
-pub use crate::gym::MultithreadedVectorizedGymWrapper;
 pub use crate::gym::{
-    Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper,
+    Gym, MultiGym, MultiGymStepInfo, ResetInfo, StackedMultiGym, StackedMultiGymError, StepInfo,
+    VectorizedGymError, VectorizedGymWrapper,
 };
+#[cfg(feature = "multithreading")]
+pub use crate::gym::{MultithreadedStackedMultiGym, MultithreadedVectorizedGymWrapper};
 pub use crate::models::{
     DefaultMLPInitializer, DuelingMLP, MLP, MLPInitializer, OrthogonalMLPInitializer,
     probabilistic_model::ExpectationPolicy, probabilistic_model::ProbabilisticPolicy,

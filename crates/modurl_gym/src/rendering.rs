@@ -18,15 +18,14 @@ pub struct Flag {
 }
 
 impl Renderer {
-    pub fn new(w: usize, h: usize, title: &str) -> Self {
-        let window = Window::new(title, w, h, WindowOptions::default()).expect("create window");
-
-        Self {
+    pub fn new(w: usize, h: usize, title: &str) -> Result<Self, minifb::Error> {
+        let window = Window::new(title, w, h, WindowOptions::default())?;
+        Ok(Self {
             window,
             buffer: vec![0; w * h],
             w,
             h,
-        }
+        })
     }
 
     pub fn clear(&mut self, color: u32) {
@@ -34,8 +33,11 @@ impl Renderer {
     }
 
     pub fn rect(&mut self, x: usize, y: usize, rw: usize, rh: usize, color: u32) {
-        let x_end = (x + rw).min(self.w);
-        let y_end = (y + rh).min(self.h);
+        if x >= self.w || y >= self.h || rw == 0 || rh == 0 {
+            return;
+        }
+        let x_end = x.saturating_add(rw).min(self.w);
+        let y_end = y.saturating_add(rh).min(self.h);
 
         for row in y..y_end {
             let start = row * self.w + x;
@@ -44,10 +46,12 @@ impl Renderer {
         }
     }
 
-    pub fn present(&mut self) {
-        self.window
-            .update_with_buffer(&self.buffer, self.w, self.h)
-            .unwrap();
+    pub fn present(&mut self) -> Result<(), minifb::Error> {
+        if self.window.is_open() {
+            self.window
+                .update_with_buffer(&self.buffer, self.w, self.h)?;
+        }
+        Ok(())
     }
 
     pub fn is_open(&self) -> bool {
@@ -103,6 +107,73 @@ impl Renderer {
                 if dx * dx + dy * dy <= radius_sq {
                     self.buffer[y * self.w + x] = color;
                 }
+            }
+        }
+    }
+
+    pub fn polygon(&mut self, points: &[(f32, f32)], color: u32) {
+        if points.len() < 3 {
+            return;
+        }
+        let min_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f32::INFINITY, f32::min)
+            .max(0.0) as usize;
+        let max_x = points
+            .iter()
+            .map(|point| point.0)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .min(self.w.saturating_sub(1) as f32) as usize;
+        let min_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f32::INFINITY, f32::min)
+            .max(0.0) as usize;
+        let max_y = points
+            .iter()
+            .map(|point| point.1)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .min(self.h.saturating_sub(1) as f32) as usize;
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let mut inside = false;
+                let mut previous = points.len() - 1;
+                for current in 0..points.len() {
+                    let (xi, yi) = points[current];
+                    let (xj, yj) = points[previous];
+                    if ((yi > py) != (yj > py)) && px < (xj - xi) * (py - yi) / (yj - yi) + xi {
+                        inside = !inside;
+                    }
+                    previous = current;
+                }
+                if inside {
+                    self.buffer[y * self.w + x] = color;
+                }
+            }
+        }
+    }
+
+    pub fn line(&mut self, start: (f32, f32), end: (f32, f32), width: usize, color: u32) {
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as usize;
+        let half = width / 2;
+        for step in 0..=steps {
+            let fraction = step as f32 / steps as f32;
+            let x = (start.0 + dx * fraction).round() as isize;
+            let y = (start.1 + dy * fraction).round() as isize;
+            if x >= 0 && y >= 0 {
+                self.rect(
+                    (x as usize).saturating_sub(half),
+                    (y as usize).saturating_sub(half),
+                    width.max(1),
+                    width.max(1),
+                    color,
+                );
             }
         }
     }

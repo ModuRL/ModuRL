@@ -72,7 +72,8 @@ impl Gym for HalfCheetahV5 {
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
-        self.core.reset_half_cheetah(self.reset_noise_scale)?;
+        self.core
+            .reset_uniform_positions_normal_velocities(self.reset_noise_scale)?;
         self.core.render()?;
         Ok(ResetInfo {
             state: self.observation()?,

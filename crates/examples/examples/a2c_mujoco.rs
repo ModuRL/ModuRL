@@ -4,34 +4,13 @@ use modurl::prelude::*;
 
 #[path = "support/graphers.rs"]
 mod graphers;
-use graphers::A2CMujocoGrapher;
+use graphers::MujocoOnPolicyGrapher;
+#[path = "support/mujoco.rs"]
+mod mujoco;
+use mujoco::ENVIRONMENT_NAME;
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
 const DTYPE: DType = DType::F32;
-
-#[cfg(not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d")))]
-compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
-
-#[cfg(any(
-    all(feature = "half-cheetah", feature = "hopper"),
-    all(feature = "half-cheetah", feature = "walker2d"),
-    all(feature = "hopper", feature = "walker2d"),
-))]
-compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
-
-#[cfg(feature = "half-cheetah")]
-use modurl_mojoco::HalfCheetahV5 as SelectedEnvironment;
-#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
-use modurl_mojoco::HopperV5 as SelectedEnvironment;
-#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
-use modurl_mojoco::Walker2dV5 as SelectedEnvironment;
-
-#[cfg(feature = "half-cheetah")]
-const ENVIRONMENT_NAME: &str = "HalfCheetah-v5";
-#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
-const ENVIRONMENT_NAME: &str = "Hopper-v5";
-#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
-const ENVIRONMENT_NAME: &str = "Walker2d-v5";
 
 /// Produces Gaussian parameters shaped `[batch, 2 * action_size]` from
 /// observations shaped `[batch, observation_size]`.
@@ -57,10 +36,7 @@ fn main() {
 
     let env = NormalizeRewardGym::new(
         NormalizeObservationGym::new(RecordRawRewardGym::new(TimeLimitGym::new(
-            SelectedEnvironment::builder()
-                .device(&device)
-                .build()
-                .unwrap(),
+            mujoco::build_environment(&device),
             1_000,
         )))
         .with_clip(10.0),
@@ -68,6 +44,7 @@ fn main() {
     )
     .with_clip(10.0);
     let mut env = VectorizedGymWrapper::from(vec![env]);
+    let rollout_batch_size = 5 * env.num_envs();
     let observation_size = env.observation_space().shape()[0];
     let action_space = env.action_space();
     let action_shape = action_space.shape();
@@ -128,17 +105,18 @@ fn main() {
             .build(),
     );
 
-    let mut grapher = A2CMujocoGrapher::new(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
+    let mut grapher = MujocoOnPolicyGrapher::a2c(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
     let mut agent = A2CAgent::builder()
         .dtype(DTYPE)
         .action_space(action_space)
         .network_info(networks)
         // SB3 A2C collects five steps from each environment per update.
-        .batch_size(5)
+        .batch_size(rollout_batch_size)
         .training_horizon(TOTAL_TIMESTEPS)
         .logging_info(&mut grapher)
         .device(device)
-        .build();
+        .build()
+        .unwrap();
 
     agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
     grapher.display();

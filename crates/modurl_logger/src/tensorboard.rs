@@ -1,5 +1,4 @@
 use std::{
-    error, fmt,
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, ErrorKind, Write},
     path::{Path, PathBuf},
@@ -30,29 +29,6 @@ pub enum TensorBoardError {
     TimestepOutOfRange { timestep: usize },
     /// The event file could not be created, written, or flushed.
     Io(io::Error),
-}
-
-impl fmt::Display for TensorBoardError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Metric(error) => error.fmt(formatter),
-            Self::TimestepOutOfRange { timestep } => write!(
-                formatter,
-                "timestep {timestep} cannot be represented by TensorBoard"
-            ),
-            Self::Io(error) => error.fmt(formatter),
-        }
-    }
-}
-
-impl error::Error for TensorBoardError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        match self {
-            Self::Metric(error) => Some(error),
-            Self::Io(error) => Some(error),
-            Self::TimestepOutOfRange { .. } => None,
-        }
-    }
 }
 
 impl From<MetricError> for TensorBoardError {

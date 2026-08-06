@@ -9,7 +9,7 @@ use crate::{
         experience,
         experience_replay::{ExperienceReplay, ExperienceReplayError},
     },
-    gym::{VectorizedGym, VectorizedStepInfo},
+    gym::{MultiGym, MultiGymStepInfo},
     parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
     spaces::{Discrete, Space},
     tensor_operations::tensor_has_nan,
@@ -505,7 +505,7 @@ where
 
     pub(crate) fn learn<I>(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         num_timesteps: usize,
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, SE>> {
@@ -526,7 +526,7 @@ where
             let step_info = env.step(actions.clone()).map_err(QAgentError::GymError)?;
             let transition_next_states =
                 step_info.transition_next_states()?.to_dtype(self.dtype)?;
-            let VectorizedStepInfo {
+            let MultiGymStepInfo {
                 states: reset_next_states,
                 rewards,
                 infos,
@@ -690,7 +690,7 @@ mod tests {
             ReplayDeviceStrategy,
             test_support::{CountingOptimizer, FixedEnv},
         },
-        gym::{Gym, ResetInfo, StepInfo, VectorizedGym, VectorizedGymError, VectorizedGymWrapper},
+        gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
         models::MLP,
         objectives::bellman_targets,
         parameter_schedule::LinearSchedule,

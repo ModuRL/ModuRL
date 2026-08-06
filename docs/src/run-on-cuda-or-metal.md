@@ -43,7 +43,7 @@ Pass the same `device` to the environment builder and to `VarBuilder`. That
 places environment observations and model parameters on the same backend.
 
 ```rust,ignore
-let env = CartPoleV1::builder().device(&device).build();
+let env = CartPoleV1::builder().device(&device).build().unwrap();
 let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
 ```
 
@@ -61,7 +61,8 @@ let storage_device = Device::Cpu;
 
 let env = CartPoleV1::builder()
     .device(&optimization_device)
-    .build();
+    .build()
+    .unwrap();
 
 let actor_vb = VarBuilder::from_varmap(
     &actor_vars,

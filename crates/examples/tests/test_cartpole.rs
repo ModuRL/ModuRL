@@ -12,7 +12,7 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
-    let envs = vec![CartPoleV1::builder().device(device).build()];
+    let envs = vec![CartPoleV1::builder().device(device).build().unwrap()];
     let mut vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
     let mut total_steps = 0;
 
@@ -44,7 +44,7 @@ struct DebugCartpoleV1 {
 
 impl DebugCartpoleV1 {
     fn new(device: &Device) -> Self {
-        let env = CartPoleV1::builder().device(device).build();
+        let env = CartPoleV1::builder().device(device).build().unwrap();
         Self {
             env,
             steps_since_print: 0,
@@ -179,7 +179,8 @@ fn ppo_cartpole() {
         .num_epochs(10)
         .training_horizon(120_000)
         .device(device.clone())
-        .build();
+        .build()
+        .unwrap();
 
     for i in 0..6 {
         agent.learn(&mut vec_env, 20000).unwrap();
@@ -308,7 +309,8 @@ fn ppo_cartpole_shared() {
         .gradient_clip(gradient_clip)
         .training_horizon(120_000)
         .device(device.clone())
-        .build();
+        .build()
+        .unwrap();
 
     for i in 0..6 {
         agent.learn(&mut vec_env, 20000).unwrap();
@@ -353,7 +355,7 @@ fn ppo_cartpole_shared_multithreaded() {
         })
         .collect();
 
-    let probe_env = CartPoleV1::builder().device(&device).build();
+    let probe_env = CartPoleV1::builder().device(&device).build().unwrap();
     let obs_space_shape: usize = probe_env.observation_space().shape()[0];
     let obs_space = modurl::spaces::BoxSpace::new(
         Tensor::full(-1000.0f32, &[obs_space_shape], &device).unwrap(),
@@ -424,7 +426,8 @@ fn ppo_cartpole_shared_multithreaded() {
         .num_epochs(10)
         .training_horizon(120_000)
         .device(device.clone())
-        .build();
+        .build()
+        .unwrap();
 
     for i in 0..6 {
         agent.learn(&mut vec_env, 20000).unwrap();

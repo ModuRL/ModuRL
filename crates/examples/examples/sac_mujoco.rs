@@ -5,32 +5,11 @@ use modurl::prelude::*;
 #[path = "support/graphers.rs"]
 mod graphers;
 use graphers::SACGrapher;
+#[path = "support/mujoco.rs"]
+mod mujoco;
+use mujoco::ENVIRONMENT_NAME;
 
 const DTYPE: DType = DType::F32;
-
-#[cfg(not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d")))]
-compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
-
-#[cfg(any(
-    all(feature = "half-cheetah", feature = "hopper"),
-    all(feature = "half-cheetah", feature = "walker2d"),
-    all(feature = "hopper", feature = "walker2d"),
-))]
-compile_error!("enable exactly one MuJoCo environment feature: half-cheetah, hopper, or walker2d");
-
-#[cfg(feature = "half-cheetah")]
-use modurl_mojoco::HalfCheetahV5 as SelectedEnvironment;
-#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
-use modurl_mojoco::HopperV5 as SelectedEnvironment;
-#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
-use modurl_mojoco::Walker2dV5 as SelectedEnvironment;
-
-#[cfg(feature = "half-cheetah")]
-const ENVIRONMENT_NAME: &str = "HalfCheetah-v5";
-#[cfg(all(not(feature = "half-cheetah"), feature = "hopper"))]
-const ENVIRONMENT_NAME: &str = "Hopper-v5";
-#[cfg(all(not(feature = "half-cheetah"), not(feature = "hopper")))]
-const ENVIRONMENT_NAME: &str = "Walker2d-v5";
 
 fn sac_mlp(
     vb: VarBuilder<'_>,
@@ -107,10 +86,7 @@ fn main() {
     println!("Environment: {ENVIRONMENT_NAME}");
     println!("Using device: {device:?}");
     let mut env = VectorizedGymWrapper::from(vec![TimeLimitGym::new(
-        SelectedEnvironment::builder()
-            .device(&device)
-            .build()
-            .unwrap(),
+        mujoco::build_environment(&device),
         1_000,
     )]);
     let observation_space = env.observation_space();

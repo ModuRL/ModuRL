@@ -19,7 +19,7 @@ fn main() {
 
     println!("Using device: {device:?}");
 
-    let envs = vec![CartPoleV1::builder().device(&device).build()];
+    let envs = vec![CartPoleV1::builder().device(&device).build().unwrap()];
     let mut env = VectorizedGymWrapper::from(envs);
     let observation_space = env.observation_space();
 

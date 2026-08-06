@@ -198,6 +198,8 @@ jobs:
         run: >-
           cargo test --locked --verbose
           -p modurl -p modurl_gym
+      - name: Validate Gym parity CLI
+        run: python crates/modurl_gym/python_tests/parity.py --list
       - name: Test examples
         run: cargo test --locked --verbose --all-targets -p examples
       - name: Test Gym rendering
@@ -217,6 +219,8 @@ jobs:
         run: >-
           cargo clippy --locked -p modurl_ale --all-targets --features rendering
           --no-deps -- -D warnings
+      - name: Validate MuJoCo parity CLI
+        run: python crates/modurl_mojoco/python_tests/parity.py --list
       - name: Test MuJoCo default package
         run: cargo test --locked -p modurl_mojoco
       - name: Build MuJoCo rendering feature

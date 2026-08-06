@@ -98,7 +98,7 @@ fn getting_started_program() {
     let device = Device::Cpu;
 
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build())
+        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
         .collect::<Vec<_>>();
     let mut env = VectorizedGymWrapper::from(envs);
 
@@ -158,7 +158,8 @@ fn getting_started_program() {
         .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .training_horizon(10_000)
         .device(device)
-        .build();
+        .build()
+        .unwrap();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
     println!("Training complete.");
@@ -168,7 +169,7 @@ fn getting_started_program() {
 // compile-only: running it would turn a documentation check into training.
 fn dqn_program() {
     let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().device(&device).build()];
+    let envs = vec![CartPoleV1::builder().device(&device).build().unwrap()];
     let mut env = VectorizedGymWrapper::from(envs);
     let observation_space = env.observation_space();
 
@@ -239,7 +240,7 @@ fn dqn_program() {
 // docs/src/ddqn.md. Keep this test compile-only for the same reason.
 fn ddqn_program() {
     let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().device(&device).build()];
+    let envs = vec![CartPoleV1::builder().device(&device).build().unwrap()];
     let mut env = VectorizedGymWrapper::from(envs);
     let observation_space = env.observation_space();
 
@@ -313,7 +314,7 @@ fn understand_ppo_training_configuration() {
     let device = Device::Cpu;
 
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build())
+        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
         .collect::<Vec<_>>();
     let mut env = VectorizedGymWrapper::from(envs);
 
@@ -373,7 +374,8 @@ fn understand_ppo_training_configuration() {
         .num_epochs(10)
         .training_horizon(120_000)
         .device(device)
-        .build();
+        .build()
+        .unwrap();
 
     agent.learn(&mut env, 120_000).expect("PPO learning failed");
 }

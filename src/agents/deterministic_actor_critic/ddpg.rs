@@ -18,7 +18,7 @@ use super::{
 use crate::agents::sac::SACCriticError;
 use crate::{
     agents::{Agent, ReplayDeviceStrategy},
-    gym::VectorizedGym,
+    gym::MultiGym,
     spaces::{BoxSpace, Space},
 };
 
@@ -224,7 +224,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)
@@ -241,7 +241,7 @@ mod tests {
             sac::{SACCritic, ScalarStateActionCritic},
             test_support::{CountingOptimizer, FixedContinuousEnv},
         },
-        gym::{VectorizedGym, VectorizedGymWrapper},
+        gym::{MultiGym, VectorizedGymWrapper},
         models::MLP,
         spaces::{BoxSpace, Space},
     };

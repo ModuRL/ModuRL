@@ -11,30 +11,52 @@ use candle_core::{D, Device, Tensor};
 use modurl::prelude::*;
 use modurl_logger::{Aggregation, AggregationConfig, Logger, TensorBoardLogger, TerminalLogger};
 
+const DIAGNOSTIC_SMOOTHING_WINDOW: usize = 10;
+const LOSS_SMOOTHING_WINDOW: usize = 100;
+const REWARD_SMOOTHING_WINDOW: usize = 25;
+const EPISODE_SMOOTHING_WINDOW: usize = 100;
+const EPISODE_RETURN_METRIC: &str = "Episode Return";
+const EPISODE_LENGTH_METRIC: &str = "Episode Length";
+
+fn standard_aggregation() -> AggregationConfig {
+    AggregationConfig::new(Aggregation::mean().with_rolling_window(DIAGNOSTIC_SMOOTHING_WINDOW))
+}
+
+fn with_metric_window(
+    mut config: AggregationConfig,
+    metrics: &[&str],
+    rolling_window: usize,
+) -> AggregationConfig {
+    for metric in metrics {
+        config = config.with_override(
+            *metric,
+            Aggregation::mean().with_rolling_window(rolling_window),
+        );
+    }
+    config
+}
+
+fn with_episode_smoothing(config: AggregationConfig) -> AggregationConfig {
+    with_metric_window(
+        config,
+        &[EPISODE_RETURN_METRIC, EPISODE_LENGTH_METRIC],
+        EPISODE_SMOOTHING_WINDOW,
+    )
+}
+
 pub struct DQNGrapher {
     terminal: TerminalLogger,
 }
 
 impl DQNGrapher {
     pub fn new() -> Self {
+        let aggregation = with_episode_smoothing(with_metric_window(
+            standard_aggregation(),
+            &["DQN Loss"],
+            LOSS_SMOOTHING_WINDOW,
+        ));
         Self {
-            terminal: TerminalLogger::new(
-                AggregationConfig::new(Aggregation::mean())
-                    .with_override("DQN Loss", Aggregation::mean().with_rolling_window(100))
-                    .with_override(
-                        "Mean Selected Q-Value",
-                        Aggregation::mean().with_rolling_window(100),
-                    )
-                    .with_override(
-                        "Episode Return",
-                        Aggregation::mean().with_rolling_window(25),
-                    )
-                    .with_override(
-                        "Episode Length",
-                        Aggregation::mean().with_rolling_window(25),
-                    ),
-            )
-            .with_live_updates(),
+            terminal: TerminalLogger::new(aggregation).with_live_updates(),
         }
     }
 
@@ -68,8 +90,8 @@ impl DQNLogger for DQNGrapher {
                 .log(
                     episode.collection_timestep,
                     &[
-                        ("Episode Return", &episode_return),
-                        ("Episode Length", &episode_length),
+                        (EPISODE_RETURN_METRIC, &episode_return),
+                        (EPISODE_LENGTH_METRIC, &episode_length),
                     ],
                 )
                 .unwrap();
@@ -83,11 +105,13 @@ pub struct PPOGrapher {
 
 impl PPOGrapher {
     pub fn new() -> Self {
+        let aggregation = with_episode_smoothing(with_metric_window(
+            standard_aggregation(),
+            &["Actor Loss", "Critic Loss"],
+            LOSS_SMOOTHING_WINDOW,
+        ));
         Self {
-            terminal: TerminalLogger::new(AggregationConfig::new(
-                Aggregation::mean().with_rolling_window(5),
-            ))
-            .with_live_updates(),
+            terminal: TerminalLogger::new(aggregation).with_live_updates(),
         }
     }
 
@@ -125,8 +149,8 @@ impl PPOLogger for PPOGrapher {
                 .log(
                     episode.collection_timestep,
                     &[
-                        ("Episode Returns", &episode_return),
-                        ("Episode Lengths", &episode_length),
+                        (EPISODE_RETURN_METRIC, &episode_return),
+                        (EPISODE_LENGTH_METRIC, &episode_length),
                     ],
                 )
                 .unwrap();
@@ -134,7 +158,7 @@ impl PPOLogger for PPOGrapher {
     }
 }
 
-pub struct PPOMujocoGrapher {
+pub struct MujocoOnPolicyGrapher {
     timestep: usize,
     total_timesteps: usize,
     terminal: TerminalLogger,
@@ -144,13 +168,25 @@ pub struct PPOMujocoGrapher {
     running_episode_returns: Vec<f32>,
 }
 
-impl PPOMujocoGrapher {
-    pub fn new(total_timesteps: usize, environment_name: &str) -> Self {
-        Self::new_with_run_name(total_timesteps, environment_name, "ppo_mujoco")
+impl MujocoOnPolicyGrapher {
+    pub fn ppo(total_timesteps: usize, environment_name: &str) -> Self {
+        Self::new(total_timesteps, environment_name, "ppo_mujoco")
     }
 
-    fn new_with_run_name(total_timesteps: usize, environment_name: &str, run_name: &str) -> Self {
-        let aggregation = AggregationConfig::new(Aggregation::mean().with_rolling_window(10));
+    pub fn a2c(total_timesteps: usize, environment_name: &str) -> Self {
+        Self::new(total_timesteps, environment_name, "a2c_mujoco")
+    }
+
+    fn new(total_timesteps: usize, environment_name: &str, run_name: &str) -> Self {
+        let aggregation = with_episode_smoothing(with_metric_window(
+            with_metric_window(
+                standard_aggregation(),
+                &["Actor Loss", "Critic Loss"],
+                LOSS_SMOOTHING_WINDOW,
+            ),
+            &["Mean Raw Step Reward"],
+            REWARD_SMOOTHING_WINDOW,
+        ));
         let tensorboard_log_dir = tensorboard_log_dir(run_name, environment_name);
         let tensorboard = TensorBoardLogger::new(&tensorboard_log_dir, aggregation.clone())
             .expect("failed to create the TensorBoard event file");
@@ -195,7 +231,7 @@ impl PPOMujocoGrapher {
     }
 
     /// Logs named scalar metric tensors, each shaped `[]`.
-    fn log_metrics(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) {
+    fn log_terminal_and_tensorboard(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) {
         self.terminal.log(timestep, metrics).unwrap();
         self.tensorboard.log(timestep, metrics).unwrap();
     }
@@ -212,7 +248,7 @@ fn tensorboard_log_dir(run_name: &str, environment_name: &str) -> PathBuf {
     ))
 }
 
-impl PPOLogger<RawRewardInfo<()>> for PPOMujocoGrapher {
+impl<I> PPOLogger<RawRewardInfo<I>> for MujocoOnPolicyGrapher {
     fn log(&mut self, info: &PPOLogEntry) {
         let new_timestep = info.timestep != self.timestep;
         if new_timestep {
@@ -223,7 +259,10 @@ impl PPOLogger<RawRewardInfo<()>> for PPOMujocoGrapher {
                     &Device::Cpu,
                 )
                 .unwrap();
-                self.log_metrics(info.timestep, &[("Mean Raw Step Reward", &mean_raw_reward)]);
+                self.log_terminal_and_tensorboard(
+                    info.timestep,
+                    &[("Mean Raw Step Reward", &mean_raw_reward)],
+                );
             }
             self.raw_reward_sum = 0.0;
             self.raw_reward_samples = 0;
@@ -234,7 +273,7 @@ impl PPOLogger<RawRewardInfo<()>> for PPOMujocoGrapher {
         let entropy = info.entropy.mean_all().unwrap();
         let kl_divergence = info.kl_divergence.mean_all().unwrap();
         let explained_variance = info.explained_variance.mean_all().unwrap();
-        self.log_metrics(
+        self.log_terminal_and_tensorboard(
             info.timestep,
             &[
                 ("Actor Loss", &actor_loss),
@@ -249,14 +288,14 @@ impl PPOLogger<RawRewardInfo<()>> for PPOMujocoGrapher {
         }
     }
 
-    fn log_collection(&mut self, info: &PPOCollectionLogEntry<RawRewardInfo<()>>) {
+    fn log_collection(&mut self, info: &PPOCollectionLogEntry<RawRewardInfo<I>>) {
         if self.running_episode_returns.len() != info.infos.len() {
             self.running_episode_returns = vec![0.0; info.infos.len()];
         }
         for (episode_return, env_info) in self.running_episode_returns.iter_mut().zip(&info.infos) {
             let raw_reward = env_info
                 .raw_reward
-                .expect("step info must have a raw reward");
+                .expect("RecordRawRewardGym attaches every raw step reward");
             self.raw_reward_sum += raw_reward;
             self.raw_reward_samples += 1;
             *episode_return += raw_reward;
@@ -267,43 +306,17 @@ impl PPOLogger<RawRewardInfo<()>> for PPOMujocoGrapher {
                 &Device::Cpu,
             )
             .unwrap();
-            self.log_metrics(
+            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            self.log_terminal_and_tensorboard(
                 episode.collection_timestep,
-                &[("Episodic Return", &episode_return)],
+                &[
+                    (EPISODE_RETURN_METRIC, &episode_return),
+                    (EPISODE_LENGTH_METRIC, &episode_length),
+                ],
             );
             self.running_episode_returns[episode.environment_index] = 0.0;
             self.progress();
         }
-    }
-}
-
-pub struct A2CMujocoGrapher {
-    inner: PPOMujocoGrapher,
-}
-
-impl A2CMujocoGrapher {
-    pub fn new(total_timesteps: usize, environment_name: &str) -> Self {
-        Self {
-            inner: PPOMujocoGrapher::new_with_run_name(
-                total_timesteps,
-                environment_name,
-                "a2c_mujoco",
-            ),
-        }
-    }
-
-    pub fn display(self) {
-        self.inner.display();
-    }
-}
-
-impl A2CLogger<RawRewardInfo<()>> for A2CMujocoGrapher {
-    fn log(&mut self, info: &A2CLogEntry) {
-        self.inner.log(info);
-    }
-
-    fn log_collection(&mut self, info: &A2CCollectionLogEntry<RawRewardInfo<()>>) {
-        self.inner.log_collection(info);
     }
 }
 
@@ -315,29 +328,15 @@ pub struct SACGrapher {
 
 impl SACGrapher {
     pub fn new() -> Self {
-        let aggregation = AggregationConfig::new(Aggregation::mean())
-            .with_override("Critic Loss", Aggregation::mean().with_rolling_window(100))
-            .with_override("Actor Loss", Aggregation::mean().with_rolling_window(100))
-            .with_override(
-                "Entropy Change Loss",
-                Aggregation::mean().with_rolling_window(100),
-            )
-            .with_override(
-                "Expected Soft Q",
-                Aggregation::mean().with_rolling_window(10),
-            )
-            .with_override(
-                "Mean Soft Bellman Target",
-                Aggregation::mean().with_rolling_window(10),
-            )
-            .with_override(
-                "Episode Return",
-                Aggregation::mean().with_rolling_window(25),
-            )
-            .with_override(
-                "Episode Length",
-                Aggregation::mean().with_rolling_window(25),
-            );
+        let aggregation = with_episode_smoothing(with_metric_window(
+            with_metric_window(
+                standard_aggregation(),
+                &["Critic Loss", "Actor Loss", "Entropy Change Loss"],
+                LOSS_SMOOTHING_WINDOW,
+            ),
+            &["Mean Collection Reward"],
+            REWARD_SMOOTHING_WINDOW,
+        ));
         Self {
             terminal: TerminalLogger::new(aggregation).with_live_updates(),
         }
@@ -431,6 +430,8 @@ impl<I> SACLogger<I> for SACGrapher {
                 .unwrap();
         }
 
+        // Update metrics may already have advanced this monotonic logger, so
+        // completed episodes are intentionally recorded at the batch time.
         for episode in &entry.completed_episodes {
             let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
             let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
@@ -438,8 +439,8 @@ impl<I> SACLogger<I> for SACGrapher {
                 .log(
                     entry.collection_timestep,
                     &[
-                        ("Episode Return", &episode_return),
-                        ("Episode Length", &episode_length),
+                        (EPISODE_RETURN_METRIC, &episode_return),
+                        (EPISODE_LENGTH_METRIC, &episode_length),
                     ],
                 )
                 .unwrap();
@@ -455,23 +456,15 @@ pub struct DeterministicActorCriticGrapher {
 
 impl DeterministicActorCriticGrapher {
     pub fn new() -> Self {
-        let aggregation = AggregationConfig::new(Aggregation::mean())
-            .with_override("Critic Loss", Aggregation::mean().with_rolling_window(100))
-            .with_override("Actor Loss", Aggregation::mean().with_rolling_window(100))
-            .with_override("Mean Replay Q", Aggregation::mean().with_rolling_window(10))
-            .with_override("Mean Policy Q", Aggregation::mean().with_rolling_window(10))
-            .with_override(
-                "Mean Bellman Target",
-                Aggregation::mean().with_rolling_window(10),
-            )
-            .with_override(
-                "Episode Return",
-                Aggregation::mean().with_rolling_window(25),
-            )
-            .with_override(
-                "Episode Length",
-                Aggregation::mean().with_rolling_window(25),
-            );
+        let aggregation = with_episode_smoothing(with_metric_window(
+            with_metric_window(
+                standard_aggregation(),
+                &["Critic Loss", "Actor Loss"],
+                LOSS_SMOOTHING_WINDOW,
+            ),
+            &["Mean Collection Reward"],
+            REWARD_SMOOTHING_WINDOW,
+        ));
         Self {
             terminal: TerminalLogger::new(aggregation).with_live_updates(),
         }
@@ -527,7 +520,7 @@ impl DeterministicActorCriticGrapher {
             .unwrap();
     }
 
-    fn log_collection<I>(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+    fn log_collection_metrics<I>(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
         if entry
             .collection_timestep
             .is_multiple_of(DETERMINISTIC_ACTOR_CRITIC_UPDATE_LOG_INTERVAL)
@@ -541,15 +534,17 @@ impl DeterministicActorCriticGrapher {
                 .unwrap();
         }
 
+        // See the SAC grapher: completed episodes use the enclosing batch time
+        // because optimization metrics may already have advanced the logger.
         for episode in &entry.completed_episodes {
             let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
             let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
             self.terminal
                 .log(
-                    episode.collection_timestep,
+                    entry.collection_timestep,
                     &[
-                        ("Episode Return", &episode_return),
-                        ("Episode Length", &episode_length),
+                        (EPISODE_RETURN_METRIC, &episode_return),
+                        (EPISODE_LENGTH_METRIC, &episode_length),
                     ],
                 )
                 .unwrap();
@@ -567,7 +562,7 @@ impl<I> DDPGLogger<I> for DeterministicActorCriticGrapher {
     }
 
     fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
-        self.log_collection(entry);
+        self.log_collection_metrics(entry);
     }
 }
 
@@ -577,6 +572,101 @@ impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
     }
 
     fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
-        self.log_collection(entry);
+        self.log_collection_metrics(entry);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_smoothing_windows_have_expected_lengths() {
+        let aggregation = with_episode_smoothing(with_metric_window(
+            with_metric_window(standard_aggregation(), &["loss"], LOSS_SMOOTHING_WINDOW),
+            &["reward"],
+            REWARD_SMOOTHING_WINDOW,
+        ));
+        let mut logger = TerminalLogger::new(aggregation);
+        for timestep in 0..=100 {
+            let value = Tensor::new(timestep as f32, &Device::Cpu).unwrap();
+            logger
+                .log(
+                    timestep,
+                    &[
+                        ("diagnostic", &value),
+                        ("loss", &value),
+                        ("reward", &value),
+                        (EPISODE_RETURN_METRIC, &value),
+                        (EPISODE_LENGTH_METRIC, &value),
+                    ],
+                )
+                .unwrap();
+        }
+        logger.finish().unwrap();
+
+        assert_eq!(logger.series("diagnostic").unwrap().last().unwrap().1, 95.5);
+        assert_eq!(logger.series("loss").unwrap().last().unwrap().1, 50.5);
+        assert_eq!(logger.series("reward").unwrap().last().unwrap().1, 88.0);
+        assert_eq!(
+            logger
+                .series(EPISODE_RETURN_METRIC)
+                .unwrap()
+                .last()
+                .unwrap()
+                .1,
+            50.5
+        );
+        assert_eq!(
+            logger
+                .series(EPISODE_LENGTH_METRIC)
+                .unwrap()
+                .last()
+                .unwrap()
+                .1,
+            50.5
+        );
+    }
+
+    #[test]
+    fn deterministic_grapher_uses_batch_timestep_for_completed_episodes() {
+        let mut grapher = DeterministicActorCriticGrapher::new();
+        let update_metric = Tensor::new(1.0_f32, &Device::Cpu).unwrap();
+        grapher
+            .terminal
+            .log(6_000, &[("Update", &update_metric)])
+            .unwrap();
+
+        grapher.log_collection_metrics(&DeterministicActorCriticCollectionLogEntry {
+            collection_rewards: Tensor::zeros(2, candle_core::DType::F32, &Device::Cpu).unwrap(),
+            infos: vec![(), ()],
+            collection_timestep: 6_000,
+            completed_episodes: vec![
+                DeterministicActorCriticEpisodeLogEntry {
+                    environment_index: 0,
+                    episode_return: 1.0,
+                    episode_length: 10,
+                    terminated: true,
+                    truncated: false,
+                    collection_timestep: 5_999,
+                },
+                DeterministicActorCriticEpisodeLogEntry {
+                    environment_index: 1,
+                    episode_return: -1.0,
+                    episode_length: 10,
+                    terminated: true,
+                    truncated: false,
+                    collection_timestep: 6_000,
+                },
+            ],
+            replay_len: 6_000,
+        });
+        grapher.terminal.finish().unwrap();
+        let returns = grapher.terminal.series(EPISODE_RETURN_METRIC).unwrap();
+        let lengths = grapher.terminal.series(EPISODE_LENGTH_METRIC).unwrap();
+        assert_eq!(returns.last().unwrap().0, 6_000);
+        assert_eq!(lengths.last().unwrap().0, 6_000);
+        assert_eq!(returns.last().unwrap().1, 0.0);
+        assert_eq!(lengths.last().unwrap().1, 10.0);
     }
 }

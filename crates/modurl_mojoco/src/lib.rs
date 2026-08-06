@@ -1,21 +1,28 @@
 //! Gymnasium-compatible MuJoCo environments for [ModuRL](https://github.com/ModuRL/ModuRL).
 //!
 //! The environments use MuJoCo for physics through [`mujoco_rs`] and expose
-//! ModuRL's [`modurl::gym::Gym`] interface.
+//! ModuRL's [`modurl::gym::Gym`] and [`modurl::gym::MultiGym`] interfaces.
 
+mod ant;
 mod core;
 mod half_cheetah;
 mod hopper;
+mod humanoid;
 mod walker2d;
 
+pub use ant::{AntV5, AntV5Info};
 pub use half_cheetah::HalfCheetahV5;
 pub use hopper::HopperV5;
+pub use humanoid::{HumanoidV5, HumanoidV5Info};
 pub use walker2d::Walker2dV5;
 
 /// Convenient imports for applications using this crate.
 pub mod prelude {
-    pub use crate::{HalfCheetahV5, HopperV5, MujocoError, Walker2dV5};
-    pub use modurl::gym::{Gym, ResetInfo, StepInfo};
+    pub use crate::{
+        AntV5, AntV5Info, HalfCheetahV5, HopperV5, HumanoidV5, HumanoidV5Info, MujocoError,
+        Walker2dV5,
+    };
+    pub use modurl::gym::{Gym, MultiGym, MultiGymStepInfo, ResetInfo, StepInfo};
 }
 
 /// Errors returned while constructing or stepping an environment.
@@ -31,20 +38,6 @@ pub enum MujocoError {
     /// An action or explicit simulator state had an invalid shape or value.
     InvalidInput(String),
 }
-
-impl std::fmt::Display for MujocoError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Model(error) => write!(f, "failed to load MuJoCo model: {error}"),
-            Self::Tensor(error) => write!(f, "tensor error: {error}"),
-            #[cfg(feature = "rendering")]
-            Self::Viewer(error) => write!(f, "MuJoCo viewer error: {error}"),
-            Self::InvalidInput(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for MujocoError {}
 
 impl From<mujoco_rs::error::MjModelError> for MujocoError {
     fn from(value: mujoco_rs::error::MjModelError) -> Self {

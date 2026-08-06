@@ -32,9 +32,8 @@ edition = "2024"
 [dependencies]
 modurl = "0.1"
 modurl_gym = "0.1"
-candle-core = "0.9.1"
-candle-nn = "0.9.1"
-candle-optimisers = "0.9.0"
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
 ```
 
 The snippets below are consecutive pieces of `src/main.rs`. Add each one in
@@ -47,14 +46,13 @@ environment into scope:
 
 ```rust,ignore
 use candle_core::{Device, Tensor};
-use candle_nn::{Optimizer, VarBuilder, VarMap};
-use candle_optimisers::adam::{Adam, ParamsAdam};
+use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 ```
 
 `modurl::prelude::*` brings the common ModuRL traits and training types into
-scope. `Agent` and `VectorizedGym` are traits that make `.learn()`,
+scope. `Agent` and `MultiGym` are traits that make `.learn()`,
 `.observation_space()`, and `.action_space()` available.
 
 ### A Few Terms
@@ -94,7 +92,7 @@ environments and wrap them as one vectorized environment:
 
 ```rust,ignore
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build())
+        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
         .collect::<Vec<_>>();
     let mut env = VectorizedGymWrapper::from(envs);
 ```
@@ -162,15 +160,17 @@ input size as the actor network but only one output.
 
 ### Create Optimizers
 
-Give the actor network and critic network separate Adam optimizers:
+Give the actor network and critic network separate AdamW optimizers:
 
 ```rust,ignore
-    let mut optimizer_config = ParamsAdam::default();
-    optimizer_config.lr = 3e-4;
+    let optimizer_config = ParamsAdamW {
+        lr: 3e-4,
+        ..Default::default()
+    };
 
-    let actor_optimizer = Adam::new(actor_var_map.all_vars(), optimizer_config.clone())
+    let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
         .expect("failed to build actor optimizer");
-    let critic_optimizer = Adam::new(critic_var_map.all_vars(), optimizer_config)
+    let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
         .expect("failed to build critic optimizer");
 ```
 
@@ -212,7 +212,7 @@ Finally, build the `PPOAgent` and run learning:
         .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .training_horizon(10_000)
         .device(device)
-        .build();
+        .build().unwrap();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
     println!("Training complete.");
@@ -241,8 +241,7 @@ After applying the pieces above, `src/main.rs` should look like this:
 
 ```rust,ignore
 use candle_core::{Device, Tensor};
-use candle_nn::{Optimizer, VarBuilder, VarMap};
-use candle_optimisers::adam::{Adam, ParamsAdam};
+use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
@@ -250,7 +249,7 @@ fn main() {
     let device = Device::Cpu;
 
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build())
+        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
         .collect::<Vec<_>>();
     let mut env = VectorizedGymWrapper::from(envs);
 
@@ -281,12 +280,14 @@ fn main() {
         .build()
         .expect("failed to build critic network");
 
-    let mut optimizer_config = ParamsAdam::default();
-    optimizer_config.lr = 3e-4;
+    let optimizer_config = ParamsAdamW {
+        lr: 3e-4,
+        ..Default::default()
+    };
 
-    let actor_optimizer = Adam::new(actor_var_map.all_vars(), optimizer_config.clone())
+    let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
         .expect("failed to build actor optimizer");
-    let critic_optimizer = Adam::new(critic_var_map.all_vars(), optimizer_config)
+    let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
         .expect("failed to build critic optimizer");
 
     let policy =
@@ -309,7 +310,7 @@ fn main() {
         .clip_range(Box::new(ConstantSchedule::new(0.2)))
         .training_horizon(10_000)
         .device(device)
-        .build();
+        .build().unwrap();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
     println!("Training complete.");

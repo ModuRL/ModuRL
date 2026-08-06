@@ -8,20 +8,23 @@ but use two unless you are intentionally studying another aggregation scheme.
 SAC is primarily a continuous-control algorithm. This chapter follows the
 continuous MuJoCo example and explains the actor, critic, entropy, replay, and
 device choices you need to adapt it. You should already be familiar with
-`VectorizedGym`, Candle `VarMap`s, and probabilistic policies from [Core
+`MultiGym`, Candle `VarMap`s, and probabilistic policies from [Core
 Concepts](./core-concepts.md).
 
 ## Run Continuous SAC
 
-The example supports HalfCheetah, Hopper, and Walker2d:
+The example supports Ant, HalfCheetah, Hopper, and Walker2d:
 
 ```sh
+cargo run --release -p examples --example sac_mujoco --features ant
 cargo run --release -p examples --example sac_mujoco --features half-cheetah
 cargo run --release -p examples --example sac_mujoco --features hopper
 cargo run --release -p examples --example sac_mujoco --features walker2d
 ```
 
-Enable exactly one environment feature. The program selects CUDA when it is
+Normally enable one environment feature; add `rendering` to it to open a
+viewer. Additive builds with several environment features select `ant`,
+`half-cheetah`, `hopper`, then `walker2d`. The program selects CUDA when it is
 available and otherwise uses the CPU. It trains for one million collected
 transitions, then displays terminal graphs for episode performance and SAC
 diagnostics.

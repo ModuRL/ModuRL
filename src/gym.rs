@@ -22,22 +22,25 @@ pub trait Gym<I = ()> {
     fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
 }
 
-/// A vectorized version of Gym that can handle multiple environments in parallel.
-/// Actors take this as input.
-/// This is automatically implemented for any Gym.
-/// Reset is called automatically when an environment is done.
-pub trait VectorizedGym<I = ()> {
+/// A batched environment interface used by actors.
+///
+/// Most implementations batch independent environments. A custom
+/// implementation may instead batch coupled players from one shared world, as
+/// long as it accepts and returns one consistently ordered row per slot.
+/// [`VectorizedGymWrapper`] provides the independent-environment form for any
+/// [`Gym`]. Reset is called automatically when an environment is done.
+pub trait MultiGym<I = ()> {
     type Error;
     type SpaceError;
 
-    /// Steps every environment with batched environment actions. Discrete
+    /// Steps every batch slot with batched environment actions. Discrete
     /// actions are `[num_envs]`; box actions are
     /// `[num_envs, ...action_space().shape()]`.
-    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error>;
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error>;
     fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>>;
     fn num_envs(&self) -> usize;
-    /// Resets all environments and returns the initial states.
+    /// Resets all batch slots and returns their initial states.
     /// Only needs to be called once at the start of training.
     fn reset(&mut self) -> Result<Tensor, Self::Error>;
 }
@@ -78,7 +81,7 @@ pub struct StepInfo<I = ()> {
 }
 
 #[derive(Debug, Clone)]
-pub struct VectorizedStepInfo<I = ()> {
+pub struct MultiGymStepInfo<I = ()> {
     pub states: Tensor,
     pub rewards: Tensor,
     pub infos: Vec<I>,
@@ -88,7 +91,7 @@ pub struct VectorizedStepInfo<I = ()> {
     pub terminal_states: Vec<Option<Tensor>>,
 }
 
-impl<I> VectorizedStepInfo<I> {
+impl<I> MultiGymStepInfo<I> {
     pub fn transition_next_states(&self) -> candle_core::Result<Tensor> {
         let env_count = self.dones.len();
         let state_chunks = self.states.chunk(env_count, 0)?;
@@ -102,6 +105,309 @@ impl<I> VectorizedStepInfo<I> {
         }
 
         Tensor::stack(&next_states, 0)
+    }
+}
+
+/// An error produced while combining several [`MultiGym`] implementations.
+#[derive(Debug)]
+pub enum StackedMultiGymError<E>
+where
+    E: std::fmt::Debug,
+{
+    /// At least one inner gym is required.
+    Empty,
+    /// An inner gym reported no batch slots.
+    EmptyInner { gym_index: usize },
+    /// An inner gym has a different per-slot observation shape.
+    IncompatibleObservationShape {
+        gym_index: usize,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    /// An inner gym has a different per-slot action shape.
+    IncompatibleActionShape {
+        gym_index: usize,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    /// An inner gym changed its number of batch slots after construction.
+    ChangedBatchSize {
+        gym_index: usize,
+        expected: usize,
+        actual: usize,
+    },
+    /// The supplied action does not have the combined batch size in dimension zero.
+    InvalidActionBatch {
+        expected: usize,
+        actual: Option<usize>,
+    },
+    /// An inner gym returned a tensor or vector that violates the [`MultiGym`] contract.
+    InvalidOutputShape {
+        gym_index: usize,
+        field: &'static str,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    /// An inner gym returned an error.
+    Inner { gym_index: usize, error: E },
+    /// Candle could not slice or concatenate a batch.
+    Batch(candle_core::Error),
+}
+
+impl<E> From<candle_core::Error> for StackedMultiGymError<E>
+where
+    E: std::fmt::Debug,
+{
+    fn from(error: candle_core::Error) -> Self {
+        Self::Batch(error)
+    }
+}
+
+/// Flattens the batch rows from several homogeneous [`MultiGym`] values.
+///
+/// If the inner gyms return states shaped `[B0, ...]`, `[B1, ...]`, and so on,
+/// this wrapper returns states shaped `[B0 + B1 + ..., ...]`. Actions are
+/// sliced back into those same contiguous ranges before each inner gym is
+/// stepped. Inner gyms retain responsibility for their own auto-reset logic.
+/// If an inner gym returns an error, earlier groups may already have advanced;
+/// callers must reset the stack before using it again.
+pub struct StackedMultiGym<G, I = ()>
+where
+    G: MultiGym<I>,
+{
+    gyms: Vec<G>,
+    group_offsets: Vec<usize>,
+    observation_shape: Vec<usize>,
+    _info: std::marker::PhantomData<fn() -> I>,
+}
+
+impl<G, I> StackedMultiGym<G, I>
+where
+    G: MultiGym<I>,
+    G::Error: std::fmt::Debug,
+{
+    /// Creates a flattened batch from one or more homogeneous inner gyms.
+    pub fn try_new(gyms: Vec<G>) -> Result<Self, StackedMultiGymError<G::Error>> {
+        let Some(first) = gyms.first() else {
+            return Err(StackedMultiGymError::Empty);
+        };
+        let observation_shape = first.observation_space().shape();
+        let action_shape = first.action_space().shape();
+        let mut group_offsets = Vec::with_capacity(gyms.len() + 1);
+        group_offsets.push(0);
+        let mut total_batch_size = 0;
+
+        for (gym_index, gym) in gyms.iter().enumerate() {
+            let batch_size = gym.num_envs();
+            if batch_size == 0 {
+                return Err(StackedMultiGymError::EmptyInner { gym_index });
+            }
+
+            let actual_observation_shape = gym.observation_space().shape();
+            if actual_observation_shape != observation_shape {
+                return Err(StackedMultiGymError::IncompatibleObservationShape {
+                    gym_index,
+                    expected: observation_shape,
+                    actual: actual_observation_shape,
+                });
+            }
+
+            let actual_action_shape = gym.action_space().shape();
+            if actual_action_shape != action_shape {
+                return Err(StackedMultiGymError::IncompatibleActionShape {
+                    gym_index,
+                    expected: action_shape,
+                    actual: actual_action_shape,
+                });
+            }
+
+            total_batch_size += batch_size;
+            group_offsets.push(total_batch_size);
+        }
+
+        Ok(Self {
+            gyms,
+            group_offsets,
+            observation_shape,
+            _info: std::marker::PhantomData,
+        })
+    }
+
+    /// Returns the inner gyms in their batch ordering.
+    pub fn gyms(&self) -> &[G] {
+        &self.gyms
+    }
+
+    /// Returns cumulative row offsets, including zero and the total batch size.
+    ///
+    /// For inner batch sizes two and three this returns `[0, 2, 5]`.
+    pub fn group_offsets(&self) -> &[usize] {
+        &self.group_offsets
+    }
+
+    /// Returns the number of independently stepped inner gyms.
+    pub fn num_groups(&self) -> usize {
+        self.gyms.len()
+    }
+
+    fn validate_batch_sizes(&self) -> Result<(), StackedMultiGymError<G::Error>> {
+        for (gym_index, gym) in self.gyms.iter().enumerate() {
+            let expected = self.group_offsets[gym_index + 1] - self.group_offsets[gym_index];
+            let actual = gym.num_envs();
+            if actual != expected {
+                return Err(StackedMultiGymError::ChangedBatchSize {
+                    gym_index,
+                    expected,
+                    actual,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_output_shape(
+        &self,
+        gym_index: usize,
+        field: &'static str,
+        actual: &[usize],
+        expected: Vec<usize>,
+    ) -> Result<(), StackedMultiGymError<G::Error>> {
+        if actual != expected {
+            return Err(StackedMultiGymError::InvalidOutputShape {
+                gym_index,
+                field,
+                expected,
+                actual: actual.to_vec(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<G, I> TryFrom<Vec<G>> for StackedMultiGym<G, I>
+where
+    G: MultiGym<I>,
+    G::Error: std::fmt::Debug,
+{
+    type Error = StackedMultiGymError<G::Error>;
+
+    fn try_from(gyms: Vec<G>) -> Result<Self, Self::Error> {
+        Self::try_new(gyms)
+    }
+}
+
+impl<G, I> MultiGym<I> for StackedMultiGym<G, I>
+where
+    G: MultiGym<I>,
+    G::Error: std::fmt::Debug,
+{
+    type Error = StackedMultiGymError<G::Error>;
+    type SpaceError = G::SpaceError;
+
+    /// Steps with actions shaped `[total_batch_size, ...]`, splitting dimension
+    /// zero across the inner gyms according to [`Self::group_offsets`].
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
+        self.validate_batch_sizes()?;
+        let total_batch_size = self.num_envs();
+        let actual_batch_size = action.dims().first().copied();
+        if actual_batch_size != Some(total_batch_size) {
+            return Err(StackedMultiGymError::InvalidActionBatch {
+                expected: total_batch_size,
+                actual: actual_batch_size,
+            });
+        }
+
+        let mut states = Vec::with_capacity(self.gyms.len());
+        let mut rewards = Vec::with_capacity(self.gyms.len());
+        let mut infos = Vec::with_capacity(total_batch_size);
+        let mut dones = Vec::with_capacity(total_batch_size);
+        let mut truncateds = Vec::with_capacity(total_batch_size);
+        let mut terminal_states = Vec::with_capacity(total_batch_size);
+
+        for gym_index in 0..self.gyms.len() {
+            let start = self.group_offsets[gym_index];
+            let batch_size = self.group_offsets[gym_index + 1] - start;
+            let child_action = action.narrow(0, start, batch_size)?;
+            let step = self.gyms[gym_index]
+                .step(child_action)
+                .map_err(|error| StackedMultiGymError::Inner { gym_index, error })?;
+
+            let mut expected_state_shape = Vec::with_capacity(self.observation_shape.len() + 1);
+            expected_state_shape.push(batch_size);
+            expected_state_shape.extend_from_slice(&self.observation_shape);
+            self.validate_output_shape(
+                gym_index,
+                "states",
+                step.states.dims(),
+                expected_state_shape,
+            )?;
+            self.validate_output_shape(
+                gym_index,
+                "rewards",
+                step.rewards.dims(),
+                vec![batch_size],
+            )?;
+            self.validate_output_shape(gym_index, "infos", &[step.infos.len()], vec![batch_size])?;
+            self.validate_output_shape(gym_index, "dones", &[step.dones.len()], vec![batch_size])?;
+            self.validate_output_shape(
+                gym_index,
+                "truncateds",
+                &[step.truncateds.len()],
+                vec![batch_size],
+            )?;
+            self.validate_output_shape(
+                gym_index,
+                "terminal_states",
+                &[step.terminal_states.len()],
+                vec![batch_size],
+            )?;
+            states.push(step.states);
+            rewards.push(step.rewards);
+            infos.extend(step.infos);
+            dones.extend(step.dones);
+            truncateds.extend(step.truncateds);
+            terminal_states.extend(step.terminal_states);
+        }
+
+        Ok(MultiGymStepInfo {
+            states: Tensor::cat(&states, 0)?,
+            rewards: Tensor::cat(&rewards, 0)?,
+            infos,
+            dones,
+            truncateds,
+            terminal_states,
+        })
+    }
+
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        self.gyms[0].observation_space()
+    }
+
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        self.gyms[0].action_space()
+    }
+
+    fn num_envs(&self) -> usize {
+        self.group_offsets.last().copied().unwrap_or(0)
+    }
+
+    fn reset(&mut self) -> Result<Tensor, Self::Error> {
+        self.validate_batch_sizes()?;
+        let mut states = Vec::with_capacity(self.gyms.len());
+
+        for gym_index in 0..self.gyms.len() {
+            let batch_size = self.group_offsets[gym_index + 1] - self.group_offsets[gym_index];
+            let state = self.gyms[gym_index]
+                .reset()
+                .map_err(|error| StackedMultiGymError::Inner { gym_index, error })?;
+            let mut expected_shape = Vec::with_capacity(self.observation_shape.len() + 1);
+            expected_shape.push(batch_size);
+            expected_shape.extend_from_slice(&self.observation_shape);
+            self.validate_output_shape(gym_index, "reset states", state.dims(), expected_shape)?;
+            states.push(state);
+        }
+
+        Tensor::cat(&states, 0).map_err(StackedMultiGymError::Batch)
     }
 }
 
@@ -135,7 +441,7 @@ where
     }
 }
 
-impl<G, I> VectorizedGym<I> for VectorizedGymWrapper<G, I>
+impl<G, I> MultiGym<I> for VectorizedGymWrapper<G, I>
 where
     G: Gym<I>,
     G::Error: std::fmt::Debug,
@@ -145,7 +451,7 @@ where
 
     /// Steps with discrete actions `[num_envs]` or box actions
     /// `[num_envs, ...action_shape]`.
-    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error> {
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
         let env_count = self.envs.len();
         let actions: Vec<Tensor> = action.chunk(env_count, 0)?;
         // this keeps the dimension for env count it's just 1 now so we squeeze it later
@@ -182,7 +488,7 @@ where
         let states = Tensor::stack(&states, 0)?;
         let rewards = Tensor::from_vec(rewards, &[env_count], states.device())?;
 
-        Ok(VectorizedStepInfo {
+        Ok(MultiGymStepInfo {
             states,
             rewards,
             infos,
@@ -242,6 +548,379 @@ where
 use std::{fmt::Debug, sync::mpsc, thread};
 
 #[cfg(feature = "multithreading")]
+struct MultiGymMetadata {
+    num_envs: usize,
+    observation_shape: Vec<usize>,
+    action_shape: Vec<usize>,
+}
+
+#[cfg(feature = "multithreading")]
+enum MultiGymCmd<E, I> {
+    Step(Tensor, mpsc::Sender<Result<MultiGymStepInfo<I>, E>>),
+    Reset(mpsc::Sender<Result<Tensor, E>>),
+}
+
+#[cfg(feature = "multithreading")]
+struct MultiGymHandle<E, I> {
+    tx: mpsc::Sender<MultiGymCmd<E, I>>,
+}
+
+#[cfg(feature = "multithreading")]
+impl<E, I> MultiGymHandle<E, I> {
+    /// Sends one group action batch shaped `[group_size, ...action_shape]`.
+    fn step(&self, action: Tensor) -> mpsc::Receiver<Result<MultiGymStepInfo<I>, E>> {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.tx
+            .send(MultiGymCmd::Step(action, response_tx))
+            .unwrap();
+        response_rx
+    }
+
+    fn reset(&self) -> mpsc::Receiver<Result<Tensor, E>> {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.tx.send(MultiGymCmd::Reset(response_tx)).unwrap();
+        response_rx
+    }
+}
+
+#[cfg(feature = "multithreading")]
+/// Flattens several homogeneous [`MultiGym`] values and steps each one on a
+/// persistent worker thread.
+///
+/// Each constructor runs inside the worker that permanently owns its gym. A
+/// whole inner gym is the unit of parallel work, so coupled batch rows remain
+/// together. If an operation fails after dispatch, call [`MultiGym::reset`]
+/// before stepping again.
+pub struct MultithreadedStackedMultiGym<G, O, A, SE, I = ()>
+where
+    G: MultiGym<I> + 'static,
+    G::Error: Send + Debug + 'static,
+    SE: Debug,
+    A: Space<Error = SE> + Clone + 'static,
+    O: Space<Error = SE> + Clone + 'static,
+    I: Send + 'static,
+{
+    groups: Vec<MultiGymHandle<G::Error, I>>,
+    group_offsets: Vec<usize>,
+    observation_shape: Vec<usize>,
+    obs_space: O,
+    action_space: A,
+    _phantom: std::marker::PhantomData<fn() -> (G, SE)>,
+}
+
+#[cfg(feature = "multithreading")]
+impl<G, O, A, SE, I> MultithreadedStackedMultiGym<G, O, A, SE, I>
+where
+    G: MultiGym<I> + 'static,
+    G::Error: Send + Debug + 'static,
+    SE: Debug,
+    A: Space<Error = SE> + Clone + 'static,
+    O: Space<Error = SE> + Clone + 'static,
+    I: Send + 'static,
+{
+    /// Creates one persistent worker per inner gym constructor.
+    pub fn try_new<F>(
+        gym_constructors: Vec<F>,
+        obs_space: O,
+        action_space: A,
+    ) -> Result<Self, StackedMultiGymError<G::Error>>
+    where
+        F: FnOnce() -> G + Send + 'static,
+    {
+        if gym_constructors.is_empty() {
+            return Err(StackedMultiGymError::Empty);
+        }
+
+        let pending_workers: Vec<_> = gym_constructors
+            .into_iter()
+            .map(start_multi_gym_thread::<G, F, I>)
+            .collect();
+        let observation_shape = obs_space.shape();
+        let action_shape = action_space.shape();
+        let mut groups = Vec::with_capacity(pending_workers.len());
+        let mut group_offsets = Vec::with_capacity(pending_workers.len() + 1);
+        group_offsets.push(0);
+        let mut total_batch_size = 0;
+
+        for (gym_index, (group, metadata_rx)) in pending_workers.into_iter().enumerate() {
+            let metadata = metadata_rx.recv().expect(
+                "failed to receive metadata, this was probably caused by a panic in the gym thread",
+            );
+            if metadata.num_envs == 0 {
+                return Err(StackedMultiGymError::EmptyInner { gym_index });
+            }
+            if metadata.observation_shape != observation_shape {
+                return Err(StackedMultiGymError::IncompatibleObservationShape {
+                    gym_index,
+                    expected: observation_shape,
+                    actual: metadata.observation_shape,
+                });
+            }
+            if metadata.action_shape != action_shape {
+                return Err(StackedMultiGymError::IncompatibleActionShape {
+                    gym_index,
+                    expected: action_shape,
+                    actual: metadata.action_shape,
+                });
+            }
+
+            total_batch_size += metadata.num_envs;
+            group_offsets.push(total_batch_size);
+            groups.push(group);
+        }
+
+        Ok(Self {
+            groups,
+            group_offsets,
+            observation_shape,
+            obs_space,
+            action_space,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+    /// Returns cumulative flattened row offsets, including zero and the total.
+    pub fn group_offsets(&self) -> &[usize] {
+        &self.group_offsets
+    }
+
+    /// Returns the number of independently stepped inner gyms.
+    pub fn num_groups(&self) -> usize {
+        self.groups.len()
+    }
+
+    fn expected_batch_size(&self, gym_index: usize) -> usize {
+        self.group_offsets[gym_index + 1] - self.group_offsets[gym_index]
+    }
+
+    fn validate_output_shape(
+        &self,
+        gym_index: usize,
+        field: &'static str,
+        actual: &[usize],
+        expected: Vec<usize>,
+    ) -> Result<(), StackedMultiGymError<G::Error>> {
+        if actual != expected {
+            return Err(StackedMultiGymError::InvalidOutputShape {
+                gym_index,
+                field,
+                expected,
+                actual: actual.to_vec(),
+            });
+        }
+        Ok(())
+    }
+
+    fn assemble_steps(
+        &self,
+        steps: Vec<MultiGymStepInfo<I>>,
+    ) -> Result<MultiGymStepInfo<I>, StackedMultiGymError<G::Error>> {
+        let total_batch_size = self.num_envs();
+        let mut states = Vec::with_capacity(steps.len());
+        let mut rewards = Vec::with_capacity(steps.len());
+        let mut infos = Vec::with_capacity(total_batch_size);
+        let mut dones = Vec::with_capacity(total_batch_size);
+        let mut truncateds = Vec::with_capacity(total_batch_size);
+        let mut terminal_states = Vec::with_capacity(total_batch_size);
+
+        for (gym_index, step) in steps.into_iter().enumerate() {
+            let batch_size = self.expected_batch_size(gym_index);
+            let mut expected_state_shape = Vec::with_capacity(self.observation_shape.len() + 1);
+            expected_state_shape.push(batch_size);
+            expected_state_shape.extend_from_slice(&self.observation_shape);
+            self.validate_output_shape(
+                gym_index,
+                "states",
+                step.states.dims(),
+                expected_state_shape,
+            )?;
+            self.validate_output_shape(
+                gym_index,
+                "rewards",
+                step.rewards.dims(),
+                vec![batch_size],
+            )?;
+            self.validate_output_shape(gym_index, "infos", &[step.infos.len()], vec![batch_size])?;
+            self.validate_output_shape(gym_index, "dones", &[step.dones.len()], vec![batch_size])?;
+            self.validate_output_shape(
+                gym_index,
+                "truncateds",
+                &[step.truncateds.len()],
+                vec![batch_size],
+            )?;
+            self.validate_output_shape(
+                gym_index,
+                "terminal_states",
+                &[step.terminal_states.len()],
+                vec![batch_size],
+            )?;
+
+            states.push(step.states);
+            rewards.push(step.rewards);
+            infos.extend(step.infos);
+            dones.extend(step.dones);
+            truncateds.extend(step.truncateds);
+            terminal_states.extend(step.terminal_states);
+        }
+
+        Ok(MultiGymStepInfo {
+            states: Tensor::cat(&states, 0)?,
+            rewards: Tensor::cat(&rewards, 0)?,
+            infos,
+            dones,
+            truncateds,
+            terminal_states,
+        })
+    }
+}
+
+#[cfg(feature = "multithreading")]
+impl<G, O, A, SE, I> MultiGym<I> for MultithreadedStackedMultiGym<G, O, A, SE, I>
+where
+    G: MultiGym<I> + 'static,
+    G::Error: Send + Debug + 'static,
+    SE: Debug,
+    A: Space<Error = SE> + Clone + 'static,
+    O: Space<Error = SE> + Clone + 'static,
+    I: Send + 'static,
+{
+    type Error = StackedMultiGymError<G::Error>;
+    type SpaceError = SE;
+
+    /// Steps with actions shaped `[total_batch_size, ...action_shape]`.
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
+        let total_batch_size = self.num_envs();
+        let actual_batch_size = action.dims().first().copied();
+        if actual_batch_size != Some(total_batch_size) {
+            return Err(StackedMultiGymError::InvalidActionBatch {
+                expected: total_batch_size,
+                actual: actual_batch_size,
+            });
+        }
+
+        // Finish every fallible slice before any worker is allowed to advance.
+        let actions = (0..self.groups.len())
+            .map(|gym_index| {
+                let start = self.group_offsets[gym_index];
+                action.narrow(0, start, self.expected_batch_size(gym_index))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let receivers = self
+            .groups
+            .iter()
+            .zip(actions)
+            .map(|(group, action)| group.step(action))
+            .collect::<Vec<_>>();
+        let replies = receivers
+            .into_iter()
+            .enumerate()
+            .map(|(gym_index, receiver)| {
+                receiver
+                    .recv()
+                    .expect("failed to receive step info, this was probably caused by a panic in the gym thread")
+                    .map_err(|error| StackedMultiGymError::Inner { gym_index, error })
+            })
+            .collect::<Vec<_>>();
+        let mut steps = Vec::with_capacity(replies.len());
+        for reply in replies {
+            steps.push(reply?);
+        }
+
+        self.assemble_steps(steps)
+    }
+
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        Box::new(self.obs_space.clone())
+    }
+
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        Box::new(self.action_space.clone())
+    }
+
+    fn num_envs(&self) -> usize {
+        self.group_offsets.last().copied().unwrap_or(0)
+    }
+
+    fn reset(&mut self) -> Result<Tensor, Self::Error> {
+        let receivers = self
+            .groups
+            .iter()
+            .map(MultiGymHandle::reset)
+            .collect::<Vec<_>>();
+        let replies = receivers
+            .into_iter()
+            .enumerate()
+            .map(|(gym_index, receiver)| {
+                receiver
+                    .recv()
+                    .expect("failed to receive reset info, this was probably caused by a panic in the gym thread")
+                    .map_err(|error| StackedMultiGymError::Inner { gym_index, error })
+            })
+            .collect::<Vec<_>>();
+        let mut states = Vec::with_capacity(replies.len());
+        for reply in replies {
+            states.push(reply?);
+        }
+
+        for (gym_index, state) in states.iter().enumerate() {
+            let batch_size = self.expected_batch_size(gym_index);
+            let mut expected_shape = Vec::with_capacity(self.observation_shape.len() + 1);
+            expected_shape.push(batch_size);
+            expected_shape.extend_from_slice(&self.observation_shape);
+            self.validate_output_shape(gym_index, "reset states", state.dims(), expected_shape)?;
+        }
+
+        Tensor::cat(&states, 0).map_err(StackedMultiGymError::Batch)
+    }
+}
+
+#[cfg(feature = "multithreading")]
+fn start_multi_gym_thread<G, F, I>(
+    make_gym: F,
+) -> (
+    MultiGymHandle<G::Error, I>,
+    mpsc::Receiver<MultiGymMetadata>,
+)
+where
+    F: FnOnce() -> G + Send + 'static,
+    G: MultiGym<I> + 'static,
+    G::Error: Send + 'static,
+    I: Send + 'static,
+{
+    let (metadata_tx, metadata_rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut gym = make_gym();
+        let metadata = MultiGymMetadata {
+            num_envs: gym.num_envs(),
+            observation_shape: gym.observation_space().shape(),
+            action_shape: gym.action_space().shape(),
+        };
+        if metadata_tx.send(metadata).is_err() {
+            return;
+        }
+
+        while let Ok(command) = rx.recv() {
+            match command {
+                MultiGymCmd::Step(action, response_tx) => {
+                    response_tx.send(gym.step(action)).expect(
+                        "failed to send step response, this was probably caused by a panic in the caller",
+                    );
+                }
+                MultiGymCmd::Reset(response_tx) => {
+                    response_tx.send(gym.reset()).expect(
+                        "failed to send reset response, this was probably caused by a panic in the caller",
+                    );
+                }
+            }
+        }
+    });
+
+    (MultiGymHandle { tx }, metadata_rx)
+}
+
+#[cfg(feature = "multithreading")]
 pub struct MultithreadedVectorizedGymWrapper<G, O, A, SE, I = ()>
 where
     G: Gym<I> + 'static,
@@ -293,7 +972,7 @@ where
 }
 
 #[cfg(feature = "multithreading")]
-impl<G, O, A, SE, I> VectorizedGym<I> for MultithreadedVectorizedGymWrapper<G, O, A, SE, I>
+impl<G, O, A, SE, I> MultiGym<I> for MultithreadedVectorizedGymWrapper<G, O, A, SE, I>
 where
     G: Gym<I> + 'static,
     G::Error: Send + Sync + std::fmt::Debug,
@@ -307,7 +986,7 @@ where
 
     /// Steps with discrete actions `[num_envs]` or box actions
     /// `[num_envs, ...action_shape]`.
-    fn step(&mut self, action: Tensor) -> Result<VectorizedStepInfo<I>, Self::Error> {
+    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
         let batch_size = self.envs.len();
         let actions: Vec<Tensor> = action.chunk(batch_size, 0)?;
         let mut step_info_recievers = Vec::with_capacity(batch_size);
@@ -348,7 +1027,7 @@ where
         let states = Tensor::stack(&states, 0)?;
         let rewards = Tensor::from_vec(rewards, &[batch_size], states.device())?;
 
-        Ok(VectorizedStepInfo {
+        Ok(MultiGymStepInfo {
             states,
             rewards,
             infos,
@@ -551,6 +1230,195 @@ mod tests {
         id: usize,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct BatchedTestInfo {
+        group: usize,
+        slot: usize,
+        action: f32,
+    }
+
+    #[derive(Debug)]
+    enum BatchedTestError {
+        Forced,
+        Tensor,
+    }
+
+    impl From<candle_core::Error> for BatchedTestError {
+        fn from(_error: candle_core::Error) -> Self {
+            Self::Tensor
+        }
+    }
+
+    struct BatchedDummyEnv {
+        group: usize,
+        batch_size: usize,
+        observation_size: usize,
+        action_size: usize,
+        fail_step: bool,
+        step_count: usize,
+    }
+
+    #[cfg(feature = "multithreading")]
+    #[derive(Default)]
+    struct ConcurrencyGateState {
+        entered: usize,
+        released: bool,
+    }
+
+    #[cfg(feature = "multithreading")]
+    struct BlockingBatchedEnv {
+        gate: std::sync::Arc<(std::sync::Mutex<ConcurrencyGateState>, std::sync::Condvar)>,
+    }
+
+    #[cfg(feature = "multithreading")]
+    impl MultiGym for BlockingBatchedEnv {
+        type Error = candle_core::Error;
+        type SpaceError = candle_core::Error;
+
+        /// Blocks after receiving one action batch shaped `[1, 1]`.
+        fn step(&mut self, _action: Tensor) -> Result<MultiGymStepInfo, Self::Error> {
+            let (lock, ready) = &*self.gate;
+            let mut state = lock.lock().unwrap();
+            state.entered += 1;
+            ready.notify_all();
+            while !state.released {
+                state = ready.wait(state).unwrap();
+            }
+            drop(state);
+
+            Ok(MultiGymStepInfo {
+                states: Tensor::zeros((1, 1), candle_core::DType::F32, &candle_core::Device::Cpu)?,
+                rewards: Tensor::zeros(1, candle_core::DType::F32, &candle_core::Device::Cpu)?,
+                infos: vec![()],
+                dones: vec![false],
+                truncateds: vec![false],
+                terminal_states: vec![None],
+            })
+        }
+
+        fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(crate::spaces::BoxSpace::new_unbounded(
+                vec![1],
+                &candle_core::Device::Cpu,
+            ))
+        }
+
+        fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(crate::spaces::BoxSpace::new_with_universal_bounds(
+                vec![1],
+                -1.0,
+                1.0,
+                &candle_core::Device::Cpu,
+            ))
+        }
+
+        fn num_envs(&self) -> usize {
+            1
+        }
+
+        fn reset(&mut self) -> Result<Tensor, Self::Error> {
+            Tensor::zeros((1, 1), candle_core::DType::F32, &candle_core::Device::Cpu)
+        }
+    }
+
+    impl BatchedDummyEnv {
+        fn new(group: usize, batch_size: usize) -> Self {
+            Self {
+                group,
+                batch_size,
+                observation_size: 3,
+                action_size: 1,
+                fail_step: false,
+                step_count: 0,
+            }
+        }
+
+        fn observations(&self, actions: &[f32]) -> Result<Tensor, BatchedTestError> {
+            let mut values = Vec::with_capacity(self.batch_size * self.observation_size);
+            for (slot, action) in actions.iter().enumerate() {
+                values.extend_from_slice(&[self.group as f32, slot as f32, *action]);
+            }
+            Tensor::from_vec(
+                values,
+                &[self.batch_size, self.observation_size],
+                &candle_core::Device::Cpu,
+            )
+            .map_err(BatchedTestError::from)
+        }
+    }
+
+    impl MultiGym<BatchedTestInfo> for BatchedDummyEnv {
+        type Error = BatchedTestError;
+        type SpaceError = candle_core::Error;
+
+        /// Steps with test actions shaped `[batch_size, 1]`.
+        fn step(
+            &mut self,
+            action: Tensor,
+        ) -> Result<MultiGymStepInfo<BatchedTestInfo>, Self::Error> {
+            if self.fail_step {
+                return Err(BatchedTestError::Forced);
+            }
+            self.step_count += 1;
+            let actions = action.flatten_all()?.to_vec1::<f32>()?;
+            let states = self.observations(&actions)?;
+            let infos = actions
+                .iter()
+                .enumerate()
+                .map(|(slot, action)| BatchedTestInfo {
+                    group: self.group,
+                    slot,
+                    action: *action,
+                })
+                .collect();
+            let mut dones = vec![false; self.batch_size];
+            dones[self.batch_size - 1] = true;
+            let terminal_states = states
+                .chunk(self.batch_size, 0)?
+                .into_iter()
+                .enumerate()
+                .map(|(slot, state)| {
+                    (slot == self.batch_size - 1)
+                        .then(|| state.squeeze(0))
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(MultiGymStepInfo {
+                states,
+                rewards: Tensor::from_vec(actions, &[self.batch_size], &candle_core::Device::Cpu)?,
+                infos,
+                dones,
+                truncateds: vec![false; self.batch_size],
+                terminal_states,
+            })
+        }
+
+        fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(crate::spaces::BoxSpace::new_unbounded(
+                vec![self.observation_size],
+                &candle_core::Device::Cpu,
+            ))
+        }
+
+        fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+            Box::new(crate::spaces::BoxSpace::new_with_universal_bounds(
+                vec![self.action_size],
+                -1.0,
+                1.0,
+                &candle_core::Device::Cpu,
+            ))
+        }
+
+        fn num_envs(&self) -> usize {
+            self.batch_size
+        }
+
+        fn reset(&mut self) -> Result<Tensor, Self::Error> {
+            self.observations(&vec![-1.0; self.batch_size])
+        }
+    }
+
     impl DummyEnv {
         fn new(id: usize) -> Self {
             Self { step_count: 0, id }
@@ -656,6 +1524,134 @@ mod tests {
     }
 
     #[test]
+    fn stacked_multi_gym_flattens_batches_and_routes_actions() {
+        let mut env = StackedMultiGym::try_new(vec![
+            BatchedDummyEnv::new(10, 2),
+            BatchedDummyEnv::new(20, 3),
+        ])
+        .unwrap();
+
+        assert_eq!(env.num_groups(), 2);
+        assert_eq!(env.num_envs(), 5);
+        assert_eq!(env.group_offsets(), &[0, 2, 5]);
+        assert_eq!(env.reset().unwrap().dims(), &[5, 3]);
+
+        let actions = Tensor::from_vec(
+            vec![0.0_f32, 0.1, 0.2, 0.3, 0.4],
+            &[5, 1],
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+        let step = env.step(actions).unwrap();
+
+        assert_eq!(step.states.dims(), &[5, 3]);
+        assert_eq!(
+            step.states.to_vec2::<f32>().unwrap(),
+            vec![
+                vec![10.0, 0.0, 0.0],
+                vec![10.0, 1.0, 0.1],
+                vec![20.0, 0.0, 0.2],
+                vec![20.0, 1.0, 0.3],
+                vec![20.0, 2.0, 0.4],
+            ]
+        );
+        assert_eq!(
+            step.rewards.to_vec1::<f32>().unwrap(),
+            vec![0.0, 0.1, 0.2, 0.3, 0.4]
+        );
+        assert_eq!(
+            step.infos,
+            vec![
+                BatchedTestInfo {
+                    group: 10,
+                    slot: 0,
+                    action: 0.0,
+                },
+                BatchedTestInfo {
+                    group: 10,
+                    slot: 1,
+                    action: 0.1,
+                },
+                BatchedTestInfo {
+                    group: 20,
+                    slot: 0,
+                    action: 0.2,
+                },
+                BatchedTestInfo {
+                    group: 20,
+                    slot: 1,
+                    action: 0.3,
+                },
+                BatchedTestInfo {
+                    group: 20,
+                    slot: 2,
+                    action: 0.4,
+                },
+            ]
+        );
+        assert_eq!(step.dones, vec![false, true, false, false, true]);
+        assert_eq!(step.truncateds, vec![false; 5]);
+        assert!(step.terminal_states[1].is_some());
+        assert!(step.terminal_states[4].is_some());
+        assert_eq!(env.gyms()[0].step_count, 1);
+        assert_eq!(env.gyms()[1].step_count, 1);
+    }
+
+    #[test]
+    fn stacked_multi_gym_validates_construction_and_actions() {
+        assert!(matches!(
+            StackedMultiGym::<BatchedDummyEnv, BatchedTestInfo>::try_new(vec![]),
+            Err(StackedMultiGymError::Empty)
+        ));
+        assert!(matches!(
+            StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 0)]),
+            Err(StackedMultiGymError::EmptyInner { gym_index: 0 })
+        ));
+
+        let mut different_observation = BatchedDummyEnv::new(1, 2);
+        different_observation.observation_size = 4;
+        assert!(matches!(
+            StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 2), different_observation]),
+            Err(StackedMultiGymError::IncompatibleObservationShape { gym_index: 1, .. })
+        ));
+
+        let mut different_action = BatchedDummyEnv::new(1, 2);
+        different_action.action_size = 2;
+        assert!(matches!(
+            StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 2), different_action]),
+            Err(StackedMultiGymError::IncompatibleActionShape { gym_index: 1, .. })
+        ));
+
+        let mut env = StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 2)]).unwrap();
+        let wrong_batch =
+            Tensor::zeros((3, 1), candle_core::DType::F32, &candle_core::Device::Cpu).unwrap();
+        assert!(matches!(
+            env.step(wrong_batch),
+            Err(StackedMultiGymError::InvalidActionBatch {
+                expected: 2,
+                actual: Some(3),
+            })
+        ));
+    }
+
+    #[test]
+    fn stacked_multi_gym_reports_the_failing_group() {
+        let mut failing = BatchedDummyEnv::new(1, 2);
+        failing.fail_step = true;
+        let mut env = StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 2), failing]).unwrap();
+        let actions =
+            Tensor::zeros((4, 1), candle_core::DType::F32, &candle_core::Device::Cpu).unwrap();
+
+        assert!(matches!(
+            env.step(actions),
+            Err(StackedMultiGymError::Inner {
+                gym_index: 1,
+                error: BatchedTestError::Forced,
+            })
+        ));
+    }
+
+    #[test]
     fn vectorized_wrapper_preserves_non_unit_step_info() {
         let mut vec_env = VectorizedGymWrapper::from(vec![InfoEnv]);
         assert_eq!(vec_env.reset().unwrap().dims(), &[1, 1]);
@@ -731,5 +1727,107 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "multithreading")]
+    #[test]
+    fn multithreaded_stacked_multi_gym_matches_flattened_order() {
+        let constructors = [(10, 2), (20, 3)]
+            .into_iter()
+            .map(|(group, batch_size)| move || BatchedDummyEnv::new(group, batch_size))
+            .collect();
+        let obs_space = crate::spaces::BoxSpace::new_unbounded(vec![3], &candle_core::Device::Cpu);
+        let action_space = crate::spaces::BoxSpace::new_with_universal_bounds(
+            vec![1],
+            -1.0,
+            1.0,
+            &candle_core::Device::Cpu,
+        );
+        let mut env =
+            MultithreadedStackedMultiGym::try_new(constructors, obs_space, action_space).unwrap();
+
+        assert_eq!(env.num_groups(), 2);
+        assert_eq!(env.num_envs(), 5);
+        assert_eq!(env.group_offsets(), &[0, 2, 5]);
+        assert_eq!(env.reset().unwrap().dims(), &[5, 3]);
+
+        let actions = Tensor::from_vec(
+            vec![0.0_f32, 0.1, 0.2, 0.3, 0.4],
+            &[5, 1],
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+        let step = env.step(actions).unwrap();
+
+        assert_eq!(
+            step.states.to_vec2::<f32>().unwrap(),
+            vec![
+                vec![10.0, 0.0, 0.0],
+                vec![10.0, 1.0, 0.1],
+                vec![20.0, 0.0, 0.2],
+                vec![20.0, 1.0, 0.3],
+                vec![20.0, 2.0, 0.4],
+            ]
+        );
+        assert_eq!(
+            step.rewards.to_vec1::<f32>().unwrap(),
+            vec![0.0, 0.1, 0.2, 0.3, 0.4]
+        );
+        assert_eq!(step.dones, vec![false, true, false, false, true]);
+        assert!(step.terminal_states[1].is_some());
+        assert!(step.terminal_states[4].is_some());
+    }
+
+    #[cfg(feature = "multithreading")]
+    #[test]
+    fn multithreaded_stacked_multi_gym_steps_groups_concurrently() {
+        let gate = std::sync::Arc::new((
+            std::sync::Mutex::new(ConcurrencyGateState::default()),
+            std::sync::Condvar::new(),
+        ));
+        let constructors = (0..2)
+            .map(|_| {
+                let gate = gate.clone();
+                move || BlockingBatchedEnv { gate }
+            })
+            .collect();
+        let obs_space = crate::spaces::BoxSpace::new_unbounded(vec![1], &candle_core::Device::Cpu);
+        let action_space = crate::spaces::BoxSpace::new_with_universal_bounds(
+            vec![1],
+            -1.0,
+            1.0,
+            &candle_core::Device::Cpu,
+        );
+        let mut env =
+            MultithreadedStackedMultiGym::try_new(constructors, obs_space, action_space).unwrap();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let actions =
+                Tensor::zeros((2, 1), candle_core::DType::F32, &candle_core::Device::Cpu).unwrap();
+            let _ = result_tx.send(env.step(actions));
+        });
+
+        let (lock, ready) = &*gate;
+        let state = lock.lock().unwrap();
+        let (mut state, _) = ready
+            .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| {
+                state.entered < 2
+            })
+            .unwrap();
+        let entered_before_release = state.entered;
+        state.released = true;
+        ready.notify_all();
+        drop(state);
+
+        assert_eq!(
+            entered_before_release, 2,
+            "both inner gyms should enter step before either is released"
+        );
+        let step = result_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("threaded stack did not finish after releasing its workers")
+            .unwrap();
+        assert_eq!(step.states.dims(), &[2, 1]);
     }
 }

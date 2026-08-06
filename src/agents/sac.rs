@@ -16,7 +16,7 @@ use crate::{
         experience,
         experience_replay::{ExperienceReplay, ExperienceReplayError},
     },
-    gym::{VectorizedGym, VectorizedStepInfo},
+    gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ExpectationPolicy,
     objectives::{bellman_targets, clipped_value_loss},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
@@ -789,7 +789,7 @@ pub struct SACEpisodeLogEntry {
     pub episode_length: usize,
     /// Whether the environment reached a terminal state.
     pub terminated: bool,
-    /// Whether an external limit truncated the episode.
+    /// Whether the episode was truncated.
     pub truncated: bool,
     /// Total collected transitions when the episode completed.
     pub collection_timestep: usize,
@@ -1181,10 +1181,11 @@ where
         let mut critic_losses = Vec::with_capacity(self.critics.len());
         for critic in &mut self.critics {
             let predicted = critic.online_replay_values(&batch.states, &batch.actions)?;
-            // Standard critic objective: L_Q_i = mean((Q_i(s, a) - y)^2).
+            // Match SB3 SAC: each critic contributes
+            // 0.5 * mean((Q_i(s, a) - y)^2).
             // With clipping, use the larger error after bounding Q_i's move
             // around its target-network value, as in PPO's value loss.
-            let loss = match self.q_value_clip {
+            let squared_error = match self.q_value_clip {
                 Some(epsilon) => {
                     let anchor = critic
                         .target_replay_values(&batch.states, &batch.actions)?
@@ -1193,6 +1194,7 @@ where
                 }
                 None => candle_nn::loss::mse(&predicted, &targets)?,
             };
+            let loss = (squared_error * 0.5)?;
             if !tensor_has_nan(&loss)? {
                 critic.optimizer_mut().backward_step(&loss)?;
             }
@@ -1265,6 +1267,8 @@ where
     fn optimize_temperature(
         &mut self,
         states: &Tensor,
+        log_probabilities: &Tensor,
+        weights: &Tensor,
     ) -> Result<SACTemperatureUpdate, SACError<PE, GE, SE>> {
         match &mut self.entropy_configuration {
             SACEntropyConfiguration::Automatic {
@@ -1272,15 +1276,8 @@ where
                 optimizer,
                 target_entropy_schedule,
             } => {
-                let terms = self
-                    .policy
-                    .expectation(states, self.samples)
-                    .map_err(SACError::PolicyError)?;
-                let expected_log_probability = terms
-                    .log_probabilities()
-                    .mul(terms.weights())?
-                    .sum(D::Minus1)?
-                    .detach();
+                let expected_log_probability =
+                    log_probabilities.mul(weights)?.sum(D::Minus1)?.detach();
                 let target_entropy = match target_entropy_schedule {
                     Some(schedule) => self.schedule_progress.parameter(schedule.as_ref()),
                     None => self
@@ -1363,7 +1360,8 @@ where
         let targets = self.compute_bellman_targets(&batch)?;
         let critic_losses = self.optimize_critics(&batch, &targets)?;
         let actor = self.optimize_actor(&batch)?;
-        let temperature = self.optimize_temperature(&batch.states)?;
+        let temperature =
+            self.optimize_temperature(&batch.states, &actor.log_probabilities, &actor.weights)?;
         self.update_target_critics()?;
         self.log_optimization(
             collection_timestep,
@@ -1487,7 +1485,7 @@ where
 
     fn learn_inner(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         num_timesteps: usize,
     ) -> Result<(), SACError<PE, GE, SE>> {
         let mut elapsed_timesteps = 0usize;
@@ -1513,7 +1511,7 @@ where
             )?;
             let step = env.step(actions.clone()).map_err(SACError::GymError)?;
             let transition_next_states = step.transition_next_states()?.to_dtype(self.dtype)?;
-            let VectorizedStepInfo {
+            let MultiGymStepInfo {
                 states: reset_next_states,
                 rewards,
                 infos,
@@ -1579,7 +1577,7 @@ where
 
     fn learn(
         &mut self,
-        env: &mut dyn VectorizedGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.learn_inner(env, num_timesteps)
