@@ -99,14 +99,17 @@ Agents train against these contracts instead of concrete environment, network, o
 
 ## Workspace crates
 
-| Crate | Purpose | License |
-| --- | --- | --- |
-| [`modurl`](src/lib.rs) | Agents, models, distributions, buffers, spaces, schedules, and environment traits | [MIT](LICENSE) |
-| [`modurl_gym`](crates/modurl_gym) | Classic-control and Box2D environments, rendering, and Gym utilities | MIT |
-| [`modurl_mojoco`](crates/modurl_mojoco) | Gymnasium-compatible MuJoCo v5 environments | [MIT](crates/modurl_mojoco/LICENSE); [third-party notices](crates/modurl_mojoco/THIRD_PARTY_LICENSES.md) |
-| [`modurl_ale`](crates/modurl_ale) | Arcade Learning Environment integration and Atari wrappers | [GPL-2.0-only](crates/modurl_ale/LICENSE); [third-party notices](crates/modurl_ale/THIRD_PARTY_LICENSES.md) |
-| [`modurl_logger`](crates/modurl_logger) | Terminal graphs and TensorBoard event logging | MIT |
-| [`examples`](crates/examples/Cargo.toml) | Runnable training programs; not published as a crate | MIT |
+| Crate | Purpose | Pure Rust? | License |
+| --- | --- | --- | --- |
+| [`modurl`](src/lib.rs) | Agents, models, distributions, buffers, spaces, schedules, and environment traits | Yes, with default features | [MIT](LICENSE) |
+| [`modurl_gym`](crates/modurl_gym) | Classic-control and Box2D environments, rendering, and Gym utilities | Yes, with default features | MIT |
+| [`modurl_mojoco`](crates/modurl_mojoco) | Gymnasium-compatible MuJoCo v5 environments | No; uses the native MuJoCo library | [MIT](crates/modurl_mojoco/LICENSE); [Gymnasium asset license](crates/modurl_mojoco/assets/LICENSE) |
+| [`modurl_ale`](crates/modurl_ale) | Arcade Learning Environment integration and Atari wrappers | No; builds bundled C++ | [GPL-2.0-only](crates/modurl_ale/LICENSE); [third-party notices](crates/modurl_ale/THIRD_PARTY_LICENSES.md) |
+| [`modurl_logger`](crates/modurl_logger) | Terminal graphs and TensorBoard event logging | Yes | MIT |
+| [`examples`](crates/examples/Cargo.toml) | Runnable training programs; not published as a crate | Mixed; depends on the example | MIT |
+
+The `cuda`, `cudnn`, `metal`, and `mkl` features can add native platform or
+accelerator dependencies to crates that are pure Rust with default features.
 
 ## Cargo features
 

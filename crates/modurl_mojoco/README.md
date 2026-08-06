@@ -84,10 +84,10 @@ viewers should be created on the application's main thread. Without the
 
 `modurl_mojoco` is MIT-licensed and does not depend on GPL-licensed ALE code.
 MuJoCo is Apache-2.0, `mujoco-rs` is used under its MIT option, and the
-Gymnasium-derived XML models are MIT. See
-[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) for the dependency audit
-and binary-redistribution notices. When available, the build places MuJoCo's
-license and third-party notice files beside Cargo output automatically.
+Gymnasium-derived XML models retain their upstream MIT notice in
+[`assets/LICENSE`](assets/LICENSE). When available, the build places MuJoCo's
+license and third-party notice files beside Cargo output automatically. Keep
+those files with any binary distribution that includes the MuJoCo library.
 
 ## Parity tests
 
