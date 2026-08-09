@@ -45,14 +45,12 @@ The example uses the CPU by default. [Additional examples](crates/examples/examp
 
 ## What ModuRL includes
 
-| Area | Included |
-| --- | --- |
-| Training algorithms | PPO, A2C, SAC, DDPG, TD3, DQN, and Double DQN |
-| Models and policies | MLPs, shared or separate actor-critic networks, categorical and Gaussian policies, transformed distributions, and user-supplied Candle modules |
-| Experience | Rollout buffers, replay buffers, configurable replay devices, and parameter schedules |
-| Environments | Single and vectorized interfaces, classic control, Box2D, MuJoCo, and Atari integrations |
-| Wrappers | Time limits, observation and reward normalization, reward clipping, frame stacking, max-and-skip, and raw reward recording |
-| Logging | Algorithm-specific hooks, terminal graphs, and TensorBoard event output |
+- Training algorithms: PPO, A2C, SAC, DDPG, TD3, DQN, and Double DQN.
+- Models and policies: MLPs, shared or separate actor-critic networks, categorical and Gaussian policies, transformed distributions, and user-supplied Candle modules.
+- Experience: rollout buffers, replay buffers, configurable replay devices, and parameter schedules.
+- Environments: single and vectorized interfaces, classic control, Box2D, MuJoCo, and Atari integrations.
+- Wrappers: time limits, observation and reward normalization, reward clipping, frame stacking, max-and-skip, and raw reward recording.
+- Logging: algorithm-specific hooks, terminal graphs, and TensorBoard event output.
 
 ## Architecture and choices
 
@@ -108,22 +106,10 @@ Agents train against these contracts instead of concrete environment, network, o
 | [`modurl_logger`](crates/modurl_logger) | Terminal graphs and TensorBoard event logging | Yes | MIT |
 | [`examples`](crates/examples/Cargo.toml) | Runnable training programs; not published as a crate | Mixed; depends on the example | MIT |
 
-The `cuda`, `cudnn`, `metal`, and `mkl` features can add native platform or
-accelerator dependencies to crates that are pure Rust with default features.
-
-## Cargo features
-
-The core `modurl` crate has no default Cargo features.
-
-| Feature | Purpose |
-| --- | --- |
-| `multithreading` | Enable multithreaded vectorized and stacked environments |
-| `cuda` | Enable Candle CUDA support |
-| `cudnn` | Enable Candle cuDNN support |
-| `metal` | Enable Candle Metal support |
-| `mkl` | Enable Candle's Intel MKL backend |
-
-Workspace crates define additional Cargo features for rendering and environment support. Check the relevant `Cargo.toml` before combining them.
+The core `modurl` crate has no default Cargo features. Enable its
+`multithreading` feature for multithreaded vectorized and stacked environments.
+Workspace crates define additional features for rendering and environment
+support.
 
 ## Documentation
 

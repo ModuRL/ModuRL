@@ -23,7 +23,7 @@ env.set_frame_skip(4);
 
 Observations are normalized to `0.0..=1.0`. The environment exposes ALE's ROM-specific minimal action set as a ModuRL `Discrete` space and max-pools the final two frames when frame skipping is enabled. RAM, RGB, and grayscale observations are supported, along with sticky-action probability, seeding, lives, reset, device selection, and optional `minifb` rendering.
 
-Enable display rendering with `features = ["rendering"]`. The `cuda`, `cudnn`, and `metal` features forward directly to the corresponding Candle backend.
+Enable display rendering with `features = ["rendering"]`.
 
 ## Licensing and ROMs
 

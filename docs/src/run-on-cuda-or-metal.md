@@ -5,10 +5,10 @@ feature and construct a device for that backend.
 
 ## CUDA
 
-Replace the `modurl` dependency line in your project's `Cargo.toml` with:
+Enable CUDA on your direct `candle-core` dependency in `Cargo.toml`:
 
 ```toml
-modurl = { version = "0.1", features = ["cuda"] }
+candle-core = { version = "0.11", features = ["cuda"] }
 ```
 
 In a program, replace `Device::Cpu` with:
@@ -22,10 +22,10 @@ support must be available on the machine.
 
 ## Metal
 
-Replace the `modurl` dependency line in your project's `Cargo.toml` with:
+Enable Metal on your direct `candle-core` dependency in `Cargo.toml`:
 
 ```toml
-modurl = { version = "0.1", features = ["metal"] }
+candle-core = { version = "0.11", features = ["metal"] }
 ```
 
 In a program, replace `Device::Cpu` with:
