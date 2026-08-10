@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-09T05:38:21.4345400Z",
+  "git_revision": "0aa6be0789c3f11911f0a30b151d7fca3e042703",
+  "dirty_worktree": true,
+  "system": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "cpu": "12th Gen Intel(R) Core(TM) i7-1255U",
+    "logical_cpus": 12,
+    "python": "3.11.4"
+  },
+  "device": "cpu",
+  "threads": 1,
+  "repeats": 5,
+  "measured_steps_per_repeat": 20480,
+  "warmup_steps_per_repeat": 2048,
+  "config": {
+    "environment": "CartPole-v1",
+    "environments": 8,
+    "steps_per_environment": 256,
+    "rollout_size": 2048,
+    "hidden_layers": [64, 64],
+    "trainable_parameters": 9155,
+    "activation": "tanh",
+    "dtype": "float32",
+    "mini_batch_size": 64,
+    "ppo_epochs": 10,
+    "learning_rate": 0.0003,
+    "adam_epsilon": 0.00001,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "value_loss_clipping": false,
+    "advantage_normalization": "per-mini-batch",
+    "entropy_coefficient": 0.0,
+    "value_coefficient": 0.5,
+    "max_gradient_norm": 0.5,
+    "seed": 42
+  },
+  "frameworks": {
+    "modurl": {
+      "version": "0.1.0 (workspace)",
+      "backend": "candle 0.11.0"
+    },
+    "sb3": {
+      "version": "2.9.0",
+      "backend": "torch 2.10.0+cpu"
+    },
+    "cleanrl": {
+      "version": "cleanrl/ppo.py@e421c2e5 (adapted)",
+      "backend": "torch 2.10.0+cpu"
+    },
+    "tianshou": {
+      "version": "2.0.1",
+      "backend": "torch 2.10.0+cpu"
+    }
+  },
+  "samples": {
+    "modurl": [
+      {"repeat": 1, "elapsed_seconds": 2.1445739, "steps_per_second": 9549.682573307453},
+      {"repeat": 2, "elapsed_seconds": 2.1754718, "steps_per_second": 9414.04986265508},
+      {"repeat": 3, "elapsed_seconds": 2.1300635, "steps_per_second": 9614.736837657658},
+      {"repeat": 4, "elapsed_seconds": 2.1383053, "steps_per_second": 9577.678173458205},
+      {"repeat": 5, "elapsed_seconds": 2.1332126, "steps_per_second": 9600.543330749126}
+    ],
+    "sb3": [
+      {"repeat": 1, "elapsed_seconds": 13.848508300026879, "steps_per_second": 1478.859640063923},
+      {"repeat": 2, "elapsed_seconds": 14.310697000008076, "steps_per_second": 1431.0973113321065},
+      {"repeat": 3, "elapsed_seconds": 12.935435799998231, "steps_per_second": 1583.2477789424613},
+      {"repeat": 4, "elapsed_seconds": 13.970818199915811, "steps_per_second": 1465.9127122650134},
+      {"repeat": 5, "elapsed_seconds": 13.800986799993552, "steps_per_second": 1483.951857704086}
+    ],
+    "cleanrl": [
+      {"repeat": 1, "elapsed_seconds": 14.906573800020851, "steps_per_second": 1373.8904911852617},
+      {"repeat": 2, "elapsed_seconds": 13.554195999982767, "steps_per_second": 1510.9712151149386},
+      {"repeat": 3, "elapsed_seconds": 12.79153970000334, "steps_per_second": 1601.0582369528706},
+      {"repeat": 4, "elapsed_seconds": 13.255424399976619, "steps_per_second": 1545.0278604460318},
+      {"repeat": 5, "elapsed_seconds": 12.831482700072229, "steps_per_second": 1596.0743180431298}
+    ],
+    "tianshou": [
+      {"repeat": 1, "elapsed_seconds": 16.952703200047836, "steps_per_second": 1208.0669235064654},
+      {"repeat": 2, "elapsed_seconds": 17.615011399961077, "steps_per_second": 1162.6447201757278},
+      {"repeat": 3, "elapsed_seconds": 17.336228300002404, "steps_per_second": 1181.3411571187696},
+      {"repeat": 4, "elapsed_seconds": 23.32922630000394, "steps_per_second": 877.8688044187965},
+      {"repeat": 5, "elapsed_seconds": 20.904440799960867, "steps_per_second": 979.6961418857154}
+    ]
+  },
+  "summary": {
+    "modurl": {
+      "median_seconds": 2.1383053,
+      "min_seconds": 2.1300635,
+      "max_seconds": 2.1754718,
+      "median_steps_per_second": 9577.678173458205,
+      "modurl_speedup": 1.0
+    },
+    "sb3": {
+      "median_seconds": 13.848508300026879,
+      "min_seconds": 12.935435799998231,
+      "max_seconds": 14.310697000008076,
+      "median_steps_per_second": 1478.859640063923,
+      "modurl_speedup": 6.47639432031847
+    },
+    "cleanrl": {
+      "median_seconds": 13.255424399976619,
+      "min_seconds": 12.79153970000334,
+      "max_seconds": 14.906573800020851,
+      "median_steps_per_second": 1545.0278604460318,
+      "modurl_speedup": 6.19903266384675
+    },
+    "tianshou": {
+      "median_seconds": 17.615011399961077,
+      "min_seconds": 16.952703200047836,
+      "max_seconds": 23.32922630000394,
+      "median_steps_per_second": 1162.6447201757278,
+      "modurl_speedup": 8.23783741262816
+    }
+  }
+}

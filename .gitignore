@@ -2,3 +2,7 @@
 /sb3_comparison/venv
 /docs/book
 /runs
+/crates/benches/.venv
+/crates/benches/.uv-cache
+/crates/benches/__pycache__
+/crates/benches/python/__pycache__
