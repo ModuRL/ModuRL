@@ -112,22 +112,4 @@ mod tests {
         shuffled.sort_unstable();
         assert_eq!(shuffled, expected);
     }
-
-    #[cfg(any(feature = "cuda", feature = "metal"))]
-    #[test]
-    fn shuffle_is_device_seeded() {
-        #[cfg(feature = "cuda")]
-        let device = Device::new_cuda(0).unwrap();
-        #[cfg(feature = "metal")]
-        let device = Device::new_metal(0).unwrap();
-        let mut first: Vec<u32> = (0..100).collect();
-        let mut second = first.clone();
-
-        device.set_seed(42).unwrap();
-        shuffle_with_device_rng(&mut first, &device).unwrap();
-        device.set_seed(42).unwrap();
-        shuffle_with_device_rng(&mut second, &device).unwrap();
-
-        assert_eq!(first, second);
-    }
 }

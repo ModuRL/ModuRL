@@ -38,7 +38,3 @@ cmake = "0.1"
 [features]
 default = []
 rendering = ["dep:minifb"]
-cuda = ["candle-core/cuda"]
-cudnn = ["candle-core/cudnn"]
-metal = ["candle-core/metal"]
-mkl = ["candle-core/mkl"]

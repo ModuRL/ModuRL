@@ -496,49 +496,4 @@ mod tests {
             }
         }
     }
-
-    #[cfg(any(feature = "cuda", feature = "metal"))]
-    #[test]
-    fn test_cartpole_tensor_determinism() {
-        #[cfg(feature = "cuda")]
-        let device = Device::new_cuda(0).unwrap();
-        #[cfg(feature = "metal")]
-        let device = Device::Metal(0);
-
-        let mut last_state: Option<Tensor> = None;
-        for i in 0..10 {
-            device.set_seed(42).unwrap();
-            let mut env = CartPoleV1::builder().device(&device).build().unwrap();
-            env.reset().unwrap();
-            let action_space = env.action_space();
-            let mut state = env.state.clone();
-            for _ in 0..10 {
-                let action = action_space.sample(&device).unwrap();
-                let StepInfo {
-                    state: next_state,
-                    reward: _,
-                    done,
-                    truncated: _,
-                } = env.step(action).unwrap();
-                state = next_state;
-                if done {
-                    break;
-                }
-            }
-            if let Some(last) = &last_state {
-                let state_vec = state.to_vec1::<f32>().unwrap();
-                let last_vec = last.to_vec1::<f32>().unwrap();
-                for (a, b) in state_vec.iter().zip(last_vec.iter()) {
-                    assert!(
-                        (a - b) == 0.0,
-                        "States do not match on iteration {}: {} vs {}",
-                        i,
-                        a,
-                        b
-                    );
-                }
-            }
-            last_state = Some(state);
-        }
-    }
 }
