@@ -1,0 +1,212 @@
+{
+  "schema_version": 2,
+  "generated_at": "2026-08-09T16:53:50.040946+00:00",
+  "git_revision": "0aa6be0789c3f11911f0a30b151d7fca3e042703",
+  "dirty_worktree": true,
+  "system": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "cpu": "12th Gen Intel(R) Core(TM) i7-1255U",
+    "logical_cpus": 12,
+    "python": "3.11.4"
+  },
+  "algorithm": "sac",
+  "device": "cpu",
+  "threads": 1,
+  "repeats": 5,
+  "measured_steps_per_repeat": 1024,
+  "warmup_steps_per_repeat": 256,
+  "config": {
+    "activation": "tanh",
+    "actor_hidden_layers": [
+      64,
+      64
+    ],
+    "adam_epsilon": 1e-05,
+    "automatic_entropy_tuning": true,
+    "batch_size": 64,
+    "critic_aggregation": "min",
+    "critic_hidden_layers": [
+      64,
+      64
+    ],
+    "critics": 2,
+    "dtype": "float32",
+    "environment": "Pendulum-v1",
+    "environments": 1,
+    "gamma": 0.99,
+    "initial_alpha": 1.0,
+    "learning_rate": 0.0003,
+    "log_std_bounds": [
+      -20.0,
+      2.0
+    ],
+    "n_step_return": 1,
+    "replay_capacity": 10000,
+    "seed": 42,
+    "state_dependent_log_std": true,
+    "target_entropy": -1.0,
+    "tau": 0.005,
+    "time_limit": 200,
+    "trainable_parameters": 13637,
+    "training_start": 256,
+    "updates_per_transition": 1
+  },
+  "frameworks": {
+    "cleanrl": {
+      "version": "cleanrl/sac_continuous_action.py@e421c2e5 (adapted)",
+      "backend": "torch 2.10.0+cpu"
+    },
+    "sb3": {
+      "version": "2.9.0",
+      "backend": "torch 2.10.0+cpu"
+    },
+    "tianshou": {
+      "version": "2.0.1",
+      "backend": "torch 2.10.0+cpu"
+    },
+    "modurl": {
+      "version": "0.1.0 (workspace)",
+      "backend": "candle 0.11.0"
+    }
+  },
+  "samples": {
+    "cleanrl": [
+      {
+        "repeat": 1,
+        "elapsed_seconds": 7.495856299996376,
+        "steps_per_second": 136.60880878953017
+      },
+      {
+        "repeat": 2,
+        "elapsed_seconds": 4.6971004999941215,
+        "steps_per_second": 218.0068320874296
+      },
+      {
+        "repeat": 3,
+        "elapsed_seconds": 4.6187624000012875,
+        "steps_per_second": 221.70441155399433
+      },
+      {
+        "repeat": 4,
+        "elapsed_seconds": 4.561111700022593,
+        "steps_per_second": 224.5066701600243
+      },
+      {
+        "repeat": 5,
+        "elapsed_seconds": 4.452120500034653,
+        "steps_per_second": 230.0027593574859
+      }
+    ],
+    "sb3": [
+      {
+        "repeat": 1,
+        "elapsed_seconds": 10.225031399982981,
+        "steps_per_second": 100.14639172665078
+      },
+      {
+        "repeat": 2,
+        "elapsed_seconds": 5.183265600004233,
+        "steps_per_second": 197.55885170136057
+      },
+      {
+        "repeat": 3,
+        "elapsed_seconds": 5.172102899989113,
+        "steps_per_second": 197.98523343419083
+      },
+      {
+        "repeat": 4,
+        "elapsed_seconds": 5.499867299920879,
+        "steps_per_second": 186.18631035238454
+      },
+      {
+        "repeat": 5,
+        "elapsed_seconds": 5.405854300013743,
+        "steps_per_second": 189.42426916637334
+      }
+    ],
+    "tianshou": [
+      {
+        "repeat": 1,
+        "elapsed_seconds": 13.125782300019637,
+        "steps_per_second": 78.01439766363244
+      },
+      {
+        "repeat": 2,
+        "elapsed_seconds": 9.72958339995239,
+        "steps_per_second": 105.24602728673983
+      },
+      {
+        "repeat": 3,
+        "elapsed_seconds": 9.264496200019494,
+        "steps_per_second": 110.52948567217777
+      },
+      {
+        "repeat": 4,
+        "elapsed_seconds": 9.200492599979043,
+        "steps_per_second": 111.29838852349411
+      },
+      {
+        "repeat": 5,
+        "elapsed_seconds": 9.065309099969454,
+        "steps_per_second": 112.95808986849113
+      }
+    ],
+    "modurl": [
+      {
+        "repeat": 1,
+        "elapsed_seconds": 2.2998038,
+        "steps_per_second": 445.2553735236024
+      },
+      {
+        "repeat": 2,
+        "elapsed_seconds": 2.2638899,
+        "steps_per_second": 452.3188163876697
+      },
+      {
+        "repeat": 3,
+        "elapsed_seconds": 2.1718455,
+        "steps_per_second": 471.4884184901735
+      },
+      {
+        "repeat": 4,
+        "elapsed_seconds": 2.1042869,
+        "steps_per_second": 486.62565926727956
+      },
+      {
+        "repeat": 5,
+        "elapsed_seconds": 2.1301939,
+        "steps_per_second": 480.70741353639215
+      }
+    ]
+  },
+  "summary": {
+    "cleanrl": {
+      "median_seconds": 4.6187624000012875,
+      "min_seconds": 4.452120500034653,
+      "max_seconds": 7.495856299996376,
+      "median_steps_per_second": 221.70441155399433,
+      "modurl_speedup": 2.1266533001547705
+    },
+    "sb3": {
+      "median_seconds": 5.405854300013743,
+      "min_seconds": 5.172102899989113,
+      "max_seconds": 10.225031399982981,
+      "median_steps_per_second": 189.42426916637334,
+      "modurl_speedup": 2.489060248536898
+    },
+    "tianshou": {
+      "median_seconds": 9.264496200019494,
+      "min_seconds": 9.065309099969454,
+      "max_seconds": 13.125782300019637,
+      "median_steps_per_second": 110.52948567217777,
+      "modurl_speedup": 4.265725255327552
+    },
+    "modurl": {
+      "median_seconds": 2.1718455,
+      "min_seconds": 2.1042869,
+      "max_seconds": 2.2998038,
+      "median_steps_per_second": 471.4884184901735,
+      "modurl_speedup": 1.0
+    }
+  }
+}

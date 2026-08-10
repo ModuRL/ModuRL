@@ -37,8 +37,8 @@ jobs:
               "modurl_logger",
               "modurl_mojoco",
           }
-          test_package = "examples"
-          expected = publishable | {test_package}
+          non_publishable = {"examples", "modurl-benches"}
+          expected = publishable | non_publishable
           metadata = json.loads(Path("target/workspace-metadata.json").read_text())
           members = set(metadata["workspace_members"])
           packages = {package["id"]: package for package in metadata["packages"]}
@@ -64,8 +64,9 @@ jobs:
                       )
 
           by_name = {packages[member]["name"]: packages[member] for member in members}
-          if by_name[test_package]["publish"] != []:
-              raise SystemExit(f"{test_package} must set publish = false")
+          for name in non_publishable:
+              if by_name[name]["publish"] != []:
+                  raise SystemExit(f"{name} must set publish = false")
           for name in publishable:
               if by_name[name]["publish"] == []:
                   raise SystemExit(f"publishable workspace package {name} has publishing disabled")
@@ -277,8 +278,8 @@ jobs:
               "modurl_logger",
               "modurl_mojoco",
           }
-          test_package = "examples"
-          workspace_packages = publishable | {test_package}
+          non_publishable = {"examples", "modurl-benches"}
+          workspace_packages = publishable | non_publishable
           expected_dependencies = {
               "modurl": set(),
               "modurl_gym": {"modurl"},
@@ -293,15 +294,14 @@ jobs:
               for package in metadata["packages"]
               if package["id"] in members
           }
-          if packages[test_package]["publish"] != []:
-              raise SystemExit(f"{test_package} must set publish = false")
-          test_archives = list(
-              Path("target/package").glob(f"{test_package}-*.crate")
-          )
-          if test_archives:
-              raise SystemExit(
-                  f"non-publishable {test_package} was packaged: {test_archives}"
-              )
+          for name in non_publishable:
+              if packages[name]["publish"] != []:
+                  raise SystemExit(f"{name} must set publish = false")
+              archives = list(Path("target/package").glob(f"{name}-*.crate"))
+              if archives:
+                  raise SystemExit(
+                      f"non-publishable {name} was packaged: {archives}"
+                  )
 
           def dependency_tables(manifest):
               for key in ("dependencies", "dev-dependencies", "build-dependencies"):

@@ -43,6 +43,24 @@ fn main() -> Result<(), EnvironmentError> {
 
 The example uses the CPU by default. [Additional examples](crates/examples/examples) cover other algorithms and environments.
 
+## End-to-end training throughput
+
+ModuRL completed the matched PPO, DQN, and SAC workloads faster than all three Python runners in this CPU benchmark.
+
+| Algorithm | ModuRL median | vs. SB3 runner | vs. CleanRL runner | vs. Tianshou runner |
+| --- | ---: | ---: | ---: | ---: |
+| PPO | 2.102 s | 4.54x | 4.47x | 6.19x |
+| DQN | 0.476 s | 4.92x | 3.16x | 13.13x |
+| SAC | 2.198 s | 2.77x | 2.40x | 4.63x |
+
+These CPU results were measured on a 12th Gen Intel Core i7-1255U with one compute thread. Each value is the median of five fresh-process samples.
+
+The CleanRL runners adapt upstream reference scripts. The DQN Stable-Baselines3 and Tianshou runners also use documented adaptations so all frameworks perform the matched workload.
+
+Compare frameworks within one algorithm. The algorithms perform different amounts of optimizer work per transition. These measurements cover small-network implementation throughput, not sample efficiency, reward, or large-model performance. CUDA and Metal were not measured.
+
+See the [benchmark workloads, fairness controls, and accelerator commands](crates/benches/README.md), plus the raw [PPO](crates/benches/results/ppo-cpu-windows-20260810.json), [DQN](crates/benches/results/dqn-cpu-windows-20260810.json), and [SAC](crates/benches/results/sac-cpu-windows-20260810.json) samples.
+
 ## What ModuRL includes
 
 - Training algorithms: PPO, A2C, SAC, DDPG, TD3, DQN, and Double DQN.
@@ -105,6 +123,7 @@ Agents train against these contracts instead of concrete environment, network, o
 | [`modurl_ale`](crates/modurl_ale) | Arcade Learning Environment integration and Atari wrappers | No; builds bundled C++ | [GPL-2.0-only](crates/modurl_ale/LICENSE); [third-party notices](crates/modurl_ale/THIRD_PARTY_LICENSES.md) |
 | [`modurl_logger`](crates/modurl_logger) | Terminal graphs and TensorBoard event logging | Yes | MIT |
 | [`examples`](crates/examples/Cargo.toml) | Runnable training programs; not published as a crate | Mixed; depends on the example | MIT |
+| [`modurl-benches`](crates/benches/Cargo.toml) | Reproducible cross-framework throughput benchmarks; not published as a crate | Mixed; includes Python runners | MIT |
 
 The core `modurl` crate has no default Cargo features. Enable its
 `multithreading` feature for multithreaded vectorized and stacked environments.

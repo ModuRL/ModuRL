@@ -11,6 +11,7 @@ members = [
     "crates/modurl_logger",
     "crates/modurl_mojoco",
     "crates/examples",
+    "crates/benches",
 ]
 resolver = "3"
 

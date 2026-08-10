@@ -1,0 +1,18 @@
+[package]
+name = "modurl-benches"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+modurl = { path = "../.." }
+modurl_gym = { path = "../modurl_gym" }
+rayon = "1.12.0"
+serde_json = "1.0"
+
+[features]
+default = []
+cuda = ["candle-core/cuda"]
+metal = ["candle-core/metal"]
