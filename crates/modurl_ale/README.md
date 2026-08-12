@@ -25,14 +25,14 @@ Observations are normalized to `0.0..=1.0`. The environment exposes ALE's ROM-sp
 
 Enable display rendering with `features = ["rendering"]`.
 
-## PPO Breakout example
+## PPO Atari example
 
-The workspace includes a readable PPO Breakout example matching the Atari
+The workspace includes a readable PPO Atari example matching the Atari
 recreation from *The 37 Implementation Details of Proximal Policy
-Optimization*. Pass it a Breakout ROM you are legally entitled to use:
+Optimization*. Pass it an Atari ROM you are legally entitled to use:
 
 ```console
-cargo run --release -p examples --example ppo_atari --features atari-environment -- path/to/breakout.bin
+cargo run --release -p examples --example ppo_atari --features atari-environment -- path/to/game.bin
 ```
 
 It uses eight environments, the standard Atari wrapper stack and shared Nature

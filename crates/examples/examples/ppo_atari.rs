@@ -1,12 +1,12 @@
-//! PPO on Atari Breakout.
+//! PPO on an Atari game.
 //!
 //! This follows the Atari recreation from "The 37 Implementation Details of
 //! Proximal Policy Optimization": eight actors, 128-step rollouts, four
 //! minibatches and epochs, and the standard Atari preprocessing and Nature CNN.
 //!
-//! Run with a legally obtained Breakout ROM:
+//! Run with a legally obtained Atari ROM:
 //!
-//! `cargo run --release -p examples --example ppo_atari --features atari-environment -- path/to/breakout.bin`
+//! `cargo run --release -p examples --example ppo_atari --features atari-environment -- path/to/game.bin`
 
 use std::{env, path::PathBuf};
 
@@ -89,7 +89,7 @@ impl Module for NatureCnn {
     }
 }
 
-/// Prints unclipped game scores while PPO trains on sign-clipped rewards.
+/// Prints unclipped episode returns while PPO trains on sign-clipped rewards.
 struct ScoreLogger {
     returns: [f32; NUM_ENVS],
     lengths: [usize; NUM_ENVS],
@@ -111,17 +111,16 @@ impl PPOLogger<RawRewardInfo<AtariInfo>> for ScoreLogger {
         for (index, atari) in info.infos.iter().enumerate() {
             self.returns[index] += atari.raw_reward.unwrap_or(0.0);
             self.lengths[index] += 1;
+        }
 
-            // EpisodicLifeGym ends training episodes on every lost life. Lives
-            // reaches zero only at a real game over, which is the useful score.
-            if atari.inner.lives == 0 {
-                println!(
-                    "step {:>8}: score {:>6.1}, length {}",
-                    info.collection_timestep, self.returns[index], self.lengths[index]
-                );
-                self.returns[index] = 0.0;
-                self.lengths[index] = 0;
-            }
+        for episode in &info.completed_episodes {
+            let index = episode.environment_index;
+            println!(
+                "step {:>8}: episode return {:>6.1}, length {}",
+                info.collection_timestep, self.returns[index], self.lengths[index]
+            );
+            self.returns[index] = 0.0;
+            self.lengths[index] = 0;
         }
     }
 }
@@ -130,7 +129,7 @@ fn main() {
     let rom_path = env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(|| {
         eprintln!(
             "usage: cargo run --release -p examples --example ppo_atari \
-             --features atari-environment -- path/to/breakout.bin"
+             --features atari-environment -- path/to/game.bin"
         );
         std::process::exit(2);
     });
@@ -162,7 +161,7 @@ fn main() {
             .random_seed(seed as i32 + 1)
             .repeat_action_probability(0.0)
             .build()
-            .expect("failed to load the Breakout ROM");
+            .expect("failed to load the Atari ROM");
 
         // The order matches the Atari recreation. AtariGym emits values in
         // [0, 1], so WarpGym and the CNN keep that scale without another /255.
@@ -243,7 +242,7 @@ fn main() {
         .build()
         .expect("invalid PPO configuration");
 
-    println!("training Breakout for {TRAINING_TIMESTEPS} steps");
+    println!("training Atari for {TRAINING_TIMESTEPS} steps");
     agent
         .learn(&mut envs, TRAINING_TIMESTEPS)
         .expect("PPO training failed");
