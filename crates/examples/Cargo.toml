@@ -34,8 +34,14 @@ name = "rendered_lunar_lander_ppo"
 path = "examples/rendered_lunar_lander_ppo.rs"
 required-features = ["rendering"]
 
+[[example]]
+name = "ppo_atari"
+path = "examples/ppo_atari.rs"
+required-features = ["atari-environment"]
+
 [dependencies]
 modurl = { version = "0.1.0", path = "../.." }
+modurl_ale = { version = "0.1.0", path = "../modurl_ale", optional = true }
 modurl_gym = { version = "0.1.0", path = "../modurl_gym" }
 modurl_logger = { version = "0.1.0", path = "../modurl_logger" }
 modurl_mojoco = { version = "0.1.0", path = "../modurl_mojoco" }
@@ -45,6 +51,7 @@ candle-nn = "0.11.0"
 [features]
 default = []
 ant = ["mujoco-environment"]
+atari-environment = ["dep:modurl_ale"]
 half-cheetah = ["mujoco-environment"]
 hopper = ["mujoco-environment"]
 mujoco-environment = []

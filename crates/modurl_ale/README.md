@@ -25,6 +25,20 @@ Observations are normalized to `0.0..=1.0`. The environment exposes ALE's ROM-sp
 
 Enable display rendering with `features = ["rendering"]`.
 
+## PPO Breakout example
+
+The workspace includes a readable PPO Breakout example matching the Atari
+recreation from *The 37 Implementation Details of Proximal Policy
+Optimization*. Pass it a Breakout ROM you are legally entitled to use:
+
+```console
+cargo run --release -p examples --example ppo_atari --features atari-environment -- path/to/breakout.bin
+```
+
+It uses eight environments, the standard Atari wrapper stack and shared Nature
+CNN, and the reference PPO2 hyperparameters for 10 million agent steps (40
+million emulator frames).
+
 ## Licensing and ROMs
 
 This crate is `GPL-2.0-only` and contains GPL-covered ALE/Stella native code. Distributed binaries that link this crate must comply with GPL-2.0; private use does not require publication. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md). This is not legal advice.
