@@ -81,6 +81,8 @@ impl NatureCnn {
 }
 
 impl Module for NatureCnn {
+    /// Maps a batch of stacked frames shaped `[batch, 4, 84, 84]` to
+    /// features shaped `[batch, 512]`.
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let features = self.conv1.forward(input)?.relu()?;
         let features = self.conv2.forward(&features)?.relu()?;
