@@ -892,6 +892,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "modurl",
+ "modurl_ale",
  "modurl_gym",
  "modurl_logger",
  "modurl_mojoco",
