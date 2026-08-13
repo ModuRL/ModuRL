@@ -13,6 +13,31 @@ let envs = (0..4)
 let mut env = VectorizedGymWrapper::from(envs);
 ```
 
+With the `multithreading` feature enabled,
+`MultithreadedVectorizedGymWrapper` runs each inner `Gym` on a persistent
+worker thread. Pass constructors so every inner environment is created on the
+thread that owns it, together with representative observation and action
+spaces:
+
+```rust,ignore
+let constructors = (0..4)
+    .map(|_| {
+        let device = device.clone();
+        move || CartPoleV1::builder().device(&device).build().unwrap()
+    })
+    .collect();
+let mut env = MultithreadedVectorizedGymWrapper::new(
+    constructors,
+    observation_space,
+    action_space,
+);
+```
+
+Each inner environment remains one unit of work. The wrapper preserves the
+batching and auto-reset behavior of `VectorizedGymWrapper`. If an inner
+environment returns an error, reset the complete batch before stepping it
+again.
+
 ## Reset Once, Then Step
 
 Before a manual loop, call `reset` once to receive one initial observation per
