@@ -58,7 +58,8 @@ pub use crate::parameter_schedule::{
 };
 pub use crate::spaces::{BoxSpace, Discrete, Space};
 pub use crate::wrappers::{
-    ClipRewardGym, ClipRewardGymError, FrameStackGym, FrameStackGymError, MaxAndSkipGym,
-    MaxAndSkipGymError, NormalizeObservationGym, NormalizeObservationGymError, NormalizeRewardGym,
-    RawRewardInfo, RecordRawRewardGym, TimeLimitGym,
+    ClipRewardGym, ClipRewardGymError, EpisodeStatistics, EpisodeStatisticsInfo, FrameStackGym,
+    FrameStackGymError, MaxAndSkipGym, MaxAndSkipGymError, NormalizeObservationGym,
+    NormalizeObservationGymError, NormalizeRewardGym, RawRewardInfo, RecordEpisodeStatisticsGym,
+    RecordRawRewardGym, TimeLimitGym,
 };

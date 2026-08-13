@@ -2,12 +2,11 @@ use candle_core::{DType, Module, Tensor};
 use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 
-#[path = "support/graphers.rs"]
-mod graphers;
-use graphers::MujocoOnPolicyGrapher;
-#[path = "support/mujoco.rs"]
-mod mujoco;
-use mujoco::ENVIRONMENT_NAME;
+mod support;
+use support::{
+    graphers::OnPolicyGrapher,
+    mujoco::{self, ENVIRONMENT_NAME},
+};
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
 const DTYPE: DType = DType::F32;
@@ -105,7 +104,7 @@ fn main() {
             .build(),
     );
 
-    let mut grapher = MujocoOnPolicyGrapher::a2c(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
+    let mut grapher = OnPolicyGrapher::a2c_mujoco(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
     let mut agent = A2CAgent::builder()
         .dtype(DTYPE)
         .action_space(action_space)

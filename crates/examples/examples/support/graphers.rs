@@ -1,8 +1,9 @@
-// Each example imports one grapher from this shared module.
+// Each example imports only the grapher used by that executable.
 #![allow(dead_code)]
 
 use std::{
     io::{self, Write},
+    marker::PhantomData,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -158,7 +159,12 @@ impl PPOLogger for PPOGrapher {
     }
 }
 
-pub struct MujocoOnPolicyGrapher {
+pub struct AgentEpisodeBoundaries;
+
+#[cfg(feature = "atari-environment")]
+pub struct RecordedEpisodeBoundaries;
+
+pub struct OnPolicyGrapher<EpisodeSource = AgentEpisodeBoundaries> {
     timestep: usize,
     total_timesteps: usize,
     terminal: TerminalLogger,
@@ -166,17 +172,27 @@ pub struct MujocoOnPolicyGrapher {
     raw_reward_sum: f32,
     raw_reward_samples: usize,
     running_episode_returns: Vec<f32>,
+    episode_source: PhantomData<EpisodeSource>,
 }
 
-impl MujocoOnPolicyGrapher {
-    pub fn ppo(total_timesteps: usize, environment_name: &str) -> Self {
+impl OnPolicyGrapher<AgentEpisodeBoundaries> {
+    pub fn ppo_mujoco(total_timesteps: usize, environment_name: &str) -> Self {
         Self::new(total_timesteps, environment_name, "ppo_mujoco")
     }
 
-    pub fn a2c(total_timesteps: usize, environment_name: &str) -> Self {
+    pub fn a2c_mujoco(total_timesteps: usize, environment_name: &str) -> Self {
         Self::new(total_timesteps, environment_name, "a2c_mujoco")
     }
+}
 
+#[cfg(feature = "atari-environment")]
+impl OnPolicyGrapher<RecordedEpisodeBoundaries> {
+    pub fn ppo_atari(total_timesteps: usize, environment_name: &str) -> Self {
+        Self::new(total_timesteps, environment_name, "ppo_atari")
+    }
+}
+
+impl<EpisodeSource> OnPolicyGrapher<EpisodeSource> {
     fn new(total_timesteps: usize, environment_name: &str, run_name: &str) -> Self {
         let aggregation = with_episode_smoothing(with_metric_window(
             with_metric_window(
@@ -204,7 +220,65 @@ impl MujocoOnPolicyGrapher {
             raw_reward_sum: 0.0,
             raw_reward_samples: 0,
             running_episode_returns: Vec::new(),
+            episode_source: PhantomData,
         }
+    }
+
+    fn log_update(&mut self, info: &PPOLogEntry) {
+        let new_timestep = info.timestep != self.timestep;
+        if new_timestep {
+            self.timestep = info.timestep;
+            if self.raw_reward_samples > 0 {
+                let mean_raw_reward = Tensor::new(
+                    self.raw_reward_sum / self.raw_reward_samples as f32,
+                    &Device::Cpu,
+                )
+                .unwrap();
+                self.log_terminal_and_tensorboard(
+                    info.timestep,
+                    &[("Mean Raw Step Reward", &mean_raw_reward)],
+                );
+            }
+            self.raw_reward_sum = 0.0;
+            self.raw_reward_samples = 0;
+        }
+
+        let actor_loss = info.actor_loss.mean_all().unwrap();
+        let critic_loss = info.critic_loss.mean_all().unwrap();
+        let entropy = info.entropy.mean_all().unwrap();
+        let kl_divergence = info.kl_divergence.mean_all().unwrap();
+        let explained_variance = info.explained_variance.mean_all().unwrap();
+        self.log_terminal_and_tensorboard(
+            info.timestep,
+            &[
+                ("Actor Loss", &actor_loss),
+                ("Critic Loss", &critic_loss),
+                ("Entropy", &entropy),
+                ("KL Divergence", &kl_divergence),
+                ("Explained Variance", &explained_variance),
+            ],
+        );
+        if new_timestep {
+            self.progress();
+        }
+    }
+
+    fn record_raw_reward(&mut self, reward: f32) {
+        self.raw_reward_sum += reward;
+        self.raw_reward_samples += 1;
+    }
+
+    fn record_episode(&mut self, timestep: usize, episode_return: f32, episode_length: usize) {
+        let episode_return = Tensor::new(episode_return, &Device::Cpu).unwrap();
+        let episode_length = Tensor::new(episode_length as f32, &Device::Cpu).unwrap();
+        self.log_terminal_and_tensorboard(
+            timestep,
+            &[
+                (EPISODE_RETURN_METRIC, &episode_return),
+                (EPISODE_LENGTH_METRIC, &episode_length),
+            ],
+        );
+        self.progress();
     }
 
     fn progress(&self) {
@@ -248,74 +322,59 @@ fn tensorboard_log_dir(run_name: &str, environment_name: &str) -> PathBuf {
     ))
 }
 
-impl<I> PPOLogger<RawRewardInfo<I>> for MujocoOnPolicyGrapher {
+impl<I> PPOLogger<RawRewardInfo<I>> for OnPolicyGrapher<AgentEpisodeBoundaries> {
     fn log(&mut self, info: &PPOLogEntry) {
-        let new_timestep = info.timestep != self.timestep;
-        if new_timestep {
-            self.timestep = info.timestep;
-            if self.raw_reward_samples > 0 {
-                let mean_raw_reward = Tensor::new(
-                    self.raw_reward_sum / self.raw_reward_samples as f32,
-                    &Device::Cpu,
-                )
-                .unwrap();
-                self.log_terminal_and_tensorboard(
-                    info.timestep,
-                    &[("Mean Raw Step Reward", &mean_raw_reward)],
-                );
-            }
-            self.raw_reward_sum = 0.0;
-            self.raw_reward_samples = 0;
-        }
-
-        let actor_loss = info.actor_loss.mean_all().unwrap();
-        let critic_loss = info.critic_loss.mean_all().unwrap();
-        let entropy = info.entropy.mean_all().unwrap();
-        let kl_divergence = info.kl_divergence.mean_all().unwrap();
-        let explained_variance = info.explained_variance.mean_all().unwrap();
-        self.log_terminal_and_tensorboard(
-            info.timestep,
-            &[
-                ("Actor Loss", &actor_loss),
-                ("Critic Loss", &critic_loss),
-                ("Entropy", &entropy),
-                ("KL Divergence", &kl_divergence),
-                ("Explained Variance", &explained_variance),
-            ],
-        );
-        if new_timestep {
-            self.progress();
-        }
+        self.log_update(info);
     }
 
     fn log_collection(&mut self, info: &PPOCollectionLogEntry<RawRewardInfo<I>>) {
         if self.running_episode_returns.len() != info.infos.len() {
             self.running_episode_returns = vec![0.0; info.infos.len()];
         }
-        for (episode_return, env_info) in self.running_episode_returns.iter_mut().zip(&info.infos) {
+        for (environment_index, env_info) in info.infos.iter().enumerate() {
             let raw_reward = env_info
                 .raw_reward
                 .expect("RecordRawRewardGym attaches every raw step reward");
-            self.raw_reward_sum += raw_reward;
-            self.raw_reward_samples += 1;
-            *episode_return += raw_reward;
+            self.record_raw_reward(raw_reward);
+            self.running_episode_returns[environment_index] += raw_reward;
         }
         for episode in &info.completed_episodes {
-            let episode_return = Tensor::new(
-                self.running_episode_returns[episode.environment_index],
-                &Device::Cpu,
-            )
-            .unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
-            self.log_terminal_and_tensorboard(
-                episode.collection_timestep,
-                &[
-                    (EPISODE_RETURN_METRIC, &episode_return),
-                    (EPISODE_LENGTH_METRIC, &episode_length),
-                ],
-            );
+            let episode_return = self.running_episode_returns[episode.environment_index];
             self.running_episode_returns[episode.environment_index] = 0.0;
-            self.progress();
+            self.record_episode(
+                episode.collection_timestep,
+                episode_return,
+                episode.episode_length,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "atari-environment")]
+impl<I> PPOLogger<RawRewardInfo<EpisodeStatisticsInfo<I>>>
+    for OnPolicyGrapher<RecordedEpisodeBoundaries>
+{
+    fn log(&mut self, info: &PPOLogEntry) {
+        self.log_update(info);
+    }
+
+    fn log_collection(
+        &mut self,
+        info: &PPOCollectionLogEntry<RawRewardInfo<EpisodeStatisticsInfo<I>>>,
+    ) {
+        for env_info in &info.infos {
+            let raw_reward = env_info
+                .raw_reward
+                .expect("RecordRawRewardGym attaches every raw step reward");
+            self.record_raw_reward(raw_reward);
+
+            if let Some(episode) = env_info.inner.completed_episode {
+                self.record_episode(
+                    info.collection_timestep,
+                    episode.episode_return,
+                    episode.episode_length,
+                );
+            }
         }
     }
 }

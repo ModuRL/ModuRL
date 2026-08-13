@@ -5,9 +5,8 @@ use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 const DTYPE: DType = DType::F32;
 
-#[path = "support/graphers.rs"]
-mod graphers;
-use graphers::DQNGrapher;
+mod support;
+use support::graphers::DQNGrapher;
 
 fn main() {
     #[cfg(not(any(feature = "cuda", feature = "metal")))]

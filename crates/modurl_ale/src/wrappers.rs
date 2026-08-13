@@ -3,6 +3,7 @@ use candle_core::{Device, IndexOp, Tensor};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     sampling::sample_u32_inclusive,
+    wrappers::EpisodeStatisticsInfo,
 };
 
 /// Takes a random number of no-op actions after reset.
@@ -79,39 +80,55 @@ where
 /// progress from the remaining lives.
 pub struct EpisodicLifeGym<G> {
     gym: G,
-    last_lives: u8,
+    last_lives: u32,
     was_real_done: bool,
     device: candle_core::Device,
 }
 
-impl<G> EpisodicLifeGym<G>
+/// Metadata that exposes the number of lives remaining in an Atari game.
+pub trait AtariLives {
+    /// Returns the current number of lives reported by ALE.
+    fn lives(&self) -> u32;
+}
+
+impl AtariLives for AtariInfo {
+    fn lives(&self) -> u32 {
+        self.lives
+    }
+}
+
+impl<I> AtariLives for EpisodeStatisticsInfo<I>
 where
-    G: Gym<AtariInfo>,
-    <G as Gym<AtariInfo>>::Error: std::fmt::Debug,
+    I: AtariLives,
 {
+    fn lives(&self) -> u32 {
+        self.inner.lives()
+    }
+}
+
+impl<G> EpisodicLifeGym<G> {
     pub fn new(gym: G, device: &Device) -> Self {
         Self {
             gym,
             last_lives: 0,
-            was_real_done: true, // Start as true so first reset is a real reset
+            was_real_done: true,
             device: device.clone(),
         }
     }
 }
 
-impl<G> Gym<AtariInfo> for EpisodicLifeGym<G>
+impl<G, I> Gym<I> for EpisodicLifeGym<G>
 where
-    G: Gym<AtariInfo>,
+    G: Gym<I>,
+    I: AtariLives,
 {
-    type Error = <G as Gym<AtariInfo>>::Error;
-    type SpaceError = <G as Gym<AtariInfo>>::SpaceError;
+    type Error = G::Error;
+    type SpaceError = G::SpaceError;
 
-    fn reset(&mut self) -> Result<ResetInfo<AtariInfo>, Self::Error> {
+    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
         let reset = if self.was_real_done {
-            // Real game over, do a full reset
             self.gym.reset()?
         } else {
-            // Life lost but game not over, just take a no-op to continue
             let noop_action = Tensor::new(0u32, &self.device).unwrap();
             let step = self.gym.step(noop_action)?;
             if step.done || step.truncated {
@@ -124,25 +141,24 @@ where
             }
         };
 
-        self.last_lives = reset.info.lives as u8;
+        self.last_lives = reset.info.lives();
         Ok(reset)
     }
 
     /// Forwards one scalar Atari action shaped `[]`.
-    fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<AtariInfo>, Self::Error> {
-        let mut info = self.gym.step(action)?;
-        let current_lives = info.info.lives;
+    fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<I>, Self::Error> {
+        let mut step = self.gym.step(action)?;
+        let current_lives = step.info.lives();
 
-        self.was_real_done = info.done || info.truncated;
+        self.was_real_done = step.done || step.truncated;
 
-        // If lives decreased, mark episode as done (but game may continue)
-        if (current_lives as u8) < self.last_lives {
-            info.done = true;
+        if current_lives < self.last_lives {
+            step.done = true;
         }
 
-        self.last_lives = current_lives as u8;
+        self.last_lives = current_lives;
 
-        Ok(info)
+        Ok(step)
     }
 
     fn action_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
@@ -378,7 +394,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use modurl::spaces::{BoxSpace, Discrete};
+    use modurl::{
+        spaces::{BoxSpace, Discrete},
+        wrappers::{EpisodeStatistics, RecordEpisodeStatisticsGym},
+    };
 
     #[derive(Clone)]
     struct ScriptStep {
@@ -561,6 +580,37 @@ mod tests {
         assert_eq!(wrapper.gym.actions, vec![1, 0]);
         assert_eq!(wrapper.gym.reset_count, 1);
         assert_eq!(scalar(&reset_obs.state), 12.0);
+    }
+
+    #[test]
+    fn episodic_life_preserves_complete_episode_statistics() {
+        let gym = ScriptGym::new(vec![
+            ScriptGym::step(11.0, 1.0, false, false, 2),
+            ScriptGym::step(12.0, 0.0, false, false, 2),
+            ScriptGym::step(13.0, 2.0, true, false, 0),
+        ]);
+        let gym = RecordEpisodeStatisticsGym::new(gym);
+        let mut wrapper = EpisodicLifeGym::new(gym, &Device::Cpu);
+
+        wrapper.reset().unwrap();
+        let life_loss = wrapper
+            .step(Tensor::new(1u32, &Device::Cpu).unwrap())
+            .unwrap();
+        assert!(life_loss.done);
+        assert!(life_loss.info.completed_episode.is_none());
+
+        wrapper.reset().unwrap();
+        let game_over = wrapper
+            .step(Tensor::new(1u32, &Device::Cpu).unwrap())
+            .unwrap();
+        assert!(game_over.done);
+        assert_eq!(
+            game_over.info.completed_episode,
+            Some(EpisodeStatistics {
+                episode_return: 3.0,
+                episode_length: 3,
+            })
+        );
     }
 
     #[test]

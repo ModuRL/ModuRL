@@ -18,17 +18,92 @@ use modurl::{
     prelude::*,
 };
 use modurl_ale::{
-    AtariGym, AtariInfo, AtariObsType,
-    wrappers::{EpisodicLifeGym, FireResetGym, NoopResetGym, WarpGym},
+    AtariGym, AtariObsType,
+    wrappers::{EpisodicLifeGym, FireResetGym, FireResetGymError, NoopResetGym, WarpGym},
 };
+
+mod support;
+use support::graphers::OnPolicyGrapher;
 
 const NUM_ENVS: usize = 8;
 const NUM_STEPS: usize = 128;
+const NUM_MINIBATCHES: usize = 4;
+const UPDATE_EPOCHS: usize = 4;
 const BATCH_SIZE: usize = NUM_ENVS * NUM_STEPS;
 const REQUESTED_TIMESTEPS: usize = 10_000_000;
-// Like the reference, train only on complete 1,024-transition rollouts.
+// PPO updates require complete rollouts, so discard the partial final batch.
 const TRAINING_TIMESTEPS: usize = REQUESTED_TIMESTEPS / BATCH_SIZE * BATCH_SIZE;
+const SEED: i32 = 1;
 const LEARNING_RATE: f64 = 2.5e-4;
+const ADAM_BETA1: f64 = 0.9;
+const ADAM_BETA2: f64 = 0.999;
+const ADAM_EPSILON: f64 = 1e-5;
+const GAMMA: f32 = 0.99;
+const GAE_LAMBDA: f32 = 0.95;
+const CLIP_COEFFICIENT: f64 = 0.1;
+const ENTROPY_COEFFICIENT: f32 = 0.01;
+const VALUE_COEFFICIENT: f32 = 0.5;
+const MAX_GRADIENT_NORM: f32 = 0.5;
+
+const NOOP_MAX: u32 = 30;
+const FRAME_SKIP: usize = 4;
+const FRAME_STACK: usize = 4;
+// This wrapper is inside the action-repeat wrapper, so the limit is measured
+// in emulator frames rather than agent steps.
+const MAX_EPISODE_FRAMES: u32 = 400_000;
+
+/// Applies FIRE reset only to games whose action set includes FIRE.
+enum OptionalFireResetGym<G> {
+    Plain(G),
+    Fire(FireResetGym<G>),
+}
+
+impl<G> OptionalFireResetGym<G> {
+    fn new(gym: G, enabled: bool) -> Self {
+        if enabled {
+            Self::Fire(FireResetGym::new(gym))
+        } else {
+            Self::Plain(gym)
+        }
+    }
+}
+
+impl<G, I> Gym<I> for OptionalFireResetGym<G>
+where
+    G: Gym<I>,
+{
+    type Error = FireResetGymError<G::Error>;
+    type SpaceError = G::SpaceError;
+
+    fn reset(&mut self) -> std::result::Result<ResetInfo<I>, Self::Error> {
+        match self {
+            Self::Plain(gym) => gym.reset().map_err(FireResetGymError::GymError),
+            Self::Fire(gym) => gym.reset(),
+        }
+    }
+
+    /// Forwards one scalar Atari action shaped `[]`.
+    fn step(&mut self, action: Tensor) -> std::result::Result<StepInfo<I>, Self::Error> {
+        match self {
+            Self::Plain(gym) => gym.step(action).map_err(FireResetGymError::GymError),
+            Self::Fire(gym) => gym.step(action),
+        }
+    }
+
+    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        match self {
+            Self::Plain(gym) => gym.action_space(),
+            Self::Fire(gym) => gym.action_space(),
+        }
+    }
+
+    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+        match self {
+            Self::Plain(gym) => gym.observation_space(),
+            Self::Fire(gym) => gym.observation_space(),
+        }
+    }
+}
 
 /// The shared Nature CNN used by both the policy and value heads.
 struct NatureCnn {
@@ -91,42 +166,6 @@ impl Module for NatureCnn {
     }
 }
 
-/// Prints unclipped episode returns while PPO trains on sign-clipped rewards.
-struct ScoreLogger {
-    returns: [f32; NUM_ENVS],
-    lengths: [usize; NUM_ENVS],
-}
-
-impl ScoreLogger {
-    fn new() -> Self {
-        Self {
-            returns: [0.0; NUM_ENVS],
-            lengths: [0; NUM_ENVS],
-        }
-    }
-}
-
-impl PPOLogger<RawRewardInfo<AtariInfo>> for ScoreLogger {
-    fn log(&mut self, _info: &PPOLogEntry) {}
-
-    fn log_collection(&mut self, info: &PPOCollectionLogEntry<RawRewardInfo<AtariInfo>>) {
-        for (index, atari) in info.infos.iter().enumerate() {
-            self.returns[index] += atari.raw_reward.unwrap_or(0.0);
-            self.lengths[index] += 1;
-        }
-
-        for episode in &info.completed_episodes {
-            let index = episode.environment_index;
-            println!(
-                "step {:>8}: episode return {:>6.1}, length {}",
-                info.collection_timestep, self.returns[index], self.lengths[index]
-            );
-            self.returns[index] = 0.0;
-            self.lengths[index] = 0;
-        }
-    }
-}
-
 fn main() {
     let rom_path = env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(|| {
         eprintln!(
@@ -144,37 +183,45 @@ fn main() {
     #[cfg(feature = "cuda")]
     let device = {
         let device = Device::new_cuda(0).expect("failed to create CUDA device");
-        device.set_seed(1).expect("failed to seed the CUDA device");
+        device
+            .set_seed(SEED as u64)
+            .expect("failed to seed the CUDA device");
         device
     };
     #[cfg(feature = "metal")]
     let device = {
         let device = Device::new_metal(0).expect("failed to create Metal device");
-        device.set_seed(1).expect("failed to seed the Metal device");
+        device
+            .set_seed(SEED as u64)
+            .expect("failed to seed the Metal device");
         device
     };
 
     let mut envs = Vec::with_capacity(NUM_ENVS);
     for seed in 0..NUM_ENVS {
-        let env = AtariGym::builder()
+        let mut env = AtariGym::builder()
             .rom_path(rom_path.clone())
             .obs_type(AtariObsType::RGBScreen)
             .device(device.clone())
-            .random_seed(seed as i32 + 1)
+            .random_seed(seed as i32 + SEED)
             .repeat_action_probability(0.0)
             .build()
             .expect("failed to load the Atari ROM");
+        let has_fire_action = env.minimal_action_set().contains(&1);
 
-        // The order matches the Atari recreation. AtariGym emits values in
-        // [0, 1], so WarpGym and the CNN keep that scale without another /255.
-        let env = NoopResetGym::new(env);
-        let env = MaxAndSkipGym::new(env, 4);
+        // Wrapper order determines whether limits, rewards, and episode ends
+        // apply to emulator frames or agent steps. AtariGym observations are
+        // already scaled to [0, 1], so no additional normalization is needed.
+        let env = TimeLimitGym::new(env, MAX_EPISODE_FRAMES);
+        let env = RecordEpisodeStatisticsGym::new(env);
+        let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
+        let env = MaxAndSkipGym::new(env, FRAME_SKIP);
         let env = EpisodicLifeGym::new(env, &device);
-        let env = FireResetGym::new(env);
+        let env = OptionalFireResetGym::new(env, has_fire_action);
         let env = RecordRawRewardGym::new(env);
         let env = ClipRewardGym::new(env);
         let env = WarpGym::new(env);
-        let env = FrameStackGym::new(env, 4);
+        let env = FrameStackGym::new(env, FRAME_STACK);
         envs.push(env);
     }
 
@@ -189,20 +236,22 @@ fn main() {
         linear_ortho(512, action_count, 0.01, vb.pp("actor")).expect("failed to build actor head");
     let critic = linear_ortho(512, 1, 1.0, vb.pp("critic")).expect("failed to build critic head");
 
-    // AdamW with zero weight decay is Adam. epsilon=1e-5 matches Baselines.
+    // AdamW is equivalent to Adam when weight decay is zero.
     let optimizer = AdamW::new(
         variables.all_vars(),
         ParamsAdamW {
             lr: LEARNING_RATE,
-            eps: 1e-5,
+            beta1: ADAM_BETA1,
+            beta2: ADAM_BETA2,
+            eps: ADAM_EPSILON,
             weight_decay: 0.0,
-            ..Default::default()
         },
     )
     .expect("failed to build Adam optimizer");
 
-    // ModuRL advances schedule progress immediately before each update. This
-    // one-batch offset makes its values identical to Baselines update 1..N.
+    // Schedule progress advances before each update. The offset preserves the
+    // initial learning rate for the first update and reaches one update's
+    // fraction of it for the final update.
     let update_count = TRAINING_TIMESTEPS / BATCH_SIZE;
     let learning_rate = move |progress: f64| {
         let fraction = (1.0 - progress + 1.0 / update_count as f64).clamp(0.0, 1.0);
@@ -221,31 +270,40 @@ fn main() {
             .build(),
     );
 
-    let mut logger = ScoreLogger::new();
-    let mut agent = PPOAgent::builder()
-        .action_space(action_space)
-        .network_info(networks)
-        .batch_size(BATCH_SIZE)
-        .mini_batch_size(BATCH_SIZE / 4)
-        .num_epochs(4)
-        .gamma(0.99)
-        .gae_lambda(0.95)
-        .normalize_advantage(true)
-        .clip_range(Box::new(ConstantSchedule::new(0.1)))
-        .clip_value_loss(true)
-        // The recreation uses 0.5 * vf_coef * MSE. ModuRL's value loss is
-        // MSE, so 0.25 gives the reference's vf_coef=0.5 effective weight.
-        .vf_coef(0.25)
-        .ent_coef(0.01)
-        .gradient_clip(0.5)
-        .training_horizon(TRAINING_TIMESTEPS)
-        .device(device)
-        .logging_info(&mut logger)
-        .build()
-        .expect("invalid PPO configuration");
+    let game_name = rom_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("atari");
+    let mut logger = OnPolicyGrapher::ppo_atari(TRAINING_TIMESTEPS, game_name);
+    {
+        let mut agent = PPOAgent::builder()
+            .action_space(action_space)
+            .network_info(networks)
+            .clipped(true)
+            .batch_size(BATCH_SIZE)
+            .mini_batch_size(BATCH_SIZE / NUM_MINIBATCHES)
+            .num_epochs(UPDATE_EPOCHS)
+            .gamma(GAMMA)
+            .gae_lambda(GAE_LAMBDA)
+            .normalize_advantage(true)
+            .normalize_returns(false)
+            .clip_range(Box::new(ConstantSchedule::new(CLIP_COEFFICIENT)))
+            .clip_value_loss(true)
+            // The PPO objective defines value loss as 0.5 * MSE, while the
+            // library's value-loss helper returns MSE directly.
+            .vf_coef(0.5 * VALUE_COEFFICIENT)
+            .ent_coef(ENTROPY_COEFFICIENT)
+            .gradient_clip(MAX_GRADIENT_NORM)
+            .training_horizon(TRAINING_TIMESTEPS)
+            .device(device)
+            .logging_info(&mut logger)
+            .build()
+            .expect("invalid PPO configuration");
 
-    println!("training Atari for {TRAINING_TIMESTEPS} steps");
-    agent
-        .learn(&mut envs, TRAINING_TIMESTEPS)
-        .expect("PPO training failed");
+        println!("training Atari for {TRAINING_TIMESTEPS} steps");
+        agent
+            .learn(&mut envs, TRAINING_TIMESTEPS)
+            .expect("PPO training failed");
+    }
+    logger.display();
 }

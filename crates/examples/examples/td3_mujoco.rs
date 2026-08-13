@@ -2,12 +2,11 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 
-#[path = "support/graphers.rs"]
-mod graphers;
-use graphers::DeterministicActorCriticGrapher;
-#[path = "support/mujoco.rs"]
-mod mujoco;
-use mujoco::ENVIRONMENT_NAME;
+mod support;
+use support::{
+    graphers::DeterministicActorCriticGrapher,
+    mujoco::{self, ENVIRONMENT_NAME},
+};
 
 const TOTAL_TIMESTEPS: usize = 1_000_000;
 const DTYPE: DType = DType::F32;
