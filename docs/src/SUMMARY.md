@@ -19,6 +19,7 @@
   - [Double DQN](./ddqn.md)
   - [Understand a Q-Learning Training Run](./understand-q-learning-training.md)
 - [Environments](./environments.md)
+  - [Environment Wrappers](./wrappers.md)
   - [Use Vectorized Environments](./vectorized-environments.md)
   - [Build a Custom Gym Environment](./custom-gym-environment.md)
 - [How-to Guides](./how-to-guides.md)
