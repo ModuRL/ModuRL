@@ -213,6 +213,7 @@ fn main() {
         // apply to emulator frames or agent steps. AtariGym observations are
         // already scaled to [0, 1], so no additional normalization is needed.
         let env = TimeLimitGym::new(env, MAX_EPISODE_FRAMES);
+        let env = RecordEpisodeStatisticsGym::new(env);
         let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
         let env = MaxAndSkipGym::new(env, FRAME_SKIP);
         let env = EpisodicLifeGym::new(env, &device);

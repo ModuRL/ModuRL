@@ -9,7 +9,10 @@ pub mod observation;
 pub mod reward;
 pub mod time_limit;
 
-pub use info::{RawRewardInfo, RecordRawRewardGym};
+pub use info::{
+    EpisodeStatistics, EpisodeStatisticsInfo, RawRewardInfo, RecordEpisodeStatisticsGym,
+    RecordRawRewardGym,
+};
 pub use normalize::{NormalizeObservationGym, NormalizeObservationGymError, NormalizeRewardGym};
 pub use observation::{FrameStackGym, FrameStackGymError, MaxAndSkipGym, MaxAndSkipGymError};
 pub use reward::{ClipRewardGym, ClipRewardGymError};
