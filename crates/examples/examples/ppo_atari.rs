@@ -82,6 +82,7 @@ where
         }
     }
 
+    /// Forwards one scalar Atari action shaped `[]`.
     fn step(&mut self, action: Tensor) -> std::result::Result<StepInfo<I>, Self::Error> {
         match self {
             Self::Plain(gym) => gym.step(action).map_err(FireResetGymError::GymError),
