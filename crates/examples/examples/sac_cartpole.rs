@@ -3,9 +3,8 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
-#[path = "support/graphers.rs"]
-mod graphers;
-use graphers::SACGrapher;
+mod support;
+use support::graphers::SACGrapher;
 
 const DTYPE: DType = DType::F32;
 

@@ -3,6 +3,23 @@ name = "examples"
 version = "0.0.0"
 edition = "2024"
 publish = false
+autoexamples = false
+
+[[example]]
+name = "dqn_cartpole"
+path = "examples/dqn_cartpole.rs"
+
+[[example]]
+name = "ppo_bench"
+path = "examples/ppo_bench.rs"
+
+[[example]]
+name = "ppo_cartpole"
+path = "examples/ppo_cartpole.rs"
+
+[[example]]
+name = "sac_cartpole"
+path = "examples/sac_cartpole.rs"
 
 [[example]]
 name = "ppo_mujoco"

@@ -1,4 +1,4 @@
-// Each example imports one grapher from this shared module.
+// Each example imports only the grapher used by that executable.
 #![allow(dead_code)]
 
 use std::{
@@ -158,7 +158,7 @@ impl PPOLogger for PPOGrapher {
     }
 }
 
-pub struct MujocoOnPolicyGrapher {
+pub struct OnPolicyGrapher {
     timestep: usize,
     total_timesteps: usize,
     terminal: TerminalLogger,
@@ -168,13 +168,17 @@ pub struct MujocoOnPolicyGrapher {
     running_episode_returns: Vec<f32>,
 }
 
-impl MujocoOnPolicyGrapher {
-    pub fn ppo(total_timesteps: usize, environment_name: &str) -> Self {
+impl OnPolicyGrapher {
+    pub fn ppo_mujoco(total_timesteps: usize, environment_name: &str) -> Self {
         Self::new(total_timesteps, environment_name, "ppo_mujoco")
     }
 
-    pub fn a2c(total_timesteps: usize, environment_name: &str) -> Self {
+    pub fn a2c_mujoco(total_timesteps: usize, environment_name: &str) -> Self {
         Self::new(total_timesteps, environment_name, "a2c_mujoco")
+    }
+
+    pub fn ppo_atari(total_timesteps: usize, environment_name: &str) -> Self {
+        Self::new(total_timesteps, environment_name, "ppo_atari")
     }
 
     fn new(total_timesteps: usize, environment_name: &str, run_name: &str) -> Self {
@@ -248,7 +252,7 @@ fn tensorboard_log_dir(run_name: &str, environment_name: &str) -> PathBuf {
     ))
 }
 
-impl<I> PPOLogger<RawRewardInfo<I>> for MujocoOnPolicyGrapher {
+impl<I> PPOLogger<RawRewardInfo<I>> for OnPolicyGrapher {
     fn log(&mut self, info: &PPOLogEntry) {
         let new_timestep = info.timestep != self.timestep;
         if new_timestep {

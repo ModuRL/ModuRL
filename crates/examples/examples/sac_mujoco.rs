@@ -2,12 +2,11 @@ use candle_core::{DType, Device, Module, Tensor, Var};
 use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::prelude::*;
 
-#[path = "support/graphers.rs"]
-mod graphers;
-use graphers::SACGrapher;
-#[path = "support/mujoco.rs"]
-mod mujoco;
-use mujoco::ENVIRONMENT_NAME;
+mod support;
+use support::{
+    graphers::SACGrapher,
+    mujoco::{self, ENVIRONMENT_NAME},
+};
 
 const DTYPE: DType = DType::F32;
 
