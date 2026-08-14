@@ -78,12 +78,12 @@ After creating the Candle modules and optimizers, a separate-network PPO agent i
 
 ```rust
 let policy =
-    ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor));
+    ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor);
 
 let networks = PPONetworkInfo::Separate(
     SeparatePPONetwork::builder()
-        .actor_network(Box::new(policy))
-        .critic_network(Box::new(critic))
+        .actor_network(policy)
+        .critic_network(critic)
         .actor_optimizer(actor_optimizer)
         .critic_optimizer(critic_optimizer)
         .build(),
@@ -94,7 +94,7 @@ let mut agent = PPOAgent::builder()
     .network_info(networks)
     .batch_size(2_048)
     .mini_batch_size(64)
-    .clip_range(Box::new(ConstantSchedule::new(0.2)))
+    .clip_range(ConstantSchedule::new(0.2))
     .training_horizon(100_000)
     .device(device)
     .logging_info(&mut logger)

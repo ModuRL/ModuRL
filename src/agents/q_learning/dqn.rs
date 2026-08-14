@@ -84,15 +84,19 @@ where
     pub fn new(
         action_space: Discrete,
         observation_space: Box<dyn Space<Error = SE>>,
+        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
         target_q_network: Box<dyn candle_core::Module>,
+        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
         online_q_network: Box<dyn candle_core::Module>,
         target_vars: &'a mut VarMap,
         online_vars: &'a VarMap,
         optimizer: O,
         #[builder(default = 1000)] target_update_interval: usize,
-        #[builder(default = Box::new(LinearSchedule::new(1.0, 0.1)))] epsilon_schedule: Box<
-            dyn ParameterSchedule,
-        >,
+        #[builder(
+            default = Box::new(LinearSchedule::new(1.0, 0.1)),
+            with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule)
+        )]
+        epsilon_schedule: Box<dyn ParameterSchedule>,
         #[builder(default = 10000)] replay_capacity: usize,
         #[builder(default = 32)] batch_size: usize,
         #[builder(default = 0.99)] gamma: f32,
@@ -216,12 +220,12 @@ mod tests {
         let mut agent = DQNAgent::builder()
             .action_space(Discrete::new(2))
             .observation_space(env.observation_space())
-            .online_q_network(Box::new(q_network(&online_vars, &device)))
-            .target_q_network(Box::new(q_network(&target_vars, &device)))
+            .online_q_network(q_network(&online_vars, &device))
+            .target_q_network(q_network(&target_vars, &device))
             .online_vars(&online_vars)
             .target_vars(&mut target_vars)
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
-            .epsilon_schedule(Box::new(ConstantSchedule::new(0.0)))
+            .epsilon_schedule(ConstantSchedule::new(0.0))
             .replay_capacity(4)
             .batch_size(1)
             .training_start(1)

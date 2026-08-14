@@ -22,11 +22,11 @@ fn sac_mlp(
         .output_size(output_size)
         .vb(vb)
         .hidden_layer_sizes(vec![64, 64])
-        .activation(Box::new(Tensor::tanh))
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .activation(Tensor::tanh)
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0_f64.sqrt(),
             output_gain,
-        }))
+        })
         .name(name.to_owned())
         .build()
 }
@@ -68,8 +68,8 @@ fn scalar_critic<'a>(
         "mlp",
     )?;
     SACCritic::builder()
-        .online_network(Box::new(ScalarStateActionCritic::new(Box::new(online))))
-        .target_network(Box::new(ScalarStateActionCritic::new(Box::new(target))))
+        .online_network(ScalarStateActionCritic::new(online))
+        .target_network(ScalarStateActionCritic::new(target))
         .online_vars(online_vars)
         .target_vars(target_vars)
         .optimizer(AdamW::new(
@@ -116,10 +116,8 @@ fn main() {
         GaussianDistribution::new(action_shape).unwrap(),
         TanhTransform,
     );
-    let policy = ProbabilisticPolicyModel::with_distribution(
-        Box::new(GaussianModule { mean, log_std }),
-        distribution,
-    );
+    let policy =
+        ProbabilisticPolicyModel::with_distribution(GaussianModule { mean, log_std }, distribution);
     let actor_optimizer = AdamW::new(actor_vars.all_vars(), optimizer_parameters.clone()).unwrap();
 
     let online_vars_1 = VarMap::new();
@@ -147,12 +145,12 @@ fn main() {
     let log_alpha = Var::zeros((), DTYPE, &device).unwrap();
     let alpha_optimizer =
         AdamW::new(vec![log_alpha.clone()], optimizer_parameters.clone()).unwrap();
-    let entropy = SACEntropyConfiguration::automatic(log_alpha, alpha_optimizer, None);
+    let entropy = SACEntropyConfiguration::automatic(log_alpha, alpha_optimizer);
     let mut grapher = SACGrapher::new();
 
     let mut agent = SACAgent::builder()
         .dtype(DTYPE)
-        .policy(Box::new(policy))
+        .policy(policy)
         .actor_optimizer(actor_optimizer)
         .critics(vec![critic_1, critic_2])
         .entropy_configuration(entropy)

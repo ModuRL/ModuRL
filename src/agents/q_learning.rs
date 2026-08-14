@@ -867,7 +867,7 @@ mod tests {
             .input_size(4)
             .output_size(2)
             .vb(VarBuilder::from_varmap(var_map, DType::F32, device))
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .hidden_layer_sizes(vec![2])
             .build()
             .unwrap()

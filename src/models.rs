@@ -101,12 +101,19 @@ impl MLP {
         output_size: usize,
         vb: VarBuilder<'_>,
         #[builder(default = vec![32, 32, 32])] hidden_layer_sizes: Vec<usize>,
-        #[builder(default = Box::new(candle_nn::Activation::Relu))] activation: Box<
-            dyn candle_nn::Module,
-        >,
+        #[builder(
+            default = Box::new(candle_nn::Activation::Relu),
+            with = |activation: impl candle_nn::Module + 'static| Box::new(activation)
+        )]
+        activation: Box<dyn candle_nn::Module>,
+        #[builder(with = |activation: impl candle_nn::Module + 'static| Box::new(activation))]
         output_activation: Option<Box<dyn candle_nn::Module>>,
         #[builder(default = "mlp".to_string())] name: String,
-        #[builder(default = Box::new(DefaultMLPInitializer))] initializer: Box<dyn MLPInitializer>,
+        #[builder(
+            default = Box::new(DefaultMLPInitializer),
+            with = |initializer: impl MLPInitializer + 'static| Box::new(initializer)
+        )]
+        initializer: Box<dyn MLPInitializer>,
     ) -> Result<Self, Error> {
         let (hidden_layers, hidden_output_size) = initialize_hidden_layers(
             initializer.as_ref(),
@@ -176,11 +183,17 @@ impl DuelingMLP {
         #[builder(default = vec![32, 32, 32])] hidden_layer_sizes: Vec<usize>,
         #[builder(default = Vec::new())] value_hidden_layer_sizes: Vec<usize>,
         #[builder(default = Vec::new())] advantage_hidden_layer_sizes: Vec<usize>,
-        #[builder(default = Box::new(candle_nn::Activation::Relu))] activation: Box<
-            dyn candle_nn::Module,
-        >,
+        #[builder(
+            default = Box::new(candle_nn::Activation::Relu),
+            with = |activation: impl candle_nn::Module + 'static| Box::new(activation)
+        )]
+        activation: Box<dyn candle_nn::Module>,
         #[builder(default = "dueling_mlp".to_string())] name: String,
-        #[builder(default = Box::new(DefaultMLPInitializer))] initializer: Box<dyn MLPInitializer>,
+        #[builder(
+            default = Box::new(DefaultMLPInitializer),
+            with = |initializer: impl MLPInitializer + 'static| Box::new(initializer)
+        )]
+        initializer: Box<dyn MLPInitializer>,
     ) -> Result<Self, Error> {
         if output_size == 0 {
             candle_core::bail!("a dueling MLP requires at least one output action");
@@ -279,7 +292,7 @@ mod dueling_tests {
             .hidden_layer_sizes(vec![8])
             .value_hidden_layer_sizes(vec![6])
             .advantage_hidden_layer_sizes(vec![7])
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .build()?;
         Ok((network, vars))
     }

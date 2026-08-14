@@ -66,8 +66,8 @@ fn main() {
     let mut agent = DQNAgent::builder()
         .action_space(Discrete::new(2))
         .observation_space(observation_space)
-        .online_q_network(Box::new(online_q_network))
-        .target_q_network(Box::new(target_q_network))
+        .online_q_network(online_q_network)
+        .target_q_network(target_q_network)
         .online_vars(&online_var_map)
         .target_vars(&mut target_var_map)
         .optimizer(optimizer)
@@ -77,10 +77,10 @@ fn main() {
         .update_frequency(10)
         .target_update_interval(500)
         .training_horizon(500_000)
-        .epsilon_schedule(Box::new(|progress: f64| {
+        .epsilon_schedule(|progress: f64| {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
-        }))
+        })
         .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DQN configuration should be valid");

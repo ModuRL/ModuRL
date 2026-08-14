@@ -20,11 +20,11 @@ fn sac_mlp(
         .output_size(output_size)
         .vb(vb)
         .hidden_layer_sizes(vec![64, 64])
-        .activation(Box::new(Tensor::tanh))
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .activation(Tensor::tanh)
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0_f64.sqrt(),
             output_gain,
-        }))
+        })
         .name(name.to_owned())
         .build()
 }
@@ -52,8 +52,8 @@ fn discrete_critic<'a>(
         "mlp",
     )?;
     SACCritic::builder()
-        .online_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(online))))
-        .target_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(target))))
+        .online_network(DiscreteVectorHeadCritic::new(online))
+        .target_network(DiscreteVectorHeadCritic::new(target))
         .online_vars(online_vars)
         .target_vars(target_vars)
         .optimizer(AdamW::new(
@@ -94,7 +94,7 @@ fn main() {
     )
     .unwrap();
     let actor_optimizer = AdamW::new(actor_vars.all_vars(), optimizer_parameters.clone()).unwrap();
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor));
+    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor);
 
     let online_vars_1 = VarMap::new();
     let mut target_vars_1 = VarMap::new();
@@ -127,16 +127,16 @@ fn main() {
     // schedule make the policy increasingly deterministic.
     let maximum_entropy = (action_count as f64).ln();
     let target_entropy = LinearSchedule::new(0.98 * maximum_entropy, 0.3 * maximum_entropy);
-    let entropy = SACEntropyConfiguration::automatic(
+    let entropy = SACEntropyConfiguration::automatic_with_target_schedule(
         log_alpha,
         alpha_optimizer,
-        Some(Box::new(target_entropy)),
+        target_entropy,
     );
     let mut grapher = SACGrapher::new();
 
     let mut agent = SACAgent::builder()
         .dtype(DTYPE)
-        .policy(Box::new(policy))
+        .policy(policy)
         .actor_optimizer(actor_optimizer)
         .critics(vec![critic_1, critic_2])
         .entropy_configuration(entropy)

@@ -103,7 +103,7 @@ let distribution = TransformedDistribution::new(
     TanhTransform,
 );
 let policy = ProbabilisticPolicyModel::with_distribution(
-    Box::new(GaussianModule { mean, log_std }),
+    GaussianModule { mean, log_std },
     distribution,
 );
 ```
@@ -125,12 +125,12 @@ wrapped module:
 
 ```rust,ignore
 let critic = SACCritic::builder()
-    .online_network(Box::new(ScalarStateActionCritic::new(Box::new(
+    .online_network(ScalarStateActionCritic::new(
         online_network,
-    ))))
-    .target_network(Box::new(ScalarStateActionCritic::new(Box::new(
+    ))
+    .target_network(ScalarStateActionCritic::new(
         target_network,
-    ))))
+    ))
     .online_vars(&online_vars)
     .target_vars(&mut target_vars)
     .optimizer(critic_optimizer)
@@ -168,14 +168,10 @@ let alpha_optimizer = AdamW::new(
     vec![log_alpha.clone()],
     optimizer_parameters.clone(),
 )?;
-let entropy = SACEntropyConfiguration::automatic(
-    log_alpha,
-    alpha_optimizer,
-    None,
-);
+let entropy = SACEntropyConfiguration::automatic(log_alpha, alpha_optimizer);
 ```
 
-Passing `None` asks the policy for its default target entropy. The built-in
+`automatic` asks the policy for its default target entropy. The built-in
 Gaussian policy uses the negative action-component count. An affine
 distribution transform adjusts that default for its scale.
 
@@ -184,10 +180,10 @@ run:
 
 ```rust,ignore
 let target_entropy = LinearSchedule::new(-2.0, -1.0);
-let entropy = SACEntropyConfiguration::automatic(
+let entropy = SACEntropyConfiguration::automatic_with_target_schedule(
     log_alpha,
     alpha_optimizer,
-    Some(Box::new(target_entropy)),
+    target_entropy,
 );
 ```
 
@@ -212,7 +208,7 @@ The continuous example assembles the pieces as follows:
 
 ```rust,ignore
 let mut agent = SACAgent::builder()
-    .policy(Box::new(policy))
+    .policy(policy)
     .actor_optimizer(actor_optimizer)
     .critics(vec![critic_1, critic_2])
     .entropy_configuration(entropy)

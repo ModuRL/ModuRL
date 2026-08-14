@@ -57,11 +57,11 @@ fn main() {
             .output_size(action_size)
             .vb(actor_vb.pp("mean"))
             .hidden_layer_sizes(vec![64, 64])
-            .activation(Box::new(Tensor::tanh))
-            .initializer(Box::new(OrthogonalMLPInitializer {
+            .activation(Tensor::tanh)
+            .initializer(OrthogonalMLPInitializer {
                 hidden_gain: 2.0_f64.sqrt(),
                 output_gain: 0.01,
-            }))
+            })
             .build()
             .unwrap(),
         log_std: actor_vb
@@ -75,11 +75,11 @@ fn main() {
         .output_size(1)
         .vb(VarBuilder::from_varmap(&critic_vars, DTYPE, &device))
         .hidden_layer_sizes(vec![64, 64])
-        .activation(Box::new(Tensor::tanh))
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .activation(Tensor::tanh)
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0_f64.sqrt(),
             output_gain: 1.0,
-        }))
+        })
         .build()
         .unwrap();
 
@@ -91,15 +91,15 @@ fn main() {
     };
     let networks = A2CNetworkInfo::separate(
         SeparateA2CNetwork::builder()
-            .actor_network(Box::new(ProbabilisticPolicyModel::with_distribution(
-                Box::new(actor),
+            .actor_network(ProbabilisticPolicyModel::with_distribution(
+                actor,
                 GaussianDistribution::new(action_shape).unwrap(),
-            )))
-            .critic_network(Box::new(critic))
+            ))
+            .critic_network(critic)
             .actor_optimizer(AdamW::new(actor_vars.all_vars(), optimizer_config.clone()).unwrap())
             .critic_optimizer(AdamW::new(critic_vars.all_vars(), optimizer_config).unwrap())
-            .actor_lr_scheduler(Box::new(LinearSchedule::new(7e-4, 0.0)))
-            .critic_lr_scheduler(Box::new(LinearSchedule::new(7e-4, 0.0)))
+            .actor_lr_scheduler(LinearSchedule::new(7e-4, 0.0))
+            .critic_lr_scheduler(LinearSchedule::new(7e-4, 0.0))
             .combined_loss(true)
             .build(),
     );

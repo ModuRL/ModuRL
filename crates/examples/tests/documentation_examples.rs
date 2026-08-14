@@ -111,7 +111,7 @@ fn getting_started_program() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(actor_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("actor".to_string())
         .build()
@@ -123,7 +123,7 @@ fn getting_started_program() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("critic".to_string())
         .build()
@@ -139,12 +139,12 @@ fn getting_started_program() {
     let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
         .expect("failed to build critic optimizer");
 
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
+    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
 
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(policy))
-            .critic_network(Box::new(critic_network))
+            .actor_network(policy)
+            .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
             .build(),
@@ -155,7 +155,7 @@ fn getting_started_program() {
         .network_info(network_info)
         .batch_size(1024)
         .mini_batch_size(64)
-        .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .clip_range(ConstantSchedule::new(0.2))
         .training_horizon(10_000)
         .device(device)
         .build()
@@ -212,8 +212,8 @@ fn dqn_program() {
     let mut agent = DQNAgent::builder()
         .action_space(Discrete::new(2))
         .observation_space(observation_space)
-        .online_q_network(Box::new(online_q_network))
-        .target_q_network(Box::new(target_q_network))
+        .online_q_network(online_q_network)
+        .target_q_network(target_q_network)
         .online_vars(&online_var_map)
         .target_vars(&mut target_var_map)
         .optimizer(optimizer)
@@ -223,10 +223,10 @@ fn dqn_program() {
         .update_frequency(10)
         .target_update_interval(500)
         .training_horizon(500_000)
-        .epsilon_schedule(Box::new(|progress: f64| {
+        .epsilon_schedule(|progress: f64| {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
-        }))
+        })
         .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .logger(&mut logger)
         .build()
@@ -283,8 +283,8 @@ fn ddqn_program() {
     let mut agent = DDQNAgent::builder()
         .action_space(Discrete::new(2))
         .observation_space(observation_space)
-        .online_q_network(Box::new(online_q_network))
-        .target_q_network(Box::new(target_q_network))
+        .online_q_network(online_q_network)
+        .target_q_network(target_q_network)
         .online_vars(&online_var_map)
         .target_vars(&mut target_var_map)
         .optimizer(optimizer)
@@ -294,10 +294,10 @@ fn ddqn_program() {
         .update_frequency(10)
         .target_update_interval(500)
         .training_horizon(500_000)
-        .epsilon_schedule(Box::new(|progress: f64| {
+        .epsilon_schedule(|progress: f64| {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
-        }))
+        })
         .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .logger(&mut logger)
         .build()
@@ -327,7 +327,7 @@ fn understand_ppo_training_configuration() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(actor_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("actor".to_string())
         .build()
@@ -339,7 +339,7 @@ fn understand_ppo_training_configuration() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("critic".to_string())
         .build()
@@ -354,11 +354,11 @@ fn understand_ppo_training_configuration() {
     let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
         .expect("failed to build critic optimizer");
 
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
+    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(policy))
-            .critic_network(Box::new(critic_network))
+            .actor_network(policy)
+            .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
             .build(),
@@ -370,7 +370,7 @@ fn understand_ppo_training_configuration() {
         .batch_size(2048)
         .mini_batch_size(64)
         .ent_coef(0.005)
-        .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .clip_range(ConstantSchedule::new(0.2))
         .num_epochs(10)
         .training_horizon(120_000)
         .device(device)

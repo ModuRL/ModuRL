@@ -80,19 +80,23 @@ where
     #[builder]
     pub fn new(
         optimizer: O,
+        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
         shared_network: Box<dyn candle_core::Module>,
+        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
         critic_head: Box<dyn candle_core::Module>,
+        #[builder(with = |policy: impl ProbabilisticPolicy<Error = E> + 'static| Box::new(policy))]
         actor_head: Box<dyn ProbabilisticPolicy<Error = E>>,
+        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         lr_scheduler: Option<Box<dyn ParameterSchedule>>,
     ) -> Self {
         Self {
-            inner: SharedPPONetwork::builder()
-                .optimizer(optimizer)
-                .shared_network(shared_network)
-                .critic_head(critic_head)
-                .actor_head(actor_head)
-                .maybe_lr_scheduler(lr_scheduler)
-                .build(),
+            inner: SharedPPONetwork::from_boxed(
+                optimizer,
+                shared_network,
+                critic_head,
+                actor_head,
+                lr_scheduler,
+            ),
         }
     }
 }
@@ -113,22 +117,26 @@ where
     pub fn new(
         actor_optimizer: O1,
         critic_optimizer: O2,
+        #[builder(with = |policy: impl ProbabilisticPolicy<Error = E> + 'static| Box::new(policy))]
         actor_network: Box<dyn ProbabilisticPolicy<Error = E>>,
+        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
         critic_network: Box<dyn candle_core::Module>,
+        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
         #[builder(default = false)] combined_loss: bool,
     ) -> Self {
         Self {
-            inner: SeparatePPONetwork::builder()
-                .actor_optimizer(actor_optimizer)
-                .critic_optimizer(critic_optimizer)
-                .actor_network(actor_network)
-                .critic_network(critic_network)
-                .maybe_actor_lr_scheduler(actor_lr_scheduler)
-                .maybe_critic_lr_scheduler(critic_lr_scheduler)
-                .combined_loss(combined_loss)
-                .build(),
+            inner: SeparatePPONetwork::from_boxed(
+                actor_optimizer,
+                critic_optimizer,
+                actor_network,
+                critic_network,
+                actor_lr_scheduler,
+                critic_lr_scheduler,
+                combined_loss,
+            ),
         }
     }
 }
@@ -346,10 +354,10 @@ mod tests {
         SeparateA2CNetwork::builder()
             .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
-            .actor_network(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor)),
+            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor,
             ))
-            .critic_network(Box::new(critic))
+            .critic_network(critic)
             .build()
             .into()
     }

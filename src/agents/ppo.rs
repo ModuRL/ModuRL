@@ -407,6 +407,26 @@ where
     #[builder]
     pub fn new(
         optimizer: O,
+        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
+        shared_network: Box<dyn candle_core::Module>,
+        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
+        critic_head: Box<dyn candle_core::Module>,
+        #[builder(with = |policy: impl ProbabilisticPolicy<Error = E> + 'static| Box::new(policy))]
+        actor_head: Box<dyn ProbabilisticPolicy<Error = E>>,
+        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
+        lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+    ) -> Self {
+        Self {
+            optimizer,
+            shared_network,
+            critic_head,
+            actor_head,
+            lr_scheduler,
+        }
+    }
+
+    pub(crate) fn from_boxed(
+        optimizer: O,
         shared_network: Box<dyn candle_core::Module>,
         critic_head: Box<dyn candle_core::Module>,
         actor_head: Box<dyn ProbabilisticPolicy<Error = E>>,
@@ -443,11 +463,35 @@ where
     pub fn new(
         actor_optimizer: O1,
         critic_optimizer: O2,
+        #[builder(with = |policy: impl ProbabilisticPolicy<Error = E> + 'static| Box::new(policy))]
+        actor_network: Box<dyn ProbabilisticPolicy<Error = E>>,
+        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
+        critic_network: Box<dyn candle_core::Module>,
+        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
+        actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
+        critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+        #[builder(default = false)] combined_loss: bool,
+    ) -> Self {
+        Self {
+            actor_optimizer,
+            critic_optimizer,
+            actor_network,
+            critic_network,
+            actor_lr_scheduler,
+            critic_lr_scheduler,
+            combined_loss,
+        }
+    }
+
+    pub(crate) fn from_boxed(
+        actor_optimizer: O1,
+        critic_optimizer: O2,
         actor_network: Box<dyn ProbabilisticPolicy<Error = E>>,
         critic_network: Box<dyn candle_core::Module>,
         actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
         critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
-        #[builder(default = false)] combined_loss: bool,
+        combined_loss: bool,
     ) -> Self {
         Self {
             actor_optimizer,
@@ -513,9 +557,11 @@ where
         #[builder(default = false)] clip_value_loss: bool,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 0.95)] gae_lambda: f32,
-        #[builder(default = Box::new(ConstantSchedule::new(0.1)))] clip_range: Box<
-            dyn ParameterSchedule,
-        >,
+        #[builder(
+            default = Box::new(ConstantSchedule::new(0.1)),
+            with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule)
+        )]
+        clip_range: Box<dyn ParameterSchedule>,
         #[builder(default = true)] normalize_advantage: bool,
         #[builder(default = false)] normalize_returns: bool,
         #[builder(default = 0.5)] vf_coef: f32,
@@ -1523,10 +1569,10 @@ mod schedule_tests {
             SeparatePPONetwork::builder()
                 .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
                 .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
-                .actor_network(Box::new(
-                    ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor)),
+                .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                    actor,
                 ))
-                .critic_network(Box::new(UnitCritic))
+                .critic_network(UnitCritic)
                 .build(),
         );
         let mut agent: PPOAgent<
@@ -1585,10 +1631,10 @@ mod schedule_tests {
             SeparatePPONetwork::builder()
                 .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
                 .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
-                .actor_network(Box::new(
-                    ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor)),
+                .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                    actor,
                 ))
-                .critic_network(Box::new(critic))
+                .critic_network(critic)
                 .build(),
         );
 
@@ -1692,14 +1738,12 @@ mod schedule_tests {
             PPONetworkInfo::Shared(
                 SharedPPONetwork::builder()
                     .optimizer(CountingOptimizer::with_learning_rate(1e-3))
-                    .shared_network(Box::new(shared_network))
-                    .actor_head(Box::new(
-                        ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(
-                            actor_head,
-                        )),
+                    .shared_network(shared_network)
+                    .actor_head(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                        actor_head,
                     ))
-                    .critic_head(Box::new(critic_head))
-                    .lr_scheduler(Box::new(LinearSchedule::new(1e-3, 1e-4)))
+                    .critic_head(critic_head)
+                    .lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
                     .build(),
             );
         let mut logger = NoopLogger;
@@ -1754,7 +1798,7 @@ mod schedule_tests {
             .input_size(4)
             .output_size(6)
             .vb(VarBuilder::from_varmap(&actor_var_map, DType::F32, &device))
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .hidden_layer_sizes(vec![8])
             .build()
             .unwrap();
@@ -1766,7 +1810,7 @@ mod schedule_tests {
                 DType::F32,
                 &device,
             ))
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .hidden_layer_sizes(vec![8])
             .build()
             .unwrap();
@@ -1783,10 +1827,10 @@ mod schedule_tests {
             SeparatePPONetwork::builder()
                 .actor_optimizer(CountingOptimizer::with_learning_rate(3e-4))
                 .critic_optimizer(CountingOptimizer::with_learning_rate(3e-4))
-                .actor_network(Box::new(
-                    ProbabilisticPolicyModel::<GaussianDistribution>::new(Box::new(actor_network)),
+                .actor_network(ProbabilisticPolicyModel::<GaussianDistribution>::new(
+                    actor_network,
                 ))
-                .critic_network(Box::new(critic_network))
+                .critic_network(critic_network)
                 .combined_loss(true)
                 .build(),
         );
@@ -1892,7 +1936,7 @@ mod schedule_tests {
             .input_size(4)
             .output_size(2)
             .vb(VarBuilder::from_varmap(&actor_var_map, DType::F32, &device))
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .hidden_layer_sizes(vec![2])
             .build()
             .unwrap();
@@ -1904,7 +1948,7 @@ mod schedule_tests {
                 DType::F32,
                 &device,
             ))
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .hidden_layer_sizes(vec![2])
             .build()
             .unwrap();
@@ -1912,14 +1956,12 @@ mod schedule_tests {
             SeparatePPONetwork::builder()
                 .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
                 .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
-                .actor_network(Box::new(
-                    ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(
-                        actor_network,
-                    )),
+                .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                    actor_network,
                 ))
-                .critic_network(Box::new(critic_network))
-                .actor_lr_scheduler(Box::new(LinearSchedule::new(1e-3, 1e-4)))
-                .critic_lr_scheduler(Box::new(LinearSchedule::new(1e-3, 1e-4)))
+                .critic_network(critic_network)
+                .actor_lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
+                .critic_lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
                 .build(),
         );
         let mut agent = PPOAgent::builder()
@@ -1928,7 +1970,7 @@ mod schedule_tests {
             .batch_size(2)
             .mini_batch_size(2)
             .num_epochs(1)
-            .clip_range(Box::new(LinearSchedule::new(0.2, 0.1)))
+            .clip_range(LinearSchedule::new(0.2, 0.1))
             .training_horizon(10)
             .device(device.clone())
             .build()

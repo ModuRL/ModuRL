@@ -177,7 +177,7 @@ fn ppo_training_is_device_deterministic() {
                 DType::F32,
                 &device,
             ))
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .hidden_layer_sizes(vec![8, 8])
             .name("actor_network".to_string())
             .build()
@@ -199,7 +199,7 @@ fn ppo_training_is_device_deterministic() {
                 DType::F32,
                 &device,
             ))
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .hidden_layer_sizes(vec![8, 8])
             .name("critic_network".to_string())
             .build()
@@ -211,12 +211,10 @@ fn ppo_training_is_device_deterministic() {
             SeparatePPONetwork::builder()
                 .actor_optimizer(actor_optimizer)
                 .critic_optimizer(critic_optimizer)
-                .actor_network(Box::new(
-                    ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(
-                        actor_network,
-                    )),
+                .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                    actor_network,
                 ))
-                .critic_network(Box::new(critic_network))
+                .critic_network(critic_network)
                 .build(),
         );
 
@@ -227,7 +225,7 @@ fn ppo_training_is_device_deterministic() {
             .mini_batch_size(64)
             .ent_coef(0.01)
             .vf_coef(0.5)
-            .clip_range(Box::new(ConstantSchedule::new(0.2)))
+            .clip_range(ConstantSchedule::new(0.2))
             .gae_lambda(0.95)
             .num_epochs(10)
             .training_horizon(10_000)

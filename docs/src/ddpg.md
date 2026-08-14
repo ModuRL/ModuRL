@@ -77,12 +77,12 @@ replay. Its target network supplies the next-state Q estimate:
 
 ```rust,ignore
 let critic = DeterministicCritic::builder()
-    .online_network(Box::new(ScalarStateActionCritic::new(Box::new(
+    .online_network(ScalarStateActionCritic::new(
         online_critic,
-    ))))
-    .target_network(Box::new(ScalarStateActionCritic::new(Box::new(
+    ))
+    .target_network(ScalarStateActionCritic::new(
         target_critic,
-    ))))
+    ))
     .online_vars(&online_critic_variables)
     .target_vars(&mut target_critic_variables)
     .optimizer(critic_optimizer)
@@ -99,8 +99,8 @@ builder:
 
 ```rust,ignore
 let mut agent = DDPGAgent::builder()
-    .online_actor(Box::new(online_actor))
-    .target_actor(Box::new(target_actor))
+    .online_actor(online_actor)
+    .target_actor(target_actor)
     .online_actor_vars(&online_actor_variables)
     .target_actor_vars(&mut target_actor_variables)
     .actor_optimizer(actor_optimizer)

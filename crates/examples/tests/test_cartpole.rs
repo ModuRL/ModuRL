@@ -111,12 +111,12 @@ fn ppo_cartpole() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(vb.clone())
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
             output_gain: 0.01,
-        }))
+        })
         .name("actor_network".to_string())
         .build()
         .unwrap();
@@ -136,12 +136,12 @@ fn ppo_cartpole() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
             output_gain: 1.0,
-        }))
+        })
         .name("critic_network".to_string())
         .build()
         .unwrap();
@@ -151,10 +151,10 @@ fn ppo_cartpole() {
 
     let ppo_network_info = modurl::agents::ppo::PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor_network,
             ))
-            .critic_network(Box::new(critic_network))
+            .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
             .build(),
@@ -171,9 +171,7 @@ fn ppo_cartpole() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
-            0.2,
-        )))
+        .clip_range(modurl::parameter_schedule::ConstantSchedule::new(0.2))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
@@ -237,13 +235,13 @@ fn ppo_cartpole_shared() {
         .input_size(observation_space.shape()[0])
         .output_size(64)
         .vb(vb.clone())
-        .activation(Box::new(Tensor::tanh))
-        .output_activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
+        .output_activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
             output_gain: 2.0f64.sqrt(),
-        }))
+        })
         .name("shared_trunk".to_string())
         .build()
         .unwrap();
@@ -268,11 +266,11 @@ fn ppo_cartpole_shared() {
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
-            .actor_head(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_head)),
+            .actor_head(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor_head,
             ))
-            .critic_head(Box::new(critic_head))
-            .shared_network(Box::new(shared_network))
+            .critic_head(critic_head)
+            .shared_network(shared_network)
             .optimizer(optimizer)
             .build(),
     );
@@ -300,9 +298,7 @@ fn ppo_cartpole_shared() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(vf_coef)
-        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
-            0.2,
-        )))
+        .clip_range(modurl::parameter_schedule::ConstantSchedule::new(0.2))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
@@ -373,13 +369,13 @@ fn ppo_cartpole_shared_multithreaded() {
         .input_size(obs_space_shape)
         .output_size(64)
         .vb(vb.clone())
-        .activation(Box::new(Tensor::tanh))
-        .output_activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
+        .output_activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
             output_gain: 2.0f64.sqrt(),
-        }))
+        })
         .name("shared_trunk_mt".to_string())
         .build()
         .unwrap();
@@ -400,11 +396,11 @@ fn ppo_cartpole_shared_multithreaded() {
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
-            .actor_head(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_head)),
+            .actor_head(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor_head,
             ))
-            .critic_head(Box::new(critic_head))
-            .shared_network(Box::new(shared_network))
+            .critic_head(critic_head)
+            .shared_network(shared_network)
             .optimizer(optimizer)
             .build(),
     );
@@ -418,9 +414,7 @@ fn ppo_cartpole_shared_multithreaded() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(Box::new(modurl::parameter_schedule::ConstantSchedule::new(
-            0.2,
-        )))
+        .clip_range(modurl::parameter_schedule::ConstantSchedule::new(0.2))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)
@@ -499,8 +493,8 @@ fn dqn_cartpole() {
     let mut agent = DQNAgent::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
         .observation_space(observation_space)
-        .online_q_network(Box::new(online_q_network))
-        .target_q_network(Box::new(target_q_network))
+        .online_q_network(online_q_network)
+        .target_q_network(target_q_network)
         .online_vars(&online_var_map)
         .target_vars(&mut target_var_map)
         .optimizer(optimizer)
@@ -510,10 +504,10 @@ fn dqn_cartpole() {
         .update_frequency(10)
         .target_update_interval(500)
         .training_horizon(500_000)
-        .epsilon_schedule(Box::new(|progress: f64| {
+        .epsilon_schedule(|progress: f64| {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
-        }))
+        })
         .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
         .build()
         .expect("DQN configuration should be valid");
@@ -587,14 +581,14 @@ fn ddqn_cartpole() {
     let mut agent = DDQNAgent::builder()
         .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
         .observation_space(observation_space)
-        .online_q_network(Box::new(online_mlp))
-        .target_q_network(Box::new(target_mlp))
+        .online_q_network(online_mlp)
+        .target_q_network(target_mlp)
         .online_vars(&online_var_map)
         .target_vars(&mut target_var_map)
-        .epsilon_schedule(Box::new(|progress: f64| {
+        .epsilon_schedule(|progress: f64| {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
-        }))
+        })
         .optimizer(optimizer)
         .replay_capacity(10_000)
         .batch_size(128)
