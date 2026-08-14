@@ -72,8 +72,8 @@ let actor = MLP::builder()
     .output_size(action_size)
     .vb(actor_vb)
     .hidden_layer_sizes(vec![64, 64])
-    .activation(Box::new(Tensor::relu))
-    .output_activation(Box::new(Tensor::tanh))
+    .activation(Tensor::relu)
+    .output_activation(Tensor::tanh)
     .name("actor".to_owned())
     .build()?;
 ```
@@ -103,12 +103,12 @@ module whose input width is `observation_size + action_size` with
 
 ```rust,ignore
 let critic = DeterministicCritic::builder()
-    .online_network(Box::new(ScalarStateActionCritic::new(Box::new(
+    .online_network(ScalarStateActionCritic::new(
         online_network,
-    ))))
-    .target_network(Box::new(ScalarStateActionCritic::new(Box::new(
+    ))
+    .target_network(ScalarStateActionCritic::new(
         target_network,
-    ))))
+    ))
     .online_vars(&online_vars)
     .target_vars(&mut target_vars)
     .optimizer(critic_optimizer)

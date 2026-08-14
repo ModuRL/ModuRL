@@ -16,11 +16,11 @@ fn mlp(
         .output_size(output_size)
         .vb(VarBuilder::from_varmap(variables, DTYPE, &Device::Cpu))
         .hidden_layer_sizes(vec![8])
-        .activation(Box::new(Tensor::tanh))
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .activation(Tensor::tanh)
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0_f64.sqrt(),
             output_gain: 1.0,
-        }))
+        })
         .name(name.to_owned())
         .build()
 }
@@ -44,12 +44,12 @@ fn dqn_updates_f64_networks_from_native_f32_observations() {
     let mut agent = DQNAgent::builder()
         .action_space(Discrete::new(2))
         .observation_space(observation_space)
-        .online_q_network(Box::new(online))
-        .target_q_network(Box::new(target))
+        .online_q_network(online)
+        .target_q_network(target)
         .online_vars(&online_vars)
         .target_vars(&mut target_vars)
         .optimizer(optimizer)
-        .epsilon_schedule(Box::new(ConstantSchedule::new(0.0)))
+        .epsilon_schedule(ConstantSchedule::new(0.0))
         .replay_capacity(8)
         .batch_size(2)
         .training_start(0)
@@ -83,12 +83,12 @@ fn ddqn_updates_f64_networks_from_native_f32_observations() {
     let mut agent = DDQNAgent::builder()
         .action_space(Discrete::new(2))
         .observation_space(observation_space)
-        .online_q_network(Box::new(online))
-        .target_q_network(Box::new(target))
+        .online_q_network(online)
+        .target_q_network(target)
         .online_vars(&online_vars)
         .target_vars(&mut target_vars)
         .optimizer(optimizer)
-        .epsilon_schedule(Box::new(ConstantSchedule::new(0.0)))
+        .epsilon_schedule(ConstantSchedule::new(0.0))
         .replay_capacity(8)
         .batch_size(2)
         .training_start(0)
@@ -115,10 +115,10 @@ fn ppo_updates_f64_networks_from_native_f32_observations() {
     let critic_optimizer = AdamW::new(critic_vars.all_vars(), ParamsAdamW::default()).unwrap();
     let networks = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor)),
+            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor,
             ))
-            .critic_network(Box::new(critic))
+            .critic_network(critic)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
             .build(),
@@ -156,10 +156,10 @@ fn a2c_updates_f64_networks_from_native_f32_observations() {
     let critic = mlp(&critic_vars, 4, 1, "critic").unwrap();
     let networks = A2CNetworkInfo::separate(
         SeparateA2CNetwork::builder()
-            .actor_network(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor)),
+            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor,
             ))
-            .critic_network(Box::new(critic))
+            .critic_network(critic)
             .actor_optimizer(AdamW::new(actor_vars.all_vars(), ParamsAdamW::default()).unwrap())
             .critic_optimizer(AdamW::new(critic_vars.all_vars(), ParamsAdamW::default()).unwrap())
             .build(),
@@ -185,8 +185,8 @@ fn discrete_critic<'a>(
     let online = mlp(online_vars, 4, 2, "critic").unwrap();
     let target = mlp(target_vars, 4, 2, "critic").unwrap();
     SACCritic::builder()
-        .online_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(online))))
-        .target_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(target))))
+        .online_network(DiscreteVectorHeadCritic::new(online))
+        .target_network(DiscreteVectorHeadCritic::new(target))
         .online_vars(online_vars)
         .target_vars(target_vars)
         .optimizer(AdamW::new(online_vars.all_vars(), ParamsAdamW::default()).unwrap())
@@ -202,13 +202,13 @@ fn sac_updates_f64_networks_from_native_f32_observations() {
     let actor_vars = VarMap::new();
     let actor = mlp(&actor_vars, 4, 2, "actor").unwrap();
     let actor_optimizer = AdamW::new(actor_vars.all_vars(), ParamsAdamW::default()).unwrap();
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor));
+    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor);
     let online_vars = VarMap::new();
     let mut target_vars = VarMap::new();
     let critic = discrete_critic(&online_vars, &mut target_vars);
 
     let mut agent = SACAgent::builder()
-        .policy(Box::new(policy))
+        .policy(policy)
         .actor_optimizer(actor_optimizer)
         .critics(vec![critic])
         .entropy_configuration(SACEntropyConfiguration::<AdamW>::fixed(0.2))
@@ -244,8 +244,8 @@ fn continuous_critic<'a>(
     let online = mlp(online_vars, 2, 1, "critic").unwrap();
     let target = mlp(target_vars, 2, 1, "critic").unwrap();
     SACCritic::builder()
-        .online_network(Box::new(ScalarStateActionCritic::new(Box::new(online))))
-        .target_network(Box::new(ScalarStateActionCritic::new(Box::new(target))))
+        .online_network(ScalarStateActionCritic::new(online))
+        .target_network(ScalarStateActionCritic::new(target))
         .online_vars(online_vars)
         .target_vars(target_vars)
         .optimizer(AdamW::new(online_vars.all_vars(), ParamsAdamW::default()).unwrap())
@@ -305,8 +305,8 @@ fn ddpg_updates_f64_networks_from_native_f32_observations() {
     let critic = continuous_critic(&online_critic_vars, &mut target_critic_vars);
 
     let mut agent = DDPGAgent::builder()
-        .online_actor(Box::new(online_actor))
-        .target_actor(Box::new(target_actor))
+        .online_actor(online_actor)
+        .target_actor(target_actor)
         .online_actor_vars(&online_actor_vars)
         .target_actor_vars(&mut target_actor_vars)
         .actor_optimizer(actor_optimizer)
@@ -353,8 +353,8 @@ fn td3_updates_f64_networks_from_native_f32_observations() {
     let critic_2 = continuous_critic(&online_critic_vars_2, &mut target_critic_vars_2);
 
     let mut agent = TD3Agent::builder()
-        .online_actor(Box::new(online_actor))
-        .target_actor(Box::new(target_actor))
+        .online_actor(online_actor)
+        .target_actor(target_actor)
         .online_actor_vars(&online_actor_vars)
         .target_actor_vars(&mut target_actor_vars)
         .actor_optimizer(actor_optimizer)

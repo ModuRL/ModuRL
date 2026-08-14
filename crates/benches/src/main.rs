@@ -170,12 +170,12 @@ fn ppo(
         .input_size(4)
         .output_size(2)
         .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, device))
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0_f64.sqrt(),
             output_gain: 0.01,
-        }))
+        })
         .name("actor".to_owned())
         .build()?;
     let critic_vars = VarMap::new();
@@ -183,21 +183,21 @@ fn ppo(
         .input_size(4)
         .output_size(1)
         .vb(VarBuilder::from_varmap(&critic_vars, DType::F32, device))
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0_f64.sqrt(),
             output_gain: 1.0,
-        }))
+        })
         .name("critic".to_owned())
         .build()?;
     assert_eq!(parameter_count([&actor_vars, &critic_vars]), PPO_PARAMETERS);
     let networks = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor)),
+            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor,
             ))
-            .critic_network(Box::new(critic))
+            .critic_network(critic)
             .actor_optimizer(AdamW::new(actor_vars.all_vars(), adam(3e-4))?)
             .critic_optimizer(AdamW::new(critic_vars.all_vars(), adam(3e-4))?)
             .combined_loss(true)
@@ -217,7 +217,7 @@ fn ppo(
             .gae_lambda(0.95)
             .vf_coef(0.5)
             .gradient_clip(0.5)
-            .clip_range(Box::new(ConstantSchedule::new(0.2)))
+            .clip_range(ConstantSchedule::new(0.2))
             .clip_value_loss(false)
             .training_horizon(warmup_steps + measured_steps)
             .device(device.clone())
@@ -263,7 +263,7 @@ fn dqn(
         .input_size(4)
         .output_size(2)
         .vb(VarBuilder::from_varmap(&online_vars, DType::F32, device))
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("q".to_owned())
         .build()?;
@@ -272,7 +272,7 @@ fn dqn(
         .input_size(4)
         .output_size(2)
         .vb(VarBuilder::from_varmap(&target_vars, DType::F32, device))
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("q".to_owned())
         .build()?;
@@ -282,8 +282,8 @@ fn dqn(
             .dtype(DType::F32)
             .action_space(Discrete::new(2))
             .observation_space(observation_space)
-            .online_q_network(Box::new(online))
-            .target_q_network(Box::new(target))
+            .online_q_network(online)
+            .target_q_network(target)
             .online_vars(&online_vars)
             .target_vars(&mut target_vars)
             .optimizer(AdamW::new(online_vars.all_vars(), adam(2.5e-4))?)
@@ -293,7 +293,7 @@ fn dqn(
             .update_frequency(DQN_UPDATE_FREQUENCY)
             .target_update_interval(DQN_TARGET_UPDATE_INTERVAL)
             .training_horizon(warmup_steps + measured_steps)
-            .epsilon_schedule(Box::new(ConstantSchedule::new(0.1)))
+            .epsilon_schedule(ConstantSchedule::new(0.1))
             .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
             .build(),
     )?;
@@ -345,7 +345,7 @@ fn sac_critic<'a>(
         .input_size(4)
         .output_size(1)
         .vb(VarBuilder::from_varmap(online_vars, DType::F32, device))
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("critic".to_owned())
         .build()?;
@@ -353,14 +353,14 @@ fn sac_critic<'a>(
         .input_size(4)
         .output_size(1)
         .vb(VarBuilder::from_varmap(target_vars, DType::F32, device))
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("critic".to_owned())
         .build()?;
     debug_result(
         SACCritic::builder()
-            .online_network(Box::new(ScalarStateActionCritic::new(Box::new(online))))
-            .target_network(Box::new(ScalarStateActionCritic::new(Box::new(target))))
+            .online_network(ScalarStateActionCritic::new(online))
+            .target_network(ScalarStateActionCritic::new(target))
             .online_vars(online_vars)
             .target_vars(target_vars)
             .optimizer(AdamW::new(online_vars.all_vars(), adam(3e-4))?)
@@ -383,7 +383,7 @@ fn sac(
         .input_size(3)
         .output_size(2)
         .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, device))
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("actor".to_owned())
         .build()?;
@@ -391,10 +391,8 @@ fn sac(
         debug_result(GaussianDistribution::new(vec![1]))?,
         TanhTransform,
     );
-    let policy = ProbabilisticPolicyModel::with_distribution(
-        Box::new(GaussianActor { network: actor }),
-        distribution,
-    );
+    let policy =
+        ProbabilisticPolicyModel::with_distribution(GaussianActor { network: actor }, distribution);
     let critic_vars_1 = VarMap::new();
     let mut target_vars_1 = VarMap::new();
     let critic_1 = sac_critic(&critic_vars_1, &mut target_vars_1, device)?;
@@ -406,15 +404,15 @@ fn sac(
         parameter_count([&actor_vars, &critic_vars_1, &critic_vars_2]) + 1,
         SAC_PARAMETERS
     );
-    let entropy = SACEntropyConfiguration::automatic(
+    let entropy = SACEntropyConfiguration::automatic_with_target_schedule(
         log_alpha.clone(),
         AdamW::new(vec![log_alpha], adam(3e-4))?,
-        Some(Box::new(ConstantSchedule::new(-1.0))),
+        ConstantSchedule::new(-1.0),
     );
     let mut agent = debug_result(
         SACAgent::builder()
             .dtype(DType::F32)
-            .policy(Box::new(policy))
+            .policy(policy)
             .actor_optimizer(AdamW::new(actor_vars.all_vars(), adam(3e-4))?)
             .critics(vec![critic_1, critic_2])
             .entropy_configuration(entropy)

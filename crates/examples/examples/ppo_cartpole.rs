@@ -44,12 +44,12 @@ fn ppo_cartpole() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(vb.clone())
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
             output_gain: 0.01,
-        }))
+        })
         .name("actor_network".to_string())
         .build()
         .unwrap();
@@ -69,12 +69,12 @@ fn ppo_cartpole() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
             output_gain: 1.0,
-        }))
+        })
         .name("critic_network".to_string())
         .build()
         .unwrap();
@@ -86,10 +86,10 @@ fn ppo_cartpole() {
 
     let ppo_network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor_network,
             ))
-            .critic_network(Box::new(critic_network))
+            .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
             .build(),
@@ -107,7 +107,7 @@ fn ppo_cartpole() {
         .ent_coef(0.005)
         .gamma(0.99)
         .vf_coef(0.5)
-        .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .clip_range(ConstantSchedule::new(0.2))
         .clipped(true)
         .gae_lambda(0.95)
         .num_epochs(10)

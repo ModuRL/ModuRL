@@ -66,11 +66,11 @@ fn main() {
             .output_size(action_size)
             .vb(actor_vb.pp("mean"))
             .hidden_layer_sizes(vec![64, 64])
-            .activation(Box::new(Tensor::tanh))
-            .initializer(Box::new(OrthogonalMLPInitializer {
+            .activation(Tensor::tanh)
+            .initializer(OrthogonalMLPInitializer {
                 hidden_gain: 2.0_f64.sqrt(),
                 output_gain: 0.01,
-            }))
+            })
             .build()
             .unwrap(),
         // Because this tensor comes from actor_vb, actor_vars tracks it and the
@@ -86,11 +86,11 @@ fn main() {
         .output_size(1)
         .vb(VarBuilder::from_varmap(&critic_vars, DTYPE, &device))
         .hidden_layer_sizes(vec![64, 64])
-        .activation(Box::new(Tensor::tanh))
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .activation(Tensor::tanh)
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0_f64.sqrt(),
             output_gain: 1.0,
-        }))
+        })
         .build()
         .unwrap();
 
@@ -105,15 +105,15 @@ fn main() {
             // The policy interprets actor output as [mean, log_std], samples an
             // unsquashed Gaussian action, and evaluates its log probability.
             // BoxSpace separately clips the action sent to the environment.
-            .actor_network(Box::new(ProbabilisticPolicyModel::with_distribution(
-                Box::new(actor),
+            .actor_network(ProbabilisticPolicyModel::with_distribution(
+                actor,
                 GaussianDistribution::new(action_shape).unwrap(),
-            )))
-            .critic_network(Box::new(critic))
+            ))
+            .critic_network(critic)
             .actor_optimizer(AdamW::new(actor_vars.all_vars(), optimizer_config.clone()).unwrap())
             .critic_optimizer(AdamW::new(critic_vars.all_vars(), optimizer_config).unwrap())
-            .actor_lr_scheduler(Box::new(LinearSchedule::new(3e-4, 0.0)))
-            .critic_lr_scheduler(Box::new(LinearSchedule::new(3e-4, 0.0)))
+            .actor_lr_scheduler(LinearSchedule::new(3e-4, 0.0))
+            .critic_lr_scheduler(LinearSchedule::new(3e-4, 0.0))
             .combined_loss(true)
             .build(),
     );
@@ -128,7 +128,7 @@ fn main() {
             .mini_batch_size(64)
             .num_epochs(10)
             .normalize_advantage(true)
-            .clip_range(Box::new(ConstantSchedule::new(0.2)))
+            .clip_range(ConstantSchedule::new(0.2))
             .clip_value_loss(true)
             .gamma(0.99)
             .gae_lambda(0.95)

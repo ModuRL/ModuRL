@@ -27,7 +27,7 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(VarBuilder::from_varmap(&online_var_map, DTYPE, &device))
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("failed to build the online Q-network");
@@ -37,7 +37,7 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(2)
         .vb(VarBuilder::from_varmap(&target_var_map, DTYPE, &device))
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("failed to build the target Q-network");
@@ -56,8 +56,8 @@ fn main() {
         .dtype(DTYPE)
         .action_space(Discrete::new(2))
         .observation_space(observation_space)
-        .online_q_network(Box::new(online_q_network))
-        .target_q_network(Box::new(target_q_network))
+        .online_q_network(online_q_network)
+        .target_q_network(target_q_network)
         .online_vars(&online_var_map)
         .target_vars(&mut target_var_map)
         .optimizer(optimizer)
@@ -67,10 +67,10 @@ fn main() {
         .update_frequency(10)
         .target_update_interval(500)
         .training_horizon(500_000)
-        .epsilon_schedule(Box::new(|progress: f64| {
+        .epsilon_schedule(|progress: f64| {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
-        }))
+        })
         .logger(&mut grapher)
         .device_strategy(ReplayDeviceStrategy::OneDevice(device))
         .build()

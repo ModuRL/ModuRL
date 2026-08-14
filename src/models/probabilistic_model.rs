@@ -63,9 +63,9 @@ where
     D: Distribution + Default,
     <D as Distribution>::Error: std::fmt::Debug,
 {
-    pub fn new(module: Box<dyn Module>) -> Self {
+    pub fn new(module: impl Module + 'static) -> Self {
         Self {
-            module,
+            module: Box::new(module),
             distribution: D::default(),
         }
     }
@@ -77,14 +77,14 @@ where
     <D as Distribution>::Error: std::fmt::Debug,
 {
     /// Creates a policy with an explicitly configured distribution operator.
-    pub fn with_distribution(module: Box<dyn Module>, distribution: D) -> Self {
+    pub fn with_distribution(module: impl Module + 'static, distribution: D) -> Self {
         Self {
-            module,
+            module: Box::new(module),
             distribution,
         }
     }
 
-    pub fn new_with_distribution(module: Box<dyn Module>, distribution: D) -> Self {
+    pub fn new_with_distribution(module: impl Module + 'static, distribution: D) -> Self {
         Self::with_distribution(module, distribution)
     }
 
@@ -210,10 +210,10 @@ mod tests {
             .output_size(action_size * 2)
             .vb(vb)
             .hidden_layer_sizes(hidden_sizes)
-            .activation(Box::new(Activation::Relu))
+            .activation(Activation::Relu)
             .build()?;
 
-        Ok(ProbabilisticPolicyModel::new(Box::new(mlp)))
+        Ok(ProbabilisticPolicyModel::new(mlp))
     }
 
     #[test]
@@ -230,7 +230,7 @@ mod tests {
             .build()
             .unwrap();
         let policy = ProbabilisticPolicyModel::with_distribution(
-            Box::new(mlp),
+            mlp,
             TransformedDistribution::new(GaussianDistribution::default(), TanhTransform),
         );
         let actions = policy
@@ -402,7 +402,7 @@ mod tests {
             .build()
             .unwrap();
         let policy = ProbabilisticPolicyModel::with_distribution(
-            Box::new(actor),
+            actor,
             GaussianDistribution::new(vec![2, 3]).unwrap(),
         );
         let states = create_test_state(5, 4).unwrap();
@@ -444,12 +444,12 @@ mod tests {
             .output_size(4)
             .vb(vb)
             .hidden_layer_sizes(vec![16])
-            .activation(Box::new(Activation::Relu))
+            .activation(Activation::Relu)
             .build()
             .unwrap();
 
         let policy: ProbabilisticPolicyModel<GaussianDistribution> =
-            ProbabilisticPolicyModel::new(Box::new(mlp));
+            ProbabilisticPolicyModel::new(mlp);
         let state = create_test_state(2, 4).unwrap();
 
         // Sample action

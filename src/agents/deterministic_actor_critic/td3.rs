@@ -126,8 +126,10 @@ where
     /// counterpart.
     pub fn new(
         /// Actor optimized on delayed replay updates.
+        #[builder(with = |actor: impl candle_core::Module + 'static| Box::new(actor))]
         online_actor: Box<dyn candle_core::Module>,
         /// Actor used to calculate smoothed next-state Bellman targets.
+        #[builder(with = |actor: impl candle_core::Module + 'static| Box::new(actor))]
         target_actor: Box<dyn candle_core::Module>,
         /// Parameters belonging to `online_actor`.
         online_actor_vars: &'a VarMap,
@@ -350,7 +352,7 @@ mod tests {
             .input_size(4)
             .output_size(1)
             .hidden_layer_sizes(vec![4])
-            .output_activation(Box::new(Tensor::tanh))
+            .output_activation(Tensor::tanh)
             .vb(VarBuilder::from_varmap(vars, DType::F32, device))
             .build()
             .unwrap()
@@ -371,12 +373,8 @@ mod tests {
                 .unwrap()
         };
         SACCritic::builder()
-            .online_network(Box::new(ScalarStateActionCritic::new(Box::new(network(
-                online_vars,
-            )))))
-            .target_network(Box::new(ScalarStateActionCritic::new(Box::new(network(
-                target_vars,
-            )))))
+            .online_network(ScalarStateActionCritic::new(network(online_vars)))
+            .target_network(ScalarStateActionCritic::new(network(target_vars)))
             .online_vars(online_vars)
             .target_vars(target_vars)
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
@@ -405,8 +403,8 @@ mod tests {
         let critic_3 = critic(&online_critic_vars_3, &mut target_critic_vars_3, &device);
         let mut logger = RecordingLogger::default();
         let mut agent = TD3Agent::builder()
-            .online_actor(Box::new(actor(&online_actor_vars, &device)))
-            .target_actor(Box::new(actor(&target_actor_vars, &device)))
+            .online_actor(actor(&online_actor_vars, &device))
+            .target_actor(actor(&target_actor_vars, &device))
             .online_actor_vars(&online_actor_vars)
             .target_actor_vars(&mut target_actor_vars)
             .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))

@@ -22,8 +22,8 @@ fn actor(
         .output_size(action_size)
         .vb(VarBuilder::from_varmap(variables, DTYPE, device))
         .hidden_layer_sizes(vec![64, 64])
-        .activation(Box::new(Tensor::relu))
-        .output_activation(Box::new(Tensor::tanh))
+        .activation(Tensor::relu)
+        .output_activation(Tensor::tanh)
         .name("actor".to_owned())
         .build()
 }
@@ -42,7 +42,7 @@ fn critic<'a>(
             .output_size(1)
             .vb(VarBuilder::from_varmap(variables, DTYPE, device))
             .hidden_layer_sizes(vec![64, 64])
-            .activation(Box::new(Tensor::relu))
+            .activation(Tensor::relu)
             .name("critic".to_owned())
             .build()
     };
@@ -50,8 +50,8 @@ fn critic<'a>(
     let target = network(target_variables)?;
 
     DeterministicCritic::builder()
-        .online_network(Box::new(ScalarStateActionCritic::new(Box::new(online))))
-        .target_network(Box::new(ScalarStateActionCritic::new(Box::new(target))))
+        .online_network(ScalarStateActionCritic::new(online))
+        .target_network(ScalarStateActionCritic::new(target))
         .online_vars(online_variables)
         .target_vars(target_variables)
         .optimizer(AdamW::new(
@@ -124,8 +124,8 @@ fn main() {
 
     let mut agent = DDPGAgent::builder()
         .dtype(DTYPE)
-        .online_actor(Box::new(online_actor))
-        .target_actor(Box::new(target_actor))
+        .online_actor(online_actor)
+        .target_actor(target_actor)
         .online_actor_vars(&online_actor_variables)
         .target_actor_vars(&mut target_actor_variables)
         .actor_optimizer(actor_optimizer)

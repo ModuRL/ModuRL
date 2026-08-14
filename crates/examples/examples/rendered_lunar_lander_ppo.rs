@@ -86,12 +86,12 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(actor_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
             output_gain: 0.01,
-        }))
+        })
         .name("actor_network".to_string())
         .build()
         .unwrap();
@@ -112,12 +112,12 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(Box::new(OrthogonalMLPInitializer {
+        .initializer(OrthogonalMLPInitializer {
             hidden_gain: 2.0f64.sqrt(),
             output_gain: 1.0,
-        }))
+        })
         .name("critic_network".to_string())
         .build()
         .unwrap();
@@ -127,14 +127,14 @@ fn main() {
 
     let ppo_network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network)),
+            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor_network,
             ))
-            .critic_network(Box::new(critic_network))
+            .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
-            .actor_lr_scheduler(Box::new(LinearSchedule::new(3e-4, 3e-5)))
-            .critic_lr_scheduler(Box::new(LinearSchedule::new(3e-4, 3e-5)))
+            .actor_lr_scheduler(LinearSchedule::new(3e-4, 3e-5))
+            .critic_lr_scheduler(LinearSchedule::new(3e-4, 3e-5))
             .build(),
     );
 
@@ -149,7 +149,7 @@ fn main() {
         .ent_coef(0.01)
         .gamma(0.999)
         .vf_coef(0.5)
-        .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .clip_range(ConstantSchedule::new(0.2))
         .clipped(true)
         .gae_lambda(0.98)
         .num_epochs(4)

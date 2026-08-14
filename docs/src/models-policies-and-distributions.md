@@ -50,7 +50,7 @@ their own implementations:
 
 ```rust,ignore
 let policy =
-    ProbabilisticPolicyModel::<MyDistribution>::new(Box::new(actor));
+    ProbabilisticPolicyModel::<MyDistribution>::new(actor);
 ```
 
 A custom implementation provides `from_outputs`, `sample`, `mode`, `dist_eval`,

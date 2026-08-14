@@ -60,7 +60,7 @@ The CartPole example sets these PPO builder values:
 .batch_size(2048)
 .mini_batch_size(64)
 .ent_coef(0.005)
-.clip_range(Box::new(ConstantSchedule::new(0.2)))
+.clip_range(ConstantSchedule::new(0.2))
 .num_epochs(10)
 .training_horizon(120_000)
 ```

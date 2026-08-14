@@ -71,8 +71,8 @@ Pass both critics and the TD3-specific update settings:
 
 ```rust,ignore
 let mut agent = TD3Agent::builder()
-    .online_actor(Box::new(online_actor))
-    .target_actor(Box::new(target_actor))
+    .online_actor(online_actor)
+    .target_actor(target_actor)
     .online_actor_vars(&online_actor_variables)
     .target_actor_vars(&mut target_actor_variables)
     .actor_optimizer(actor_optimizer)

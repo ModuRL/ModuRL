@@ -124,7 +124,7 @@ The actor network maps observations to action logits:
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(actor_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("actor".to_string())
         .build()
@@ -147,7 +147,7 @@ The critic maps observations to one value estimate:
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("critic".to_string())
         .build()
@@ -183,12 +183,12 @@ actions and evaluate their log probabilities:
 
 ```rust,ignore
     let policy =
-        ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
+        ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
 
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(policy))
-            .critic_network(Box::new(critic_network))
+            .actor_network(policy)
+            .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
             .build(),
@@ -209,7 +209,7 @@ Finally, build the `PPOAgent` and run learning:
         .network_info(network_info)
         .batch_size(1024)
         .mini_batch_size(64)
-        .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .clip_range(ConstantSchedule::new(0.2))
         .training_horizon(10_000)
         .device(device)
         .build().unwrap();
@@ -262,7 +262,7 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.shape()[0])
         .vb(actor_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("actor".to_string())
         .build()
@@ -274,7 +274,7 @@ fn main() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .vb(critic_vb)
-        .activation(Box::new(Tensor::tanh))
+        .activation(Tensor::tanh)
         .hidden_layer_sizes(vec![64, 64])
         .name("critic".to_string())
         .build()
@@ -291,12 +291,12 @@ fn main() {
         .expect("failed to build critic optimizer");
 
     let policy =
-        ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor_network));
+        ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
 
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(Box::new(policy))
-            .critic_network(Box::new(critic_network))
+            .actor_network(policy)
+            .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
             .build(),
@@ -307,7 +307,7 @@ fn main() {
         .network_info(network_info)
         .batch_size(1024)
         .mini_batch_size(64)
-        .clip_range(Box::new(ConstantSchedule::new(0.2)))
+        .clip_range(ConstantSchedule::new(0.2))
         .training_horizon(10_000)
         .device(device)
         .build().unwrap();

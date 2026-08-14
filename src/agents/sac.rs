@@ -83,8 +83,10 @@ pub struct ScalarStateActionCritic {
 }
 
 impl ScalarStateActionCritic {
-    pub fn new(module: Box<dyn candle_core::Module>) -> Self {
-        Self { module }
+    pub fn new(module: impl candle_core::Module + 'static) -> Self {
+        Self {
+            module: Box::new(module),
+        }
     }
 
     /// Flattens states `[batch, ...state_shape]` and candidates
@@ -178,8 +180,10 @@ pub struct DiscreteVectorHeadCritic {
 }
 
 impl DiscreteVectorHeadCritic {
-    pub fn new(module: Box<dyn candle_core::Module>) -> Self {
-        Self { module }
+    pub fn new(module: impl candle_core::Module + 'static) -> Self {
+        Self {
+            module: Box::new(module),
+        }
     }
 
     /// Evaluates states `[batch, ...state_shape]` as vector-head values
@@ -269,7 +273,9 @@ where
 {
     #[builder]
     pub fn new(
+        #[builder(with = |network: impl SACCriticNetwork + 'static| Box::new(network))]
         online_network: Box<dyn SACCriticNetwork>,
+        #[builder(with = |network: impl SACCriticNetwork + 'static| Box::new(network))]
         target_network: Box<dyn SACCriticNetwork>,
         online_vars: &'a VarMap,
         target_vars: &'a mut VarMap,
@@ -503,7 +509,14 @@ pub fn sac_entropy_change_loss(
 }
 
 /// Entropy coefficient configuration.
-pub enum SACEntropyConfiguration<O>
+pub struct SACEntropyConfiguration<O>
+where
+    O: Optimizer,
+{
+    kind: SACEntropyConfigurationKind<O>,
+}
+
+enum SACEntropyConfigurationKind<O>
 where
     O: Optimizer,
 {
@@ -529,21 +542,37 @@ where
     O: Optimizer,
 {
     /// Creates an automatically tuned entropy coefficient.
-    pub fn automatic(
+    pub fn automatic(log_alpha: Var, optimizer: O) -> Self {
+        Self {
+            kind: SACEntropyConfigurationKind::Automatic {
+                log_alpha,
+                optimizer,
+                target_entropy_schedule: None,
+            },
+        }
+    }
+
+    /// Creates an automatically tuned entropy coefficient with a scheduled
+    /// target entropy.
+    pub fn automatic_with_target_schedule(
         log_alpha: Var,
         optimizer: O,
-        target_entropy_schedule: Option<Box<dyn ParameterSchedule>>,
+        target_entropy_schedule: impl ParameterSchedule + 'static,
     ) -> Self {
-        Self::Automatic {
-            log_alpha,
-            optimizer,
-            target_entropy_schedule,
+        Self {
+            kind: SACEntropyConfigurationKind::Automatic {
+                log_alpha,
+                optimizer,
+                target_entropy_schedule: Some(Box::new(target_entropy_schedule)),
+            },
         }
     }
 
     /// Creates a fixed entropy coefficient.
     pub fn fixed(alpha: f64) -> Self {
-        Self::Fixed { alpha }
+        Self {
+            kind: SACEntropyConfigurationKind::Fixed { alpha },
+        }
     }
 }
 
@@ -900,6 +929,7 @@ where
         reason = "Bon's generated typestate contains every SAC agent generic parameter"
     )]
     pub fn new(
+        #[builder(with = |policy: impl ExpectationPolicy<Error = PE> + 'static| Box::new(policy))]
         policy: Box<dyn ExpectationPolicy<Error = PE>>,
         actor_optimizer: AO,
         critics: Vec<SACCritic<'a, CO>>,
@@ -1004,10 +1034,10 @@ impl SACConfigurationValidator {
             Some(SACConfigurationError::InvalidGamma)
         } else if !tau.is_finite() || !(0.0..=1.0).contains(&tau) {
             Some(SACConfigurationError::InvalidTau)
-        } else if matches!(entropy, SACEntropyConfiguration::Fixed { alpha } if !alpha.is_finite() || *alpha < 0.0)
+        } else if matches!(&entropy.kind, SACEntropyConfigurationKind::Fixed { alpha } if !alpha.is_finite() || *alpha < 0.0)
         {
             Some(SACConfigurationError::InvalidAlpha)
-        } else if matches!(entropy, SACEntropyConfiguration::Automatic { target_entropy_schedule: Some(schedule), .. }
+        } else if matches!(&entropy.kind, SACEntropyConfigurationKind::Automatic { target_entropy_schedule: Some(schedule), .. }
         if !schedule.value(0.0).is_finite() || !schedule.value(1.0).is_finite())
         {
             Some(SACConfigurationError::InvalidTargetEntropySchedule)
@@ -1094,13 +1124,13 @@ where
     /// Returns scalar alpha shaped `[]` on the same device and with the same
     /// dtype as the arbitrarily shaped reference tensor `like`.
     fn alpha_tensor(&self, like: &Tensor) -> candle_core::Result<Tensor> {
-        match &self.entropy_configuration {
-            SACEntropyConfiguration::Automatic { log_alpha, .. } => log_alpha
+        match &self.entropy_configuration.kind {
+            SACEntropyConfigurationKind::Automatic { log_alpha, .. } => log_alpha
                 .as_tensor()
                 .exp()?
                 .to_device(like.device())?
                 .to_dtype(like.dtype()),
-            SACEntropyConfiguration::Fixed { alpha } => {
+            SACEntropyConfigurationKind::Fixed { alpha } => {
                 Tensor::new(*alpha, like.device())?.to_dtype(like.dtype())
             }
         }
@@ -1270,8 +1300,8 @@ where
         log_probabilities: &Tensor,
         weights: &Tensor,
     ) -> Result<SACTemperatureUpdate, SACError<PE, GE, SE>> {
-        match &mut self.entropy_configuration {
-            SACEntropyConfiguration::Automatic {
+        match &mut self.entropy_configuration.kind {
+            SACEntropyConfigurationKind::Automatic {
                 log_alpha,
                 optimizer,
                 target_entropy_schedule,
@@ -1306,7 +1336,7 @@ where
                     target_entropy: Some(target_entropy),
                 })
             }
-            SACEntropyConfiguration::Fixed { .. } => Ok(SACTemperatureUpdate {
+            SACEntropyConfigurationKind::Fixed { .. } => Ok(SACTemperatureUpdate {
                 loss: None,
                 target_entropy: None,
             }),
@@ -1832,7 +1862,7 @@ mod tests {
 
     #[test]
     fn scalar_adapter_broadcasts_states_across_candidates() {
-        let critic = ScalarStateActionCritic::new(Box::new(SumModule));
+        let critic = ScalarStateActionCritic::new(SumModule);
         let states = tensor(&[1.0, 2.0, 3.0, 4.0], (2, 2));
         let actions = tensor(&[10.0, 20.0, 30.0, 40.0], (2, 2, 1));
         assert_eq!(
@@ -1856,7 +1886,7 @@ mod tests {
 
     #[test]
     fn scalar_adapter_flattens_five_dimensional_action_events() {
-        let critic = ScalarStateActionCritic::new(Box::new(SumModule));
+        let critic = ScalarStateActionCritic::new(SumModule);
         let states = tensor(&[1.0, 2.0, 3.0, 4.0], (2, 2));
         let candidates = Tensor::ones(&[2, 2, 2, 2, 2, 2, 2], DType::F32, &Device::Cpu).unwrap();
         assert_eq!(
@@ -1881,7 +1911,7 @@ mod tests {
 
     #[test]
     fn scalar_adapter_reports_candidate_rank_and_batch_errors_separately() {
-        let critic = ScalarStateActionCritic::new(Box::new(SumModule));
+        let critic = ScalarStateActionCritic::new(SumModule);
         let states = tensor(&[1.0, 2.0, 3.0, 4.0], (2, 2));
 
         let missing_candidate_axis = tensor(&[0.0, 1.0], 2);
@@ -1904,7 +1934,7 @@ mod tests {
 
     #[test]
     fn discrete_adapter_gathers_replay_and_exact_candidates() {
-        let critic = DiscreteVectorHeadCritic::new(Box::new(IdentityModule));
+        let critic = DiscreteVectorHeadCritic::new(IdentityModule);
         let values = tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3));
         let replay_actions = Tensor::from_vec(vec![2u32, 0], 2, &Device::Cpu).unwrap();
         assert_eq!(
@@ -1942,7 +1972,7 @@ mod tests {
             .hidden_layer_sizes(vec![4])
             .build()
             .unwrap();
-        let critic = DiscreteVectorHeadCritic::new(Box::new(critic_module));
+        let critic = DiscreteVectorHeadCritic::new(critic_module);
         let logits = Var::from_vec(vec![0.2f32, -0.1], (1, 2), &Device::Cpu).unwrap();
         let terms = crate::distributions::CategoricalDistribution
             .expectation(logits.as_tensor(), NonZeroUsize::MIN)
@@ -1975,10 +2005,10 @@ mod tests {
                 &Device::Cpu,
             ))
             .hidden_layer_sizes(vec![4])
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .build()
             .unwrap();
-        let critic = ScalarStateActionCritic::new(Box::new(critic_module));
+        let critic = ScalarStateActionCritic::new(critic_module);
         let actions = Var::from_vec(vec![0.25f32], (1, 1, 1), &Device::Cpu).unwrap();
         let states = tensor(&[0.5, -0.25], (1, 2));
         let loss = critic
@@ -2007,9 +2037,9 @@ mod tests {
         let actor_outputs = Var::from_vec(vec![0.1f32, -0.5], (1, 2), &Device::Cpu).unwrap();
         let policy = ProbabilisticPolicyModel::<
             TransformedDistribution<GaussianDistribution, TanhTransform>,
-        >::new(Box::new(DirectGaussianModule {
+        >::new(DirectGaussianModule {
             outputs: actor_outputs.clone(),
-        }));
+        });
         let states = tensor(&[0.25, -0.5, 0.75, 1.0], (4, 1));
 
         let critic_vars = VarMap::new();
@@ -2022,10 +2052,10 @@ mod tests {
                 &Device::Cpu,
             ))
             .hidden_layer_sizes(vec![4])
-            .activation(Box::new(Tensor::tanh))
+            .activation(Tensor::tanh)
             .build()
             .unwrap();
-        let critic = ScalarStateActionCritic::new(Box::new(critic_module));
+        let critic = ScalarStateActionCritic::new(critic_module);
 
         let terms = policy.expectation(&states, NonZeroUsize::MIN).unwrap();
         let q_values = critic.actor_values(&states, terms.actions()).unwrap();
@@ -2117,21 +2147,16 @@ mod tests {
         let online_vars = VarMap::new();
         let mut target_vars = VarMap::new();
         let critic = SACCritic::builder()
-            .online_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(
-                IdentityModule,
-            ))))
-            .target_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(
-                IdentityModule,
-            ))))
+            .online_network(DiscreteVectorHeadCritic::new(IdentityModule))
+            .target_network(DiscreteVectorHeadCritic::new(IdentityModule))
             .online_vars(&online_vars)
             .target_vars(&mut target_vars)
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .build()
             .unwrap();
-        let policy =
-            ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(IdentityModule));
+        let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(IdentityModule);
         let mut agent = SACAgent::builder()
-            .policy(Box::new(policy))
+            .policy(policy)
             .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .critics(vec![critic])
             .entropy_configuration(SACEntropyConfiguration::<CountingOptimizer>::fixed(0.0))
@@ -2226,12 +2251,8 @@ mod tests {
             .get_with_hints(2, "weight", Init::Const(-2.0))
             .unwrap();
         let mut critic = SACCritic::builder()
-            .online_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(
-                IdentityModule,
-            ))))
-            .target_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(
-                IdentityModule,
-            ))))
+            .online_network(DiscreteVectorHeadCritic::new(IdentityModule))
+            .target_network(DiscreteVectorHeadCritic::new(IdentityModule))
             .online_vars(&online)
             .target_vars(&mut target)
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
@@ -2258,12 +2279,8 @@ mod tests {
             .get_with_hints(1, "target", Init::Const(0.0))
             .unwrap();
         let result = SACCritic::builder()
-            .online_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(
-                IdentityModule,
-            ))))
-            .target_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(
-                IdentityModule,
-            ))))
+            .online_network(DiscreteVectorHeadCritic::new(IdentityModule))
+            .target_network(DiscreteVectorHeadCritic::new(IdentityModule))
             .online_vars(&online)
             .target_vars(&mut target)
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
@@ -2296,7 +2313,7 @@ mod tests {
             .hidden_layer_sizes(vec![4])
             .build()
             .unwrap();
-        let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor));
+        let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor);
         let (actor_optimizer, actor_steps) = SharedCountingOptimizer::new_counter();
 
         let online_vars_1 = VarMap::new();
@@ -2317,8 +2334,8 @@ mod tests {
             .unwrap();
         let (critic_optimizer_1, critic_steps_1) = SharedCountingOptimizer::new_counter();
         let critic_1 = SACCritic::builder()
-            .online_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(online_1))))
-            .target_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(target_1))))
+            .online_network(DiscreteVectorHeadCritic::new(online_1))
+            .target_network(DiscreteVectorHeadCritic::new(target_1))
             .online_vars(&online_vars_1)
             .target_vars(&mut target_vars_1)
             .optimizer(critic_optimizer_1)
@@ -2343,8 +2360,8 @@ mod tests {
             .unwrap();
         let (critic_optimizer_2, critic_steps_2) = SharedCountingOptimizer::new_counter();
         let critic_2 = SACCritic::builder()
-            .online_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(online_2))))
-            .target_network(Box::new(DiscreteVectorHeadCritic::new(Box::new(target_2))))
+            .online_network(DiscreteVectorHeadCritic::new(online_2))
+            .target_network(DiscreteVectorHeadCritic::new(target_2))
             .online_vars(&online_vars_2)
             .target_vars(&mut target_vars_2)
             .optimizer(critic_optimizer_2)
@@ -2353,16 +2370,14 @@ mod tests {
 
         let log_alpha = Var::from_vec(vec![0.0f32], (), &device).unwrap();
         let (alpha_optimizer, alpha_steps) = SharedCountingOptimizer::new_counter();
-        let entropy = SACEntropyConfiguration::automatic(
+        let entropy = SACEntropyConfiguration::automatic_with_target_schedule(
             log_alpha,
             alpha_optimizer,
-            Some(Box::new(crate::parameter_schedule::LinearSchedule::new(
-                1.0, 0.0,
-            ))),
+            crate::parameter_schedule::LinearSchedule::new(1.0, 0.0),
         );
         let mut logger = RecordingLogger::default();
         let mut agent = SACAgent::builder()
-            .policy(Box::new(policy))
+            .policy(policy)
             .actor_optimizer(actor_optimizer)
             .critics(vec![critic_1, critic_2])
             .entropy_configuration(entropy)

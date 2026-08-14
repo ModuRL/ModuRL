@@ -260,13 +260,13 @@ fn main() {
 
     let networks: PPONetworkInfo<AdamW, _, FakeOptimizer> = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
-            .shared_network(Box::new(cnn))
-            .actor_head(Box::new(
-                ProbabilisticPolicyModel::<CategoricalDistribution>::new(Box::new(actor)),
+            .shared_network(cnn)
+            .actor_head(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                actor,
             ))
-            .critic_head(Box::new(critic))
+            .critic_head(critic)
             .optimizer(optimizer)
-            .lr_scheduler(Box::new(learning_rate))
+            .lr_scheduler(learning_rate)
             .build(),
     );
 
@@ -287,7 +287,7 @@ fn main() {
             .gae_lambda(GAE_LAMBDA)
             .normalize_advantage(true)
             .normalize_returns(false)
-            .clip_range(Box::new(ConstantSchedule::new(CLIP_COEFFICIENT)))
+            .clip_range(ConstantSchedule::new(CLIP_COEFFICIENT))
             .clip_value_loss(true)
             // The PPO objective defines value loss as 0.5 * MSE, while the
             // library's value-loss helper returns MSE directly.
