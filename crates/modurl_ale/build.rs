@@ -30,7 +30,10 @@ fn main() {
         .build_target("ale-c-lib-static");
 
     if cfg!(windows) {
-        config.cflag("-DWIN32=1").cxxflag("-DWIN32=1");
+        config
+            .static_crt(true)
+            .cflag("-DWIN32=1")
+            .cxxflag("-DWIN32=1");
     }
 
     let destination = config.build();
