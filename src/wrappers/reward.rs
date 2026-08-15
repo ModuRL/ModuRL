@@ -37,7 +37,11 @@ where
             .gym
             .step(action)
             .map_err(ClipRewardGymError::GymError)?;
-        info.reward = info.reward.signum();
+        // `f32::signum()` maps positive zero to `1.0` and negative zero to
+        // `-1.0`. Atari rewards are usually zero, so preserve zero explicitly.
+        if info.reward != 0.0 {
+            info.reward = info.reward.signum();
+        }
         Ok(info)
     }
 
@@ -60,13 +64,24 @@ mod tests {
     use super::ClipRewardGym;
 
     #[test]
-    fn maps_reward_to_its_sign_and_preserves_metadata() {
-        let gym = TestGym::new([TestGym::step(1.0, 2.5, false, false, 7)]);
+    fn maps_nonzero_rewards_to_their_sign_and_preserves_zero() {
+        let gym = TestGym::new([
+            TestGym::step(1.0, 2.5, false, false, 1),
+            TestGym::step(1.0, -2.5, false, false, 2),
+            TestGym::step(1.0, 0.0, false, false, 3),
+            TestGym::step(1.0, -0.0, false, false, 4),
+        ]);
         let mut wrapper = ClipRewardGym::new(gym);
 
-        let step = wrapper.step(action()).unwrap();
+        let positive = wrapper.step(action()).unwrap();
+        let negative = wrapper.step(action()).unwrap();
+        let positive_zero = wrapper.step(action()).unwrap();
+        let negative_zero = wrapper.step(action()).unwrap();
 
-        assert_eq!(step.reward, 1.0);
-        assert_eq!(step.info.sequence, 7);
+        assert_eq!(positive.reward, 1.0);
+        assert_eq!(negative.reward, -1.0);
+        assert_eq!(positive_zero.reward, 0.0);
+        assert_eq!(negative_zero.reward, 0.0);
+        assert_eq!(negative_zero.info.sequence, 4);
     }
 }
