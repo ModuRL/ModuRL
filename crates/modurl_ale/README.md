@@ -8,20 +8,18 @@ No ROMs are included or downloaded. You must supply a filesystem path to a ROM y
 
 ```rust,no_run
 use std::path::PathBuf;
-use candle_core::Device;
 use modurl_ale::{AtariGym, AtariObsType};
 
 let mut env = AtariGym::builder()
     .rom_path(PathBuf::from("/path/to/your/game.bin"))
     .obs_type(AtariObsType::RAM)
-    .device(Device::Cpu)
     .repeat_action_probability(0.0)
     .build()?;
 env.set_frame_skip(4);
 # Ok::<(), modurl_ale::AtariGymError>(())
 ```
 
-Observations are normalized to `0.0..=1.0`. The environment exposes ALE's ROM-specific minimal action set as a ModuRL `Discrete` space and max-pools the final two frames when frame skipping is enabled. RAM, RGB, and grayscale observations are supported, along with sticky-action probability, seeding, lives, reset, device selection, and optional `minifb` rendering.
+RAM, RGB, and grayscale observations use ALE's standard `u8` representation in `0..=255`, avoiding an unnecessary expansion before preprocessing. ALE environments and their observations always remain on the CPU; convert or normalize observations and transfer processed batches to an accelerator at the policy boundary. The environment exposes ALE's ROM-specific minimal action set as a ModuRL `Discrete` space and max-pools the final two frames when frame skipping is enabled. RAM, RGB, and grayscale observations are supported, along with sticky-action probability, seeding, lives, reset, and optional `minifb` rendering.
 
 Enable display rendering with `features = ["rendering"]`.
 

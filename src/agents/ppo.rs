@@ -726,8 +726,8 @@ where
 
         let values_tensor = self.critic_network_forward(&latent_states)?.detach();
 
-        // unflatten back to [batch_size, env_count, ...]
-        let values_tensor = values_tensor.reshape((batch_size, env_count, ()))?; // shape [batch_size, env_count, ...]
+        // Unflatten back to [batch_size, env_count, ...].
+        let values_tensor = values_tensor.reshape((batch_size, env_count, ()))?;
 
         let next_states_tensor = batch.next_states;
         let bootstrapped_states = next_states_tensor.i(next_states_tensor.shape().dims()[0] - 1)?; // shape [env_count, ...]
@@ -1133,7 +1133,6 @@ where
             .map_err(PPOError::SpaceError)?;
         let (log_probs, _) =
             self.actor_network_log_prob_and_entropy(&latent_states, &policy_actions)?;
-
         Ok(PPOCollectionAction {
             policy_actions,
             environment_actions,

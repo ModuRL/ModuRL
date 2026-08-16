@@ -61,5 +61,5 @@ pub use crate::wrappers::{
     ClipRewardGym, ClipRewardGymError, EpisodeStatistics, EpisodeStatisticsInfo, FrameStackGym,
     FrameStackGymError, MaxAndSkipGym, MaxAndSkipGymError, NormalizeObservationGym,
     NormalizeObservationGymError, NormalizeRewardGym, RawRewardInfo, RecordEpisodeStatisticsGym,
-    RecordRawRewardGym, TimeLimitGym,
+    RecordRawRewardGym, TensorMapMultiGymError, TensorMapMultiGymWrapper, TimeLimitGym,
 };

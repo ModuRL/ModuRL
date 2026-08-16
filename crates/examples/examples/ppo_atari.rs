@@ -6,7 +6,7 @@
 //!
 //! Run with a legally obtained Atari ROM:
 //!
-//! `cargo run --release -p examples --example ppo_atari --features atari-environment -- path/to/game.bin`
+//! `cargo run --release -p examples --example ppo_atari --features atari-environment,multithreading -- path/to/game.bin`
 
 use std::{env, path::PathBuf};
 
@@ -18,7 +18,7 @@ use modurl::{
     prelude::*,
 };
 use modurl_ale::{
-    AtariGym, AtariObsType,
+    AtariGym, AtariInfo, AtariObsType,
     wrappers::{EpisodicLifeGym, FireResetGym, FireResetGymError, NoopResetGym, WarpGym},
 };
 
@@ -56,6 +56,35 @@ const MAX_EPISODE_FRAMES: u32 = 400_000;
 enum OptionalFireResetGym<G> {
     Plain(G),
     Fire(FireResetGym<G>),
+}
+
+fn make_atari_env(
+    rom_path: PathBuf,
+    seed: i32,
+) -> impl Gym<
+    RawRewardInfo<EpisodeStatisticsInfo<AtariInfo>>,
+    SpaceError = candle_core::Error,
+    Error: Send + Sync + std::fmt::Debug,
+> {
+    let mut env = AtariGym::builder()
+        .rom_path(rom_path)
+        .obs_type(AtariObsType::RGBScreen)
+        .random_seed(seed)
+        .repeat_action_probability(0.0)
+        .build()
+        .expect("failed to load the Atari ROM");
+    let has_fire_action = env.minimal_action_set().contains(&1);
+
+    let env = TimeLimitGym::new(env, MAX_EPISODE_FRAMES);
+    let env = RecordEpisodeStatisticsGym::new(env);
+    let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
+    let env = MaxAndSkipGym::new(env, FRAME_SKIP);
+    let env = EpisodicLifeGym::new(env, &Device::Cpu);
+    let env = OptionalFireResetGym::new(env, has_fire_action);
+    let env = RecordRawRewardGym::new(env);
+    let env = ClipRewardGym::new(env);
+    let env = WarpGym::new(env);
+    FrameStackGym::new(env, FRAME_STACK)
 }
 
 impl<G> OptionalFireResetGym<G> {
@@ -174,7 +203,6 @@ fn main() {
         );
         std::process::exit(2);
     });
-
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = {
         println!("CPU seed cannot be set");
@@ -197,37 +225,60 @@ fn main() {
         device
     };
 
-    let mut envs = Vec::with_capacity(NUM_ENVS);
-    for seed in 0..NUM_ENVS {
-        let mut env = AtariGym::builder()
-            .rom_path(rom_path.clone())
-            .obs_type(AtariObsType::RGBScreen)
-            .device(device.clone())
-            .random_seed(seed as i32 + SEED)
-            .repeat_action_probability(0.0)
-            .build()
-            .expect("failed to load the Atari ROM");
-        let has_fire_action = env.minimal_action_set().contains(&1);
+    // ALE and Atari image preprocessing are CPU-native. Keep all eight
+    // environments on the CPU and transfer one processed batch at the policy
+    // boundary instead of synchronizing each frame and action separately.
+    let environment_device = Device::Cpu;
 
-        // Wrapper order determines whether limits, rewards, and episode ends
-        // apply to emulator frames or agent steps. AtariGym observations are
-        // already scaled to [0, 1], so no additional normalization is needed.
-        let env = TimeLimitGym::new(env, MAX_EPISODE_FRAMES);
-        let env = RecordEpisodeStatisticsGym::new(env);
-        let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
-        let env = MaxAndSkipGym::new(env, FRAME_SKIP);
-        let env = EpisodicLifeGym::new(env, &device);
-        let env = OptionalFireResetGym::new(env, has_fire_action);
-        let env = RecordRawRewardGym::new(env);
-        let env = ClipRewardGym::new(env);
-        let env = WarpGym::new(env);
-        let env = FrameStackGym::new(env, FRAME_STACK);
-        envs.push(env);
-    }
+    // Load one environment on the main thread to discover the ROM's minimal
+    // action set. Worker environments are constructed inside their own threads
+    // because ALE instances are intentionally not Send.
+    let probe_env = make_atari_env(rom_path.clone(), SEED);
+    let action_count = probe_env.action_space().shape()[0];
+    drop(probe_env);
+    let action_space = Discrete::new(action_count);
 
-    let action_space = envs[0].action_space();
-    let action_count = action_space.shape()[0];
-    let mut envs = VectorizedGymWrapper::from(envs);
+    #[cfg(feature = "multithreading")]
+    let envs = {
+        let constructors: Vec<_> = (0..NUM_ENVS)
+            .map(|seed| {
+                let rom_path = rom_path.clone();
+                move || make_atari_env(rom_path, seed as i32 + SEED)
+            })
+            .collect();
+        let observation_space = BoxSpace::new(
+            Tensor::zeros((FRAME_STACK, 84, 84), DType::U8, &Device::Cpu)
+                .expect("failed to build Atari observation space"),
+            Tensor::full(u8::MAX, (FRAME_STACK, 84, 84), &Device::Cpu)
+                .expect("failed to build Atari observation space"),
+        );
+        MultithreadedVectorizedGymWrapper::new(
+            constructors,
+            observation_space,
+            action_space.clone(),
+        )
+    };
+
+    #[cfg(not(feature = "multithreading"))]
+    let envs = VectorizedGymWrapper::from(
+        (0..NUM_ENVS)
+            .map(|seed| make_atari_env(rom_path.clone(), seed as i32 + SEED))
+            .collect::<Vec<_>>(),
+    );
+    let action_device = environment_device.clone();
+    let observation_device = device.clone();
+    let mut envs = TensorMapMultiGymWrapper::new(
+        envs,
+        move |tensor: Tensor| tensor.to_device(&action_device),
+        move |tensor: Tensor| {
+            let tensor = tensor.to_device(&observation_device)?;
+            if tensor.dtype() == DType::U8 {
+                tensor.to_dtype(DType::F32)? / 255.0
+            } else {
+                Ok(tensor)
+            }
+        },
+    );
 
     let variables = VarMap::new();
     let vb = VarBuilder::from_varmap(&variables, DType::F32, &device);
@@ -277,7 +328,7 @@ fn main() {
     let mut logger = OnPolicyGrapher::ppo_atari(TRAINING_TIMESTEPS, game_name);
     {
         let mut agent = PPOAgent::builder()
-            .action_space(action_space)
+            .action_space(Box::new(action_space))
             .network_info(networks)
             .clipped(true)
             .batch_size(BATCH_SIZE)

@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use candle_core::Device;
 use modurl::gym::Gym;
 use modurl_ale::{AtariGym, AtariObsType};
 
@@ -13,7 +12,6 @@ fn user_supplied_rom_can_reset_and_step() {
     let mut env = AtariGym::builder()
         .rom_path(PathBuf::from(path))
         .obs_type(AtariObsType::RAM)
-        .device(Device::Cpu)
         .repeat_action_probability(0.0)
         .build()
         .unwrap();
