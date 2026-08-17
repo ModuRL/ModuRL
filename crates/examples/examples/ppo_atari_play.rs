@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use candle_core::{D, DType, Device, Module, Result, Tensor};
+use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, Linear, VarBuilder, VarMap};
 use modurl::{
     init::{conv2d_ortho, linear_ortho},
@@ -188,13 +188,15 @@ fn main() {
     let device = Device::new_metal(0).expect("failed to create Metal device");
 
     let mut gym = make_atari_env(rom_path);
-    let action_count = gym.action_space().shape()[0];
+    let action_space = gym.action_space();
+    let action_count = action_space.shape()[0];
 
     let mut variables = VarMap::new();
     let vb = VarBuilder::from_varmap(&variables, DType::F32, &device);
     let cnn = NatureCnn::new(vb.pp("network")).expect("failed to build Nature CNN");
-    let actor =
-        linear_ortho(512, action_count, 0.01, vb.pp("actor")).expect("failed to build actor head");
+    let actor = ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+        linear_ortho(512, action_count, 0.01, vb.pp("actor")).expect("failed to build actor head"),
+    );
     // Checkpoints also contain the critic, so instantiate it before loading to
     // ensure every saved variable has the same model layout as training.
     let _critic = linear_ortho(512, 1, 1.0, vb.pp("critic")).expect("failed to build critic head");
@@ -218,11 +220,11 @@ fn main() {
             .expect("failed to prepare observation")
             / 255.0)
             .expect("failed to normalize observation");
-        let logits = actor
-            .forward(&cnn.forward(&input).expect("CNN inference failed"))
-            .expect("actor inference failed");
-        let action = logits
-            .argmax(D::Minus1)
+        let action_neurons = actor
+            .sample(&cnn.forward(&input).expect("CNN inference failed"))
+            .expect("failed to sample action");
+        let action = action_space
+            .tensor_from_neurons(&action_neurons)
             .and_then(|action| action.squeeze(0))
             .and_then(|action| action.to_device(&Device::Cpu))
             .expect("failed to select action");
