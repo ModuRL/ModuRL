@@ -8,7 +8,7 @@
 //!
 //! `cargo run --release -p examples --example ppo_atari --features atari-environment,multithreading -- path/to/game.bin`
 
-use std::{env, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{AdamW, Conv2d, Conv2dConfig, Linear, Optimizer, ParamsAdamW, VarBuilder, VarMap};
@@ -33,6 +33,7 @@ const BATCH_SIZE: usize = NUM_ENVS * NUM_STEPS;
 const REQUESTED_TIMESTEPS: usize = 10_000_000;
 // PPO updates require complete rollouts, so discard the partial final batch.
 const TRAINING_TIMESTEPS: usize = REQUESTED_TIMESTEPS / BATCH_SIZE * BATCH_SIZE;
+const CHECKPOINT_INTERVAL: usize = 1_000_000;
 const SEED: i32 = 1;
 const LEARNING_RATE: f64 = 2.5e-4;
 const ADAM_BETA1: f64 = 0.9;
@@ -325,6 +326,10 @@ fn main() {
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or("atari");
+    let checkpoint_dir = PathBuf::from("runs")
+        .join("ppo_atari_checkpoints")
+        .join(game_name);
+    fs::create_dir_all(&checkpoint_dir).expect("failed to create Atari checkpoint directory");
     let mut logger = OnPolicyGrapher::ppo_atari(TRAINING_TIMESTEPS, game_name);
     {
         let mut agent = PPOAgent::builder()
@@ -352,9 +357,44 @@ fn main() {
             .expect("invalid PPO configuration");
 
         println!("training Atari for {TRAINING_TIMESTEPS} steps");
+        let mut trained_timesteps = 0;
+        for checkpoint_timestep in
+            (CHECKPOINT_INTERVAL..TRAINING_TIMESTEPS).step_by(CHECKPOINT_INTERVAL)
+        {
+            // PPO can only stop after a complete rollout. Save the first fully
+            // trained model at or beyond each nominal checkpoint boundary.
+            let trained_checkpoint = checkpoint_timestep.div_ceil(BATCH_SIZE) * BATCH_SIZE;
+            agent
+                .learn(&mut envs, trained_checkpoint - trained_timesteps)
+                .expect("PPO training failed");
+            trained_timesteps = trained_checkpoint;
+
+            let checkpoint_path =
+                checkpoint_dir.join(format!("{game_name}-{checkpoint_timestep}.safetensors"));
+            variables
+                .save(&checkpoint_path)
+                .expect("failed to save Atari checkpoint");
+            println!(
+                "saved {}-step checkpoint after {trained_timesteps} trained steps to {}",
+                checkpoint_timestep,
+                checkpoint_path.display()
+            );
+        }
+
         agent
-            .learn(&mut envs, TRAINING_TIMESTEPS)
+            .learn(&mut envs, TRAINING_TIMESTEPS - trained_timesteps)
             .expect("PPO training failed");
+
+        let final_checkpoint_path =
+            checkpoint_dir.join(format!("{game_name}-{REQUESTED_TIMESTEPS}.safetensors"));
+        variables
+            .save(&final_checkpoint_path)
+            .expect("failed to save final Atari checkpoint");
+        println!(
+            "saved {}-step checkpoint after {TRAINING_TIMESTEPS} trained steps to {}",
+            REQUESTED_TIMESTEPS,
+            final_checkpoint_path.display()
+        );
     }
     logger.display();
 }
