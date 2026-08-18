@@ -6,9 +6,9 @@
 //!
 //! Run with a legally obtained Atari ROM:
 //!
-//! `cargo run --release -p examples --example ppo_atari --features atari-environment -- path/to/game.bin`
+//! `cargo run --release -p examples --example ppo_atari --features atari-environment,multithreading -- path/to/game.bin`
 
-use std::{env, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::{AdamW, Conv2d, Conv2dConfig, Linear, Optimizer, ParamsAdamW, VarBuilder, VarMap};
@@ -18,7 +18,7 @@ use modurl::{
     prelude::*,
 };
 use modurl_ale::{
-    AtariGym, AtariObsType,
+    AtariGym, AtariInfo, AtariObsType,
     wrappers::{EpisodicLifeGym, FireResetGym, FireResetGymError, NoopResetGym, WarpGym},
 };
 
@@ -33,6 +33,7 @@ const BATCH_SIZE: usize = NUM_ENVS * NUM_STEPS;
 const REQUESTED_TIMESTEPS: usize = 10_000_000;
 // PPO updates require complete rollouts, so discard the partial final batch.
 const TRAINING_TIMESTEPS: usize = REQUESTED_TIMESTEPS / BATCH_SIZE * BATCH_SIZE;
+const CHECKPOINT_INTERVAL: usize = 1_000_000;
 const SEED: i32 = 1;
 const LEARNING_RATE: f64 = 2.5e-4;
 const ADAM_BETA1: f64 = 0.9;
@@ -56,6 +57,35 @@ const MAX_EPISODE_FRAMES: u32 = 400_000;
 enum OptionalFireResetGym<G> {
     Plain(G),
     Fire(FireResetGym<G>),
+}
+
+fn make_atari_env(
+    rom_path: PathBuf,
+    seed: i32,
+) -> impl Gym<
+    RawRewardInfo<EpisodeStatisticsInfo<AtariInfo>>,
+    SpaceError = candle_core::Error,
+    Error: Send + Sync + std::fmt::Debug,
+> {
+    let mut env = AtariGym::builder()
+        .rom_path(rom_path)
+        .obs_type(AtariObsType::RGBScreen)
+        .random_seed(seed)
+        .repeat_action_probability(0.0)
+        .build()
+        .expect("failed to load the Atari ROM");
+    let has_fire_action = env.minimal_action_set().contains(&1);
+
+    let env = TimeLimitGym::new(env, MAX_EPISODE_FRAMES);
+    let env = RecordEpisodeStatisticsGym::new(env);
+    let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
+    let env = MaxAndSkipGym::new(env, FRAME_SKIP);
+    let env = EpisodicLifeGym::new(env, &Device::Cpu);
+    let env = OptionalFireResetGym::new(env, has_fire_action);
+    let env = RecordRawRewardGym::new(env);
+    let env = ClipRewardGym::new(env);
+    let env = WarpGym::new(env);
+    FrameStackGym::new(env, FRAME_STACK)
 }
 
 impl<G> OptionalFireResetGym<G> {
@@ -174,7 +204,6 @@ fn main() {
         );
         std::process::exit(2);
     });
-
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = {
         println!("CPU seed cannot be set");
@@ -197,37 +226,60 @@ fn main() {
         device
     };
 
-    let mut envs = Vec::with_capacity(NUM_ENVS);
-    for seed in 0..NUM_ENVS {
-        let mut env = AtariGym::builder()
-            .rom_path(rom_path.clone())
-            .obs_type(AtariObsType::RGBScreen)
-            .device(device.clone())
-            .random_seed(seed as i32 + SEED)
-            .repeat_action_probability(0.0)
-            .build()
-            .expect("failed to load the Atari ROM");
-        let has_fire_action = env.minimal_action_set().contains(&1);
+    // ALE and Atari image preprocessing are CPU-native. Keep all eight
+    // environments on the CPU and transfer one processed batch at the policy
+    // boundary instead of synchronizing each frame and action separately.
+    let environment_device = Device::Cpu;
 
-        // Wrapper order determines whether limits, rewards, and episode ends
-        // apply to emulator frames or agent steps. AtariGym observations are
-        // already scaled to [0, 1], so no additional normalization is needed.
-        let env = TimeLimitGym::new(env, MAX_EPISODE_FRAMES);
-        let env = RecordEpisodeStatisticsGym::new(env);
-        let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
-        let env = MaxAndSkipGym::new(env, FRAME_SKIP);
-        let env = EpisodicLifeGym::new(env, &device);
-        let env = OptionalFireResetGym::new(env, has_fire_action);
-        let env = RecordRawRewardGym::new(env);
-        let env = ClipRewardGym::new(env);
-        let env = WarpGym::new(env);
-        let env = FrameStackGym::new(env, FRAME_STACK);
-        envs.push(env);
-    }
+    // Load one environment on the main thread to discover the ROM's minimal
+    // action set. Worker environments are constructed inside their own threads
+    // because ALE instances are intentionally not Send.
+    let probe_env = make_atari_env(rom_path.clone(), SEED);
+    let action_count = probe_env.action_space().shape()[0];
+    drop(probe_env);
+    let action_space = Discrete::new(action_count);
 
-    let action_space = envs[0].action_space();
-    let action_count = action_space.shape()[0];
-    let mut envs = VectorizedGymWrapper::from(envs);
+    #[cfg(feature = "multithreading")]
+    let envs = {
+        let constructors: Vec<_> = (0..NUM_ENVS)
+            .map(|seed| {
+                let rom_path = rom_path.clone();
+                move || make_atari_env(rom_path, seed as i32 + SEED)
+            })
+            .collect();
+        let observation_space = BoxSpace::new(
+            Tensor::zeros((FRAME_STACK, 84, 84), DType::U8, &Device::Cpu)
+                .expect("failed to build Atari observation space"),
+            Tensor::full(u8::MAX, (FRAME_STACK, 84, 84), &Device::Cpu)
+                .expect("failed to build Atari observation space"),
+        );
+        MultithreadedVectorizedGymWrapper::new(
+            constructors,
+            observation_space,
+            action_space.clone(),
+        )
+    };
+
+    #[cfg(not(feature = "multithreading"))]
+    let envs = VectorizedGymWrapper::from(
+        (0..NUM_ENVS)
+            .map(|seed| make_atari_env(rom_path.clone(), seed as i32 + SEED))
+            .collect::<Vec<_>>(),
+    );
+    let action_device = environment_device.clone();
+    let observation_device = device.clone();
+    let mut envs = TensorMapMultiGymWrapper::new(
+        envs,
+        move |tensor: Tensor| tensor.to_device(&action_device),
+        move |tensor: Tensor| {
+            let tensor = tensor.to_device(&observation_device)?;
+            if tensor.dtype() == DType::U8 {
+                tensor.to_dtype(DType::F32)? / 255.0
+            } else {
+                Ok(tensor)
+            }
+        },
+    );
 
     let variables = VarMap::new();
     let vb = VarBuilder::from_varmap(&variables, DType::F32, &device);
@@ -274,10 +326,14 @@ fn main() {
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or("atari");
+    let checkpoint_dir = PathBuf::from("runs")
+        .join("ppo_atari_checkpoints")
+        .join(game_name);
+    fs::create_dir_all(&checkpoint_dir).expect("failed to create Atari checkpoint directory");
     let mut logger = OnPolicyGrapher::ppo_atari(TRAINING_TIMESTEPS, game_name);
     {
         let mut agent = PPOAgent::builder()
-            .action_space(action_space)
+            .action_space(Box::new(action_space))
             .network_info(networks)
             .clipped(true)
             .batch_size(BATCH_SIZE)
@@ -301,9 +357,44 @@ fn main() {
             .expect("invalid PPO configuration");
 
         println!("training Atari for {TRAINING_TIMESTEPS} steps");
+        let mut trained_timesteps = 0;
+        for checkpoint_timestep in
+            (CHECKPOINT_INTERVAL..TRAINING_TIMESTEPS).step_by(CHECKPOINT_INTERVAL)
+        {
+            // PPO can only stop after a complete rollout. Save the first fully
+            // trained model at or beyond each nominal checkpoint boundary.
+            let trained_checkpoint = checkpoint_timestep.div_ceil(BATCH_SIZE) * BATCH_SIZE;
+            agent
+                .learn(&mut envs, trained_checkpoint - trained_timesteps)
+                .expect("PPO training failed");
+            trained_timesteps = trained_checkpoint;
+
+            let checkpoint_path =
+                checkpoint_dir.join(format!("{game_name}-{checkpoint_timestep}.safetensors"));
+            variables
+                .save(&checkpoint_path)
+                .expect("failed to save Atari checkpoint");
+            println!(
+                "saved {}-step checkpoint after {trained_timesteps} trained steps to {}",
+                checkpoint_timestep,
+                checkpoint_path.display()
+            );
+        }
+
         agent
-            .learn(&mut envs, TRAINING_TIMESTEPS)
+            .learn(&mut envs, TRAINING_TIMESTEPS - trained_timesteps)
             .expect("PPO training failed");
+
+        let final_checkpoint_path =
+            checkpoint_dir.join(format!("{game_name}-{REQUESTED_TIMESTEPS}.safetensors"));
+        variables
+            .save(&final_checkpoint_path)
+            .expect("failed to save final Atari checkpoint");
+        println!(
+            "saved {}-step checkpoint after {TRAINING_TIMESTEPS} trained steps to {}",
+            REQUESTED_TIMESTEPS,
+            final_checkpoint_path.display()
+        );
     }
     logger.display();
 }

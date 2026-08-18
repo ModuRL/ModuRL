@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ale::Ale;
 use bon::bon;
-use candle_core::Tensor;
+use candle_core::{Device, Tensor};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces::{BoxSpace, Discrete},
@@ -34,11 +34,12 @@ pub struct AtariGym {
     _not_send_sync: PhantomData<*const ()>,
     ale: Ale,
     obs_type: AtariObsType,
-    device: candle_core::Device,
     observation_space: BoxSpace,
     action_space: Discrete,
     frame_skip: usize,
     lives: u32,
+    // Reused for ALE's RAM and screen output to avoid allocating on every observation.
+    buffer_bytes: Vec<u8>,
     #[cfg(feature = "rendering")]
     renderer: Option<crate::renderer::Renderer>,
     #[cfg(feature = "rendering")]
@@ -68,7 +69,6 @@ impl AtariGym {
     pub fn new(
         rom_path: PathBuf,
         obs_type: AtariObsType,
-        device: candle_core::Device,
         random_seed: Option<i32>,
         /// Sticky-action probability. Defaults to 0.25 when unset;
         /// pass 0.0 for deterministic NoFrameskip-style behavior.
@@ -94,10 +94,14 @@ impl AtariGym {
         ale.set_bool(c"color_averaging", false);
         ale.load_rom_file(&c_path);
 
-        let observation_space = Self::get_observation_space_initial(&ale, obs_type, &device)
+        let observation_space = Self::get_observation_space_initial(&ale, obs_type)
             .map_err(AtariGymError::CandleError)?;
         let action_space = Self::get_action_space_initial(&mut ale);
-
+        let observation_len = match obs_type {
+            AtariObsType::RAM => ale.ram_size(),
+            AtariObsType::RGBScreen => ale.screen_width() * ale.screen_height() * 3,
+            AtariObsType::GrayscaleScreen => ale.screen_width() * ale.screen_height(),
+        };
         Ok(Self {
             _not_send_sync: PhantomData,
             lives: ale.lives() as u32,
@@ -114,10 +118,10 @@ impl AtariGym {
             },
             ale,
             obs_type,
-            device,
             observation_space,
             action_space,
             frame_skip: 1,
+            buffer_bytes: vec![0; observation_len],
             #[cfg(feature = "rendering")]
             render_every,
             #[cfg(feature = "rendering")]
@@ -139,51 +143,45 @@ impl AtariGym {
     fn get_observation_space_initial(
         ale: &Ale,
         obs_type: AtariObsType,
-        device: &candle_core::Device,
     ) -> Result<BoxSpace, candle_core::Error> {
+        let device = &Device::Cpu;
         Ok(match obs_type {
             AtariObsType::RAM => BoxSpace::new(
-                Tensor::full(0.0f32, &[ale.ram_size()], device)?,
-                Tensor::full(1.0f32, &[ale.ram_size()], device)?,
+                Tensor::full(0u8, &[ale.ram_size()], device)?,
+                Tensor::full(u8::MAX, &[ale.ram_size()], device)?,
             ),
             AtariObsType::RGBScreen => {
                 let (width, height) = (ale.screen_width(), ale.screen_height());
                 BoxSpace::new(
-                    Tensor::full(0.0f32, &[height, width, 3], device)?,
-                    Tensor::full(1.0f32, &[height, width, 3], device)?,
+                    Tensor::full(0u8, &[height, width, 3], device)?,
+                    Tensor::full(u8::MAX, &[height, width, 3], device)?,
                 )
             }
             AtariObsType::GrayscaleScreen => {
                 let (width, height) = (ale.screen_width(), ale.screen_height());
                 BoxSpace::new(
-                    Tensor::full(0.0f32, &[height, width], device)?,
-                    Tensor::full(1.0f32, &[height, width], device)?,
+                    Tensor::full(0u8, &[height, width], device)?,
+                    Tensor::full(u8::MAX, &[height, width], device)?,
                 )
             }
         })
     }
 
-    fn get_state(&self) -> Result<Tensor, candle_core::Error> {
+    fn get_state(&mut self) -> Result<Tensor, candle_core::Error> {
         match self.obs_type {
             AtariObsType::RAM => {
-                let mut ram_vec = vec![0u8; self.ale.ram_size()];
-                self.ale.get_ram(&mut ram_vec);
-                let ram: Vec<f32> = ram_vec.iter().map(|&x| x as f32 / 255.0).collect();
-                Tensor::from_slice(&ram, &[ram.len()], &self.device)
+                self.ale.get_ram(&mut self.buffer_bytes);
+                Tensor::from_slice(&self.buffer_bytes, &[self.buffer_bytes.len()], &Device::Cpu)
             }
             AtariObsType::RGBScreen => {
                 let (width, height) = (self.ale.screen_width(), self.ale.screen_height());
-                let mut screen_vec = vec![0u8; width * height * 3];
-                self.ale.get_screen_rgb(&mut screen_vec);
-                let screen: Vec<f32> = screen_vec.iter().map(|&x| x as f32 / 255.0).collect();
-                Tensor::from_slice(&screen, &[height, width, 3], &self.device)
+                self.ale.get_screen_rgb(&mut self.buffer_bytes);
+                Tensor::from_slice(&self.buffer_bytes, &[height, width, 3], &Device::Cpu)
             }
             AtariObsType::GrayscaleScreen => {
                 let (width, height) = (self.ale.screen_width(), self.ale.screen_height());
-                let mut screen_vec = vec![0u8; width * height];
-                self.ale.get_screen_grayscale(&mut screen_vec);
-                let screen: Vec<f32> = screen_vec.iter().map(|&x| x as f32 / 255.0).collect();
-                Tensor::from_slice(&screen, &[height, width], &self.device)
+                self.ale.get_screen_grayscale(&mut self.buffer_bytes);
+                Tensor::from_slice(&self.buffer_bytes, &[height, width], &Device::Cpu)
             }
         }
     }

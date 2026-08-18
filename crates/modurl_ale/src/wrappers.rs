@@ -1,10 +1,11 @@
 use crate::AtariInfo;
-use candle_core::{Device, IndexOp, Tensor};
+use candle_core::{DType, Device, Tensor};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     sampling::sample_u32_inclusive,
     wrappers::EpisodeStatisticsInfo,
 };
+use std::sync::OnceLock;
 
 /// Takes a random number of no-op actions after reset.
 ///
@@ -265,96 +266,179 @@ pub struct WarpGym<G> {
     gym: G,
 }
 
+#[derive(Clone, Copy)]
+struct AreaSpan {
+    start: usize,
+    len: usize,
+    weights: [f32; 3],
+}
+
+fn area_spans(source_len: usize, target_len: usize) -> Vec<AreaSpan> {
+    let scale = source_len as f32 / target_len as f32;
+    (0..target_len)
+        .map(|output| {
+            let start_f = output as f32 * scale;
+            let end_f = (output + 1) as f32 * scale;
+            let start = start_f.floor() as usize;
+            let end = end_f.ceil().min(source_len as f32) as usize;
+            let len = end - start;
+            debug_assert!(len <= 3);
+            let mut weights = [0.0; 3];
+            for (offset, weight) in weights.iter_mut().enumerate().take(len) {
+                let source = start + offset;
+                *weight =
+                    (end_f.min((source + 1) as f32) - start_f.max(source as f32)).max(0.0) / scale;
+            }
+            AreaSpan {
+                start,
+                len,
+                weights,
+            }
+        })
+        .collect()
+}
+
+static ATARI_HORIZONTAL_SPANS: OnceLock<Vec<AreaSpan>> = OnceLock::new();
+static ATARI_VERTICAL_SPANS: OnceLock<Vec<AreaSpan>> = OnceLock::new();
+
 impl<G> WarpGym<G> {
     pub fn new(gym: G) -> Self {
         Self { gym }
     }
 
-    /// Resizes grayscale `obs` from `[210, 160]` to `[84, 84]`.
-    fn resize_observation(&self, obs: Tensor) -> Result<Tensor, candle_core::Error> {
-        // Resize from [210, 160] to [84, 84] using area-based interpolation
-        // This mimics OpenCV's INTER_AREA which is standard for Atari preprocessing
-        self.resize_area_interp(obs, 84, 84)
-    }
-
-    /// Resizes a grayscale matrix `input` shaped `[input_h, input_w]` to
-    /// `[target_h, target_w]`.
-    fn resize_area_interp(
-        &self,
-        input: Tensor,
+    fn resize_area_data(
+        input: &[f32],
+        input_h: usize,
+        input_w: usize,
         target_h: usize,
         target_w: usize,
-    ) -> Result<Tensor, candle_core::Error> {
-        // Get input dimensions
-        let shape = input.shape();
-        let input_h = shape.dims()[0];
-        let input_w = shape.dims()[1];
-
-        // Calculate scaling factors
+    ) -> Vec<f32> {
         let scale_h = input_h as f32 / target_h as f32;
         let scale_w = input_w as f32 / target_w as f32;
 
-        let mut output_data = vec![0.0f32; target_h * target_w];
-        let input_data = input.to_vec2::<f32>()?;
-
-        // True area average: source pixels only partially covered by the
-        // destination pixel's box are weighted by their covered fraction,
-        // matching cv2 INTER_AREA. Equal-weight averaging distorts pixels on
-        // feature boundaries by up to ~13% (33/255 measured on Breakout).
-        for i in 0..target_h {
-            let y_start = i as f32 * scale_h;
-            let y_end = (i as f32 + 1.0) * scale_h;
-            for j in 0..target_w {
-                let x_start = j as f32 * scale_w;
-                let x_end = (j as f32 + 1.0) * scale_w;
-
+        // INTER_AREA is a separable box filter. The two one-dimensional
+        // passes avoid recomputing every horizontal contribution for each
+        // vertically overlapping output pixel.
+        let mut horizontal = vec![0.0f32; input_h * target_w];
+        for y in 0..input_h {
+            for output_x in 0..target_w {
+                let x_start = output_x as f32 * scale_w;
+                let x_end = (output_x + 1) as f32 * scale_w;
                 let mut sum = 0.0f32;
-                let mut weight_total = 0.0f32;
-
-                let mut y = y_start.floor() as usize;
-                while (y as f32) < y_end && y < input_h {
-                    let wy = (y_end.min((y + 1) as f32) - y_start.max(y as f32)).max(0.0);
-                    let mut x = x_start.floor() as usize;
-                    while (x as f32) < x_end && x < input_w {
-                        let wx = (x_end.min((x + 1) as f32) - x_start.max(x as f32)).max(0.0);
-                        let w = wy * wx;
-                        sum += input_data[y][x] * w;
-                        weight_total += w;
-                        x += 1;
-                    }
-                    y += 1;
+                let mut x = x_start.floor() as usize;
+                while (x as f32) < x_end && x < input_w {
+                    let weight = (x_end.min((x + 1) as f32) - x_start.max(x as f32)).max(0.0);
+                    sum += input[y * input_w + x] * weight;
+                    x += 1;
                 }
-
-                output_data[i * target_w + j] = if weight_total > 0.0 {
-                    sum / weight_total
-                } else {
-                    0.0
-                };
+                horizontal[y * target_w + output_x] = sum / scale_w;
             }
         }
 
-        Tensor::from_vec(output_data, (target_h, target_w), input.device())
+        let mut output = vec![0.0f32; target_h * target_w];
+        for output_y in 0..target_h {
+            let y_start = output_y as f32 * scale_h;
+            let y_end = (output_y + 1) as f32 * scale_h;
+            for x in 0..target_w {
+                let mut sum = 0.0f32;
+                let mut y = y_start.floor() as usize;
+                while (y as f32) < y_end && y < input_h {
+                    let weight = (y_end.min((y + 1) as f32) - y_start.max(y as f32)).max(0.0);
+                    sum += horizontal[y * target_w + x] * weight;
+                    y += 1;
+                }
+                output[output_y * target_w + x] = sum / scale_h;
+            }
+        }
+        output
     }
 
-    /// Converts `obs` shaped `[height, width, 3]` to `[height, width]`; an
-    /// already-grayscale `[height, width]` tensor is returned unchanged.
-    fn extract_luminance(&self, obs: &Tensor) -> Result<Tensor, candle_core::Error> {
-        if obs.dims().len() == 2 {
-            return Ok(obs.clone());
+    fn resize_atari_rgb_u8(rgb: &[u8], height: usize, width: usize) -> Vec<u8> {
+        debug_assert_eq!((height, width), (210, 160));
+        let horizontal_spans = ATARI_HORIZONTAL_SPANS.get_or_init(|| area_spans(160, 84));
+        let vertical_spans = ATARI_VERTICAL_SPANS.get_or_init(|| area_spans(210, 84));
+
+        // Fuse RGB-to-luminance with the horizontal area pass. This avoids a
+        // 210x160 f32 grayscale allocation and a second traversal of it.
+        let mut horizontal = vec![0.0f32; height * 84];
+        for y in 0..height {
+            for (output_x, span) in horizontal_spans.iter().enumerate() {
+                let mut sum = 0.0;
+                for offset in 0..span.len {
+                    let pixel = (y * width + span.start + offset) * 3;
+                    let luminance = rgb[pixel] as f32 * 0.299
+                        + rgb[pixel + 1] as f32 * 0.587
+                        + rgb[pixel + 2] as f32 * 0.114;
+                    sum += luminance * span.weights[offset];
+                }
+                horizontal[y * 84 + output_x] = sum;
+            }
         }
-        // Assuming obs is [210, 160, 3] in RGB format
-        let r = (obs.i((.., .., 0))? * 0.299)?;
-        let g = (obs.i((.., .., 1))? * 0.587)?;
-        let b = (obs.i((.., .., 2))? * 0.114)?;
-        r.add(&g)?.add(&b)
+
+        let mut output = vec![0u8; 84 * 84];
+        for (output_y, span) in vertical_spans.iter().enumerate() {
+            for x in 0..84 {
+                let mut sum = 0.0;
+                for offset in 0..span.len {
+                    sum += horizontal[(span.start + offset) * 84 + x] * span.weights[offset];
+                }
+                output[output_y * 84 + x] = sum.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+        output
     }
 
     /// Converts an Atari observation `[210, 160, 3]` or `[210, 160]` to the
     /// warped grayscale shape `[84, 84]`.
     fn preprocess_observation(&self, obs: &Tensor) -> Result<Tensor, candle_core::Error> {
-        let luminance = self.extract_luminance(obs)?;
-        let resized = self.resize_observation(luminance)?;
-        Ok(resized)
+        let device = obs.device().clone();
+        let dims = obs.dims();
+        let (height, width) = match dims {
+            [height, width] | [height, width, 3] => (*height, *width),
+            _ => candle_core::bail!("expected an Atari RGB or grayscale observation, got {dims:?}"),
+        };
+
+        if obs.dtype() == DType::U8 {
+            let bytes = obs.flatten_all()?.to_vec1::<u8>()?;
+            if matches!(dims, [_, _, 3]) && (height, width) == (210, 160) {
+                return Tensor::from_vec(
+                    Self::resize_atari_rgb_u8(&bytes, height, width),
+                    (84, 84),
+                    &device,
+                );
+            }
+            let luminance: Vec<f32> = match dims {
+                [_, _] => bytes.into_iter().map(f32::from).collect(),
+                [_, _, 3] => bytes
+                    .chunks_exact(3)
+                    .map(|pixel| {
+                        pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114
+                    })
+                    .collect(),
+                _ => unreachable!(),
+            };
+            let resized = Self::resize_area_data(&luminance, height, width, 84, 84)
+                .into_iter()
+                .map(|value| value.round().clamp(0.0, 255.0) as u8)
+                .collect::<Vec<_>>();
+            return Tensor::from_vec(resized, (84, 84), &device);
+        }
+
+        let luminance = match dims {
+            [height, width] => {
+                let _ = (height, width);
+                obs.flatten_all()?.to_vec1::<f32>()?
+            }
+            [_, _, 3] => obs
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .chunks_exact(3)
+                .map(|pixel| pixel[0] * 0.299 + pixel[1] * 0.587 + pixel[2] * 0.114)
+                .collect(),
+            _ => unreachable!(),
+        };
+        let resized = Self::resize_area_data(&luminance, height, width, 84, 84);
+        Tensor::from_vec(resized, (84, 84), &device)
     }
 }
 
@@ -503,6 +587,66 @@ mod tests {
     /// Reads one scalar tensor shaped `[]`.
     fn scalar(tensor: &Tensor) -> f32 {
         tensor.to_scalar::<f32>().unwrap()
+    }
+
+    #[test]
+    fn warp_preserves_u8_through_grayscale_and_resize() {
+        let wrapper = WarpGym::new(ScriptGym::new(vec![]));
+        let rgb = Tensor::zeros((210, 160, 3), DType::U8, &Device::Cpu).unwrap();
+
+        let warped = wrapper.preprocess_observation(&rgb).unwrap();
+
+        assert_eq!(warped.dtype(), DType::U8);
+        assert_eq!(warped.dims(), &[84, 84]);
+    }
+
+    #[test]
+    fn fused_u8_warp_matches_separable_reference() {
+        let rgb = (0..210 * 160 * 3)
+            .map(|index| ((index * 37 + 11) % 256) as u8)
+            .collect::<Vec<_>>();
+        let luminance = rgb
+            .chunks_exact(3)
+            .map(|pixel| {
+                pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114
+            })
+            .collect::<Vec<_>>();
+        let expected = WarpGym::<ScriptGym>::resize_area_data(&luminance, 210, 160, 84, 84)
+            .into_iter()
+            .map(|value| value.round().clamp(0.0, 255.0) as u8)
+            .collect::<Vec<_>>();
+
+        let actual = WarpGym::<ScriptGym>::resize_atari_rgb_u8(&rgb, 210, 160);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn u8_warp_differs_from_old_float_pipeline_only_by_final_rounding() {
+        let rgb = (0..210 * 160 * 3)
+            .map(|index| ((index * 37 + 11) % 256) as u8)
+            .collect::<Vec<_>>();
+        let normalized_luminance = rgb
+            .chunks_exact(3)
+            .map(|pixel| {
+                (pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114)
+                    / 255.0
+            })
+            .collect::<Vec<_>>();
+        let old_float =
+            WarpGym::<ScriptGym>::resize_area_data(&normalized_luminance, 210, 160, 84, 84);
+        let new_float = WarpGym::<ScriptGym>::resize_atari_rgb_u8(&rgb, 210, 160)
+            .into_iter()
+            .map(|value| value as f32 / 255.0)
+            .collect::<Vec<_>>();
+
+        let maximum_error = old_float
+            .iter()
+            .zip(new_float)
+            .map(|(old, new)| (old - new).abs())
+            .fold(0.0f32, f32::max);
+
+        assert!(maximum_error <= 0.5 / 255.0 + 1e-6, "{maximum_error}");
     }
 
     #[test]

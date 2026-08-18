@@ -30,10 +30,20 @@ fn main() {
         .build_target("ale-c-lib-static");
 
     if cfg!(windows) {
+        // The vendored ALE CMake file uses GCC's `-O3`, and cmake-rs
+        // replaces the usual MSVC Release flags. Supply MSVC's actual
+        // optimizer switch explicitly; otherwise ALE is built effectively
+        // unoptimized on Windows. Candle's CUDA kernels use the static release
+        // MSVC runtime even in non-release Cargo profiles, so use /MT for ALE
+        // in every profile as well. In particular, do not select /MTd for a
+        // debug build: Rust does not link the debug CRT by default.
         config
-            .static_crt(true)
+            .define("CMAKE_POLICY_DEFAULT_CMP0091", "NEW")
+            .define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreaded")
             .cflag("-DWIN32=1")
-            .cxxflag("-DWIN32=1");
+            .cflag("/O2")
+            .cxxflag("-DWIN32=1")
+            .cxxflag("/O2");
     }
 
     let destination = config.build();
