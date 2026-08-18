@@ -10,9 +10,12 @@ use crate::{
     spaces::Space,
 };
 
+/// An error raised while mapping tensors around a multi-environment gym.
 #[derive(Debug)]
 pub enum TensorMapMultiGymError<E> {
+    /// An error returned by the wrapped environment.
     Gym(E),
+    /// An error returned by either tensor-mapping function.
     Candle(candle_core::Error),
 }
 
@@ -28,6 +31,7 @@ pub struct TensorMapMultiGymWrapper<G, FInput, FOutput> {
 }
 
 impl<G, FInput, FOutput> TensorMapMultiGymWrapper<G, FInput, FOutput> {
+    /// Creates a wrapper with input and output tensor transformations.
     pub fn new(gym: G, map_input: FInput, map_output: FOutput) -> Self {
         Self {
             gym,
@@ -36,14 +40,17 @@ impl<G, FInput, FOutput> TensorMapMultiGymWrapper<G, FInput, FOutput> {
         }
     }
 
+    /// Returns a shared reference to the wrapped environment.
     pub fn inner(&self) -> &G {
         &self.gym
     }
 
+    /// Returns a mutable reference to the wrapped environment.
     pub fn inner_mut(&mut self) -> &mut G {
         &mut self.gym
     }
 
+    /// Unwraps and returns the inner environment.
     pub fn into_inner(self) -> G {
         self.gym
     }
