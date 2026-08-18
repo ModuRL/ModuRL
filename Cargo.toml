@@ -27,5 +27,4 @@ default = []
 multithreading = []
 
 [patch.crates-io]
-candle-core = { path = "../candle-0.11-conv-bwd/candle-core" }
 glutin = { git = "https://github.com/davidhozic/glutin", rev = "e95fe97f1857c0498ed2236c0e8d60e5a30a2854" }
