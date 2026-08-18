@@ -8,8 +8,10 @@ updates:
       day: "monday"
       time: "09:00"
       timezone: "America/Chicago"
+    open-pull-requests-limit: 0
     groups:
-      cargo-dependencies:
+      cargo-security-updates:
+        applies-to: "security-updates"
         patterns:
           - "*"
 
@@ -20,7 +22,23 @@ updates:
       day: "monday"
       time: "09:00"
       timezone: "America/Chicago"
+    open-pull-requests-limit: 0
     groups:
-      github-actions:
+      github-actions-security-updates:
+        applies-to: "security-updates"
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/crates/benches"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/Chicago"
+    open-pull-requests-limit: 0
+    groups:
+      pip-security-updates:
+        applies-to: "security-updates"
         patterns:
           - "*"
