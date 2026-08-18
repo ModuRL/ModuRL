@@ -58,6 +58,7 @@ where
         }
     }
 
+    /// Steps the environment using an action tensor with shape `[1]`.
     fn step(&mut self, action: Tensor) -> std::result::Result<StepInfo<I>, Self::Error> {
         match self {
             Self::Plain(gym) => gym.step(action).map_err(FireResetGymError::GymError),
@@ -160,6 +161,7 @@ impl NatureCnn {
 }
 
 impl Module for NatureCnn {
+    /// Applies the encoder to observations with shape `[batch_size, 4, 84, 84]`.
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let features = self.conv1.forward(input)?.relu()?;
         let features = self.conv2.forward(&features)?.relu()?;

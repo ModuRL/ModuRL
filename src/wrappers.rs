@@ -124,6 +124,7 @@ mod tests {
         type Error = candle_core::Error;
         type SpaceError = candle_core::Error;
 
+        /// Steps both test environments with an action tensor of shape `[2]`.
         fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo, Self::Error> {
             let actions = action.flatten_all()?.to_vec1::<f32>()?;
             let states = Tensor::from_vec(
