@@ -4,7 +4,7 @@ cloudpickle==3.1.2
 colorama==0.4.6
 contourpy==1.3.3
 cycler==0.12.1
-deepdiff==7.0.1
+deepdiff==8.6.2
 distlib==0.4.3
 farama-notifications==0.0.6
 filelock==3.32.2
@@ -42,9 +42,9 @@ sympy==1.14.0
 tensorboard==2.21.0
 tensorboard-data-server==0.7.2
 tianshou==2.0.1
-torch==2.10.0
+torch==2.13.0
 tqdm==4.70.0
 typing-extensions==4.16.0
 tzdata==2026.3
-virtualenv==20.16.3
+virtualenv==20.36.1
 werkzeug==3.1.8
