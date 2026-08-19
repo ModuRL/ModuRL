@@ -10,6 +10,11 @@ name = "dqn_cartpole"
 path = "examples/dqn_cartpole.rs"
 
 [[example]]
+name = "dqn_atari"
+path = "examples/dqn_atari.rs"
+required-features = ["atari-environment"]
+
+[[example]]
 name = "ppo_bench"
 path = "examples/ppo_bench.rs"
 

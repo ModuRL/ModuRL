@@ -186,7 +186,6 @@ impl experience::Experience for QLearningExperience {
             .first()
             .expect("cannot batch an empty Q-learning replay sample");
         let device = first.state.device();
-        let dtype = first.state.dtype();
         Ok(QLearningBatch {
             states: experience::stack_tensor_field(experiences, |experience| {
                 experience.state.clone()
@@ -203,16 +202,14 @@ impl experience::Experience for QLearningExperience {
                     .map(|experience| experience.reward)
                     .collect::<Vec<_>>(),
                 device,
-            )?
-            .to_dtype(dtype)?,
+            )?,
             next_dones: Tensor::new(
                 experiences
                     .iter()
                     .map(|experience| experience.next_done)
                     .collect::<Vec<_>>(),
                 device,
-            )?
-            .to_dtype(dtype)?,
+            )?,
         })
     }
 }
@@ -241,6 +238,7 @@ where
     training_start: usize,
     device_strategy: ReplayDeviceStrategy,
     dtype: DType,
+    replay_dtype: DType,
     optimization_steps: usize,
     _phantom: PhantomData<(GE, T)>,
 }
@@ -274,10 +272,15 @@ where
         training_horizon: usize,
         device_strategy: ReplayDeviceStrategy,
         #[builder(default = DType::F32)] dtype: DType,
+        #[builder(default = DType::F32)] replay_dtype: DType,
     ) -> Result<Self, QAgentError<GE, SE>> {
         assert!(
             dtype.is_float(),
             "Q-learning compute dtype must be floating-point"
+        );
+        assert!(
+            replay_dtype.is_float() || replay_dtype == DType::U8,
+            "Q-learning replay dtype must be floating-point or u8"
         );
         let initial_epsilon = epsilon_schedule.value(0.0);
         let final_epsilon = epsilon_schedule.value(1.0);
@@ -314,6 +317,7 @@ where
             training_start,
             device_strategy,
             dtype,
+            replay_dtype,
             optimization_steps: 0,
             _phantom: PhantomData,
         };
@@ -357,21 +361,30 @@ where
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(());
         }
+        let optimization_device = self.device_strategy.optimization_device();
         let training_batch = match self.experience_replay.sample() {
             Ok(batch) => batch,
             Err(ExperienceReplayError::ExperienceError(error)) => return Err(error),
             Err(ExperienceReplayError::TensorError(error)) => return Err(error),
         };
         let mut training_batch = training_batch;
-        for element in [
-            &mut training_batch.states,
-            &mut training_batch.next_states,
-            &mut training_batch.actions,
-            &mut training_batch.rewards,
-            &mut training_batch.next_dones,
-        ] {
-            *element = element.to_device(&self.device_strategy.optimization_device())?;
-        }
+        training_batch.states = training_batch
+            .states
+            .to_device(&optimization_device)?
+            .to_dtype(self.dtype)?;
+        training_batch.next_states = training_batch
+            .next_states
+            .to_device(&optimization_device)?
+            .to_dtype(self.dtype)?;
+        training_batch.actions = training_batch.actions.to_device(&optimization_device)?;
+        training_batch.rewards = training_batch
+            .rewards
+            .to_device(&optimization_device)?
+            .to_dtype(self.dtype)?;
+        training_batch.next_dones = training_batch
+            .next_dones
+            .to_device(&optimization_device)?
+            .to_dtype(self.dtype)?;
         let QLearningBatch {
             states,
             next_states,
@@ -391,7 +404,8 @@ where
             &target_next_q_values,
             self.gamma,
         )?
-        .reshape(&[rewards.shape().dims()[0], 1])?;
+        .reshape(&[rewards.shape().dims()[0], 1])?
+        .detach();
 
         let state_action_q_values = selected_action_q_values(
             &self.online_q_network.forward(&states)?.squeeze(1)?,
@@ -464,12 +478,14 @@ where
                     .clone()
                     .squeeze(0)?
                     .detach()
-                    .to_device(&storage_device)?,
+                    .to_device(&storage_device)?
+                    .to_dtype(self.replay_dtype)?,
                 next_state: next_state_rows[environment_index]
                     .clone()
                     .squeeze(0)?
                     .detach()
-                    .to_device(&storage_device)?,
+                    .to_device(&storage_device)?
+                    .to_dtype(self.replay_dtype)?,
                 action: action_rows[environment_index]
                     .clone()
                     .squeeze(0)?
@@ -558,10 +574,14 @@ where
                 collection_timestep,
                 completed_episodes,
             };
-            logger.log_collection(&collection_entry);
 
             elapsed_timesteps += environment_count;
             self.run_scheduled_updates(first_timestep, environment_count, logger)?;
+            // A vectorized collection batch spans several consecutive
+            // timesteps. Emit its endpoint after any scheduled updates inside
+            // that range so timestamp-ordered loggers never see an update
+            // following the batch's later collection timestamp.
+            logger.log_collection(&collection_entry);
             self.schedule_progress.advance_steps(environment_count);
         }
         Ok(())
