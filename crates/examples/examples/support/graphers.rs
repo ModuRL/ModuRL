@@ -66,7 +66,7 @@ impl DQNGrapher {
     }
 }
 
-impl DQNLogger for DQNGrapher {
+impl<I> DQNLogger<I> for DQNGrapher {
     fn log(&mut self, entry: &QLogEntry) {
         let loss = entry.loss.mean_all().unwrap();
         let epsilon = Tensor::new(entry.epsilon as f32, &Device::Cpu).unwrap();
@@ -83,7 +83,7 @@ impl DQNLogger for DQNGrapher {
             .unwrap();
     }
 
-    fn log_collection(&mut self, entry: &QCollectionLogEntry) {
+    fn log_collection(&mut self, entry: &QCollectionLogEntry<I>) {
         for episode in &entry.completed_episodes {
             let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
             let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
