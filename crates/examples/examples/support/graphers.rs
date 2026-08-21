@@ -84,12 +84,13 @@ impl<I> DQNLogger<I> for DQNGrapher {
     }
 
     fn log_collection(&mut self, entry: &QCollectionLogEntry<I>) {
+        // Update logs may have already advanced the monotonic logger to the batch endpoint.
         for episode in &entry.completed_episodes {
             let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
             let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
             self.terminal
                 .log(
-                    episode.collection_timestep,
+                    entry.collection_timestep,
                     &[
                         (EPISODE_RETURN_METRIC, &episode_return),
                         (EPISODE_LENGTH_METRIC, &episode_length),
@@ -638,6 +639,41 @@ impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dqn_episode_metrics_do_not_go_backwards_after_a_batch_update() {
+        let device = Device::Cpu;
+        let mut grapher = DQNGrapher::new();
+        DQNLogger::<()>::log(
+            &mut grapher,
+            &QLogEntry {
+                loss: Tensor::new(1.0f32, &device).unwrap(),
+                epsilon: 0.1,
+                learning_rate: 1e-4,
+                q_values: Tensor::new(&[1.0f32], &device).unwrap(),
+                replay_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                update_index: 0,
+                collection_timestep: 80_000,
+            },
+        );
+        DQNLogger::<()>::log_collection(
+            &mut grapher,
+            &QCollectionLogEntry {
+                collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                infos: vec![()],
+                epsilon: 0.1,
+                collection_timestep: 80_000,
+                completed_episodes: vec![QEpisodeLogEntry {
+                    environment_index: 3,
+                    episode_return: 10.0,
+                    episode_length: 100,
+                    terminated: true,
+                    truncated: false,
+                    collection_timestep: 79_996,
+                }],
+            },
+        );
+    }
 
     #[test]
     fn shared_smoothing_windows_have_expected_lengths() {

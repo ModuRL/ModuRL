@@ -119,7 +119,7 @@ let games = (0..4)
         Ok(game)
     })
     .collect::<Result<Vec<_>, GameError>>()?;
-let mut env = StackedMultiGym::try_new(games)?;
+let mut env = StackedMultiGym::new(games)?;
 
 let states = env.reset()?; // [8, ...observation_shape]
 let actions = agent.act(&states)?; // [8, ...action_shape]
@@ -144,7 +144,7 @@ let constructors = (0..4)
         game
     })
     .collect();
-let mut env = MultithreadedStackedMultiGym::try_new(
+let mut env = MultithreadedStackedMultiGym::new(
     constructors,
     observation_space,
     action_space,

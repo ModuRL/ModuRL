@@ -7,14 +7,14 @@
 use std::{fmt::Debug, num::NonZeroUsize, ops::Deref};
 
 use bon::bon;
-use candle_core::{D, DType, IndexOp, Tensor, Var};
+use candle_core::{D, DType, Tensor, Var};
 use candle_nn::{Optimizer, VarMap};
 
 use super::{Agent, ReplayDeviceStrategy};
 use crate::{
-    buffers::{
-        experience,
-        experience_replay::{ExperienceReplay, ExperienceReplayError},
+    buffers::experience_replay::{
+        ExperienceReplay, ExperienceReplayError, ReplayStorage, ReplayStorageError,
+        TensorReplayColumn, replay_index_tensor,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ExpectationPolicy,
@@ -637,6 +637,7 @@ where
     GymError(GE),
     SpaceError(SE),
     TensorError(candle_core::Error),
+    ReplayStorageError(ReplayStorageError),
     CriticError(SACCriticError),
     ConfigurationError(SACConfigurationError),
 }
@@ -647,77 +648,34 @@ impl<PE: Debug, GE: Debug, SE: Debug> From<candle_core::Error> for SACError<PE, 
     }
 }
 
+impl<PE: Debug, GE: Debug, SE: Debug> From<ReplayStorageError> for SACError<PE, GE, SE> {
+    fn from(error: ReplayStorageError) -> Self {
+        Self::ReplayStorageError(error)
+    }
+}
+
+impl<PE: Debug, GE: Debug, SE: Debug> From<ExperienceReplayError<ReplayStorageError>>
+    for SACError<PE, GE, SE>
+{
+    fn from(error: ExperienceReplayError<ReplayStorageError>) -> Self {
+        Self::ReplayStorageError(error.into())
+    }
+}
+
 impl<PE: Debug, GE: Debug, SE: Debug> From<SACCriticError> for SACError<PE, GE, SE> {
     fn from(value: SACCriticError) -> Self {
         Self::CriticError(value)
     }
 }
 
-#[derive(Clone)]
-struct SACExperience {
-    state: Tensor,
-    next_state: Tensor,
-    action: Tensor,
-    reward: f32,
-    terminated: f32,
-    collection_policy_entropy: f32,
-    entropy_change_weight: f32,
-}
-
-impl experience::Experience for SACExperience {
-    type Batch = SACOptimizationBatch;
-    type Error = candle_core::Error;
-
-    fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
-        let first = experiences
-            .first()
-            .expect("cannot batch an empty SAC replay sample");
-        let device = first.state.device();
-        let dtype = first.state.dtype();
-        Ok(SACOptimizationBatch {
-            states: experience::stack_tensor_field(experiences, |experience| {
-                experience.state.clone()
-            })?,
-            next_states: experience::stack_tensor_field(experiences, |experience| {
-                experience.next_state.clone()
-            })?,
-            actions: experience::stack_tensor_field(experiences, |experience| {
-                experience.action.clone()
-            })?,
-            rewards: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.reward)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-            terminated: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.terminated)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-            collection_policy_entropies: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.collection_policy_entropy)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-            entropy_change_weights: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.entropy_change_weight)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-        })
-    }
+struct SACReplayInsert {
+    states: Tensor,
+    next_states: Tensor,
+    actions: Tensor,
+    rewards: Tensor,
+    terminated: Tensor,
+    collection_policy_entropies: Tensor,
+    entropy_change_weights: Tensor,
 }
 
 struct SACOptimizationBatch {
@@ -728,6 +686,119 @@ struct SACOptimizationBatch {
     terminated: Tensor,
     collection_policy_entropies: Tensor,
     entropy_change_weights: Tensor,
+}
+
+struct SACReplayStorage {
+    states: TensorReplayColumn,
+    next_states: TensorReplayColumn,
+    actions: TensorReplayColumn,
+    rewards: TensorReplayColumn,
+    terminated: TensorReplayColumn,
+    collection_policy_entropies: TensorReplayColumn,
+    entropy_change_weights: TensorReplayColumn,
+    capacity: usize,
+    device: candle_core::Device,
+}
+
+impl SACReplayStorage {
+    fn new(
+        capacity: usize,
+        state_shape: &[usize],
+        action_shape: &[usize],
+        action_dtype: DType,
+        dtype: DType,
+        device: candle_core::Device,
+    ) -> Result<Self, ReplayStorageError> {
+        Ok(Self {
+            states: TensorReplayColumn::new(capacity, state_shape, dtype, &device)?,
+            next_states: TensorReplayColumn::new(capacity, state_shape, dtype, &device)?,
+            actions: TensorReplayColumn::new(capacity, action_shape, action_dtype, &device)?,
+            rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            collection_policy_entropies: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            entropy_change_weights: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            capacity,
+            device,
+        })
+    }
+}
+
+impl ReplayStorage for SACReplayStorage {
+    type Insert = SACReplayInsert;
+    type Batch = SACOptimizationBatch;
+    type Error = ReplayStorageError;
+
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
+        let prepared = SACReplayInsert {
+            states: self.states.prepare(&transitions.states)?,
+            next_states: self.next_states.prepare(&transitions.next_states)?,
+            actions: self.actions.prepare(&transitions.actions)?,
+            rewards: self.rewards.prepare(&transitions.rewards)?,
+            terminated: self.terminated.prepare(&transitions.terminated)?,
+            collection_policy_entropies: self
+                .collection_policy_entropies
+                .prepare(&transitions.collection_policy_entropies)?,
+            entropy_change_weights: self
+                .entropy_change_weights
+                .prepare(&transitions.entropy_change_weights)?,
+        };
+        let count = prepared.states.dim(0)?;
+        for (name, tensor) in [
+            ("next states", &prepared.next_states),
+            ("actions", &prepared.actions),
+            ("rewards", &prepared.rewards),
+            ("terminated", &prepared.terminated),
+            (
+                "collection policy entropies",
+                &prepared.collection_policy_entropies,
+            ),
+            ("entropy change weights", &prepared.entropy_change_weights),
+        ] {
+            let actual = tensor.dim(0)?;
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field: name,
+                    expected: count,
+                    actual,
+                });
+            }
+        }
+        for (column, tensor) in [
+            (&self.states, &prepared.states),
+            (&self.next_states, &prepared.next_states),
+            (&self.actions, &prepared.actions),
+            (&self.rewards, &prepared.rewards),
+            (&self.terminated, &prepared.terminated),
+            (
+                &self.collection_policy_entropies,
+                &prepared.collection_policy_entropies,
+            ),
+            (
+                &self.entropy_change_weights,
+                &prepared.entropy_change_weights,
+            ),
+        ] {
+            column.write(start, tensor)?;
+        }
+        Ok(count)
+    }
+
+    fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
+        let indices = replay_index_tensor(indices, &self.device)?;
+        Ok(SACOptimizationBatch {
+            states: self.states.gather(&indices)?,
+            next_states: self.next_states.gather(&indices)?,
+            actions: self.actions.gather(&indices)?,
+            rewards: self.rewards.gather(&indices)?,
+            terminated: self.terminated.gather(&indices)?,
+            collection_policy_entropies: self.collection_policy_entropies.gather(&indices)?,
+            entropy_change_weights: self.entropy_change_weights.gather(&indices)?,
+        })
+    }
 }
 
 struct SACActorUpdate {
@@ -898,7 +969,7 @@ where
     aggregation_mode: SACCriticAggregationMode,
     action_space: Box<dyn Space<Error = SE>>,
     observation_space: Box<dyn Space<Error = SE>>,
-    replay: ExperienceReplay<SACExperience>,
+    replay: ExperienceReplay<SACReplayInsert, SACReplayStorage>,
     gamma: f64,
     tau: f64,
     training_start: usize,
@@ -977,6 +1048,21 @@ where
             .maybe_q_value_clip(q_value_clip)
             .training_horizon(training_horizon)
             .call()?;
+        let storage_device = device_strategy.storage_device();
+        let observation_sample = observation_space
+            .sample(&storage_device)
+            .map_err(SACError::SpaceError)?;
+        let action_sample = action_space
+            .sample(&storage_device)
+            .map_err(SACError::SpaceError)?;
+        let replay_storage = SACReplayStorage::new(
+            replay_capacity,
+            observation_sample.dims(),
+            action_sample.dims(),
+            action_sample.dtype(),
+            dtype,
+            storage_device.clone(),
+        )?;
         Ok(Self {
             policy,
             actor_optimizer,
@@ -985,11 +1071,7 @@ where
             aggregation_mode,
             action_space,
             observation_space,
-            replay: ExperienceReplay::new(
-                replay_capacity,
-                batch_size,
-                device_strategy.storage_device(),
-            ),
+            replay: ExperienceReplay::with_storage(replay_storage, batch_size),
             gamma,
             tau,
             training_start,
@@ -1142,11 +1224,7 @@ where
         if self.replay.len() < self.replay.get_batch_size() {
             return Ok(None);
         }
-        let mut batch = match self.replay.sample() {
-            Ok(batch) => batch,
-            Err(ExperienceReplayError::TensorError(error))
-            | Err(ExperienceReplayError::ExperienceError(error)) => return Err(error.into()),
-        };
+        let mut batch = self.replay.sample()?;
         let optimization_device = self.device_strategy.optimization_device();
         for element in [
             &mut batch.states,
@@ -1470,15 +1548,14 @@ where
             first_timestep,
         } = transitions;
         let environment_count = dones.len();
-        let state_rows = states.chunk(environment_count, 0)?;
-        let next_rows = next_states.chunk(environment_count, 0)?;
-        let action_rows = actions.chunk(environment_count, 0)?;
-        let reward_rows = rewards.chunk(environment_count, 0)?;
-        let storage_device = self.device_strategy.storage_device();
+        let reward_values = rewards
+            .to_dtype(DType::F32)?
+            .to_device(&candle_core::Device::Cpu)?
+            .to_vec1::<f32>()?;
         let mut completed_episodes = Vec::new();
 
         for index in 0..environment_count {
-            let reward = reward_rows[index].i(0)?.to_scalar::<f32>()?;
+            let reward = reward_values[index];
             let collection_timestep = first_timestep + index + 1;
             if let Some(entry) = episodes.record(
                 index,
@@ -1489,26 +1566,33 @@ where
             ) {
                 completed_episodes.push(entry);
             }
-
-            self.replay.add(SACExperience {
-                state: state_rows[index]
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                next_state: next_rows[index]
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                action: action_rows[index]
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                reward,
-                terminated: if dones[index] { 1.0 } else { 0.0 },
-                collection_policy_entropy: policy_entropies[index],
-                entropy_change_weight,
-            });
         }
+
+        let cpu = candle_core::Device::Cpu;
+        self.replay.add(SACReplayInsert {
+            states: states.clone(),
+            next_states: next_states.clone(),
+            actions: actions.clone(),
+            rewards: rewards.clone(),
+            terminated: Tensor::from_vec(
+                dones
+                    .iter()
+                    .map(|&done| if done { 1.0f32 } else { 0.0 })
+                    .collect::<Vec<_>>(),
+                environment_count,
+                &cpu,
+            )?,
+            collection_policy_entropies: Tensor::from_vec(
+                policy_entropies.to_vec(),
+                environment_count,
+                &cpu,
+            )?,
+            entropy_change_weights: Tensor::from_vec(
+                vec![entropy_change_weight; environment_count],
+                environment_count,
+                &cpu,
+            )?,
+        })?;
 
         Ok(completed_episodes)
     }

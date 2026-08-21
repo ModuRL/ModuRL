@@ -36,9 +36,7 @@ const NUM_ENVS: usize = 8;
 const NOOP_MAX: u32 = 30;
 const MAX_EPISODE_FRAMES: u32 = 400_000;
 
-// This matches CleanRL. ModuRL currently stores complete, normalized
-// stacked state pairs rather than deduplicated uint8 frames, so a full replay
-// needs roughly 210 GiB of host memory. Reduce this for smaller machines.
+// Separate state and next-state storage at this capacity uses about 53 GiB.
 const REPLAY_CAPACITY: usize = 1_000_000;
 const BATCH_SIZE: usize = 32;
 const GAMMA: f32 = 0.99;
@@ -80,6 +78,7 @@ where
         }
     }
 
+    /// Steps with a scalar action shaped `[]`.
     fn step(&mut self, action: Tensor) -> std::result::Result<StepInfo<I>, Self::Error> {
         match self {
             Self::Plain(gym) => gym.step(action).map_err(FireResetGymError::GymError),
@@ -219,6 +218,7 @@ impl AtariQNetwork {
 }
 
 impl Module for AtariQNetwork {
+    /// Maps `[batch, 4, 84, 84]` observations to `[batch, action_count]`.
     fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let x = (input / 255.0)?;
         let x = self.conv1.forward(&x)?.relu()?;
@@ -278,11 +278,9 @@ fn main() {
             .collect::<Vec<_>>(),
     );
 
-    // ALE and preprocessing operate on CPU. Observations cross to the
-    // accelerator as uint8 tensors and the network performs CleanRL's /255
-    // normalization; actions return to CPU for ALE.
+    // Keep ALE and replay on CPU; the agent moves inference and samples as needed.
     let action_device = Device::Cpu;
-    let observation_device = device.clone();
+    let observation_device = Device::Cpu;
     let mut envs = TensorMapMultiGymWrapper::new(
         envs,
         move |action: Tensor| action.to_device(&action_device),
