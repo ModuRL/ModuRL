@@ -13,7 +13,6 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
     spaces::{Discrete, Space},
-    tensor_operations::tensor_has_nan,
 };
 
 pub mod ddqn;
@@ -520,9 +519,7 @@ where
         };
         logger.log_update(&entry);
         self.optimization_steps += 1;
-        if !tensor_has_nan(&loss)? {
-            self.optimizer.backward_step(&loss)?;
-        }
+        self.optimizer.backward_step(&loss)?;
         Ok(())
     }
 

@@ -21,7 +21,6 @@ use crate::{
     objectives::{bellman_targets, clipped_value_loss},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::Space,
-    tensor_operations::tensor_has_nan,
 };
 
 /// A Q network that can evaluate replay actions and policy candidates.
@@ -1329,9 +1328,7 @@ where
                 None => candle_nn::loss::mse(&predicted, &targets)?,
             };
             let loss = (squared_error * 0.5)?;
-            if !tensor_has_nan(&loss)? {
-                critic.optimizer_mut().backward_step(&loss)?;
-            }
+            critic.optimizer_mut().backward_step(&loss)?;
             critic_losses.push(loss);
         }
         Ok(critic_losses)
@@ -1384,9 +1381,7 @@ where
             Some(loss) => (&base_actor_loss + loss)?,
             None => base_actor_loss,
         };
-        if !tensor_has_nan(&actor_loss)? {
-            self.actor_optimizer.backward_step(&actor_loss)?;
-        }
+        self.actor_optimizer.backward_step(&actor_loss)?;
         Ok(SACActorUpdate {
             loss: actor_loss,
             entropy_change_loss,
@@ -1432,9 +1427,7 @@ where
                     &expected_log_probability,
                     target_entropy,
                 )?;
-                if !tensor_has_nan(&loss)? {
-                    optimizer.backward_step(&loss)?;
-                }
+                optimizer.backward_step(&loss)?;
                 Ok(SACTemperatureUpdate {
                     loss: Some(loss),
                     target_entropy: Some(target_entropy),

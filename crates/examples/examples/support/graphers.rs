@@ -13,6 +13,7 @@ use modurl::prelude::*;
 use modurl_logger::{Aggregation, AggregationConfig, Logger, TensorBoardLogger, TerminalLogger};
 
 const DIAGNOSTIC_SMOOTHING_WINDOW: usize = 10;
+const DQN_LOG_INTERVAL: usize = 100;
 const LOSS_SMOOTHING_WINDOW: usize = 100;
 const REWARD_SMOOTHING_WINDOW: usize = 25;
 const EPISODE_SMOOTHING_WINDOW: usize = 100;
@@ -47,6 +48,11 @@ fn with_episode_smoothing(config: AggregationConfig) -> AggregationConfig {
 
 pub struct DQNGrapher {
     terminal: TerminalLogger,
+    pending_loss: Option<Tensor>,
+    pending_q_value: Option<Tensor>,
+    pending_updates: usize,
+    pending_timestep: usize,
+    pending_epsilon: f32,
 }
 
 impl DQNGrapher {
@@ -58,22 +64,39 @@ impl DQNGrapher {
         ));
         Self {
             terminal: TerminalLogger::new(aggregation).with_live_updates(),
+            pending_loss: None,
+            pending_q_value: None,
+            pending_updates: 0,
+            pending_timestep: 0,
+            pending_epsilon: 0.0,
         }
     }
 
     pub fn display(mut self) {
+        self.flush_updates();
         self.terminal.display();
     }
-}
 
-impl<I> DQNLogger<I> for DQNGrapher {
-    fn log(&mut self, entry: &QLogEntry) {
-        let loss = entry.loss.mean_all().unwrap();
-        let epsilon = Tensor::new(entry.epsilon as f32, &Device::Cpu).unwrap();
-        let mean_q_value = entry.q_values.mean_all().unwrap();
+    /// Adds a scalar `value` shaped `[]` to the detached scalar accumulator.
+    fn accumulate(total: &mut Option<Tensor>, value: Tensor) {
+        *total = Some(match total.take() {
+            Some(total) => (&total + &value).unwrap().detach(),
+            None => value.detach(),
+        });
+    }
+
+    fn flush_updates(&mut self) {
+        if self.pending_updates == 0 {
+            return;
+        }
+
+        let count = self.pending_updates as f64;
+        let loss = (self.pending_loss.take().unwrap() / count).unwrap();
+        let mean_q_value = (self.pending_q_value.take().unwrap() / count).unwrap();
+        let epsilon = Tensor::new(self.pending_epsilon, &Device::Cpu).unwrap();
         self.terminal
             .log(
-                entry.collection_timestep,
+                self.pending_timestep,
                 &[
                     ("DQN Loss", &loss),
                     ("Exploration Epsilon", &epsilon),
@@ -81,9 +104,26 @@ impl<I> DQNLogger<I> for DQNGrapher {
                 ],
             )
             .unwrap();
+        self.pending_updates = 0;
+    }
+}
+
+impl<I> DQNLogger<I> for DQNGrapher {
+    fn log(&mut self, entry: &QLogEntry) {
+        let loss = entry.loss.mean_all().unwrap();
+        let mean_q_value = entry.q_values.mean_all().unwrap();
+        Self::accumulate(&mut self.pending_loss, loss);
+        Self::accumulate(&mut self.pending_q_value, mean_q_value);
+        self.pending_updates += 1;
+        self.pending_timestep = entry.collection_timestep;
+        self.pending_epsilon = entry.epsilon as f32;
+        if self.pending_updates == DQN_LOG_INTERVAL {
+            self.flush_updates();
+        }
     }
 
     fn log_collection(&mut self, entry: &QCollectionLogEntry<I>) {
+        self.pending_timestep = self.pending_timestep.max(entry.collection_timestep);
         // Update logs may have already advanced the monotonic logger to the batch endpoint.
         for episode in &entry.completed_episodes {
             let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
@@ -639,6 +679,40 @@ impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dqn_metrics_are_reduced_before_periodic_host_logging() {
+        let device = Device::Cpu;
+        let mut grapher = DQNGrapher::new();
+        for update_index in 0..DQN_LOG_INTERVAL {
+            DQNLogger::<()>::log(
+                &mut grapher,
+                &QLogEntry {
+                    loss: Tensor::new(2.0f32, &device).unwrap(),
+                    epsilon: 0.1,
+                    learning_rate: 1e-4,
+                    q_values: Tensor::new(&[1.0f32, 3.0], &device).unwrap(),
+                    replay_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                    update_index,
+                    collection_timestep: update_index + 1,
+                },
+            );
+            assert_eq!(
+                grapher.pending_updates,
+                (update_index + 1) % DQN_LOG_INTERVAL
+            );
+        }
+
+        grapher.terminal.finish().unwrap();
+        assert_eq!(
+            grapher.terminal.series("DQN Loss").unwrap(),
+            &[(DQN_LOG_INTERVAL, 2.0)]
+        );
+        assert_eq!(
+            grapher.terminal.series("Mean Selected Q-Value").unwrap(),
+            &[(DQN_LOG_INTERVAL, 2.0)]
+        );
+    }
 
     #[test]
     fn dqn_episode_metrics_do_not_go_backwards_after_a_batch_update() {

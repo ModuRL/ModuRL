@@ -23,7 +23,6 @@ use crate::{
     objectives::bellman_targets,
     parameter_schedule::ScheduleProgress,
     spaces::{BoxSpace, Space},
-    tensor_operations::tensor_has_nan,
 };
 
 pub mod ddpg;
@@ -776,9 +775,7 @@ where
         for critic in &mut self.critics {
             let predicted = critic.online_replay_values(&batch.states, &batch.actions)?;
             let loss = candle_nn::loss::mse(&predicted, targets)?;
-            if !tensor_has_nan(&loss)? {
-                critic.optimizer_mut().backward_step(&loss)?;
-            }
+            critic.optimizer_mut().backward_step(&loss)?;
             losses.push(loss);
             q_values.push(predicted);
         }
@@ -806,9 +803,7 @@ where
             .collect::<candle_core::Result<Vec<_>>>()?;
         let values = self.strategy.aggregate_actor_values(values)?;
         let loss = values.mean_all()?.neg()?;
-        if !tensor_has_nan(&loss)? {
-            self.actor_optimizer.backward_step(&loss)?;
-        }
+        self.actor_optimizer.backward_step(&loss)?;
         Ok(ActorUpdate {
             loss,
             q_values: values,
