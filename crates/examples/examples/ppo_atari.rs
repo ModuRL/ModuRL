@@ -10,7 +10,7 @@
 
 use std::{env, fs, path::PathBuf};
 
-use candle_core::{DType, Device, Module, Result, Tensor};
+use candle_core::{DType, Device, Module, Result, Tensor, conv::CudnnFwdAlgo};
 use candle_nn::{AdamW, Conv2d, Conv2dConfig, Linear, Optimizer, ParamsAdamW, VarBuilder, VarMap};
 use modurl::{
     agents::ppo::FakeOptimizer,
@@ -153,6 +153,7 @@ impl NatureCnn {
                 8,
                 Conv2dConfig {
                     stride: 4,
+                    cudnn_fwd_algo: Some(CudnnFwdAlgo::ImplicitGemm),
                     ..Default::default()
                 },
                 gain,
@@ -164,6 +165,7 @@ impl NatureCnn {
                 4,
                 Conv2dConfig {
                     stride: 2,
+                    cudnn_fwd_algo: Some(CudnnFwdAlgo::ImplicitGemm),
                     ..Default::default()
                 },
                 gain,
@@ -175,6 +177,7 @@ impl NatureCnn {
                 3,
                 Conv2dConfig {
                     stride: 1,
+                    cudnn_fwd_algo: Some(CudnnFwdAlgo::Winograd),
                     ..Default::default()
                 },
                 gain,
