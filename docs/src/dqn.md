@@ -72,6 +72,7 @@ fn main() {
         .target_vars(&mut target_var_map)
         .optimizer(optimizer)
         .replay_capacity(10_000)
+        .environment_count(1)
         .batch_size(128)
         .training_start(10_000)
         .update_frequency(10)

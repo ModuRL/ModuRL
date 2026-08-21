@@ -28,3 +28,7 @@ multithreading = []
 
 [patch.crates-io]
 glutin = { git = "https://github.com/davidhozic/glutin", rev = "e95fe97f1857c0498ed2236c0e8d60e5a30a2854" }
+candle-core = { git = "https://github.com/EthanAlmloff/candle", branch = "perf/cudnn-conv2d-backward" }
+
+[profile.release]
+debug = true

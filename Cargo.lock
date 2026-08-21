@@ -283,8 +283,7 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ecb245093b0f791b89d3420c3df9c6d49c60ab63ba54db896bf8a3baf486706"
+source = "git+https://github.com/EthanAlmloff/candle?branch=perf%2Fcudnn-conv2d-backward#7d9afc1a713e6412d810df64583097d0db3d0afe"
 dependencies = [
  "byteorder",
  "candle-kernels",
@@ -315,8 +314,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67450168a281bbb195a14cc85cf164c7a12023a54a03409a3324f476346e0789"
+source = "git+https://github.com/EthanAlmloff/candle?branch=perf%2Fcudnn-conv2d-backward#7d9afc1a713e6412d810df64583097d0db3d0afe"
 dependencies = [
  "cudaforge",
 ]
@@ -324,8 +322,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "242e83c6acf639bb273c929d73c67a882bb4dd08a140f121096e19ba2f213d3e"
+source = "git+https://github.com/EthanAlmloff/candle?branch=perf%2Fcudnn-conv2d-backward#7d9afc1a713e6412d810df64583097d0db3d0afe"
 dependencies = [
  "block2 0.6.2",
  "half",
@@ -356,8 +353,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "257411c33abf7d898a31ac20d80813dfe96ff09e23a73039e22ab293aea9b871"
+source = "git+https://github.com/EthanAlmloff/candle?branch=perf%2Fcudnn-conv2d-backward#7d9afc1a713e6412d810df64583097d0db3d0afe"
 dependencies = [
  "ug",
  "ug-cuda",

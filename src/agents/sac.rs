@@ -13,8 +13,8 @@ use candle_nn::{Optimizer, VarMap};
 use super::{Agent, ReplayDeviceStrategy};
 use crate::{
     buffers::experience_replay::{
-        ExperienceReplay, ExperienceReplayError, ReplayStorage, ReplayStorageError,
-        TensorReplayColumn, replay_index_tensor,
+        AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
+        ReplayStorageError, TensorReplayColumn, replay_index_tensor,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ExpectationPolicy,
@@ -676,6 +676,7 @@ struct SACReplayInsert {
     terminated: Tensor,
     collection_policy_entropies: Tensor,
     entropy_change_weights: Tensor,
+    truncateds: Vec<bool>,
 }
 
 struct SACOptimizationBatch {
@@ -689,8 +690,7 @@ struct SACOptimizationBatch {
 }
 
 struct SACReplayStorage {
-    states: TensorReplayColumn,
-    next_states: TensorReplayColumn,
+    observations: AlignedObservationReplay,
     actions: TensorReplayColumn,
     rewards: TensorReplayColumn,
     terminated: TensorReplayColumn,
@@ -703,6 +703,7 @@ struct SACReplayStorage {
 impl SACReplayStorage {
     fn new(
         capacity: usize,
+        environment_count: usize,
         state_shape: &[usize],
         action_shape: &[usize],
         action_dtype: DType,
@@ -710,8 +711,13 @@ impl SACReplayStorage {
         device: candle_core::Device,
     ) -> Result<Self, ReplayStorageError> {
         Ok(Self {
-            states: TensorReplayColumn::new(capacity, state_shape, dtype, &device)?,
-            next_states: TensorReplayColumn::new(capacity, state_shape, dtype, &device)?,
+            observations: AlignedObservationReplay::new(
+                capacity,
+                environment_count,
+                state_shape,
+                dtype,
+                &device,
+            )?,
             actions: TensorReplayColumn::new(capacity, action_shape, action_dtype, &device)?,
             rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
             terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
@@ -734,8 +740,8 @@ impl ReplayStorage for SACReplayStorage {
 
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let prepared = SACReplayInsert {
-            states: self.states.prepare(&transitions.states)?,
-            next_states: self.next_states.prepare(&transitions.next_states)?,
+            states: transitions.states,
+            next_states: transitions.next_states,
             actions: self.actions.prepare(&transitions.actions)?,
             rewards: self.rewards.prepare(&transitions.rewards)?,
             terminated: self.terminated.prepare(&transitions.terminated)?,
@@ -745,10 +751,10 @@ impl ReplayStorage for SACReplayStorage {
             entropy_change_weights: self
                 .entropy_change_weights
                 .prepare(&transitions.entropy_change_weights)?,
+            truncateds: transitions.truncateds,
         };
         let count = prepared.states.dim(0)?;
         for (name, tensor) in [
-            ("next states", &prepared.next_states),
             ("actions", &prepared.actions),
             ("rewards", &prepared.rewards),
             ("terminated", &prepared.terminated),
@@ -767,9 +773,13 @@ impl ReplayStorage for SACReplayStorage {
                 });
             }
         }
+        self.observations.insert(
+            start,
+            &prepared.states,
+            &prepared.next_states,
+            &prepared.truncateds,
+        )?;
         for (column, tensor) in [
-            (&self.states, &prepared.states),
-            (&self.next_states, &prepared.next_states),
             (&self.actions, &prepared.actions),
             (&self.rewards, &prepared.rewards),
             (&self.terminated, &prepared.terminated),
@@ -788,16 +798,25 @@ impl ReplayStorage for SACReplayStorage {
     }
 
     fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
+        let (states, next_states) = self.observations.gather(indices)?;
         let indices = replay_index_tensor(indices, &self.device)?;
         Ok(SACOptimizationBatch {
-            states: self.states.gather(&indices)?,
-            next_states: self.next_states.gather(&indices)?,
+            states,
+            next_states,
             actions: self.actions.gather(&indices)?,
             rewards: self.rewards.gather(&indices)?,
             terminated: self.terminated.gather(&indices)?,
             collection_policy_entropies: self.collection_policy_entropies.gather(&indices)?,
             entropy_change_weights: self.entropy_change_weights.gather(&indices)?,
         })
+    }
+
+    fn sampleable_len(&self, len: usize) -> usize {
+        self.observations.sampleable_len(len)
+    }
+
+    fn sample_index(&self, index: usize, len: usize) -> usize {
+        self.observations.sample_index(index, len)
     }
 }
 
@@ -815,7 +834,7 @@ struct SACTemperatureUpdate {
 }
 
 struct SACCollectionEntropy {
-    values: Vec<f32>,
+    values: Tensor,
     change_weight: f32,
 }
 
@@ -826,7 +845,7 @@ struct SACCollectedTransitions<'batch> {
     rewards: &'batch Tensor,
     dones: &'batch [bool],
     truncateds: &'batch [bool],
-    policy_entropies: &'batch [f32],
+    policy_entropies: &'batch Tensor,
     entropy_change_weight: f32,
     first_timestep: usize,
 }
@@ -1021,6 +1040,8 @@ where
         #[builder(default = 0.99)] gamma: f64,
         #[builder(default = 0.005)] tau: f64,
         #[builder(default = 1_000_000)] replay_capacity: usize,
+        /// Number of environments whose transitions are inserted together.
+        environment_count: usize,
         #[builder(default = 256)] batch_size: usize,
         /// Number of random-action transitions collected before optimization.
         #[builder(default = 1_000)]
@@ -1057,6 +1078,7 @@ where
             .map_err(SACError::SpaceError)?;
         let replay_storage = SACReplayStorage::new(
             replay_capacity,
+            environment_count,
             observation_sample.dims(),
             action_sample.dims(),
             action_sample.dtype(),
@@ -1164,7 +1186,9 @@ where
         &mut self,
         observation: &Tensor,
     ) -> Result<Tensor, SACError<PE, GE, SE>> {
-        let observation = observation.to_dtype(self.dtype)?;
+        let observation = observation
+            .to_device(&self.device_strategy.optimization_device())?
+            .to_dtype(self.dtype)?;
         let latent = self
             .policy
             .mode(&observation)
@@ -1177,7 +1201,9 @@ where
     /// Samples environment actions `[batch, ...action_shape]` for observations
     /// `[batch, ...observation_shape]`.
     fn stochastic_action(&self, observation: &Tensor) -> Result<Tensor, SACError<PE, GE, SE>> {
-        let observation = observation.to_dtype(self.dtype)?;
+        let observation = observation
+            .to_device(&self.device_strategy.optimization_device())?
+            .to_dtype(self.dtype)?;
         let latent = self
             .policy
             .sample(&observation)
@@ -1493,14 +1519,21 @@ where
     ) -> Result<SACCollectionEntropy, SACError<PE, GE, SE>> {
         if self.entropy_change_penalty.is_none() || uses_random_actions {
             return Ok(SACCollectionEntropy {
-                values: vec![0.0; environment_count],
+                values: Tensor::zeros(
+                    environment_count,
+                    self.dtype,
+                    &self.device_strategy.storage_device(),
+                )?,
                 change_weight: 0.0,
             });
         }
 
+        let observations = observations
+            .to_device(&self.device_strategy.optimization_device())?
+            .to_dtype(self.dtype)?;
         let terms = self
             .policy
-            .expectation(observations, self.samples)
+            .expectation(&observations, self.samples)
             .map_err(SACError::PolicyError)?;
         let values = terms
             .log_probabilities()
@@ -1508,8 +1541,7 @@ where
             .sum(D::Minus1)?
             .neg()?
             .detach()
-            .to_dtype(DType::F32)?
-            .to_vec1::<f32>()?;
+            .to_dtype(self.dtype)?;
         Ok(SACCollectionEntropy {
             values,
             change_weight: 1.0,
@@ -1568,30 +1600,26 @@ where
             }
         }
 
-        let cpu = candle_core::Device::Cpu;
+        let storage_device = self.device_strategy.storage_device();
         self.replay.add(SACReplayInsert {
             states: states.clone(),
             next_states: next_states.clone(),
             actions: actions.clone(),
             rewards: rewards.clone(),
             terminated: Tensor::from_vec(
-                dones
-                    .iter()
-                    .map(|&done| if done { 1.0f32 } else { 0.0 })
-                    .collect::<Vec<_>>(),
+                dones.iter().map(|&done| u8::from(done)).collect::<Vec<_>>(),
                 environment_count,
-                &cpu,
-            )?,
-            collection_policy_entropies: Tensor::from_vec(
-                policy_entropies.to_vec(),
-                environment_count,
-                &cpu,
-            )?,
+                &storage_device,
+            )?
+            .to_dtype(self.dtype)?,
+            collection_policy_entropies: policy_entropies.clone(),
             entropy_change_weights: Tensor::from_vec(
                 vec![entropy_change_weight; environment_count],
                 environment_count,
-                &cpu,
-            )?,
+                &storage_device,
+            )?
+            .to_dtype(self.dtype)?,
+            truncateds: truncateds.to_vec(),
         })?;
 
         Ok(completed_episodes)
@@ -1613,13 +1641,20 @@ where
         while elapsed_timesteps < num_timesteps {
             let first_timestep = self.schedule_progress.elapsed_steps();
             let uses_random_actions = first_timestep < self.training_start;
+            let policy_observations = if uses_random_actions {
+                observations.clone()
+            } else {
+                observations
+                    .to_device(&self.device_strategy.optimization_device())?
+                    .to_dtype(self.dtype)?
+            };
             let entropy = self.collection_entropy_metadata(
-                &observations,
+                &policy_observations,
                 environment_count,
                 uses_random_actions,
             )?;
             let actions = self.select_collection_actions(
-                &observations,
+                &policy_observations,
                 environment_count,
                 uses_random_actions,
             )?;
@@ -2253,6 +2288,7 @@ mod tests {
             )))
             .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
             .replay_capacity(2)
+            .environment_count(1)
             .batch_size(1)
             .training_start(10)
             .training_horizon(1)
@@ -2474,6 +2510,7 @@ mod tests {
             )))
             .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
             .replay_capacity(16)
+            .environment_count(2)
             .batch_size(2)
             .training_start(2)
             .training_horizon(4)

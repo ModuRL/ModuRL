@@ -6,8 +6,8 @@ use std::{marker::PhantomData, ops::Deref};
 use crate::{
     agents::ReplayDeviceStrategy,
     buffers::experience_replay::{
-        ExperienceReplay, ExperienceReplayError, ReplayStorage, ReplayStorageError,
-        replay_index_tensor,
+        AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
+        ReplayStorageError, TensorReplayColumn, replay_index_tensor,
     },
     gym::{MultiGym, MultiGymStepInfo},
     parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
@@ -185,83 +185,40 @@ struct QLearningInsert {
     actions: Tensor,
     rewards: Tensor,
     next_dones: Tensor,
+    truncateds: Vec<bool>,
 }
 
 struct QLearningReplayStorage {
-    states: Tensor,
-    next_states: Tensor,
-    actions: Tensor,
-    rewards: Tensor,
-    next_dones: Tensor,
+    observations: AlignedObservationReplay,
+    actions: TensorReplayColumn,
+    rewards: TensorReplayColumn,
+    next_dones: TensorReplayColumn,
     capacity: usize,
-    replay_dtype: DType,
     device: candle_core::Device,
 }
 
 impl QLearningReplayStorage {
     fn new(
         capacity: usize,
+        environment_count: usize,
         observation_shape: &[usize],
         replay_dtype: DType,
         device: candle_core::Device,
-    ) -> Result<Self, Error> {
-        let mut state_shape = Vec::with_capacity(observation_shape.len() + 1);
-        state_shape.push(capacity);
-        state_shape.extend_from_slice(observation_shape);
-
-        let states = Tensor::zeros(state_shape.as_slice(), replay_dtype, &device)?;
-        let next_states = Tensor::zeros(state_shape.as_slice(), replay_dtype, &device)?;
-        let actions = Tensor::zeros(capacity, DType::U32, &device)?;
-        let rewards = Tensor::zeros(capacity, DType::F32, &device)?;
-        let next_dones = Tensor::zeros(capacity, DType::F32, &device)?;
-
+    ) -> Result<Self, ReplayStorageError> {
         Ok(Self {
-            states,
-            next_states,
-            actions,
-            rewards,
-            next_dones,
+            observations: AlignedObservationReplay::new(
+                capacity,
+                environment_count,
+                observation_shape,
+                replay_dtype,
+                &device,
+            )?,
+            actions: TensorReplayColumn::new(capacity, &[], DType::U32, &device)?,
+            rewards: TensorReplayColumn::new(capacity, &[], DType::F32, &device)?,
+            next_dones: TensorReplayColumn::new(capacity, &[], DType::F32, &device)?,
             capacity,
-            replay_dtype,
             device,
         })
-    }
-
-    /// Copies `[batch, ...]` into `[capacity, ...]` with ring wrapping.
-    fn ring_write(
-        &self,
-        destination: &Tensor,
-        source: &Tensor,
-        start: usize,
-    ) -> Result<(), ReplayStorageError> {
-        let count = source.dim(0)?;
-        if count > self.capacity {
-            return Err(ReplayStorageError::InsertionExceedsCapacity {
-                capacity: self.capacity,
-                inserted: count,
-            });
-        }
-
-        let first_count = count.min(self.capacity - start);
-        if first_count != 0 {
-            let first = source.narrow(0, 0, first_count)?.contiguous()?;
-            destination.slice_set(&first, 0, start)?;
-        }
-
-        let second_count = count - first_count;
-        if second_count != 0 {
-            let second = source.narrow(0, first_count, second_count)?.contiguous()?;
-            destination.slice_set(&second, 0, 0)?;
-        }
-        Ok(())
-    }
-
-    /// Converts a `[batch, ...]` tensor to the replay dtype and device.
-    fn prepare(&self, tensor: &Tensor, dtype: DType) -> Result<Tensor, Error> {
-        tensor
-            .to_dtype(dtype)?
-            .to_device(&self.device)?
-            .contiguous()
     }
 }
 
@@ -275,9 +232,11 @@ impl ReplayStorage for QLearningReplayStorage {
     }
 
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
+        let actions = self.actions.prepare(&transitions.actions)?;
+        let rewards = self.rewards.prepare(&transitions.rewards)?;
+        let next_dones = self.next_dones.prepare(&transitions.next_dones)?;
         let count = transitions.states.dim(0)?;
         for (name, tensor) in [
-            ("next states", &transitions.next_states),
             ("actions", &transitions.actions),
             ("rewards", &transitions.rewards),
             ("next dones", &transitions.next_dones),
@@ -292,30 +251,37 @@ impl ReplayStorage for QLearningReplayStorage {
             }
         }
 
-        let states = self.prepare(&transitions.states, self.replay_dtype)?;
-        let next_states = self.prepare(&transitions.next_states, self.replay_dtype)?;
-        let actions = self.prepare(&transitions.actions, DType::U32)?;
-        let rewards = self.prepare(&transitions.rewards, DType::F32)?;
-        let next_dones = self.prepare(&transitions.next_dones, DType::F32)?;
-
-        self.ring_write(&self.states, &states, start)?;
-        self.ring_write(&self.next_states, &next_states, start)?;
-        self.ring_write(&self.actions, &actions, start)?;
-        self.ring_write(&self.rewards, &rewards, start)?;
-        self.ring_write(&self.next_dones, &next_dones, start)?;
+        self.observations.insert(
+            start,
+            &transitions.states,
+            &transitions.next_states,
+            &transitions.truncateds,
+        )?;
+        self.actions.write(start, &actions)?;
+        self.rewards.write(start, &rewards)?;
+        self.next_dones.write(start, &next_dones)?;
         Ok(count)
     }
 
     fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
+        let (states, next_states) = self.observations.gather(indices)?;
         let indices = replay_index_tensor(indices, &self.device)?;
 
         Ok(QLearningBatch {
-            states: self.states.index_select(&indices, 0)?.detach(),
-            next_states: self.next_states.index_select(&indices, 0)?.detach(),
-            actions: self.actions.index_select(&indices, 0)?.detach(),
-            rewards: self.rewards.index_select(&indices, 0)?.detach(),
-            next_dones: self.next_dones.index_select(&indices, 0)?.detach(),
+            states,
+            next_states,
+            actions: self.actions.gather(&indices)?,
+            rewards: self.rewards.gather(&indices)?,
+            next_dones: self.next_dones.gather(&indices)?,
         })
+    }
+
+    fn sampleable_len(&self, len: usize) -> usize {
+        self.observations.sampleable_len(len)
+    }
+
+    fn sample_index(&self, index: usize, len: usize) -> usize {
+        self.observations.sample_index(index, len)
     }
 }
 
@@ -379,6 +345,7 @@ where
             dyn ParameterSchedule,
         >,
         #[builder(default = 10000)] replay_capacity: usize,
+        environment_count: usize,
         #[builder(default = 32)] batch_size: usize,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 4)] update_frequency: usize,
@@ -412,6 +379,7 @@ where
         let storage_device = device_strategy.storage_device();
         let replay_storage = QLearningReplayStorage::new(
             replay_capacity,
+            environment_count,
             &observation_space.shape(),
             replay_dtype,
             storage_device,
@@ -594,7 +562,7 @@ where
                 .map(|&done| if done { 1.0f32 } else { 0.0 })
                 .collect::<Vec<_>>(),
             environment_count,
-            &candle_core::Device::Cpu,
+            &self.device_strategy.storage_device(),
         )?;
         self.experience_replay.add(QLearningInsert {
             states: states.clone(),
@@ -602,6 +570,7 @@ where
             actions: actions.clone(),
             rewards: rewards.clone(),
             next_dones,
+            truncateds: truncateds.to_vec(),
         })?;
 
         Ok(completed_episodes)
@@ -681,10 +650,6 @@ where
 
             elapsed_timesteps += environment_count;
             self.run_scheduled_updates(first_timestep, environment_count, logger)?;
-            // A vectorized collection batch spans several consecutive
-            // timesteps. Emit its endpoint after any scheduled updates inside
-            // that range so timestamp-ordered loggers never see an update
-            // following the batch's later collection timestamp.
             logger.log_collection(&collection_entry);
             self.schedule_progress.advance_steps(environment_count);
         }
@@ -872,6 +837,7 @@ mod tests {
             actions: Tensor::from_vec(vec![0u32; count], count, device).unwrap(),
             rewards: Tensor::from_vec(vec![1.0f32; count], count, device).unwrap(),
             next_dones: Tensor::zeros(count, DType::F32, device).unwrap(),
+            truncateds: vec![false; count],
         }
     }
 
@@ -880,11 +846,13 @@ mod tests {
         use crate::buffers::experience_replay::ReplayStorage;
 
         let device = Device::Cpu;
-        let mut storage = QLearningReplayStorage::new(3, &[1], DType::U8, device.clone()).unwrap();
+        let mut storage =
+            QLearningReplayStorage::new(4, 2, &[1], DType::U8, device.clone()).unwrap();
         storage.insert(0, replay_insert(&[1, 2], &device)).unwrap();
 
         let gathered_before_overwrite = storage.gather(&[0]).unwrap();
         storage.insert(2, replay_insert(&[3, 4], &device)).unwrap();
+        storage.insert(0, replay_insert(&[5, 6], &device)).unwrap();
 
         assert_eq!(
             gathered_before_overwrite.states.to_vec2::<u8>().unwrap(),
@@ -892,12 +860,12 @@ mod tests {
         );
         assert_eq!(
             storage
-                .gather(&[0, 1, 2])
+                .gather(&[0, 1, 2, 3])
                 .unwrap()
                 .states
                 .to_vec2::<u8>()
                 .unwrap(),
-            vec![vec![4], vec![2], vec![3]]
+            vec![vec![5], vec![6], vec![15], vec![16]]
         );
     }
 
@@ -1124,6 +1092,7 @@ mod tests {
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .epsilon_schedule(Box::new(LinearSchedule::new(1.0, 0.0)))
             .replay_capacity(8)
+            .environment_count(2)
             .batch_size(1)
             .training_start(3)
             .update_frequency(2)
@@ -1189,6 +1158,7 @@ mod tests {
             .target_vars(&mut target_var_map)
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .replay_capacity(8)
+            .environment_count(2)
             .batch_size(1)
             .training_start(10)
             .update_frequency(1)

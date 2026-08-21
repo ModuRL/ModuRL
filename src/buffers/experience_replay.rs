@@ -33,6 +33,18 @@ pub enum ReplayStorageError {
         capacity: usize,
         inserted: usize,
     },
+    EnvironmentCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidReplayAlignment {
+        capacity: usize,
+        environment_count: usize,
+    },
+    CapacityOverflow {
+        capacity: usize,
+        additional: usize,
+    },
 }
 
 impl From<candle_core::Error> for ReplayStorageError {
@@ -61,6 +73,14 @@ pub trait ReplayStorage {
     fn capacity(&self) -> usize;
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error>;
     fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error>;
+
+    fn sampleable_len(&self, len: usize) -> usize {
+        len
+    }
+
+    fn sample_index(&self, index: usize, _len: usize) -> usize {
+        index
+    }
 }
 
 pub(crate) struct TensorReplayColumn {
@@ -80,6 +100,11 @@ impl TensorReplayColumn {
         Ok(Self {
             tensor: Tensor::zeros(shape.as_slice(), dtype, device)?,
         })
+    }
+
+    /// Wraps a replay tensor shaped `[capacity, ...item_shape]`.
+    fn from_tensor(tensor: Tensor) -> Self {
+        Self { tensor }
     }
 
     /// Converts a `[batch, ...]` tensor to this column's dtype and device.
@@ -130,6 +155,140 @@ impl TensorReplayColumn {
     /// Gathers owning rows using indices shaped `[sample_count]`.
     pub(crate) fn gather(&self, indices: &Tensor) -> Result<Tensor, ReplayStorageError> {
         Ok(self.tensor.index_select(indices, 0)?.detach())
+    }
+}
+
+pub(crate) struct AlignedObservationReplay {
+    states: TensorReplayColumn,
+    next_states: TensorReplayColumn,
+    truncated_next_states: HashMap<usize, Tensor>,
+    capacity: usize,
+    environment_count: usize,
+    frontier: usize,
+    frontier_is_invalid: bool,
+    inserted: usize,
+    device: Device,
+}
+
+impl AlignedObservationReplay {
+    pub(crate) fn new(
+        capacity: usize,
+        environment_count: usize,
+        item_shape: &[usize],
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self, ReplayStorageError> {
+        if environment_count == 0
+            || capacity <= environment_count
+            || !capacity.is_multiple_of(environment_count)
+        {
+            return Err(ReplayStorageError::InvalidReplayAlignment {
+                capacity,
+                environment_count,
+            });
+        }
+        let mut shape = Vec::with_capacity(item_shape.len() + 1);
+        shape.push(capacity.checked_add(environment_count).ok_or(
+            ReplayStorageError::CapacityOverflow {
+                capacity,
+                additional: environment_count,
+            },
+        )?);
+        shape.extend_from_slice(item_shape);
+        let observations = Tensor::zeros(shape.as_slice(), dtype, device)?;
+        let states = observations.narrow(0, 0, capacity)?;
+        let next_states = observations.narrow(0, environment_count, capacity)?;
+        Ok(Self {
+            states: TensorReplayColumn::from_tensor(states),
+            next_states: TensorReplayColumn::from_tensor(next_states),
+            truncated_next_states: HashMap::new(),
+            capacity,
+            environment_count,
+            frontier: 0,
+            frontier_is_invalid: false,
+            inserted: 0,
+            device: device.clone(),
+        })
+    }
+
+    /// Stores aligned `states` and `next_states` shaped `[environment_count, ...]`.
+    pub(crate) fn insert(
+        &mut self,
+        start: usize,
+        states: &Tensor,
+        next_states: &Tensor,
+        truncateds: &[bool],
+    ) -> Result<usize, ReplayStorageError> {
+        let states = self.states.prepare(states)?;
+        let next_states = self.next_states.prepare(next_states)?;
+        let count = states.dim(0)?;
+        if count != self.environment_count {
+            return Err(ReplayStorageError::EnvironmentCountMismatch {
+                expected: self.environment_count,
+                actual: count,
+            });
+        }
+        for (field, actual) in [
+            ("next states", next_states.dim(0)?),
+            ("truncateds", truncateds.len()),
+        ] {
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field,
+                    expected: count,
+                    actual,
+                });
+            }
+        }
+
+        for offset in 0..count {
+            self.truncated_next_states
+                .remove(&((start + offset) % self.capacity));
+        }
+        self.states.write(start, &states)?;
+        self.next_states.write(start, &next_states)?;
+
+        for (offset, &truncated) in truncateds.iter().enumerate() {
+            if truncated {
+                let row = replay_index_tensor(&[offset], &self.device)?;
+                self.truncated_next_states.insert(
+                    (start + offset) % self.capacity,
+                    next_states.index_select(&row, 0)?.detach(),
+                );
+            }
+        }
+        self.frontier_is_invalid |= self.inserted >= self.capacity;
+        self.inserted = self.inserted.saturating_add(count);
+        self.frontier = (start + count) % self.capacity;
+        Ok(count)
+    }
+
+    pub(crate) fn sampleable_len(&self, len: usize) -> usize {
+        if len == self.capacity && self.frontier_is_invalid {
+            len - self.environment_count
+        } else {
+            len
+        }
+    }
+
+    pub(crate) fn sample_index(&self, index: usize, len: usize) -> usize {
+        if len == self.capacity && self.frontier_is_invalid {
+            (self.frontier + self.environment_count + index) % self.capacity
+        } else {
+            index
+        }
+    }
+
+    pub(crate) fn gather(&self, indices: &[usize]) -> Result<(Tensor, Tensor), ReplayStorageError> {
+        let index_tensor = replay_index_tensor(indices, &self.device)?;
+        let states = self.states.gather(&index_tensor)?;
+        let next_states = self.next_states.gather(&index_tensor)?;
+        for (batch_index, replay_index) in indices.iter().copied().enumerate() {
+            if let Some(terminal_state) = self.truncated_next_states.get(&replay_index) {
+                next_states.slice_set(terminal_state, 0, batch_index)?;
+            }
+        }
+        Ok((states, next_states))
     }
 }
 
@@ -185,16 +344,19 @@ where
     }
 
     pub fn sample(&self) -> Result<S::Batch, ExperienceReplayError<S::Error>> {
-        let total_samples = self.len;
+        let total_samples = self.storage.sampleable_len(self.len);
         let size_to_sample = self.batch_size.min(total_samples);
-        let indices = sample_indices_without_replacement(total_samples, size_to_sample);
+        let indices = sample_indices_without_replacement(total_samples, size_to_sample)
+            .into_iter()
+            .map(|index| self.storage.sample_index(index, self.len))
+            .collect::<Vec<_>>();
         self.storage
             .gather(&indices)
             .map_err(ExperienceReplayError::ExperienceError)
     }
 
     pub fn len(&self) -> usize {
-        self.len
+        self.storage.sampleable_len(self.len)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -302,6 +464,46 @@ mod tests {
                 inserted: 4
             })
         ));
+    }
+
+    #[test]
+    fn aligned_observations_exclude_the_wrapped_frontier_and_preserve_truncations() {
+        let device = Device::Cpu;
+        let mut observations =
+            AlignedObservationReplay::new(4, 2, &[1], DType::F32, &device).unwrap();
+        let batch = |values: [f32; 2]| Tensor::new(&values, &device).unwrap().reshape((2, 1));
+
+        observations
+            .insert(
+                0,
+                &batch([0.0, 10.0]).unwrap(),
+                &batch([1.0, 11.0]).unwrap(),
+                &[false, false],
+            )
+            .unwrap();
+        observations
+            .insert(
+                2,
+                &batch([1.0, 11.0]).unwrap(),
+                &batch([99.0, 12.0]).unwrap(),
+                &[true, false],
+            )
+            .unwrap();
+        assert_eq!(observations.sampleable_len(4), 4);
+        observations
+            .insert(
+                0,
+                &batch([2.0, 12.0]).unwrap(),
+                &batch([3.0, 13.0]).unwrap(),
+                &[false, false],
+            )
+            .unwrap();
+
+        assert_eq!(observations.sampleable_len(4), 2);
+        assert_eq!(observations.sample_index(0, 4), 0);
+        assert_eq!(observations.sample_index(1, 4), 1);
+        let (_, next_states) = observations.gather(&[2]).unwrap();
+        assert_eq!(next_states.to_vec2::<f32>().unwrap(), vec![vec![99.0]]);
     }
 
     #[test]

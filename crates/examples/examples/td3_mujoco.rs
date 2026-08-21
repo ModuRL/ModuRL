@@ -146,6 +146,7 @@ fn main() {
         .target_noise_clip(0.5)
         .actor_update_interval(2)
         .replay_capacity(1_000_000)
+        .environment_count(1)
         .batch_size(256)
         .training_start(10_000)
         .training_horizon(TOTAL_TIMESTEPS)

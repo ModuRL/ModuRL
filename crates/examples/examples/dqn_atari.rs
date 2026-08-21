@@ -330,6 +330,7 @@ fn main() {
         .target_vars(&mut target_vars)
         .optimizer(optimizer)
         .replay_capacity(REPLAY_CAPACITY)
+        .environment_count(NUM_ENVS)
         .batch_size(BATCH_SIZE)
         .gamma(GAMMA)
         .training_start(TRAINING_START)
