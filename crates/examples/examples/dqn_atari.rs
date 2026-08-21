@@ -4,16 +4,12 @@
 //! starts, action-repeat/max-pooling, episodic lives, reward clipping,
 //! 84x84 grayscale frames, and a four-frame stack. The learner uses CleanRL's
 //! convolutional architecture, Adam optimizer, replay warm-up, update/target
-//! cadence, and epsilon schedule. It collects from eight environments to
-//! improve throughput, unlike CleanRL's single-environment default.
+//! cadence, epsilon schedule, and single-environment configuration.
 //!
 //! Run with a legally obtained Atari ROM:
 //!
 //! `cargo run --release -p examples --example dqn_atari --features atari-environment,cuda -- path/to/game.bin`
 //!
-//! Add `multithreading` to construct the eight ALE environments in worker
-//! threads; without it, they are stepped sequentially on the main thread.
-
 use std::{env, path::PathBuf};
 
 use candle_core::{DType, Device, Module, Result, Tensor};
@@ -32,9 +28,9 @@ use support::graphers::DQNGrapher;
 const SEED: i32 = 1;
 const FRAME_SKIP: usize = 4;
 const FRAME_STACK: usize = 4;
-const NUM_ENVS: usize = 8;
+const NUM_ENVS: usize = 1;
 const NOOP_MAX: u32 = 30;
-const MAX_EPISODE_FRAMES: u32 = 400_000;
+const MAX_EPISODE_FRAMES: u32 = 108_000;
 
 // Separate state and next-state storage at this capacity uses about 53 GiB.
 const REPLAY_CAPACITY: usize = 1_000_000;
@@ -323,7 +319,10 @@ fn main() {
         .dtype(DType::F32)
         .replay_dtype(DType::U8)
         .action_space(action_space)
-        .observation_space(envs.observation_space())
+        .observation_space(Box::new(BoxSpace::new(
+            Tensor::zeros((FRAME_STACK, 84, 84), DType::U8, &Device::Cpu).unwrap(),
+            Tensor::full(u8::MAX, (FRAME_STACK, 84, 84), &Device::Cpu).unwrap(),
+        )))
         .online_q_network(online_q_network)
         .target_q_network(target_q_network)
         .online_vars(&online_vars)
