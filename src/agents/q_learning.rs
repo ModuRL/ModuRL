@@ -1,6 +1,7 @@
 use bon::bon;
 use candle_core::{DType, Error, Tensor};
 use candle_nn::{Optimizer, VarMap};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{marker::PhantomData, ops::Deref};
 
 use crate::{
@@ -320,6 +321,7 @@ where
     device_strategy: ReplayDeviceStrategy,
     dtype: DType,
     optimization_steps: usize,
+    action_rng: StdRng,
     _phantom: PhantomData<(GE, T)>,
 }
 
@@ -376,6 +378,14 @@ where
             .training_horizon(training_horizon)
             .call()?;
 
+        let optimization_device = device_strategy.optimization_device();
+        // Tie host-side action sampling to the configured accelerator seed. This
+        // is the only device-to-host synchronization needed by epsilon-greedy.
+        let action_seed = Tensor::rand(0.0f64, u32::MAX as f64, (), &optimization_device)?
+            .to_dtype(DType::U32)?
+            .to_scalar::<u32>()?;
+        let action_rng = StdRng::seed_from_u64(u64::from(action_seed));
+
         let storage_device = device_strategy.storage_device();
         let replay_storage = QLearningReplayStorage::new(
             replay_capacity,
@@ -404,6 +414,7 @@ where
             device_strategy,
             dtype,
             optimization_steps: 0,
+            action_rng,
             _phantom: PhantomData,
         };
         agent.update_target_network();
@@ -432,11 +443,14 @@ where
         let observation = observation
             .to_device(&self.device_strategy.optimization_device())?
             .to_dtype(self.dtype)?;
+        let action_rng = &mut self.action_rng;
+        let online_q_network = &self.online_q_network;
         Ok(epsilon_greedy_actions(
             &observation,
             self.current_epsilon,
             &self.action_space,
-            |observations| self.online_q_network.forward(observations),
+            action_rng,
+            |observations| online_q_network.forward(observations),
         )?)
     }
 
@@ -713,48 +727,39 @@ pub(crate) fn epsilon_greedy_actions(
     observation: &Tensor,
     epsilon: f64,
     action_space: &Discrete,
+    rng: &mut impl Rng,
     forward: impl FnOnce(&Tensor) -> Result<Tensor, Error>,
 ) -> Result<Tensor, Error> {
     let batch_size = observation.shape().dims()[0];
-    let explores = Tensor::rand(0.0f64, 1.0, &[batch_size], observation.device())?
-        .to_vec1::<f64>()?
-        .into_iter()
-        .map(|value| value < epsilon)
-        .collect::<Vec<_>>();
+    let device = observation.device();
+    if epsilon == 0.0 {
+        return forward(observation)?.argmax(1);
+    }
 
-    let greedy_indices = explores
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &explore)| (!explore).then_some(index as u32))
-        .collect::<Vec<_>>();
-    let greedy_count = greedy_indices.len();
-    let mut greedy_actions = if greedy_indices.is_empty() {
-        None
-    } else {
-        let greedy_indices =
-            Tensor::from_vec(greedy_indices, &[greedy_count], observation.device())?;
-        let greedy_observations = observation.index_select(&greedy_indices, 0)?;
-        Some(
-            forward(&greedy_observations)?
-                .argmax(1)?
-                .chunk(greedy_count, 0)?
-                .into_iter(),
-        )
-    };
-
+    let action_count = action_space.get_possible_values() as u32;
     let mut actions = Vec::with_capacity(batch_size);
-    for explore in explores {
-        if explore {
-            actions.push(action_space.sample(observation.device())?);
+    let mut greedy_indices = Vec::with_capacity(batch_size);
+    for index in 0..batch_size {
+        if rng.random_bool(epsilon) {
+            actions.push(rng.random_range(0..action_count));
         } else {
-            let action = greedy_actions
-                .as_mut()
-                .and_then(|actions| actions.next())
-                .expect("greedy actions must exist for non-exploring environments");
-            actions.push(action.squeeze(0)?);
+            actions.push(0);
+            greedy_indices.push(index as u32);
         }
     }
-    Tensor::stack(&actions, 0)
+
+    if greedy_indices.is_empty() {
+        return Tensor::from_vec(actions, batch_size, device);
+    }
+    if greedy_indices.len() == batch_size {
+        return forward(observation)?.argmax(1);
+    }
+
+    let greedy_count = greedy_indices.len();
+    let greedy_indices = Tensor::from_vec(greedy_indices, greedy_count, device)?;
+    let greedy_observations = observation.index_select(&greedy_indices, 0)?;
+    let greedy_actions = forward(&greedy_observations)?.argmax(1)?;
+    Tensor::from_vec(actions, batch_size, device)?.scatter(&greedy_indices, &greedy_actions, 0)
 }
 
 /// Gathers scalar `actions` containing one index per batch item from `q_values`
@@ -772,7 +777,7 @@ mod tests {
     use super::{
         QCollectionLogEntry, QLearningAgent, QLearningConfigurationError,
         QLearningConfigurationValidator, QLearningInsert, QLearningLogger, QLearningReplayStorage,
-        QLearningTarget, selected_action_q_values, validate_epsilon,
+        QLearningTarget, epsilon_greedy_actions, selected_action_q_values, validate_epsilon,
     };
     use crate::{
         agents::{
@@ -787,8 +792,91 @@ mod tests {
     };
     use candle_core::{DType, Device, Error, Tensor};
     use candle_nn::{VarBuilder, VarMap};
+    use rand::{SeedableRng, rngs::StdRng};
 
     struct TestTarget;
+
+    fn assert_device_native_epsilon_greedy(device: &Device) {
+        let observations = Tensor::new(
+            &[[0.0f32, 2.0, 1.0], [3.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
+            device,
+        )
+        .unwrap();
+        let action_space = Discrete::new(3);
+        let actions = epsilon_greedy_actions(
+            &observations,
+            0.0,
+            &action_space,
+            &mut StdRng::seed_from_u64(1),
+            |input| {
+                assert_eq!(input.dims(), &[3, 3]);
+                Ok(input.clone())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(actions.dtype(), DType::U32);
+        assert_eq!(actions.to_vec1::<u32>().unwrap(), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn epsilon_greedy_selects_actions_without_changing_the_batch_shape() {
+        assert_device_native_epsilon_greedy(&Device::Cpu);
+    }
+
+    #[test]
+    fn full_exploration_skips_the_q_network() {
+        let observations = Tensor::zeros((16, 2), DType::F32, &Device::Cpu).unwrap();
+        let actions = epsilon_greedy_actions(
+            &observations,
+            1.0,
+            &Discrete::new(3),
+            &mut StdRng::seed_from_u64(2),
+            |_| panic!("full exploration must not evaluate the Q-network"),
+        )
+        .unwrap();
+
+        assert_eq!(actions.dims(), &[16]);
+        assert!(
+            actions
+                .to_vec1::<u32>()
+                .unwrap()
+                .into_iter()
+                .all(|action| action < 3)
+        );
+    }
+
+    #[test]
+    fn mixed_exploration_forwards_only_greedy_observations() {
+        let observations = Tensor::arange(0u32, 128, &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .reshape((128, 1))
+            .unwrap();
+        let mut forwarded = 0;
+        let actions = epsilon_greedy_actions(
+            &observations,
+            0.5,
+            &Discrete::new(2),
+            &mut StdRng::seed_from_u64(3),
+            |input| {
+                forwarded = input.dim(0)?;
+                Tensor::cat(&[input, &input.affine(-1.0, 0.0)?], 1)
+            },
+        )
+        .unwrap();
+
+        assert!(forwarded > 0 && forwarded < 128);
+        assert_eq!(actions.dims(), &[128]);
+        assert!(
+            actions
+                .to_vec1::<u32>()
+                .unwrap()
+                .into_iter()
+                .all(|action| action < 2)
+        );
+    }
 
     impl QLearningTarget for TestTarget {
         fn requires_online_next_q_values() -> bool {
