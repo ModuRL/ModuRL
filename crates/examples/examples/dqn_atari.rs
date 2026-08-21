@@ -12,7 +12,7 @@
 //!
 use std::{env, path::PathBuf};
 
-use candle_core::{DType, Device, Module, Result, Tensor};
+use candle_core::{DType, Device, Module, Result, Tensor, conv::CudnnFwdAlgo};
 use candle_nn::{
     AdamW, Conv2d, Conv2dConfig, Init, Linear, Optimizer, ParamsAdamW, VarBuilder, VarMap,
 };
@@ -183,6 +183,7 @@ impl AtariQNetwork {
                 8,
                 Conv2dConfig {
                     stride: 4,
+                    cudnn_fwd_algo: Some(CudnnFwdAlgo::Gemm),
                     ..Default::default()
                 },
                 vb.pp("conv1"),
@@ -193,6 +194,7 @@ impl AtariQNetwork {
                 4,
                 Conv2dConfig {
                     stride: 2,
+                    cudnn_fwd_algo: Some(CudnnFwdAlgo::ImplicitGemm),
                     ..Default::default()
                 },
                 vb.pp("conv2"),
@@ -203,6 +205,7 @@ impl AtariQNetwork {
                 3,
                 Conv2dConfig {
                     stride: 1,
+                    cudnn_fwd_algo: Some(CudnnFwdAlgo::ImplicitGemm),
                     ..Default::default()
                 },
                 vb.pp("conv3"),
@@ -227,7 +230,7 @@ impl Module for AtariQNetwork {
 
 fn main() {
     let rom_path = env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(|| {
-        eprintln!("usage: cargo run --release -p examples --example dqn_atari --features atari-environment[,cuda,multithreading] -- path/to/game.bin");
+        eprintln!("usage: cargo run --release -p examples --example dqn_atari --features atari-environment[,cuda] -- path/to/game.bin");
         std::process::exit(2);
     });
 
@@ -247,25 +250,6 @@ fn main() {
     drop(probe_env);
     let action_space = Discrete::new(action_count);
 
-    #[cfg(feature = "multithreading")]
-    let envs = {
-        let constructors = (0..NUM_ENVS)
-            .map(|environment_index| {
-                let rom_path = rom_path.clone();
-                move || make_atari_env(rom_path, SEED + environment_index as i32)
-            })
-            .collect();
-        let observation_space = BoxSpace::new(
-            Tensor::zeros((FRAME_STACK, 84, 84), DType::U8, &Device::Cpu).unwrap(),
-            Tensor::full(u8::MAX, (FRAME_STACK, 84, 84), &Device::Cpu).unwrap(),
-        );
-        MultithreadedVectorizedGymWrapper::new(
-            constructors,
-            observation_space,
-            action_space.clone(),
-        )
-    };
-    #[cfg(not(feature = "multithreading"))]
     let envs = VectorizedGymWrapper::from(
         (0..NUM_ENVS)
             .map(|environment_index| {
