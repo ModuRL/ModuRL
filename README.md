@@ -108,7 +108,7 @@ The public boundaries make each part replaceable:
 | Environment execution | Implement `Gym` for one environment or `MultiGym` for a batch. Collect `Gym` implementations with `VectorizedGymWrapper::from(envs)`, or enable `multithreading` and use `MultithreadedVectorizedGymWrapper`. |
 | Network topology | Use `PPONetworkInfo::Separate` for independent actor and critic modules, or `PPONetworkInfo::Shared` for one trunk with policy and value heads. |
 | Policy representation | Wrap a Candle module in `ProbabilisticPolicyModel<D>`. Choose a categorical, Gaussian, transformed, or application-defined `Distribution`. |
-| Training state and devices | On-policy agents use rollout storage. Replay agents select `ReplayDeviceStrategy::OneDevice` or split storage and optimization with `Hybrid`. |
+| Training state and devices | On-policy agents use rollout storage. Replay agents use `ReplayStorageConfig` to select observation dtype and either one-device or hybrid storage. |
 | Schedules and logging | Use constant, linear, exponential, or application-defined `ParameterSchedule` values. Pass a logger implementation to the agent builder, or omit logging. |
 
 Agents train against these contracts instead of concrete environment, network, or logger types. See [Core Concepts](https://modurl.github.io/ModuRL/dev/core-concepts.html) for how the parts interact.

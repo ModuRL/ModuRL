@@ -16,7 +16,7 @@ use candle_core::{DType, Device, Module, Result, Tensor, conv::CudnnFwdAlgo};
 use candle_nn::{
     AdamW, Conv2d, Conv2dConfig, Init, Linear, Optimizer, ParamsAdamW, VarBuilder, VarMap,
 };
-use modurl::{agents::ReplayDeviceStrategy, prelude::*};
+use modurl::prelude::*;
 use modurl_ale::{
     AtariGym, AtariInfo, AtariObsType,
     wrappers::{EpisodicLifeGym, FireResetGym, FireResetGymError, NoopResetGym, WarpGym},
@@ -301,9 +301,10 @@ fn main() {
     // Use the statistics recorded inside episodic-life and reward-clipping so
     // the reported return is the raw score for a complete game, as in CleanRL.
     let mut grapher = DQNGrapher::atari();
+    let replay_storage_config =
+        ReplayStorageConfig::new(device_strategy).with_observation_dtype(DType::U8);
     let mut agent = DQNAgent::builder()
         .dtype(DType::F32)
-        .replay_dtype(DType::U8)
         .action_space(action_space)
         .observation_space(Box::new(BoxSpace::new(
             Tensor::zeros((FRAME_STACK, 84, 84), DType::U8, &Device::Cpu).unwrap(),
@@ -327,7 +328,7 @@ fn main() {
             1.0 + (0.01 - 1.0) * annealing
         })
         .logger(&mut grapher)
-        .device_strategy(device_strategy)
+        .replay_storage_config(replay_storage_config)
         .build()
         .expect("invalid DQN configuration");
 

@@ -11,7 +11,7 @@ use candle_core::{DType, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
 use super::{
-    ReplayDeviceStrategy,
+    ReplayStorageConfig,
     sac::{SACCritic, SACCriticError},
 };
 use crate::{
@@ -303,11 +303,17 @@ impl DeterministicReplayStorage {
         capacity: usize,
         state_shape: &[usize],
         action_shape: &[usize],
+        observation_dtype: DType,
         dtype: DType,
         device: candle_core::Device,
     ) -> Result<Self, ReplayStorageError> {
         Ok(Self {
-            observations: AlignedObservationReplay::new(capacity, state_shape, dtype, &device),
+            observations: AlignedObservationReplay::new(
+                capacity,
+                state_shape,
+                observation_dtype,
+                &device,
+            ),
             actions: TensorReplayColumn::new(capacity, action_shape, dtype, &device)?,
             rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
             terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
@@ -440,7 +446,7 @@ where
     training_start: usize,
     update_frequency: usize,
     schedule_progress: ScheduleProgress,
-    device_strategy: ReplayDeviceStrategy,
+    replay_storage_config: ReplayStorageConfig,
     optimization_steps: usize,
     dtype: DType,
     _errors: PhantomData<GE>,
@@ -466,7 +472,7 @@ where
         strategy: S,
         action_space: BoxSpace,
         observation_space: Box<dyn Space<Error = SE>>,
-        device_strategy: ReplayDeviceStrategy,
+        replay_storage_config: ReplayStorageConfig,
         #[builder(default = 0.99)] gamma: f64,
         #[builder(default = 0.005)] tau: f64,
         #[builder(default = 0.1)] exploration_noise: f64,
@@ -496,7 +502,7 @@ where
             .training_horizon(training_horizon)
             .call()?;
         copy_actor_var_map(online_actor_vars, target_actor_vars, 1.0)?;
-        let storage_device = device_strategy.storage_device();
+        let storage_device = replay_storage_config.storage_device();
         let observation_sample = observation_space
             .sample(&storage_device)
             .map_err(DeterministicActorCriticError::SpaceError)?;
@@ -505,6 +511,7 @@ where
             replay_capacity,
             observation_sample.dims(),
             action_sample.dims(),
+            replay_storage_config.observation_dtype(),
             dtype,
             storage_device.clone(),
         )?;
@@ -525,7 +532,7 @@ where
             training_start,
             update_frequency,
             schedule_progress: ScheduleProgress::new(training_horizon),
-            device_strategy,
+            replay_storage_config,
             optimization_steps: 0,
             dtype,
             _errors: PhantomData,
@@ -676,7 +683,7 @@ where
         observation: &Tensor,
     ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
         let observation = observation
-            .to_device(&self.device_strategy.optimization_device())?
+            .to_device(&self.replay_storage_config.optimization_device())?
             .to_dtype(self.dtype)?;
         let actions = self.online_actor.forward(&observation)?;
         Ok(self.action_space.tensor_from_neurons(&actions)?)
@@ -689,7 +696,7 @@ where
         observation: &Tensor,
     ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
         let observation = observation
-            .to_device(&self.device_strategy.optimization_device())?
+            .to_device(&self.replay_storage_config.optimization_device())?
             .to_dtype(self.dtype)?;
         let actions = self.online_actor.forward(&observation)?;
         let actions = add_gaussian_noise(&actions, self.exploration_noise, None)?;
@@ -703,7 +710,7 @@ where
         let actions = (0..batch_size)
             .map(|_| {
                 self.action_space
-                    .sample(&self.device_strategy.optimization_device())
+                    .sample(&self.replay_storage_config.optimization_device())
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Tensor::stack(&actions, 0)?.to_dtype(self.dtype)?)
@@ -716,7 +723,7 @@ where
             return Ok(None);
         }
         let mut batch = self.replay.sample()?;
-        let optimization_device = self.device_strategy.optimization_device();
+        let optimization_device = self.replay_storage_config.optimization_device();
         for tensor in [
             &mut batch.states,
             &mut batch.next_states,
@@ -724,9 +731,10 @@ where
             &mut batch.rewards,
             &mut batch.terminated,
         ] {
-            *tensor = tensor.to_device(&optimization_device)?;
+            *tensor = tensor
+                .to_device(&optimization_device)?
+                .to_dtype(self.dtype)?;
         }
-        batch.actions = batch.actions.to_dtype(self.dtype)?;
         Ok(Some(batch))
     }
 
@@ -898,7 +906,7 @@ where
                 completed_episodes.push(entry);
             }
         }
-        let storage_device = self.device_strategy.storage_device();
+        let storage_device = self.replay_storage_config.storage_device();
         self.replay.add(DeterministicReplayInsert {
             states: states.clone(),
             next_states: next_states.clone(),

@@ -216,7 +216,9 @@ let mut agent = SACAgent::builder()
     .observation_space(observation_space)
     .aggregation_mode(SACCriticAggregationMode::Min)
     .training_horizon(total_timesteps)
-    .device_strategy(ReplayDeviceStrategy::OneDevice(device))
+    .replay_storage_config(ReplayStorageConfig::new(
+        ReplayDeviceStrategy::OneDevice(device),
+    ))
     .build()?;
 
 agent.learn(&mut env, total_timesteps)?;
@@ -269,10 +271,10 @@ actions while excluding gradients to critic parameters.
 ## Discrete SAC Is an API Variant
 
 `SACAgent` can also work with categorical policies and
-`DiscreteVectorHeadCritic`. ModuRL retains that support for experiments with
-discrete-SAC variants, including `SACStabilizationConfiguration::stable_discrete`.
-It is not the canonical example because traditional SAC is a continuous-control
-algorithm.
+`DiscreteVectorHeadCritic`. Experimental discrete-SAC configurations can select
+mean critic aggregation with `.aggregation_mode(SACCriticAggregationMode::Mean)`
+and add an entropy-drift penalty with `.entropy_change_penalty(0.5)`. It is not
+the canonical example because traditional SAC is a continuous-control algorithm.
 
 Read [Understand an SAC Training Run](./understand-sac-training.md) to add a
 logger and interpret its metrics. Read [Run on CUDA or

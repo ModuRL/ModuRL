@@ -1,4 +1,4 @@
-use candle_core::Device;
+use candle_core::{DType, Device};
 
 /// Strategy for selecting devices used by replay-based agents.
 ///
@@ -15,6 +15,47 @@ pub enum ReplayDeviceStrategy {
         /// Device holding detached transitions while they remain in replay.
         storage_device: Device,
     },
+}
+
+/// Configuration for the representation and placement of replay observations.
+///
+/// Other replay columns retain the dtype appropriate to their values. Sampled
+/// observations are converted to the agent's compute dtype before optimization.
+pub struct ReplayStorageConfig {
+    device_strategy: ReplayDeviceStrategy,
+    observation_dtype: DType,
+}
+
+impl ReplayStorageConfig {
+    /// Creates replay storage using `F32` observations.
+    pub fn new(device_strategy: ReplayDeviceStrategy) -> Self {
+        Self {
+            device_strategy,
+            observation_dtype: DType::F32,
+        }
+    }
+
+    /// Sets the dtype used by observations while retained in replay.
+    pub fn with_observation_dtype(mut self, observation_dtype: DType) -> Self {
+        assert!(
+            observation_dtype.is_float() || observation_dtype == DType::U8,
+            "replay observation dtype must be floating-point or u8"
+        );
+        self.observation_dtype = observation_dtype;
+        self
+    }
+
+    pub(crate) fn storage_device(&self) -> Device {
+        self.device_strategy.storage_device()
+    }
+
+    pub(crate) fn optimization_device(&self) -> Device {
+        self.device_strategy.optimization_device()
+    }
+
+    pub(crate) fn observation_dtype(&self) -> DType {
+        self.observation_dtype
+    }
 }
 
 impl ReplayDeviceStrategy {

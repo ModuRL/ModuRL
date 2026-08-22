@@ -10,7 +10,7 @@ use bon::bon;
 use candle_core::{D, DType, Tensor, Var};
 use candle_nn::{Optimizer, VarMap};
 
-use super::{Agent, ReplayDeviceStrategy};
+use super::{Agent, ReplayStorageConfig};
 use crate::{
     buffers::experience_replay::{
         AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
@@ -575,41 +575,6 @@ where
     }
 }
 
-/// Optional SAC stabilization techniques.
-///
-/// [`Self::stable_discrete`] selects the published discrete-SAC defaults:
-/// mean critic aggregation and a `0.5` replay-to-current entropy penalty.
-/// Q-value clipping remains opt-in because its useful scale depends on the
-/// task's rewards.
-#[derive(Default)]
-pub struct SACStabilizationConfiguration {
-    entropy_change_penalty: Option<f64>,
-    aggregation_mode: Option<SACCriticAggregationMode>,
-}
-
-#[bon]
-impl SACStabilizationConfiguration {
-    #[builder]
-    pub fn new(
-        /// Coefficient for the replay-to-current entropy-change penalty.
-        entropy_change_penalty: Option<f64>,
-        /// Critic aggregation override associated with this preset.
-        aggregation_mode: Option<SACCriticAggregationMode>,
-    ) -> Self {
-        Self {
-            entropy_change_penalty,
-            aggregation_mode,
-        }
-    }
-
-    pub fn stable_discrete() -> Self {
-        Self {
-            entropy_change_penalty: Some(0.5),
-            aggregation_mode: Some(SACCriticAggregationMode::Mean),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SACConfigurationError {
     NoCritics,
@@ -705,11 +670,17 @@ impl SACReplayStorage {
         state_shape: &[usize],
         action_shape: &[usize],
         action_dtype: DType,
+        observation_dtype: DType,
         dtype: DType,
         device: candle_core::Device,
     ) -> Result<Self, ReplayStorageError> {
         Ok(Self {
-            observations: AlignedObservationReplay::new(capacity, state_shape, dtype, &device),
+            observations: AlignedObservationReplay::new(
+                capacity,
+                state_shape,
+                observation_dtype,
+                &device,
+            ),
             actions: TensorReplayColumn::new(capacity, action_shape, action_dtype, &device)?,
             rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
             terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
@@ -996,7 +967,7 @@ where
     entropy_change_penalty: Option<f64>,
     q_value_clip: Option<f64>,
     schedule_progress: ScheduleProgress,
-    device_strategy: ReplayDeviceStrategy,
+    replay_storage_config: ReplayStorageConfig,
     optimization_steps: usize,
     logger: Option<&'a mut dyn SACLogger<I>>,
     dtype: DType,
@@ -1026,15 +997,14 @@ where
         entropy_configuration: SACEntropyConfiguration<EO>,
         action_space: Box<dyn Space<Error = SE>>,
         observation_space: Box<dyn Space<Error = SE>>,
-        device_strategy: ReplayDeviceStrategy,
+        replay_storage_config: ReplayStorageConfig,
         /// Optional update and collection metric sink.
         logger: Option<&'a mut dyn SACLogger<I>>,
         /// Explicit critic aggregation mode. This takes precedence over the
-        /// stabilization configuration and defaults to `Min`.
+        /// default of `Min`.
         aggregation_mode: Option<SACCriticAggregationMode>,
-        /// Optional grouped defaults for stabilization techniques.
-        #[builder(default)]
-        stabilization_configuration: SACStabilizationConfiguration,
+        /// Coefficient for the replay-to-current entropy-change penalty.
+        entropy_change_penalty: Option<f64>,
         /// Enables PPO-style critic value clipping around target-network Q.
         q_value_clip: Option<f64>,
         #[builder(default = 0.99)] gamma: f64,
@@ -1053,9 +1023,7 @@ where
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, SACError<PE, GE, SE>> {
         assert!(dtype.is_float(), "SAC compute dtype must be floating-point");
-        let aggregation_mode = aggregation_mode
-            .or(stabilization_configuration.aggregation_mode)
-            .unwrap_or(SACCriticAggregationMode::Min);
+        let aggregation_mode = aggregation_mode.unwrap_or(SACCriticAggregationMode::Min);
         SACConfigurationValidator::validate_configuration()
             .critic_count(critics.len())
             .replay_capacity(replay_capacity)
@@ -1063,11 +1031,11 @@ where
             .gamma(gamma)
             .tau(tau)
             .entropy(&entropy_configuration)
-            .maybe_entropy_change_penalty(stabilization_configuration.entropy_change_penalty)
+            .maybe_entropy_change_penalty(entropy_change_penalty)
             .maybe_q_value_clip(q_value_clip)
             .training_horizon(training_horizon)
             .call()?;
-        let storage_device = device_strategy.storage_device();
+        let storage_device = replay_storage_config.storage_device();
         let observation_sample = observation_space
             .sample(&storage_device)
             .map_err(SACError::SpaceError)?;
@@ -1079,6 +1047,7 @@ where
             observation_sample.dims(),
             action_sample.dims(),
             action_sample.dtype(),
+            replay_storage_config.observation_dtype(),
             dtype,
             storage_device.clone(),
         )?;
@@ -1095,10 +1064,10 @@ where
             tau,
             training_start,
             samples,
-            entropy_change_penalty: stabilization_configuration.entropy_change_penalty,
+            entropy_change_penalty,
             q_value_clip,
             schedule_progress: ScheduleProgress::new(training_horizon),
-            device_strategy,
+            replay_storage_config,
             optimization_steps: 0,
             logger,
             dtype,
@@ -1184,7 +1153,7 @@ where
         observation: &Tensor,
     ) -> Result<Tensor, SACError<PE, GE, SE>> {
         let observation = observation
-            .to_device(&self.device_strategy.optimization_device())?
+            .to_device(&self.replay_storage_config.optimization_device())?
             .to_dtype(self.dtype)?;
         let latent = self
             .policy
@@ -1199,7 +1168,7 @@ where
     /// `[batch, ...observation_shape]`.
     fn stochastic_action(&self, observation: &Tensor) -> Result<Tensor, SACError<PE, GE, SE>> {
         let observation = observation
-            .to_device(&self.device_strategy.optimization_device())?
+            .to_device(&self.replay_storage_config.optimization_device())?
             .to_dtype(self.dtype)?;
         let latent = self
             .policy
@@ -1214,7 +1183,7 @@ where
         let actions = (0..batch_size)
             .map(|_| {
                 self.action_space
-                    .sample(&self.device_strategy.optimization_device())
+                    .sample(&self.replay_storage_config.optimization_device())
                     .map_err(SACError::SpaceError)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1248,18 +1217,20 @@ where
             return Ok(None);
         }
         let mut batch = self.replay.sample()?;
-        let optimization_device = self.device_strategy.optimization_device();
+        let optimization_device = self.replay_storage_config.optimization_device();
         for element in [
             &mut batch.states,
             &mut batch.next_states,
-            &mut batch.actions,
             &mut batch.rewards,
             &mut batch.terminated,
             &mut batch.collection_policy_entropies,
             &mut batch.entropy_change_weights,
         ] {
-            *element = element.to_device(&optimization_device)?;
+            *element = element
+                .to_device(&optimization_device)?
+                .to_dtype(self.dtype)?;
         }
+        batch.actions = batch.actions.to_device(&optimization_device)?;
         if batch.actions.dtype().is_float() {
             batch.actions = batch.actions.to_dtype(self.dtype)?;
         }
@@ -1513,14 +1484,14 @@ where
                 values: Tensor::zeros(
                     environment_count,
                     self.dtype,
-                    &self.device_strategy.storage_device(),
+                    &self.replay_storage_config.storage_device(),
                 )?,
                 change_weight: 0.0,
             });
         }
 
         let observations = observations
-            .to_device(&self.device_strategy.optimization_device())?
+            .to_device(&self.replay_storage_config.optimization_device())?
             .to_dtype(self.dtype)?;
         let terms = self
             .policy
@@ -1591,7 +1562,7 @@ where
             }
         }
 
-        let storage_device = self.device_strategy.storage_device();
+        let storage_device = self.replay_storage_config.storage_device();
         self.replay.add(SACReplayInsert {
             states: states.clone(),
             next_states: next_states.clone(),
@@ -1639,7 +1610,7 @@ where
                 observations.clone()
             } else {
                 observations
-                    .to_device(&self.device_strategy.optimization_device())?
+                    .to_device(&self.replay_storage_config.optimization_device())?
                     .to_dtype(self.dtype)?
             };
             let entropy = self.collection_entropy_metadata(
@@ -1730,7 +1701,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::test_support::CountingOptimizer;
+    use crate::agents::{ReplayDeviceStrategy, test_support::CountingOptimizer};
     use candle_core::{Device, Module};
     use candle_nn::{Init, VarBuilder};
     use std::sync::{
@@ -1961,16 +1932,6 @@ mod tests {
             gradients(SACCriticAggregationMode::Median, &[1.0, 2.0]),
             vec![0.5, 0.5]
         );
-    }
-
-    #[test]
-    fn stable_discrete_defaults_to_mean_and_entropy_change_penalty() {
-        let configuration = SACStabilizationConfiguration::stable_discrete();
-        assert_eq!(
-            configuration.aggregation_mode,
-            Some(SACCriticAggregationMode::Mean)
-        );
-        assert_eq!(configuration.entropy_change_penalty, Some(0.5));
     }
 
     #[test]
@@ -2280,7 +2241,9 @@ mod tests {
                 10.0,
                 &Device::Cpu,
             )))
-            .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                Device::Cpu,
+            )))
             .replay_capacity(2)
             .batch_size(1)
             .training_start(10)
@@ -2501,12 +2464,15 @@ mod tests {
                 1.0,
                 &device,
             )))
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device.clone(),
+            )))
             .replay_capacity(16)
             .batch_size(2)
             .training_start(2)
             .training_horizon(4)
-            .stabilization_configuration(SACStabilizationConfiguration::stable_discrete())
+            .aggregation_mode(SACCriticAggregationMode::Mean)
+            .entropy_change_penalty(0.5)
             .q_value_clip(0.5)
             .logger(&mut logger)
             .build()

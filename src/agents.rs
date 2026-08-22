@@ -7,7 +7,7 @@ pub mod q_learning;
 mod replay_device_strategy;
 pub mod sac;
 
-pub use replay_device_strategy::ReplayDeviceStrategy;
+pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
 
 pub trait Agent<I = ()> {
     type Error;

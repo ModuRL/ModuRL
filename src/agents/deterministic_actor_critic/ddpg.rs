@@ -17,7 +17,7 @@ use super::{
 };
 use crate::agents::sac::SACCriticError;
 use crate::{
-    agents::{Agent, ReplayDeviceStrategy},
+    agents::{Agent, ReplayStorageConfig},
     gym::MultiGym,
     spaces::{BoxSpace, Space},
 };
@@ -132,7 +132,7 @@ where
         /// Observation-space contract expected by the actor and critic.
         observation_space: Box<dyn Space<Error = SE>>,
         /// Devices used for replay storage and optimization.
-        device_strategy: ReplayDeviceStrategy,
+        replay_storage_config: ReplayStorageConfig,
         /// Optional replay-update and collection metric sink.
         logger: Option<&'a mut dyn DDPGLogger<I>>,
         /// Bellman discount factor.
@@ -170,7 +170,7 @@ where
             .strategy(DDPGStrategy)
             .action_space(action_space)
             .observation_space(observation_space)
-            .device_strategy(device_strategy)
+            .replay_storage_config(replay_storage_config)
             .gamma(gamma)
             .tau(tau)
             .exploration_noise(exploration_noise)
@@ -238,7 +238,7 @@ mod tests {
     use super::{DDPGAgent, DDPGLogger};
     use crate::{
         agents::{
-            Agent, ReplayDeviceStrategy,
+            Agent, ReplayDeviceStrategy, ReplayStorageConfig,
             deterministic_actor_critic::DeterministicActorCriticLogEntry,
             sac::{SACCritic, ScalarStateActionCritic},
             test_support::{CountingOptimizer, FixedContinuousEnv},
@@ -336,7 +336,9 @@ mod tests {
                 &device,
             ))
             .observation_space(env.observation_space())
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device.clone(),
+            )))
             .exploration_noise(0.0)
             .replay_capacity(4)
             .batch_size(1)

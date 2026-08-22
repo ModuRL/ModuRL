@@ -6,7 +6,7 @@ use super::{
     QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
 };
 use crate::{
-    agents::{Agent, ReplayDeviceStrategy},
+    agents::{Agent, ReplayStorageConfig},
     gym::MultiGym,
     objectives::bellman_targets,
     parameter_schedule::{LinearSchedule, ParameterSchedule},
@@ -104,14 +104,10 @@ where
         #[builder(default = 1000)] training_start: usize,
         training_horizon: usize,
         logger: Option<&'a mut dyn DQNLogger<I>>,
-        device_strategy: ReplayDeviceStrategy,
+        replay_storage_config: ReplayStorageConfig,
         /// Floating-point dtype used for network inputs and optimization.
         #[builder(default = candle_core::DType::F32)]
         dtype: candle_core::DType,
-        /// Dtype used for state and next-state tensors retained in replay.
-        /// Sampled states are converted to `dtype` before optimization.
-        #[builder(default = candle_core::DType::F32)]
-        replay_dtype: candle_core::DType,
     ) -> Result<Self, QAgentError<GE, SE>> {
         let inner = QLearningAgent::<'a, O, GE, SE, DQNTarget>::builder()
             .action_space(action_space)
@@ -129,9 +125,8 @@ where
             .update_frequency(update_frequency)
             .training_start(training_start)
             .training_horizon(training_horizon)
-            .device_strategy(device_strategy)
+            .replay_storage_config(replay_storage_config)
             .dtype(dtype)
-            .replay_dtype(replay_dtype)
             .build()?;
         Ok(Self {
             inner,
@@ -178,7 +173,7 @@ mod tests {
     use super::{DQNAgent, DQNLogger, DQNTarget};
     use crate::{
         agents::{
-            Agent, ReplayDeviceStrategy,
+            Agent, ReplayDeviceStrategy, ReplayStorageConfig,
             q_learning::{QLearningTarget, selected_action_q_values},
             test_support::{CountingOptimizer, FixedEnv},
         },
@@ -240,7 +235,9 @@ mod tests {
             .target_update_interval(2)
             .training_horizon(4)
             .logger(&mut logger)
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device.clone(),
+            )))
             .build()
             .unwrap();
 

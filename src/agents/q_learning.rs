@@ -5,7 +5,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{marker::PhantomData, ops::Deref};
 
 use crate::{
-    agents::ReplayDeviceStrategy,
+    agents::ReplayStorageConfig,
     buffers::experience_replay::{
         AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
         ReplayStorageError, TensorReplayColumn, replay_index_tensor,
@@ -201,14 +201,14 @@ impl QLearningReplayStorage {
     fn new(
         capacity: usize,
         observation_shape: &[usize],
-        replay_dtype: DType,
+        observation_dtype: DType,
         device: candle_core::Device,
     ) -> Result<Self, ReplayStorageError> {
         Ok(Self {
             observations: AlignedObservationReplay::new(
                 capacity,
                 observation_shape,
-                replay_dtype,
+                observation_dtype,
                 &device,
             ),
             actions: TensorReplayColumn::new(capacity, &[], DType::U32, &device)?,
@@ -323,7 +323,7 @@ where
     gamma: f32,
     update_frequency: usize,
     training_start: usize,
-    device_strategy: ReplayDeviceStrategy,
+    replay_storage_config: ReplayStorageConfig,
     dtype: DType,
     optimization_steps: usize,
     action_rng: StdRng,
@@ -357,17 +357,12 @@ where
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         training_horizon: usize,
-        device_strategy: ReplayDeviceStrategy,
+        replay_storage_config: ReplayStorageConfig,
         #[builder(default = DType::F32)] dtype: DType,
-        #[builder(default = DType::F32)] replay_dtype: DType,
     ) -> Result<Self, QAgentError<GE, SE>> {
         assert!(
             dtype.is_float(),
             "Q-learning compute dtype must be floating-point"
-        );
-        assert!(
-            replay_dtype.is_float() || replay_dtype == DType::U8,
-            "Q-learning replay dtype must be floating-point or u8"
         );
         let initial_epsilon = epsilon_schedule.value(0.0);
         let final_epsilon = epsilon_schedule.value(1.0);
@@ -382,7 +377,7 @@ where
             .training_horizon(training_horizon)
             .call()?;
 
-        let optimization_device = device_strategy.optimization_device();
+        let optimization_device = replay_storage_config.optimization_device();
         // Tie host-side action sampling to the configured accelerator seed. This
         // is the only device-to-host synchronization needed by epsilon-greedy.
         let action_seed = Tensor::rand(0.0f64, u32::MAX as f64, (), &optimization_device)?
@@ -390,11 +385,11 @@ where
             .to_scalar::<u32>()?;
         let action_rng = StdRng::seed_from_u64(u64::from(action_seed));
 
-        let storage_device = device_strategy.storage_device();
+        let storage_device = replay_storage_config.storage_device();
         let replay_storage = QLearningReplayStorage::new(
             replay_capacity,
             &observation_space.shape(),
-            replay_dtype,
+            replay_storage_config.observation_dtype(),
             storage_device,
         )?;
 
@@ -414,7 +409,7 @@ where
             gamma,
             update_frequency,
             training_start,
-            device_strategy,
+            replay_storage_config,
             dtype,
             optimization_steps: 0,
             action_rng,
@@ -444,7 +439,7 @@ where
     /// `[batch, ...observation_shape]`.
     pub(crate) fn act(&mut self, observation: &Tensor) -> Result<Tensor, QAgentError<GE, SE>> {
         let observation = observation
-            .to_device(&self.device_strategy.optimization_device())?
+            .to_device(&self.replay_storage_config.optimization_device())?
             .to_dtype(self.dtype)?;
         let action_rng = &mut self.action_rng;
         let online_q_network = &self.online_q_network;
@@ -465,7 +460,7 @@ where
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(());
         }
-        let optimization_device = self.device_strategy.optimization_device();
+        let optimization_device = self.replay_storage_config.optimization_device();
         let training_batch = self.experience_replay.sample()?;
         let mut training_batch = training_batch;
         training_batch.states = training_batch
@@ -577,7 +572,7 @@ where
                 .map(|&done| if done { 1.0f32 } else { 0.0 })
                 .collect::<Vec<_>>(),
             environment_count,
-            &self.device_strategy.storage_device(),
+            &self.replay_storage_config.storage_device(),
         )?;
         self.experience_replay.add(QLearningInsert {
             states: states.clone(),
@@ -785,7 +780,7 @@ mod tests {
     };
     use crate::{
         agents::{
-            ReplayDeviceStrategy,
+            ReplayDeviceStrategy, ReplayStorageConfig,
             test_support::{CountingOptimizer, FixedEnv},
         },
         buffers::experience_replay::ReplayStorageError,
@@ -1190,7 +1185,9 @@ mod tests {
             .update_frequency(2)
             .target_update_interval(4)
             .training_horizon(10)
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device.clone(),
+            )))
             .build()
             .unwrap();
 
@@ -1269,7 +1266,9 @@ mod tests {
             .update_frequency(1)
             .target_update_interval(4)
             .training_horizon(4)
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device,
+            )))
             .build()
             .unwrap();
 

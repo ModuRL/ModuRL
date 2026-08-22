@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     agents::{
-        Agent, ReplayDeviceStrategy,
+        Agent, ReplayStorageConfig,
         sac::{SACCriticAggregationMode, SACCriticError, aggregate_critic_values},
     },
     gym::MultiGym,
@@ -144,7 +144,7 @@ where
         /// Observation-space contract expected by the actor and critics.
         observation_space: Box<dyn Space<Error = SE>>,
         /// Devices used for replay storage and optimization.
-        device_strategy: ReplayDeviceStrategy,
+        replay_storage_config: ReplayStorageConfig,
         /// Optional replay-update and collection metric sink.
         logger: Option<&'a mut dyn TD3Logger<I>>,
         /// Bellman discount factor.
@@ -205,7 +205,7 @@ where
             .strategy(strategy)
             .action_space(action_space)
             .observation_space(observation_space)
-            .device_strategy(device_strategy)
+            .replay_storage_config(replay_storage_config)
             .gamma(gamma)
             .tau(tau)
             .exploration_noise(exploration_noise)
@@ -273,7 +273,7 @@ mod tests {
     use super::{TD3Agent, TD3Logger, TD3Strategy};
     use crate::{
         agents::{
-            Agent, ReplayDeviceStrategy,
+            Agent, ReplayDeviceStrategy, ReplayStorageConfig,
             deterministic_actor_critic::{
                 DeterministicActorCriticLogEntry, DeterministicActorCriticStrategy,
             },
@@ -416,7 +416,9 @@ mod tests {
                 &device,
             ))
             .observation_space(env.observation_space())
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device,
+            )))
             .exploration_noise(0.0)
             .target_policy_noise(0.0)
             .target_aggregation_mode(SACCriticAggregationMode::Mean)

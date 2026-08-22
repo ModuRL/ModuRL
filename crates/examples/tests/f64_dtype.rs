@@ -56,7 +56,9 @@ fn dqn_updates_f64_networks_from_native_f32_observations() {
         .update_frequency(1)
         .target_update_interval(2)
         .training_horizon(4)
-        .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            Device::Cpu,
+        )))
         .dtype(DTYPE)
         .build()
         .unwrap();
@@ -95,7 +97,9 @@ fn ddqn_updates_f64_networks_from_native_f32_observations() {
         .update_frequency(1)
         .target_update_interval(2)
         .training_horizon(4)
-        .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            Device::Cpu,
+        )))
         .dtype(DTYPE)
         .build()
         .unwrap();
@@ -218,9 +222,12 @@ fn sac_updates_f64_networks_from_native_f32_observations() {
         .batch_size(2)
         .training_start(0)
         .training_horizon(4)
-        .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            Device::Cpu,
+        )))
         .dtype(DTYPE)
-        .stabilization_configuration(SACStabilizationConfiguration::stable_discrete())
+        .aggregation_mode(SACCriticAggregationMode::Mean)
+        .entropy_change_penalty(0.5)
         .build()
         .unwrap();
 
@@ -323,7 +330,9 @@ fn ddpg_updates_f64_networks_from_native_f32_observations() {
         .batch_size(2)
         .training_start(0)
         .training_horizon(4)
-        .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            Device::Cpu,
+        )))
         .dtype(DTYPE)
         .build()
         .unwrap();
@@ -371,7 +380,9 @@ fn td3_updates_f64_networks_from_native_f32_observations() {
         .batch_size(2)
         .training_start(0)
         .training_horizon(4)
-        .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            Device::Cpu,
+        )))
         .dtype(DTYPE)
         .build()
         .unwrap();
