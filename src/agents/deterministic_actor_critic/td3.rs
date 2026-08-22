@@ -175,8 +175,6 @@ where
         /// Maximum number of transitions retained in replay.
         #[builder(default = 1_000_000)]
         replay_capacity: usize,
-        /// Number of environments whose transitions are inserted together.
-        environment_count: usize,
         /// Number of replay transitions sampled per optimization.
         #[builder(default = 256)]
         batch_size: usize,
@@ -212,7 +210,6 @@ where
             .tau(tau)
             .exploration_noise(exploration_noise)
             .replay_capacity(replay_capacity)
-            .environment_count(environment_count)
             .batch_size(batch_size)
             .update_frequency(update_frequency)
             .training_start(training_start)
@@ -425,7 +422,6 @@ mod tests {
             .target_aggregation_mode(SACCriticAggregationMode::Mean)
             .actor_aggregation_mode(SACCriticAggregationMode::Median)
             .replay_capacity(4)
-            .environment_count(2)
             .batch_size(1)
             .training_start(1)
             .training_horizon(2)

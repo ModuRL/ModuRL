@@ -301,26 +301,27 @@ struct DeterministicReplayStorage {
 impl DeterministicReplayStorage {
     fn new(
         capacity: usize,
-        environment_count: usize,
         state_shape: &[usize],
         action_shape: &[usize],
         dtype: DType,
         device: candle_core::Device,
     ) -> Result<Self, ReplayStorageError> {
         Ok(Self {
-            observations: AlignedObservationReplay::new(
-                capacity,
-                environment_count,
-                state_shape,
-                dtype,
-                &device,
-            )?,
+            observations: AlignedObservationReplay::new(capacity, state_shape, dtype, &device),
             actions: TensorReplayColumn::new(capacity, action_shape, dtype, &device)?,
             rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
             terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
             capacity,
             device,
         })
+    }
+
+    fn initialize_environment_count(
+        &mut self,
+        environment_count: usize,
+    ) -> Result<(), ReplayStorageError> {
+        self.observations
+            .initialize_environment_count(environment_count)
     }
 }
 
@@ -470,7 +471,6 @@ where
         #[builder(default = 0.005)] tau: f64,
         #[builder(default = 0.1)] exploration_noise: f64,
         #[builder(default = 1_000_000)] replay_capacity: usize,
-        environment_count: usize,
         #[builder(default = 256)] batch_size: usize,
         #[builder(default = 1)] update_frequency: usize,
         #[builder(default = 1_000)] training_start: usize,
@@ -503,7 +503,6 @@ where
         let action_sample = action_space.sample(&storage_device)?;
         let replay_storage = DeterministicReplayStorage::new(
             replay_capacity,
-            environment_count,
             observation_sample.dims(),
             action_sample.dims(),
             dtype,
@@ -923,11 +922,14 @@ where
         logger: &mut dyn DeterministicActorCriticLogger<I>,
     ) -> Result<(), DeterministicActorCriticError<GE, SE>> {
         let mut elapsed_timesteps = 0;
+        let environment_count = env.num_envs();
+        self.replay
+            .storage_mut()
+            .initialize_environment_count(environment_count)?;
         let mut observations = env
             .reset()
             .map_err(DeterministicActorCriticError::GymError)?
             .to_dtype(self.dtype)?;
-        let environment_count = env.num_envs();
         let mut episodes = EpisodeTracker::new(environment_count);
         while elapsed_timesteps < num_timesteps {
             let first_timestep = self.schedule_progress.elapsed_steps();

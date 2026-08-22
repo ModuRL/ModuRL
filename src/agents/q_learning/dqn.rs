@@ -98,8 +98,6 @@ where
         )]
         epsilon_schedule: Box<dyn ParameterSchedule>,
         #[builder(default = 10000)] replay_capacity: usize,
-        /// Number of environments whose transitions are inserted together.
-        environment_count: usize,
         #[builder(default = 32)] batch_size: usize,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 4)] update_frequency: usize,
@@ -126,7 +124,6 @@ where
             .target_update_interval(target_update_interval)
             .epsilon_schedule(epsilon_schedule)
             .replay_capacity(replay_capacity)
-            .environment_count(environment_count)
             .batch_size(batch_size)
             .gamma(gamma)
             .update_frequency(update_frequency)
@@ -237,7 +234,6 @@ mod tests {
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .epsilon_schedule(ConstantSchedule::new(0.0))
             .replay_capacity(4)
-            .environment_count(2)
             .batch_size(1)
             .training_start(1)
             .update_frequency(1)

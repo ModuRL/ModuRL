@@ -144,7 +144,6 @@ fn main() {
         .observation_space(observation_space)
         .stabilization_configuration(SACStabilizationConfiguration::stable_discrete())
         .replay_capacity(100_000)
-        .environment_count(1)
         .batch_size(64)
         .training_horizon(total_timesteps)
         .logger(&mut grapher)

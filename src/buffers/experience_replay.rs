@@ -45,6 +45,7 @@ pub enum ReplayStorageError {
         capacity: usize,
         additional: usize,
     },
+    UninitializedEnvironmentCount,
 }
 
 impl From<candle_core::Error> for ReplayStorageError {
@@ -159,11 +160,13 @@ impl TensorReplayColumn {
 }
 
 pub(crate) struct AlignedObservationReplay {
-    states: TensorReplayColumn,
-    next_states: TensorReplayColumn,
+    states: Option<TensorReplayColumn>,
+    next_states: Option<TensorReplayColumn>,
     truncated_next_states: HashMap<usize, Tensor>,
     capacity: usize,
-    environment_count: usize,
+    environment_count: Option<usize>,
+    item_shape: Vec<usize>,
+    dtype: DType,
     frontier: usize,
     frontier_is_invalid: bool,
     inserted: usize,
@@ -173,11 +176,40 @@ pub(crate) struct AlignedObservationReplay {
 impl AlignedObservationReplay {
     pub(crate) fn new(
         capacity: usize,
-        environment_count: usize,
         item_shape: &[usize],
         dtype: DType,
         device: &Device,
-    ) -> Result<Self, ReplayStorageError> {
+    ) -> Self {
+        Self {
+            states: None,
+            next_states: None,
+            truncated_next_states: HashMap::new(),
+            capacity,
+            environment_count: None,
+            item_shape: item_shape.to_vec(),
+            dtype,
+            frontier: 0,
+            frontier_is_invalid: false,
+            inserted: 0,
+            device: device.clone(),
+        }
+    }
+
+    pub(crate) fn initialize_environment_count(
+        &mut self,
+        environment_count: usize,
+    ) -> Result<(), ReplayStorageError> {
+        if let Some(expected) = self.environment_count {
+            return if expected == environment_count {
+                Ok(())
+            } else {
+                Err(ReplayStorageError::EnvironmentCountMismatch {
+                    expected,
+                    actual: environment_count,
+                })
+            };
+        }
+        let capacity = self.capacity;
         if environment_count == 0
             || capacity <= environment_count
             || !capacity.is_multiple_of(environment_count)
@@ -187,28 +219,21 @@ impl AlignedObservationReplay {
                 environment_count,
             });
         }
-        let mut shape = Vec::with_capacity(item_shape.len() + 1);
+        let mut shape = Vec::with_capacity(self.item_shape.len() + 1);
         shape.push(capacity.checked_add(environment_count).ok_or(
             ReplayStorageError::CapacityOverflow {
                 capacity,
                 additional: environment_count,
             },
         )?);
-        shape.extend_from_slice(item_shape);
-        let observations = Tensor::zeros(shape.as_slice(), dtype, device)?;
+        shape.extend_from_slice(&self.item_shape);
+        let observations = Tensor::zeros(shape.as_slice(), self.dtype, &self.device)?;
         let states = observations.narrow(0, 0, capacity)?;
         let next_states = observations.narrow(0, environment_count, capacity)?;
-        Ok(Self {
-            states: TensorReplayColumn::from_tensor(states),
-            next_states: TensorReplayColumn::from_tensor(next_states),
-            truncated_next_states: HashMap::new(),
-            capacity,
-            environment_count,
-            frontier: 0,
-            frontier_is_invalid: false,
-            inserted: 0,
-            device: device.clone(),
-        })
+        self.states = Some(TensorReplayColumn::from_tensor(states));
+        self.next_states = Some(TensorReplayColumn::from_tensor(next_states));
+        self.environment_count = Some(environment_count);
+        Ok(())
     }
 
     /// Stores aligned `states` and `next_states` shaped `[environment_count, ...]`.
@@ -219,15 +244,27 @@ impl AlignedObservationReplay {
         next_states: &Tensor,
         truncateds: &[bool],
     ) -> Result<usize, ReplayStorageError> {
-        let states = self.states.prepare(states)?;
-        let next_states = self.next_states.prepare(next_states)?;
         let count = states.dim(0)?;
-        if count != self.environment_count {
+        self.initialize_environment_count(count)?;
+        let environment_count = self
+            .environment_count
+            .ok_or(ReplayStorageError::UninitializedEnvironmentCount)?;
+        if count != environment_count {
             return Err(ReplayStorageError::EnvironmentCountMismatch {
-                expected: self.environment_count,
+                expected: environment_count,
                 actual: count,
             });
         }
+        let states_column = self
+            .states
+            .as_ref()
+            .ok_or(ReplayStorageError::UninitializedEnvironmentCount)?;
+        let next_states_column = self
+            .next_states
+            .as_ref()
+            .ok_or(ReplayStorageError::UninitializedEnvironmentCount)?;
+        let states = states_column.prepare(states)?;
+        let next_states = next_states_column.prepare(next_states)?;
         for (field, actual) in [
             ("next states", next_states.dim(0)?),
             ("truncateds", truncateds.len()),
@@ -245,8 +282,8 @@ impl AlignedObservationReplay {
             self.truncated_next_states
                 .remove(&((start + offset) % self.capacity));
         }
-        self.states.write(start, &states)?;
-        self.next_states.write(start, &next_states)?;
+        states_column.write(start, &states)?;
+        next_states_column.write(start, &next_states)?;
 
         for (offset, &truncated) in truncateds.iter().enumerate() {
             if truncated {
@@ -265,7 +302,9 @@ impl AlignedObservationReplay {
 
     pub(crate) fn sampleable_len(&self, len: usize) -> usize {
         if len == self.capacity && self.frontier_is_invalid {
-            len - self.environment_count
+            len - self
+                .environment_count
+                .expect("a populated aligned replay must be initialized")
         } else {
             len
         }
@@ -273,7 +312,12 @@ impl AlignedObservationReplay {
 
     pub(crate) fn sample_index(&self, index: usize, len: usize) -> usize {
         if len == self.capacity && self.frontier_is_invalid {
-            (self.frontier + self.environment_count + index) % self.capacity
+            (self.frontier
+                + self
+                    .environment_count
+                    .expect("a populated aligned replay must be initialized")
+                + index)
+                % self.capacity
         } else {
             index
         }
@@ -281,8 +325,16 @@ impl AlignedObservationReplay {
 
     pub(crate) fn gather(&self, indices: &[usize]) -> Result<(Tensor, Tensor), ReplayStorageError> {
         let index_tensor = replay_index_tensor(indices, &self.device)?;
-        let states = self.states.gather(&index_tensor)?;
-        let next_states = self.next_states.gather(&index_tensor)?;
+        let states = self
+            .states
+            .as_ref()
+            .ok_or(ReplayStorageError::UninitializedEnvironmentCount)?
+            .gather(&index_tensor)?;
+        let next_states = self
+            .next_states
+            .as_ref()
+            .ok_or(ReplayStorageError::UninitializedEnvironmentCount)?
+            .gather(&index_tensor)?;
         for (batch_index, replay_index) in indices.iter().copied().enumerate() {
             if let Some(terminal_state) = self.truncated_next_states.get(&replay_index) {
                 next_states.slice_set(terminal_state, 0, batch_index)?;
@@ -365,6 +417,10 @@ where
 
     pub fn get_batch_size(&self) -> usize {
         self.batch_size
+    }
+
+    pub(crate) fn storage_mut(&mut self) -> &mut S {
+        &mut self.storage
     }
 }
 
@@ -469,8 +525,8 @@ mod tests {
     #[test]
     fn aligned_observations_exclude_the_wrapped_frontier_and_preserve_truncations() {
         let device = Device::Cpu;
-        let mut observations =
-            AlignedObservationReplay::new(4, 2, &[1], DType::F32, &device).unwrap();
+        let mut observations = AlignedObservationReplay::new(4, &[1], DType::F32, &device);
+        observations.initialize_environment_count(2).unwrap();
         let batch = |values: [f32; 2]| Tensor::new(&values, &device).unwrap().reshape((2, 1));
 
         observations

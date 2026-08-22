@@ -200,7 +200,6 @@ struct QLearningReplayStorage {
 impl QLearningReplayStorage {
     fn new(
         capacity: usize,
-        environment_count: usize,
         observation_shape: &[usize],
         replay_dtype: DType,
         device: candle_core::Device,
@@ -208,17 +207,24 @@ impl QLearningReplayStorage {
         Ok(Self {
             observations: AlignedObservationReplay::new(
                 capacity,
-                environment_count,
                 observation_shape,
                 replay_dtype,
                 &device,
-            )?,
+            ),
             actions: TensorReplayColumn::new(capacity, &[], DType::U32, &device)?,
             rewards: TensorReplayColumn::new(capacity, &[], DType::F32, &device)?,
             next_dones: TensorReplayColumn::new(capacity, &[], DType::F32, &device)?,
             capacity,
             device,
         })
+    }
+
+    fn initialize_environment_count(
+        &mut self,
+        environment_count: usize,
+    ) -> Result<(), ReplayStorageError> {
+        self.observations
+            .initialize_environment_count(environment_count)
     }
 }
 
@@ -346,7 +352,6 @@ where
             dyn ParameterSchedule,
         >,
         #[builder(default = 10000)] replay_capacity: usize,
-        environment_count: usize,
         #[builder(default = 32)] batch_size: usize,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 4)] update_frequency: usize,
@@ -388,7 +393,6 @@ where
         let storage_device = device_strategy.storage_device();
         let replay_storage = QLearningReplayStorage::new(
             replay_capacity,
-            environment_count,
             &observation_space.shape(),
             replay_dtype,
             storage_device,
@@ -614,8 +618,11 @@ where
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, SE>> {
         let mut elapsed_timesteps = 0;
-        let mut observations = env.reset().map_err(QAgentError::GymError)?;
         let environment_count = env.num_envs();
+        self.experience_replay
+            .storage_mut()
+            .initialize_environment_count(environment_count)?;
+        let mut observations = env.reset().map_err(QAgentError::GymError)?;
         let mut episodes = QEpisodeTracker::new(environment_count);
 
         while elapsed_timesteps < num_timesteps {
@@ -772,7 +779,7 @@ pub(crate) fn selected_action_q_values(
 #[cfg(test)]
 mod tests {
     use super::{
-        QCollectionLogEntry, QLearningAgent, QLearningConfigurationError,
+        QAgentError, QCollectionLogEntry, QLearningAgent, QLearningConfigurationError,
         QLearningConfigurationValidator, QLearningInsert, QLearningLogger, QLearningReplayStorage,
         QLearningTarget, epsilon_greedy_actions, selected_action_q_values, validate_epsilon,
     };
@@ -781,6 +788,7 @@ mod tests {
             ReplayDeviceStrategy,
             test_support::{CountingOptimizer, FixedEnv},
         },
+        buffers::experience_replay::ReplayStorageError,
         gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
         models::MLP,
         objectives::bellman_targets,
@@ -931,8 +939,8 @@ mod tests {
         use crate::buffers::experience_replay::ReplayStorage;
 
         let device = Device::Cpu;
-        let mut storage =
-            QLearningReplayStorage::new(4, 2, &[1], DType::U8, device.clone()).unwrap();
+        let mut storage = QLearningReplayStorage::new(4, &[1], DType::U8, device.clone()).unwrap();
+        storage.initialize_environment_count(2).unwrap();
         storage.insert(0, replay_insert(&[1, 2], &device)).unwrap();
 
         let gathered_before_overwrite = storage.gather(&[0]).unwrap();
@@ -1143,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn cadence_and_epsilon_progress_continue_across_learn_calls() {
+    fn learn_initializes_replay_and_preserves_alignment_across_calls() {
         let device = Device::Cpu;
         let mut env: VectorizedGymWrapper<FixedEnv> =
             vec![FixedEnv::new(device.clone()), FixedEnv::new(device.clone())].into();
@@ -1177,7 +1185,6 @@ mod tests {
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .epsilon_schedule(Box::new(LinearSchedule::new(1.0, 0.0)))
             .replay_capacity(8)
-            .environment_count(2)
             .batch_size(1)
             .training_start(3)
             .update_frequency(2)
@@ -1214,6 +1221,20 @@ mod tests {
                 .to_vec1::<f32>()
                 .unwrap()
         );
+
+        let replay_len = agent.experience_replay.len();
+        let mut incompatible_env: VectorizedGymWrapper<FixedEnv> =
+            vec![FixedEnv::new(device)].into();
+        assert!(matches!(
+            agent.learn(&mut incompatible_env, 1, &mut logger),
+            Err(QAgentError::ReplayStorageError(
+                ReplayStorageError::EnvironmentCountMismatch {
+                    expected: 2,
+                    actual: 1,
+                }
+            ))
+        ));
+        assert_eq!(agent.experience_replay.len(), replay_len);
     }
 
     #[test]
@@ -1243,7 +1264,6 @@ mod tests {
             .target_vars(&mut target_var_map)
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .replay_capacity(8)
-            .environment_count(2)
             .batch_size(1)
             .training_start(10)
             .update_frequency(1)

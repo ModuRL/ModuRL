@@ -215,7 +215,6 @@ let mut agent = SACAgent::builder()
     .action_space(action_space)
     .observation_space(observation_space)
     .aggregation_mode(SACCriticAggregationMode::Min)
-    .environment_count(1)
     .training_horizon(total_timesteps)
     .device_strategy(ReplayDeviceStrategy::OneDevice(device))
     .build()?;
@@ -233,8 +232,7 @@ Important defaults and constraints are:
 | --- | --- | --- |
 | `gamma` | `0.99` | Finite and between zero and one |
 | `tau` | `0.005` | Target-network update coefficient from zero to one |
-| `replay_capacity` | `1_000_000` | At least `batch_size`, larger than and divisible by `environment_count` |
-| `environment_count` | Required | Number of environments inserted on each vector step |
+| `replay_capacity` | `1_000_000` | At least `batch_size`; at first `learn`, larger than and divisible by `env.num_envs()` |
 | `batch_size` | `256` | Nonzero |
 | `training_start` | `1_000` | Random-action collection before optimization |
 | `samples` | `1` | Continuous expectation candidates per state |

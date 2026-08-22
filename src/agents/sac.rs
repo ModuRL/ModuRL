@@ -702,7 +702,6 @@ struct SACReplayStorage {
 impl SACReplayStorage {
     fn new(
         capacity: usize,
-        environment_count: usize,
         state_shape: &[usize],
         action_shape: &[usize],
         action_dtype: DType,
@@ -710,13 +709,7 @@ impl SACReplayStorage {
         device: candle_core::Device,
     ) -> Result<Self, ReplayStorageError> {
         Ok(Self {
-            observations: AlignedObservationReplay::new(
-                capacity,
-                environment_count,
-                state_shape,
-                dtype,
-                &device,
-            )?,
+            observations: AlignedObservationReplay::new(capacity, state_shape, dtype, &device),
             actions: TensorReplayColumn::new(capacity, action_shape, action_dtype, &device)?,
             rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
             terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
@@ -725,6 +718,14 @@ impl SACReplayStorage {
             capacity,
             device,
         })
+    }
+
+    fn initialize_environment_count(
+        &mut self,
+        environment_count: usize,
+    ) -> Result<(), ReplayStorageError> {
+        self.observations
+            .initialize_environment_count(environment_count)
     }
 }
 
@@ -1039,8 +1040,6 @@ where
         #[builder(default = 0.99)] gamma: f64,
         #[builder(default = 0.005)] tau: f64,
         #[builder(default = 1_000_000)] replay_capacity: usize,
-        /// Number of environments whose transitions are inserted together.
-        environment_count: usize,
         #[builder(default = 256)] batch_size: usize,
         /// Number of random-action transitions collected before optimization.
         #[builder(default = 1_000)]
@@ -1077,7 +1076,6 @@ where
             .map_err(SACError::SpaceError)?;
         let replay_storage = SACReplayStorage::new(
             replay_capacity,
-            environment_count,
             observation_sample.dims(),
             action_sample.dims(),
             action_sample.dtype(),
@@ -1624,11 +1622,14 @@ where
         num_timesteps: usize,
     ) -> Result<(), SACError<PE, GE, SE>> {
         let mut elapsed_timesteps = 0usize;
+        let environment_count = env.num_envs();
+        self.replay
+            .storage_mut()
+            .initialize_environment_count(environment_count)?;
         let mut observations = env
             .reset()
             .map_err(SACError::GymError)?
             .to_dtype(self.dtype)?;
-        let environment_count = env.num_envs();
         let mut episodes = SACEpisodeTracker::new(environment_count);
 
         while elapsed_timesteps < num_timesteps {
@@ -2281,7 +2282,6 @@ mod tests {
             )))
             .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
             .replay_capacity(2)
-            .environment_count(1)
             .batch_size(1)
             .training_start(10)
             .training_horizon(1)
@@ -2503,7 +2503,6 @@ mod tests {
             )))
             .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
             .replay_capacity(16)
-            .environment_count(2)
             .batch_size(2)
             .training_start(2)
             .training_horizon(4)

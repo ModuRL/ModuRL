@@ -87,7 +87,6 @@ let mut agent = TD3Agent::builder()
     .target_noise_clip(0.5)
     .actor_update_interval(2)
     .replay_capacity(1_000_000)
-    .environment_count(1)
     .batch_size(256)
     .training_start(10_000)
     .training_horizon(TOTAL_TIMESTEPS)
@@ -121,7 +120,7 @@ Important defaults and constraints are:
 | `target_policy_noise` | `0.2` | Non-negative target-noise deviation |
 | `target_noise_clip` | `0.5` | Non-negative target-noise bound |
 | `actor_update_interval` | `2` | Nonzero replay-update interval |
-| `replay_capacity` | `1_000_000` | At least `batch_size` |
+| `replay_capacity` | `1_000_000` | At least `batch_size`; at first `learn`, larger than and divisible by `env.num_envs()` |
 | `batch_size` | `256` | Nonzero |
 | `update_frequency` | `1` | Nonzero transition interval |
 | `training_start` | `1_000` | Random-action transitions before optimization |
