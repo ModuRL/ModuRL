@@ -24,20 +24,20 @@ The checked-in results were measured on Windows with a 12th Gen Intel Core i7-12
 | PPO | Stable-Baselines3 2.9.0 | 9.551 s | 2,144 | 4.54x |
 | PPO | Adapted CleanRL `ppo.py` | 9.390 s | 2,181 | 4.47x |
 | PPO | Tianshou 2.0.1 | 13.007 s | 1,575 | 6.19x |
-| DQN | ModuRL 0.1.0 | 0.476 s | 8,607 | 1.00x |
-| DQN | Adapted Stable-Baselines3 2.9.0 | 2.341 s | 1,750 | 4.92x |
-| DQN | Adapted CleanRL `dqn.py` | 1.503 s | 2,725 | 3.16x |
-| DQN | Adapted Tianshou 2.0.1 | 6.248 s | 656 | 13.13x |
-| SAC | ModuRL 0.1.0 | 2.198 s | 466 | 1.00x |
-| SAC | Stable-Baselines3 2.9.0 | 6.079 s | 168 | 2.77x |
-| SAC | Adapted CleanRL `sac_continuous_action.py` | 5.269 s | 194 | 2.40x |
-| SAC | Tianshou 2.0.1 | 10.186 s | 101 | 4.63x |
+| DQN | ModuRL 0.1.0 | 0.242 s | 16,955 | 1.00x |
+| DQN | Adapted Stable-Baselines3 2.9.0 | 1.567 s | 2,613 | 6.49x |
+| DQN | Adapted CleanRL `dqn.py` | 0.958 s | 4,274 | 3.97x |
+| DQN | Adapted Tianshou 2.0.1 | 3.744 s | 1,094 | 15.50x |
+| SAC | ModuRL 0.1.0 | 1.396 s | 734 | 1.00x |
+| SAC | Stable-Baselines3 2.9.0 | 3.668 s | 279 | 2.63x |
+| SAC | Adapted CleanRL `sac_continuous_action.py` | 3.199 s | 320 | 2.29x |
+| SAC | Tianshou 2.0.1 | 6.241 s | 164 | 4.47x |
 
 The raw reports contain versions, every elapsed time, minimum and maximum times, and system metadata:
 
 - [PPO CPU samples](results/ppo-cpu-windows-20260810.json)
-- [DQN CPU samples](results/dqn-cpu-windows-20260810.json)
-- [SAC CPU samples](results/sac-cpu-windows-20260810.json)
+- [DQN CPU samples](results/dqn-cpu-windows-20260820.json)
+- [SAC CPU samples](results/sac-cpu-windows-20260820.json)
 
 Do not compare transitions per second between algorithm rows. The algorithms perform different amounts of optimizer work per transition. The fair comparison is across frameworks within one algorithm.
 

@@ -227,7 +227,9 @@ fn dqn_program() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         })
-        .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            device.clone(),
+        )))
         .logger(&mut logger)
         .build()
         .expect("DQN configuration should be valid");
@@ -298,7 +300,9 @@ fn ddqn_program() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         })
-        .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            device.clone(),
+        )))
         .logger(&mut logger)
         .build()
         .expect("DDQN configuration should be valid");

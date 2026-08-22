@@ -7,21 +7,20 @@
 use std::{fmt::Debug, num::NonZeroUsize, ops::Deref};
 
 use bon::bon;
-use candle_core::{D, DType, IndexOp, Tensor, Var};
+use candle_core::{D, DType, Tensor, Var};
 use candle_nn::{Optimizer, VarMap};
 
-use super::{Agent, ReplayDeviceStrategy};
+use super::{Agent, ReplayStorageConfig};
 use crate::{
-    buffers::{
-        experience,
-        experience_replay::{ExperienceReplay, ExperienceReplayError},
+    buffers::experience_replay::{
+        AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
+        ReplayStorageError, TensorReplayColumn, replay_index_tensor,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ExpectationPolicy,
     objectives::{bellman_targets, clipped_value_loss},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::Space,
-    tensor_operations::tensor_has_nan,
 };
 
 /// A Q network that can evaluate replay actions and policy candidates.
@@ -294,7 +293,7 @@ where
 
     /// Evaluates online replay values for states `[batch, ...state_shape]` and
     /// actions `[batch, ...action_shape]`, returning `[batch]`.
-    pub fn online_replay_values(
+    pub(crate) fn online_replay_values(
         &self,
         states: &Tensor,
         actions: &Tensor,
@@ -302,21 +301,10 @@ where
         self.online_network.replay_values(states, actions)
     }
 
-    /// Evaluates online policy values for states `[batch, ...state_shape]` and
-    /// candidates `[batch, candidates, ...action_shape]`, returning
-    /// `[batch, candidates]`.
-    pub fn online_policy_values(
-        &self,
-        states: &Tensor,
-        actions: &Tensor,
-    ) -> candle_core::Result<Tensor> {
-        self.online_network.policy_values(states, actions)
-    }
-
     /// Evaluates actor-loss values for states `[batch, ...state_shape]` and
     /// candidates `[batch, candidates, ...action_shape]`, returning
     /// `[batch, candidates]`.
-    pub fn online_actor_values(
+    pub(crate) fn online_actor_values(
         &self,
         states: &Tensor,
         actions: &Tensor,
@@ -327,7 +315,7 @@ where
     /// Evaluates detached target values for states `[batch, ...state_shape]`
     /// and candidates `[batch, candidates, ...action_shape]`, returning
     /// `[batch, candidates]`.
-    pub fn target_policy_values(
+    pub(crate) fn target_policy_values(
         &self,
         states: &Tensor,
         actions: &Tensor,
@@ -338,7 +326,7 @@ where
     /// Evaluates detached target replay values for states
     /// `[batch, ...state_shape]` and actions `[batch, ...action_shape]`,
     /// returning `[batch]`.
-    pub fn target_replay_values(
+    pub(crate) fn target_replay_values(
         &self,
         states: &Tensor,
         actions: &Tensor,
@@ -346,19 +334,19 @@ where
         Ok(self.target_network.replay_values(states, actions)?.detach())
     }
 
-    pub fn optimizer(&self) -> &O {
+    pub(crate) fn optimizer(&self) -> &O {
         &self.optimizer
     }
 
-    pub fn optimizer_mut(&mut self) -> &mut O {
+    pub(crate) fn optimizer_mut(&mut self) -> &mut O {
         &mut self.optimizer
     }
 
-    pub fn hard_update(&mut self) -> Result<(), SACCriticError> {
+    pub(crate) fn hard_update(&mut self) -> Result<(), SACCriticError> {
         copy_var_map(self.online_vars, self.target_vars, 1.0)
     }
 
-    pub fn polyak_update(&mut self, tau: f64) -> Result<(), SACCriticError> {
+    pub(crate) fn polyak_update(&mut self, tau: f64) -> Result<(), SACCriticError> {
         if !tau.is_finite() || !(0.0..=1.0).contains(&tau) {
             return Err(SACCriticError::InvalidPolyakCoefficient { tau });
         }
@@ -435,7 +423,7 @@ pub enum SACCriticAggregationMode {
 
 /// Differentiably aggregates critic tensors `values[i]`, each shaped
 /// `value_shape`, and returns one tensor shaped `value_shape`.
-pub fn aggregate_critic_values(
+pub(crate) fn aggregate_critic_values(
     values: &[Tensor],
     mode: SACCriticAggregationMode,
 ) -> Result<Tensor, SACCriticError> {
@@ -484,7 +472,7 @@ pub fn aggregate_critic_values(
 
 /// Returns a scalar temperature loss from scalar `log_alpha` shaped `[]` and
 /// `expected_log_probability` shaped `[batch]`.
-pub fn sac_alpha_loss(
+fn sac_alpha_loss(
     log_alpha: &Tensor,
     expected_log_probability: &Tensor,
     target_entropy: f64,
@@ -495,7 +483,7 @@ pub fn sac_alpha_loss(
 
 /// Returns a scalar entropy-drift loss from `current_entropy`,
 /// `collection_entropy`, and `weights`, all shaped `[batch]`.
-pub fn sac_entropy_change_loss(
+fn sac_entropy_change_loss(
     current_entropy: &Tensor,
     collection_entropy: &Tensor,
     weights: &Tensor,
@@ -576,41 +564,6 @@ where
     }
 }
 
-/// Optional SAC stabilization techniques.
-///
-/// [`Self::stable_discrete`] selects the published discrete-SAC defaults:
-/// mean critic aggregation and a `0.5` replay-to-current entropy penalty.
-/// Q-value clipping remains opt-in because its useful scale depends on the
-/// task's rewards.
-#[derive(Default)]
-pub struct SACStabilizationConfiguration {
-    entropy_change_penalty: Option<f64>,
-    aggregation_mode: Option<SACCriticAggregationMode>,
-}
-
-#[bon]
-impl SACStabilizationConfiguration {
-    #[builder]
-    pub fn new(
-        /// Coefficient for the replay-to-current entropy-change penalty.
-        entropy_change_penalty: Option<f64>,
-        /// Critic aggregation override associated with this preset.
-        aggregation_mode: Option<SACCriticAggregationMode>,
-    ) -> Self {
-        Self {
-            entropy_change_penalty,
-            aggregation_mode,
-        }
-    }
-
-    pub fn stable_discrete() -> Self {
-        Self {
-            entropy_change_penalty: Some(0.5),
-            aggregation_mode: Some(SACCriticAggregationMode::Mean),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SACConfigurationError {
     NoCritics,
@@ -637,6 +590,7 @@ where
     GymError(GE),
     SpaceError(SE),
     TensorError(candle_core::Error),
+    ReplayStorageError(ReplayStorageError),
     CriticError(SACCriticError),
     ConfigurationError(SACConfigurationError),
 }
@@ -647,77 +601,35 @@ impl<PE: Debug, GE: Debug, SE: Debug> From<candle_core::Error> for SACError<PE, 
     }
 }
 
+impl<PE: Debug, GE: Debug, SE: Debug> From<ReplayStorageError> for SACError<PE, GE, SE> {
+    fn from(error: ReplayStorageError) -> Self {
+        Self::ReplayStorageError(error)
+    }
+}
+
+impl<PE: Debug, GE: Debug, SE: Debug> From<ExperienceReplayError<ReplayStorageError>>
+    for SACError<PE, GE, SE>
+{
+    fn from(error: ExperienceReplayError<ReplayStorageError>) -> Self {
+        Self::ReplayStorageError(error.into())
+    }
+}
+
 impl<PE: Debug, GE: Debug, SE: Debug> From<SACCriticError> for SACError<PE, GE, SE> {
     fn from(value: SACCriticError) -> Self {
         Self::CriticError(value)
     }
 }
 
-#[derive(Clone)]
-struct SACExperience {
-    state: Tensor,
-    next_state: Tensor,
-    action: Tensor,
-    reward: f32,
-    terminated: f32,
-    collection_policy_entropy: f32,
-    entropy_change_weight: f32,
-}
-
-impl experience::Experience for SACExperience {
-    type Batch = SACOptimizationBatch;
-    type Error = candle_core::Error;
-
-    fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
-        let first = experiences
-            .first()
-            .expect("cannot batch an empty SAC replay sample");
-        let device = first.state.device();
-        let dtype = first.state.dtype();
-        Ok(SACOptimizationBatch {
-            states: experience::stack_tensor_field(experiences, |experience| {
-                experience.state.clone()
-            })?,
-            next_states: experience::stack_tensor_field(experiences, |experience| {
-                experience.next_state.clone()
-            })?,
-            actions: experience::stack_tensor_field(experiences, |experience| {
-                experience.action.clone()
-            })?,
-            rewards: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.reward)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-            terminated: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.terminated)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-            collection_policy_entropies: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.collection_policy_entropy)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-            entropy_change_weights: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.entropy_change_weight)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-        })
-    }
+struct SACReplayInsert {
+    states: Tensor,
+    next_states: Tensor,
+    actions: Tensor,
+    rewards: Tensor,
+    terminated: Tensor,
+    collection_policy_entropies: Tensor,
+    entropy_change_weights: Tensor,
+    truncateds: Vec<bool>,
 }
 
 struct SACOptimizationBatch {
@@ -728,6 +640,144 @@ struct SACOptimizationBatch {
     terminated: Tensor,
     collection_policy_entropies: Tensor,
     entropy_change_weights: Tensor,
+}
+
+struct SACReplayStorage {
+    observations: AlignedObservationReplay,
+    actions: TensorReplayColumn,
+    rewards: TensorReplayColumn,
+    terminated: TensorReplayColumn,
+    collection_policy_entropies: TensorReplayColumn,
+    entropy_change_weights: TensorReplayColumn,
+    capacity: usize,
+    device: candle_core::Device,
+}
+
+impl SACReplayStorage {
+    fn new(
+        capacity: usize,
+        state_shape: &[usize],
+        action_shape: &[usize],
+        action_dtype: DType,
+        observation_dtype: DType,
+        dtype: DType,
+        device: candle_core::Device,
+    ) -> Result<Self, ReplayStorageError> {
+        Ok(Self {
+            observations: AlignedObservationReplay::new(
+                capacity,
+                state_shape,
+                observation_dtype,
+                &device,
+            ),
+            actions: TensorReplayColumn::new(capacity, action_shape, action_dtype, &device)?,
+            rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            collection_policy_entropies: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            entropy_change_weights: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            capacity,
+            device,
+        })
+    }
+
+    fn initialize_environment_count(
+        &mut self,
+        environment_count: usize,
+    ) -> Result<(), ReplayStorageError> {
+        self.observations
+            .initialize_environment_count(environment_count)
+    }
+}
+
+impl ReplayStorage for SACReplayStorage {
+    type Insert = SACReplayInsert;
+    type Batch = SACOptimizationBatch;
+    type Error = ReplayStorageError;
+
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
+        let prepared = SACReplayInsert {
+            states: transitions.states,
+            next_states: transitions.next_states,
+            actions: self.actions.prepare(&transitions.actions)?,
+            rewards: self.rewards.prepare(&transitions.rewards)?,
+            terminated: self.terminated.prepare(&transitions.terminated)?,
+            collection_policy_entropies: self
+                .collection_policy_entropies
+                .prepare(&transitions.collection_policy_entropies)?,
+            entropy_change_weights: self
+                .entropy_change_weights
+                .prepare(&transitions.entropy_change_weights)?,
+            truncateds: transitions.truncateds,
+        };
+        let count = prepared.states.dim(0)?;
+        for (name, tensor) in [
+            ("actions", &prepared.actions),
+            ("rewards", &prepared.rewards),
+            ("terminated", &prepared.terminated),
+            (
+                "collection policy entropies",
+                &prepared.collection_policy_entropies,
+            ),
+            ("entropy change weights", &prepared.entropy_change_weights),
+        ] {
+            let actual = tensor.dim(0)?;
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field: name,
+                    expected: count,
+                    actual,
+                });
+            }
+        }
+        self.observations.insert(
+            start,
+            &prepared.states,
+            &prepared.next_states,
+            &prepared.truncateds,
+        )?;
+        for (column, tensor) in [
+            (&self.actions, &prepared.actions),
+            (&self.rewards, &prepared.rewards),
+            (&self.terminated, &prepared.terminated),
+            (
+                &self.collection_policy_entropies,
+                &prepared.collection_policy_entropies,
+            ),
+            (
+                &self.entropy_change_weights,
+                &prepared.entropy_change_weights,
+            ),
+        ] {
+            column.write(start, tensor)?;
+        }
+        Ok(count)
+    }
+
+    fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
+        let (states, next_states) = self.observations.gather(indices)?;
+        let indices = replay_index_tensor(indices, &self.device)?;
+        Ok(SACOptimizationBatch {
+            states,
+            next_states,
+            actions: self.actions.gather(&indices)?,
+            rewards: self.rewards.gather(&indices)?,
+            terminated: self.terminated.gather(&indices)?,
+            collection_policy_entropies: self.collection_policy_entropies.gather(&indices)?,
+            entropy_change_weights: self.entropy_change_weights.gather(&indices)?,
+        })
+    }
+
+    fn sampleable_len(&self, len: usize) -> usize {
+        self.observations.sampleable_len(len)
+    }
+
+    fn sample_index(&self, index: usize, len: usize) -> usize {
+        self.observations.sample_index(index, len)
+    }
 }
 
 struct SACActorUpdate {
@@ -744,7 +794,7 @@ struct SACTemperatureUpdate {
 }
 
 struct SACCollectionEntropy {
-    values: Vec<f32>,
+    values: Tensor,
     change_weight: f32,
 }
 
@@ -755,7 +805,7 @@ struct SACCollectedTransitions<'batch> {
     rewards: &'batch Tensor,
     dones: &'batch [bool],
     truncateds: &'batch [bool],
-    policy_entropies: &'batch [f32],
+    policy_entropies: &'batch Tensor,
     entropy_change_weight: f32,
     first_timestep: usize,
 }
@@ -898,7 +948,7 @@ where
     aggregation_mode: SACCriticAggregationMode,
     action_space: Box<dyn Space<Error = SE>>,
     observation_space: Box<dyn Space<Error = SE>>,
-    replay: ExperienceReplay<SACExperience>,
+    replay: ExperienceReplay<SACReplayInsert, SACReplayStorage>,
     gamma: f64,
     tau: f64,
     training_start: usize,
@@ -906,7 +956,7 @@ where
     entropy_change_penalty: Option<f64>,
     q_value_clip: Option<f64>,
     schedule_progress: ScheduleProgress,
-    device_strategy: ReplayDeviceStrategy,
+    replay_storage_config: ReplayStorageConfig,
     optimization_steps: usize,
     logger: Option<&'a mut dyn SACLogger<I>>,
     dtype: DType,
@@ -936,15 +986,13 @@ where
         entropy_configuration: SACEntropyConfiguration<EO>,
         action_space: Box<dyn Space<Error = SE>>,
         observation_space: Box<dyn Space<Error = SE>>,
-        device_strategy: ReplayDeviceStrategy,
+        replay_storage_config: ReplayStorageConfig,
         /// Optional update and collection metric sink.
         logger: Option<&'a mut dyn SACLogger<I>>,
-        /// Explicit critic aggregation mode. This takes precedence over the
-        /// stabilization configuration and defaults to `Min`.
+        /// Critic aggregation mode. Defaults to `Min`.
         aggregation_mode: Option<SACCriticAggregationMode>,
-        /// Optional grouped defaults for stabilization techniques.
-        #[builder(default)]
-        stabilization_configuration: SACStabilizationConfiguration,
+        /// Coefficient for the replay-to-current entropy-change penalty.
+        entropy_change_penalty: Option<f64>,
         /// Enables PPO-style critic value clipping around target-network Q.
         q_value_clip: Option<f64>,
         #[builder(default = 0.99)] gamma: f64,
@@ -963,9 +1011,7 @@ where
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, SACError<PE, GE, SE>> {
         assert!(dtype.is_float(), "SAC compute dtype must be floating-point");
-        let aggregation_mode = aggregation_mode
-            .or(stabilization_configuration.aggregation_mode)
-            .unwrap_or(SACCriticAggregationMode::Min);
+        let aggregation_mode = aggregation_mode.unwrap_or(SACCriticAggregationMode::Min);
         SACConfigurationValidator::validate_configuration()
             .critic_count(critics.len())
             .replay_capacity(replay_capacity)
@@ -973,10 +1019,26 @@ where
             .gamma(gamma)
             .tau(tau)
             .entropy(&entropy_configuration)
-            .maybe_entropy_change_penalty(stabilization_configuration.entropy_change_penalty)
+            .maybe_entropy_change_penalty(entropy_change_penalty)
             .maybe_q_value_clip(q_value_clip)
             .training_horizon(training_horizon)
             .call()?;
+        let storage_device = replay_storage_config.storage_device();
+        let observation_sample = observation_space
+            .sample(&storage_device)
+            .map_err(SACError::SpaceError)?;
+        let action_sample = action_space
+            .sample(&storage_device)
+            .map_err(SACError::SpaceError)?;
+        let replay_storage = SACReplayStorage::new(
+            replay_capacity,
+            observation_sample.dims(),
+            action_sample.dims(),
+            action_sample.dtype(),
+            replay_storage_config.observation_dtype(),
+            dtype,
+            storage_device.clone(),
+        )?;
         Ok(Self {
             policy,
             actor_optimizer,
@@ -985,19 +1047,15 @@ where
             aggregation_mode,
             action_space,
             observation_space,
-            replay: ExperienceReplay::new(
-                replay_capacity,
-                batch_size,
-                device_strategy.storage_device(),
-            ),
+            replay: ExperienceReplay::with_storage(replay_storage, batch_size),
             gamma,
             tau,
             training_start,
             samples,
-            entropy_change_penalty: stabilization_configuration.entropy_change_penalty,
+            entropy_change_penalty,
             q_value_clip,
             schedule_progress: ScheduleProgress::new(training_horizon),
-            device_strategy,
+            replay_storage_config,
             optimization_steps: 0,
             logger,
             dtype,
@@ -1082,7 +1140,9 @@ where
         &mut self,
         observation: &Tensor,
     ) -> Result<Tensor, SACError<PE, GE, SE>> {
-        let observation = observation.to_dtype(self.dtype)?;
+        let observation = observation
+            .to_device(&self.replay_storage_config.optimization_device())?
+            .to_dtype(self.dtype)?;
         let latent = self
             .policy
             .mode(&observation)
@@ -1095,7 +1155,9 @@ where
     /// Samples environment actions `[batch, ...action_shape]` for observations
     /// `[batch, ...observation_shape]`.
     fn stochastic_action(&self, observation: &Tensor) -> Result<Tensor, SACError<PE, GE, SE>> {
-        let observation = observation.to_dtype(self.dtype)?;
+        let observation = observation
+            .to_device(&self.replay_storage_config.optimization_device())?
+            .to_dtype(self.dtype)?;
         let latent = self
             .policy
             .sample(&observation)
@@ -1109,7 +1171,7 @@ where
         let actions = (0..batch_size)
             .map(|_| {
                 self.action_space
-                    .sample(&self.device_strategy.optimization_device())
+                    .sample(&self.replay_storage_config.optimization_device())
                     .map_err(SACError::SpaceError)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1142,23 +1204,21 @@ where
         if self.replay.len() < self.replay.get_batch_size() {
             return Ok(None);
         }
-        let mut batch = match self.replay.sample() {
-            Ok(batch) => batch,
-            Err(ExperienceReplayError::TensorError(error))
-            | Err(ExperienceReplayError::ExperienceError(error)) => return Err(error.into()),
-        };
-        let optimization_device = self.device_strategy.optimization_device();
+        let mut batch = self.replay.sample()?;
+        let optimization_device = self.replay_storage_config.optimization_device();
         for element in [
             &mut batch.states,
             &mut batch.next_states,
-            &mut batch.actions,
             &mut batch.rewards,
             &mut batch.terminated,
             &mut batch.collection_policy_entropies,
             &mut batch.entropy_change_weights,
         ] {
-            *element = element.to_device(&optimization_device)?;
+            *element = element
+                .to_device(&optimization_device)?
+                .to_dtype(self.dtype)?;
         }
+        batch.actions = batch.actions.to_device(&optimization_device)?;
         if batch.actions.dtype().is_float() {
             batch.actions = batch.actions.to_dtype(self.dtype)?;
         }
@@ -1225,9 +1285,7 @@ where
                 None => candle_nn::loss::mse(&predicted, &targets)?,
             };
             let loss = (squared_error * 0.5)?;
-            if !tensor_has_nan(&loss)? {
-                critic.optimizer_mut().backward_step(&loss)?;
-            }
+            critic.optimizer_mut().backward_step(&loss)?;
             critic_losses.push(loss);
         }
         Ok(critic_losses)
@@ -1280,9 +1338,7 @@ where
             Some(loss) => (&base_actor_loss + loss)?,
             None => base_actor_loss,
         };
-        if !tensor_has_nan(&actor_loss)? {
-            self.actor_optimizer.backward_step(&actor_loss)?;
-        }
+        self.actor_optimizer.backward_step(&actor_loss)?;
         Ok(SACActorUpdate {
             loss: actor_loss,
             entropy_change_loss,
@@ -1328,9 +1384,7 @@ where
                     &expected_log_probability,
                     target_entropy,
                 )?;
-                if !tensor_has_nan(&loss)? {
-                    optimizer.backward_step(&loss)?;
-                }
+                optimizer.backward_step(&loss)?;
                 Ok(SACTemperatureUpdate {
                     loss: Some(loss),
                     target_entropy: Some(target_entropy),
@@ -1415,14 +1469,21 @@ where
     ) -> Result<SACCollectionEntropy, SACError<PE, GE, SE>> {
         if self.entropy_change_penalty.is_none() || uses_random_actions {
             return Ok(SACCollectionEntropy {
-                values: vec![0.0; environment_count],
+                values: Tensor::zeros(
+                    environment_count,
+                    self.dtype,
+                    &self.replay_storage_config.storage_device(),
+                )?,
                 change_weight: 0.0,
             });
         }
 
+        let observations = observations
+            .to_device(&self.replay_storage_config.optimization_device())?
+            .to_dtype(self.dtype)?;
         let terms = self
             .policy
-            .expectation(observations, self.samples)
+            .expectation(&observations, self.samples)
             .map_err(SACError::PolicyError)?;
         let values = terms
             .log_probabilities()
@@ -1430,8 +1491,7 @@ where
             .sum(D::Minus1)?
             .neg()?
             .detach()
-            .to_dtype(DType::F32)?
-            .to_vec1::<f32>()?;
+            .to_dtype(self.dtype)?;
         Ok(SACCollectionEntropy {
             values,
             change_weight: 1.0,
@@ -1470,15 +1530,14 @@ where
             first_timestep,
         } = transitions;
         let environment_count = dones.len();
-        let state_rows = states.chunk(environment_count, 0)?;
-        let next_rows = next_states.chunk(environment_count, 0)?;
-        let action_rows = actions.chunk(environment_count, 0)?;
-        let reward_rows = rewards.chunk(environment_count, 0)?;
-        let storage_device = self.device_strategy.storage_device();
+        let reward_values = rewards
+            .to_dtype(DType::F32)?
+            .to_device(&candle_core::Device::Cpu)?
+            .to_vec1::<f32>()?;
         let mut completed_episodes = Vec::new();
 
         for index in 0..environment_count {
-            let reward = reward_rows[index].i(0)?.to_scalar::<f32>()?;
+            let reward = reward_values[index];
             let collection_timestep = first_timestep + index + 1;
             if let Some(entry) = episodes.record(
                 index,
@@ -1489,26 +1548,29 @@ where
             ) {
                 completed_episodes.push(entry);
             }
-
-            self.replay.add(SACExperience {
-                state: state_rows[index]
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                next_state: next_rows[index]
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                action: action_rows[index]
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                reward,
-                terminated: if dones[index] { 1.0 } else { 0.0 },
-                collection_policy_entropy: policy_entropies[index],
-                entropy_change_weight,
-            });
         }
+
+        let storage_device = self.replay_storage_config.storage_device();
+        self.replay.add(SACReplayInsert {
+            states: states.clone(),
+            next_states: next_states.clone(),
+            actions: actions.clone(),
+            rewards: rewards.clone(),
+            terminated: Tensor::from_vec(
+                dones.iter().map(|&done| u8::from(done)).collect::<Vec<_>>(),
+                environment_count,
+                &storage_device,
+            )?
+            .to_dtype(self.dtype)?,
+            collection_policy_entropies: policy_entropies.clone(),
+            entropy_change_weights: Tensor::from_vec(
+                vec![entropy_change_weight; environment_count],
+                environment_count,
+                &storage_device,
+            )?
+            .to_dtype(self.dtype)?,
+            truncateds: truncateds.to_vec(),
+        })?;
 
         Ok(completed_episodes)
     }
@@ -1519,23 +1581,33 @@ where
         num_timesteps: usize,
     ) -> Result<(), SACError<PE, GE, SE>> {
         let mut elapsed_timesteps = 0usize;
+        let environment_count = env.num_envs();
+        self.replay
+            .storage_mut()
+            .initialize_environment_count(environment_count)?;
         let mut observations = env
             .reset()
             .map_err(SACError::GymError)?
             .to_dtype(self.dtype)?;
-        let environment_count = env.num_envs();
         let mut episodes = SACEpisodeTracker::new(environment_count);
 
         while elapsed_timesteps < num_timesteps {
             let first_timestep = self.schedule_progress.elapsed_steps();
             let uses_random_actions = first_timestep < self.training_start;
+            let policy_observations = if uses_random_actions {
+                observations.clone()
+            } else {
+                observations
+                    .to_device(&self.replay_storage_config.optimization_device())?
+                    .to_dtype(self.dtype)?
+            };
             let entropy = self.collection_entropy_metadata(
-                &observations,
+                &policy_observations,
                 environment_count,
                 uses_random_actions,
             )?;
             let actions = self.select_collection_actions(
-                &observations,
+                &policy_observations,
                 environment_count,
                 uses_random_actions,
             )?;
@@ -1617,7 +1689,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::test_support::CountingOptimizer;
+    use crate::agents::{ReplayDeviceStrategy, test_support::CountingOptimizer};
     use candle_core::{Device, Module};
     use candle_nn::{Init, VarBuilder};
     use std::sync::{
@@ -1848,16 +1920,6 @@ mod tests {
             gradients(SACCriticAggregationMode::Median, &[1.0, 2.0]),
             vec![0.5, 0.5]
         );
-    }
-
-    #[test]
-    fn stable_discrete_defaults_to_mean_and_entropy_change_penalty() {
-        let configuration = SACStabilizationConfiguration::stable_discrete();
-        assert_eq!(
-            configuration.aggregation_mode,
-            Some(SACCriticAggregationMode::Mean)
-        );
-        assert_eq!(configuration.entropy_change_penalty, Some(0.5));
     }
 
     #[test]
@@ -2167,7 +2229,9 @@ mod tests {
                 10.0,
                 &Device::Cpu,
             )))
-            .device_strategy(ReplayDeviceStrategy::OneDevice(Device::Cpu))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                Device::Cpu,
+            )))
             .replay_capacity(2)
             .batch_size(1)
             .training_start(10)
@@ -2388,12 +2452,15 @@ mod tests {
                 1.0,
                 &device,
             )))
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device.clone(),
+            )))
             .replay_capacity(16)
             .batch_size(2)
             .training_start(2)
             .training_horizon(4)
-            .stabilization_configuration(SACStabilizationConfiguration::stable_discrete())
+            .aggregation_mode(SACCriticAggregationMode::Mean)
+            .entropy_change_penalty(0.5)
             .q_value_clip(0.5)
             .logger(&mut logger)
             .build()

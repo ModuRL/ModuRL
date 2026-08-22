@@ -147,26 +147,6 @@ pub trait DifferentiableExpectation: Distribution {
     /// Returns the conventional SAC target entropy for `outputs` shaped
     /// `[batch_size, ...parameter_shape]`.
     fn default_target_entropy(&self, outputs: &Tensor) -> Result<f64, Self::Error>;
-
-    /// A descriptive alias for [`DifferentiableExpectation::expectation`],
-    /// accepting `outputs` shaped `[batch_size, ...parameter_shape]`.
-    fn differentiable_expectation(
-        &self,
-        outputs: &Tensor,
-        samples: NonZeroUsize,
-    ) -> Result<ExpectationTerms, Self::Error> {
-        self.expectation(outputs, samples)
-    }
-
-    /// Returns expectation terms for `outputs` shaped
-    /// `[batch_size, ...parameter_shape]`.
-    fn expectation_terms(
-        &self,
-        outputs: &Tensor,
-        samples: NonZeroUsize,
-    ) -> Result<ExpectationTerms, Self::Error> {
-        self.expectation(outputs, samples)
-    }
 }
 
 #[cfg(test)]

@@ -142,12 +142,15 @@ fn main() {
         .entropy_configuration(entropy)
         .action_space(action_space)
         .observation_space(observation_space)
-        .stabilization_configuration(SACStabilizationConfiguration::stable_discrete())
+        .aggregation_mode(SACCriticAggregationMode::Mean)
+        .entropy_change_penalty(0.5)
         .replay_capacity(100_000)
         .batch_size(64)
         .training_horizon(total_timesteps)
         .logger(&mut grapher)
-        .device_strategy(ReplayDeviceStrategy::OneDevice(device))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            device,
+        )))
         .build()
         .unwrap();
 

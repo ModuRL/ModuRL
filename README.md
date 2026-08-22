@@ -50,8 +50,8 @@ ModuRL completed the matched PPO, DQN, and SAC workloads faster than all three P
 | Algorithm | ModuRL median | vs. SB3 runner | vs. CleanRL runner | vs. Tianshou runner |
 | --- | ---: | ---: | ---: | ---: |
 | PPO | 2.102 s | 4.54x | 4.47x | 6.19x |
-| DQN | 0.476 s | 4.92x | 3.16x | 13.13x |
-| SAC | 2.198 s | 2.77x | 2.40x | 4.63x |
+| DQN | 0.242 s | 6.49x | 3.97x | 15.50x |
+| SAC | 1.396 s | 2.63x | 2.29x | 4.47x |
 
 These CPU results were measured on a 12th Gen Intel Core i7-1255U with one compute thread. Each value is the median of five fresh-process samples.
 
@@ -59,7 +59,7 @@ The CleanRL runners adapt upstream reference scripts. The DQN Stable-Baselines3 
 
 Compare frameworks within one algorithm. The algorithms perform different amounts of optimizer work per transition. These measurements cover small-network implementation throughput, not sample efficiency, reward, or large-model performance. CUDA and Metal were not measured.
 
-See the [benchmark workloads, fairness controls, and accelerator commands](crates/benches/README.md), plus the raw [PPO](crates/benches/results/ppo-cpu-windows-20260810.json), [DQN](crates/benches/results/dqn-cpu-windows-20260810.json), and [SAC](crates/benches/results/sac-cpu-windows-20260810.json) samples.
+See the [benchmark workloads, fairness controls, and accelerator commands](crates/benches/README.md), plus the raw [PPO](crates/benches/results/ppo-cpu-windows-20260810.json), [DQN](crates/benches/results/dqn-cpu-windows-20260820.json), and [SAC](crates/benches/results/sac-cpu-windows-20260820.json) samples.
 
 ## What ModuRL includes
 
@@ -108,7 +108,7 @@ The public boundaries make each part replaceable:
 | Environment execution | Implement `Gym` for one environment or `MultiGym` for a batch. Collect `Gym` implementations with `VectorizedGymWrapper::from(envs)`, or enable `multithreading` and use `MultithreadedVectorizedGymWrapper`. |
 | Network topology | Use `PPONetworkInfo::Separate` for independent actor and critic modules, or `PPONetworkInfo::Shared` for one trunk with policy and value heads. |
 | Policy representation | Wrap a Candle module in `ProbabilisticPolicyModel<D>`. Choose a categorical, Gaussian, transformed, or application-defined `Distribution`. |
-| Training state and devices | On-policy agents use rollout storage. Replay agents select `ReplayDeviceStrategy::OneDevice` or split storage and optimization with `Hybrid`. |
+| Training state and devices | On-policy agents use rollout storage. Replay agents use `ReplayStorageConfig` to select observation dtype and either one-device or hybrid storage. |
 | Schedules and logging | Use constant, linear, exponential, or application-defined `ParameterSchedule` values. Pass a logger implementation to the agent builder, or omit logging. |
 
 Agents train against these contracts instead of concrete environment, network, or logger types. See [Core Concepts](https://modurl.github.io/ModuRL/dev/core-concepts.html) for how the parts interact.

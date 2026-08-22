@@ -74,16 +74,18 @@ let device_strategy = ReplayDeviceStrategy::Hybrid {
     optimization_device: optimization_device.clone(),
     storage_device,
 };
+let replay_storage_config = ReplayStorageConfig::new(device_strategy);
 
 let mut agent = SACAgent::builder()
     // Build the actor, critics, target critics, optimizers, and entropy
     // variable on optimization_device.
-    .device_strategy(device_strategy)
+    .replay_storage_config(replay_storage_config)
     // Keep the remaining SAC configuration unchanged.
     .build()?;
 ```
 
-`ReplayDeviceStrategy` moves replay entries and sampled batches. It does not
+`ReplayStorageConfig` controls replay observation representation and uses its
+`ReplayDeviceStrategy` to move replay entries and sampled batches. It does not
 move an environment or model parameters for you.
 
 Set up everything you create for SAC on `optimization_device`: the environment,

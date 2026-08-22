@@ -72,7 +72,9 @@ fn main() {
             1.0 + (0.05 - 1.0) * exploration_progress
         })
         .logger(&mut grapher)
-        .device_strategy(ReplayDeviceStrategy::OneDevice(device))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            device,
+        )))
         .build()
         .expect("DQN configuration should be valid");
 

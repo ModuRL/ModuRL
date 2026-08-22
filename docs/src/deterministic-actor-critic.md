@@ -121,10 +121,10 @@ Each TD3 critic needs its own networks, parameter maps, and optimizer.
 
 ## Keep Replay and Models on the Intended Devices
 
-`ReplayDeviceStrategy::OneDevice(device)` stores replay and runs optimization
-on the same device. `ReplayDeviceStrategy::Hybrid` can keep detached replay
-transitions on one device, such as the CPU, and move sampled batches to the
-optimization device.
+Wrap `ReplayDeviceStrategy::OneDevice(device)` in `ReplayStorageConfig` to
+store replay and run optimization on the same device. A configuration using
+`ReplayDeviceStrategy::Hybrid` can keep detached replay transitions on one
+device, such as the CPU, and move sampled batches to the optimization device.
 
 The strategy does not move models or environments. Build the environment,
 actors, critics, target networks, and optimizers on the optimization device.

@@ -75,17 +75,6 @@ where
     }
 }
 
-/// Treats a lost life as an episode end while preserving the current game.
-///
-/// This supplies denser reset boundaries for Atari training without discarding
-/// progress from the remaining lives.
-pub struct EpisodicLifeGym<G> {
-    gym: G,
-    last_lives: u32,
-    was_real_done: bool,
-    device: candle_core::Device,
-}
-
 /// Metadata that exposes the number of lives remaining in an Atari game.
 pub trait AtariLives {
     /// Returns the current number of lives reported by ALE.
@@ -105,6 +94,17 @@ where
     fn lives(&self) -> u32 {
         self.inner.lives()
     }
+}
+
+/// Treats a lost life as an episode end while preserving the current game.
+///
+/// This supplies denser reset boundaries for Atari training without discarding
+/// progress from the remaining lives.
+pub struct EpisodicLifeGym<G> {
+    gym: G,
+    last_lives: u32,
+    was_real_done: bool,
+    device: candle_core::Device,
 }
 
 impl<G> EpisodicLifeGym<G> {

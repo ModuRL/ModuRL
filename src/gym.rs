@@ -187,7 +187,7 @@ where
     G::Error: std::fmt::Debug,
 {
     /// Creates a flattened batch from one or more homogeneous inner gyms.
-    pub fn try_new(gyms: Vec<G>) -> Result<Self, StackedMultiGymError<G::Error>> {
+    pub fn new(gyms: Vec<G>) -> Result<Self, StackedMultiGymError<G::Error>> {
         let Some(first) = gyms.first() else {
             return Err(StackedMultiGymError::Empty);
         };
@@ -292,7 +292,7 @@ where
     type Error = StackedMultiGymError<G::Error>;
 
     fn try_from(gyms: Vec<G>) -> Result<Self, Self::Error> {
-        Self::try_new(gyms)
+        Self::new(gyms)
     }
 }
 
@@ -619,7 +619,7 @@ where
     I: Send + 'static,
 {
     /// Creates one persistent worker per inner gym constructor.
-    pub fn try_new<F>(
+    pub fn new<F>(
         gym_constructors: Vec<F>,
         obs_space: O,
         action_space: A,
@@ -1525,7 +1525,7 @@ mod tests {
 
     #[test]
     fn stacked_multi_gym_flattens_batches_and_routes_actions() {
-        let mut env = StackedMultiGym::try_new(vec![
+        let mut env = StackedMultiGym::new(vec![
             BatchedDummyEnv::new(10, 2),
             BatchedDummyEnv::new(20, 3),
         ])
@@ -1600,29 +1600,29 @@ mod tests {
     #[test]
     fn stacked_multi_gym_validates_construction_and_actions() {
         assert!(matches!(
-            StackedMultiGym::<BatchedDummyEnv, BatchedTestInfo>::try_new(vec![]),
+            StackedMultiGym::<BatchedDummyEnv, BatchedTestInfo>::new(vec![]),
             Err(StackedMultiGymError::Empty)
         ));
         assert!(matches!(
-            StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 0)]),
+            StackedMultiGym::new(vec![BatchedDummyEnv::new(0, 0)]),
             Err(StackedMultiGymError::EmptyInner { gym_index: 0 })
         ));
 
         let mut different_observation = BatchedDummyEnv::new(1, 2);
         different_observation.observation_size = 4;
         assert!(matches!(
-            StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 2), different_observation]),
+            StackedMultiGym::new(vec![BatchedDummyEnv::new(0, 2), different_observation]),
             Err(StackedMultiGymError::IncompatibleObservationShape { gym_index: 1, .. })
         ));
 
         let mut different_action = BatchedDummyEnv::new(1, 2);
         different_action.action_size = 2;
         assert!(matches!(
-            StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 2), different_action]),
+            StackedMultiGym::new(vec![BatchedDummyEnv::new(0, 2), different_action]),
             Err(StackedMultiGymError::IncompatibleActionShape { gym_index: 1, .. })
         ));
 
-        let mut env = StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 2)]).unwrap();
+        let mut env = StackedMultiGym::new(vec![BatchedDummyEnv::new(0, 2)]).unwrap();
         let wrong_batch =
             Tensor::zeros((3, 1), candle_core::DType::F32, &candle_core::Device::Cpu).unwrap();
         assert!(matches!(
@@ -1638,7 +1638,7 @@ mod tests {
     fn stacked_multi_gym_reports_the_failing_group() {
         let mut failing = BatchedDummyEnv::new(1, 2);
         failing.fail_step = true;
-        let mut env = StackedMultiGym::try_new(vec![BatchedDummyEnv::new(0, 2), failing]).unwrap();
+        let mut env = StackedMultiGym::new(vec![BatchedDummyEnv::new(0, 2), failing]).unwrap();
         let actions =
             Tensor::zeros((4, 1), candle_core::DType::F32, &candle_core::Device::Cpu).unwrap();
 
@@ -1744,7 +1744,7 @@ mod tests {
             &candle_core::Device::Cpu,
         );
         let mut env =
-            MultithreadedStackedMultiGym::try_new(constructors, obs_space, action_space).unwrap();
+            MultithreadedStackedMultiGym::new(constructors, obs_space, action_space).unwrap();
 
         assert_eq!(env.num_groups(), 2);
         assert_eq!(env.num_envs(), 5);
@@ -1799,7 +1799,7 @@ mod tests {
             &candle_core::Device::Cpu,
         );
         let mut env =
-            MultithreadedStackedMultiGym::try_new(constructors, obs_space, action_space).unwrap();
+            MultithreadedStackedMultiGym::new(constructors, obs_space, action_space).unwrap();
         let (result_tx, result_rx) = std::sync::mpsc::channel();
 
         std::thread::spawn(move || {

@@ -1,18 +1,18 @@
 use bon::bon;
-use candle_core::{DType, Error, IndexOp, Tensor};
+use candle_core::{DType, Error, Tensor};
 use candle_nn::{Optimizer, VarMap};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{marker::PhantomData, ops::Deref};
 
 use crate::{
-    agents::ReplayDeviceStrategy,
-    buffers::{
-        experience,
-        experience_replay::{ExperienceReplay, ExperienceReplayError},
+    agents::ReplayStorageConfig,
+    buffers::experience_replay::{
+        AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
+        ReplayStorageError, TensorReplayColumn, replay_index_tensor,
     },
     gym::{MultiGym, MultiGymStepInfo},
     parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
     spaces::{Discrete, Space},
-    tensor_operations::tensor_has_nan,
 };
 
 pub mod ddqn;
@@ -37,6 +37,7 @@ where
     SE: std::fmt::Debug,
 {
     TensorError(candle_core::Error),
+    ReplayStorageError(ReplayStorageError),
     ConfigurationError(QLearningConfigurationError),
     GymError(GE),
     SpaceError(SE),
@@ -49,6 +50,26 @@ where
 {
     fn from(err: candle_core::Error) -> Self {
         Self::TensorError(err)
+    }
+}
+
+impl<GE, SE> From<ReplayStorageError> for QAgentError<GE, SE>
+where
+    GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
+{
+    fn from(error: ReplayStorageError) -> Self {
+        Self::ReplayStorageError(error)
+    }
+}
+
+impl<GE, SE> From<ExperienceReplayError<ReplayStorageError>> for QAgentError<GE, SE>
+where
+    GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
+{
+    fn from(error: ExperienceReplayError<ReplayStorageError>) -> Self {
+        Self::ReplayStorageError(error.into())
     }
 }
 
@@ -150,21 +171,124 @@ pub(crate) trait QLearningTarget {
     ) -> Result<Tensor, Error>;
 }
 
-#[derive(Clone)]
-struct QLearningExperience {
-    state: Tensor,
-    next_state: Tensor,
-    action: Tensor,
-    reward: f32,
-    next_done: f32,
-}
-
 struct QLearningBatch {
     states: Tensor,
     next_states: Tensor,
     actions: Tensor,
     rewards: Tensor,
     next_dones: Tensor,
+}
+
+struct QLearningInsert {
+    states: Tensor,
+    next_states: Tensor,
+    actions: Tensor,
+    rewards: Tensor,
+    next_dones: Tensor,
+    truncateds: Vec<bool>,
+}
+
+struct QLearningReplayStorage {
+    observations: AlignedObservationReplay,
+    actions: TensorReplayColumn,
+    rewards: TensorReplayColumn,
+    next_dones: TensorReplayColumn,
+    capacity: usize,
+    device: candle_core::Device,
+}
+
+impl QLearningReplayStorage {
+    fn new(
+        capacity: usize,
+        observation_shape: &[usize],
+        observation_dtype: DType,
+        device: candle_core::Device,
+    ) -> Result<Self, ReplayStorageError> {
+        Ok(Self {
+            observations: AlignedObservationReplay::new(
+                capacity,
+                observation_shape,
+                observation_dtype,
+                &device,
+            ),
+            actions: TensorReplayColumn::new(capacity, &[], DType::U32, &device)?,
+            rewards: TensorReplayColumn::new(capacity, &[], DType::F32, &device)?,
+            next_dones: TensorReplayColumn::new(capacity, &[], DType::F32, &device)?,
+            capacity,
+            device,
+        })
+    }
+
+    fn initialize_environment_count(
+        &mut self,
+        environment_count: usize,
+    ) -> Result<(), ReplayStorageError> {
+        self.observations
+            .initialize_environment_count(environment_count)
+    }
+}
+
+impl ReplayStorage for QLearningReplayStorage {
+    type Insert = QLearningInsert;
+    type Batch = QLearningBatch;
+    type Error = ReplayStorageError;
+
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
+        let actions = self.actions.prepare(&transitions.actions)?;
+        let rewards = self.rewards.prepare(&transitions.rewards)?;
+        let next_dones = self.next_dones.prepare(&transitions.next_dones)?;
+        let count = transitions.states.dim(0)?;
+        for (name, tensor) in [
+            ("actions", &transitions.actions),
+            ("rewards", &transitions.rewards),
+            ("next dones", &transitions.next_dones),
+        ] {
+            let actual = tensor.dim(0)?;
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field: name,
+                    expected: count,
+                    actual,
+                });
+            }
+        }
+
+        self.observations.insert(
+            start,
+            &transitions.states,
+            &transitions.next_states,
+            &transitions.truncateds,
+        )?;
+        self.actions.write(start, &actions)?;
+        self.rewards.write(start, &rewards)?;
+        self.next_dones.write(start, &next_dones)?;
+        Ok(count)
+    }
+
+    fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
+        let (states, next_states) = self.observations.gather(indices)?;
+        let indices = replay_index_tensor(indices, &self.device)?;
+
+        Ok(QLearningBatch {
+            states,
+            next_states,
+            actions: self.actions.gather(&indices)?,
+            rewards: self.rewards.gather(&indices)?,
+            next_dones: self.next_dones.gather(&indices)?,
+        })
+    }
+
+    fn sampleable_len(&self, len: usize) -> usize {
+        self.observations.sampleable_len(len)
+    }
+
+    fn sample_index(&self, index: usize, len: usize) -> usize {
+        self.observations.sample_index(index, len)
+    }
 }
 
 struct QCollectedTransitions<'a> {
@@ -175,46 +299,6 @@ struct QCollectedTransitions<'a> {
     dones: &'a [bool],
     truncateds: &'a [bool],
     first_timestep: usize,
-}
-
-impl experience::Experience for QLearningExperience {
-    type Batch = QLearningBatch;
-    type Error = candle_core::Error;
-
-    fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
-        let first = experiences
-            .first()
-            .expect("cannot batch an empty Q-learning replay sample");
-        let device = first.state.device();
-        let dtype = first.state.dtype();
-        Ok(QLearningBatch {
-            states: experience::stack_tensor_field(experiences, |experience| {
-                experience.state.clone()
-            })?,
-            next_states: experience::stack_tensor_field(experiences, |experience| {
-                experience.next_state.clone()
-            })?,
-            actions: experience::stack_tensor_field(experiences, |experience| {
-                experience.action.clone()
-            })?,
-            rewards: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.reward)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-            next_dones: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|experience| experience.next_done)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-        })
-    }
 }
 
 pub(crate) struct QLearningAgent<'a, O, GE, SE, T>
@@ -235,13 +319,14 @@ where
     schedule_progress: ScheduleProgress,
     action_space: Discrete,
     observation_space: Box<dyn Space<Error = SE>>,
-    experience_replay: ExperienceReplay<QLearningExperience>,
+    experience_replay: ExperienceReplay<QLearningInsert, QLearningReplayStorage>,
     gamma: f32,
     update_frequency: usize,
     training_start: usize,
-    device_strategy: ReplayDeviceStrategy,
+    replay_storage_config: ReplayStorageConfig,
     dtype: DType,
     optimization_steps: usize,
+    action_rng: StdRng,
     _phantom: PhantomData<(GE, T)>,
 }
 
@@ -272,7 +357,7 @@ where
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         training_horizon: usize,
-        device_strategy: ReplayDeviceStrategy,
+        replay_storage_config: ReplayStorageConfig,
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, QAgentError<GE, SE>> {
         assert!(
@@ -292,6 +377,22 @@ where
             .training_horizon(training_horizon)
             .call()?;
 
+        let optimization_device = replay_storage_config.optimization_device();
+        // Tie host-side action sampling to the configured accelerator seed. This
+        // is the only device-to-host synchronization needed by epsilon-greedy.
+        let action_seed = Tensor::rand(0.0f64, u32::MAX as f64, (), &optimization_device)?
+            .to_dtype(DType::U32)?
+            .to_scalar::<u32>()?;
+        let action_rng = StdRng::seed_from_u64(u64::from(action_seed));
+
+        let storage_device = replay_storage_config.storage_device();
+        let replay_storage = QLearningReplayStorage::new(
+            replay_capacity,
+            &observation_space.shape(),
+            replay_storage_config.observation_dtype(),
+            storage_device,
+        )?;
+
         let mut agent = Self {
             online_q_network,
             target_q_network,
@@ -304,17 +405,14 @@ where
             schedule_progress: ScheduleProgress::new(training_horizon),
             action_space,
             observation_space,
-            experience_replay: ExperienceReplay::new(
-                replay_capacity,
-                batch_size,
-                device_strategy.storage_device(),
-            ),
+            experience_replay: ExperienceReplay::with_storage(replay_storage, batch_size),
             gamma,
             update_frequency,
             training_start,
-            device_strategy,
+            replay_storage_config,
             dtype,
             optimization_steps: 0,
+            action_rng,
             _phantom: PhantomData,
         };
         agent.update_target_network();
@@ -340,11 +438,14 @@ where
     /// Selects scalar discrete actions shaped `[batch]` for observations shaped
     /// `[batch, ...observation_shape]`.
     pub(crate) fn act(&mut self, observation: &Tensor) -> Result<Tensor, QAgentError<GE, SE>> {
-        let observation = observation.to_dtype(self.dtype)?;
+        let observation = observation
+            .to_device(&self.replay_storage_config.optimization_device())?
+            .to_dtype(self.dtype)?;
         Ok(epsilon_greedy_actions(
             &observation,
             self.current_epsilon,
             &self.action_space,
+            &mut self.action_rng,
             |observations| self.online_q_network.forward(observations),
         )?)
     }
@@ -353,25 +454,30 @@ where
         &mut self,
         collection_timestep: usize,
         logger: &mut dyn QLearningLogger<I>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), QAgentError<GE, SE>> {
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(());
         }
-        let training_batch = match self.experience_replay.sample() {
-            Ok(batch) => batch,
-            Err(ExperienceReplayError::ExperienceError(error)) => return Err(error),
-            Err(ExperienceReplayError::TensorError(error)) => return Err(error),
-        };
+        let optimization_device = self.replay_storage_config.optimization_device();
+        let training_batch = self.experience_replay.sample()?;
         let mut training_batch = training_batch;
-        for element in [
-            &mut training_batch.states,
-            &mut training_batch.next_states,
-            &mut training_batch.actions,
-            &mut training_batch.rewards,
-            &mut training_batch.next_dones,
-        ] {
-            *element = element.to_device(&self.device_strategy.optimization_device())?;
-        }
+        training_batch.states = training_batch
+            .states
+            .to_device(&optimization_device)?
+            .to_dtype(self.dtype)?;
+        training_batch.next_states = training_batch
+            .next_states
+            .to_device(&optimization_device)?
+            .to_dtype(self.dtype)?;
+        training_batch.actions = training_batch.actions.to_device(&optimization_device)?;
+        training_batch.rewards = training_batch
+            .rewards
+            .to_device(&optimization_device)?
+            .to_dtype(self.dtype)?;
+        training_batch.next_dones = training_batch
+            .next_dones
+            .to_device(&optimization_device)?
+            .to_dtype(self.dtype)?;
         let QLearningBatch {
             states,
             next_states,
@@ -391,7 +497,8 @@ where
             &target_next_q_values,
             self.gamma,
         )?
-        .reshape(&[rewards.shape().dims()[0], 1])?;
+        .reshape(&[rewards.shape().dims()[0], 1])?
+        .detach();
 
         let state_action_q_values = selected_action_q_values(
             &self.online_q_network.forward(&states)?.squeeze(1)?,
@@ -409,9 +516,7 @@ where
         };
         logger.log_update(&entry);
         self.optimization_steps += 1;
-        if !tensor_has_nan(&loss)? {
-            self.optimizer.backward_step(&loss)?;
-        }
+        self.optimizer.backward_step(&loss)?;
         Ok(())
     }
 
@@ -439,15 +544,14 @@ where
             first_timestep,
         } = transitions;
         let environment_count = dones.len();
-        let state_rows = states.chunk(environment_count, 0)?;
-        let next_state_rows = next_states.chunk(environment_count, 0)?;
-        let action_rows = actions.chunk(environment_count, 0)?;
-        let reward_rows = rewards.chunk(environment_count, 0)?;
-        let storage_device = self.device_strategy.storage_device();
+        let reward_values = rewards
+            .to_dtype(DType::F32)?
+            .to_device(&candle_core::Device::Cpu)?
+            .to_vec1::<f32>()?;
         let mut completed_episodes = Vec::new();
 
         for environment_index in 0..environment_count {
-            let reward = reward_rows[environment_index].i(0)?.to_scalar::<f32>()?;
+            let reward = reward_values[environment_index];
             let collection_timestep = first_timestep.saturating_add(environment_index + 1);
             if let Some(entry) = episodes.record(
                 environment_index,
@@ -458,27 +562,24 @@ where
             ) {
                 completed_episodes.push(entry);
             }
-
-            self.experience_replay.add(QLearningExperience {
-                state: state_rows[environment_index]
-                    .clone()
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                next_state: next_state_rows[environment_index]
-                    .clone()
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                action: action_rows[environment_index]
-                    .clone()
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                reward,
-                next_done: if dones[environment_index] { 1.0 } else { 0.0 },
-            });
         }
+
+        let next_dones = Tensor::from_vec(
+            dones
+                .iter()
+                .map(|&done| if done { 1.0f32 } else { 0.0 })
+                .collect::<Vec<_>>(),
+            environment_count,
+            &self.replay_storage_config.storage_device(),
+        )?;
+        self.experience_replay.add(QLearningInsert {
+            states: states.clone(),
+            next_states: next_states.clone(),
+            actions: actions.clone(),
+            rewards: rewards.clone(),
+            next_dones,
+            truncateds: truncateds.to_vec(),
+        })?;
 
         Ok(completed_episodes)
     }
@@ -510,11 +611,11 @@ where
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, SE>> {
         let mut elapsed_timesteps = 0;
-        let mut observations = env
-            .reset()
-            .map_err(QAgentError::GymError)?
-            .to_dtype(self.dtype)?;
         let environment_count = env.num_envs();
+        self.experience_replay
+            .storage_mut()
+            .initialize_environment_count(environment_count)?;
+        let mut observations = env.reset().map_err(QAgentError::GymError)?;
         let mut episodes = QEpisodeTracker::new(environment_count);
 
         while elapsed_timesteps < num_timesteps {
@@ -524,8 +625,7 @@ where
             )?;
             let actions = self.act(&observations)?;
             let step_info = env.step(actions.clone()).map_err(QAgentError::GymError)?;
-            let transition_next_states =
-                step_info.transition_next_states()?.to_dtype(self.dtype)?;
+            let transition_next_states = step_info.transition_next_states()?;
             let MultiGymStepInfo {
                 states: reset_next_states,
                 rewards,
@@ -549,7 +649,7 @@ where
                 },
                 &mut episodes,
             )?;
-            observations = reset_next_states.to_dtype(self.dtype)?;
+            observations = reset_next_states;
             let collection_timestep = first_timestep.saturating_add(environment_count);
             let collection_entry = QCollectionLogEntry {
                 collection_rewards,
@@ -558,10 +658,10 @@ where
                 collection_timestep,
                 completed_episodes,
             };
-            logger.log_collection(&collection_entry);
 
             elapsed_timesteps += environment_count;
             self.run_scheduled_updates(first_timestep, environment_count, logger)?;
+            logger.log_collection(&collection_entry);
             self.schedule_progress.advance_steps(environment_count);
         }
         Ok(())
@@ -624,48 +724,39 @@ pub(crate) fn epsilon_greedy_actions(
     observation: &Tensor,
     epsilon: f64,
     action_space: &Discrete,
+    rng: &mut impl Rng,
     forward: impl FnOnce(&Tensor) -> Result<Tensor, Error>,
 ) -> Result<Tensor, Error> {
     let batch_size = observation.shape().dims()[0];
-    let explores = Tensor::rand(0.0f64, 1.0, &[batch_size], observation.device())?
-        .to_vec1::<f64>()?
-        .into_iter()
-        .map(|value| value < epsilon)
-        .collect::<Vec<_>>();
+    let device = observation.device();
+    if epsilon == 0.0 {
+        return forward(observation)?.argmax(1);
+    }
 
-    let greedy_indices = explores
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &explore)| (!explore).then_some(index as u32))
-        .collect::<Vec<_>>();
-    let greedy_count = greedy_indices.len();
-    let mut greedy_actions = if greedy_indices.is_empty() {
-        None
-    } else {
-        let greedy_indices =
-            Tensor::from_vec(greedy_indices, &[greedy_count], observation.device())?;
-        let greedy_observations = observation.index_select(&greedy_indices, 0)?;
-        Some(
-            forward(&greedy_observations)?
-                .argmax(1)?
-                .chunk(greedy_count, 0)?
-                .into_iter(),
-        )
-    };
-
+    let action_count = action_space.get_possible_values() as u32;
     let mut actions = Vec::with_capacity(batch_size);
-    for explore in explores {
-        if explore {
-            actions.push(action_space.sample(observation.device())?);
+    let mut greedy_indices = Vec::with_capacity(batch_size);
+    for index in 0..batch_size {
+        if rng.random_bool(epsilon) {
+            actions.push(rng.random_range(0..action_count));
         } else {
-            let action = greedy_actions
-                .as_mut()
-                .and_then(|actions| actions.next())
-                .expect("greedy actions must exist for non-exploring environments");
-            actions.push(action.squeeze(0)?);
+            actions.push(0);
+            greedy_indices.push(index as u32);
         }
     }
-    Tensor::stack(&actions, 0)
+
+    if greedy_indices.is_empty() {
+        return Tensor::from_vec(actions, batch_size, device);
+    }
+    if greedy_indices.len() == batch_size {
+        return forward(observation)?.argmax(1);
+    }
+
+    let greedy_count = greedy_indices.len();
+    let greedy_indices = Tensor::from_vec(greedy_indices, greedy_count, device)?;
+    let greedy_observations = observation.index_select(&greedy_indices, 0)?;
+    let greedy_actions = forward(&greedy_observations)?.argmax(1)?;
+    Tensor::from_vec(actions, batch_size, device)?.scatter(&greedy_indices, &greedy_actions, 0)
 }
 
 /// Gathers scalar `actions` containing one index per batch item from `q_values`
@@ -681,15 +772,16 @@ pub(crate) fn selected_action_q_values(
 #[cfg(test)]
 mod tests {
     use super::{
-        QCollectionLogEntry, QLearningAgent, QLearningConfigurationError,
-        QLearningConfigurationValidator, QLearningLogger, QLearningTarget,
-        selected_action_q_values, validate_epsilon,
+        QAgentError, QCollectionLogEntry, QLearningAgent, QLearningConfigurationError,
+        QLearningConfigurationValidator, QLearningInsert, QLearningLogger, QLearningReplayStorage,
+        QLearningTarget, epsilon_greedy_actions, selected_action_q_values, validate_epsilon,
     };
     use crate::{
         agents::{
-            ReplayDeviceStrategy,
+            ReplayDeviceStrategy, ReplayStorageConfig,
             test_support::{CountingOptimizer, FixedEnv},
         },
+        buffers::experience_replay::ReplayStorageError,
         gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
         models::MLP,
         objectives::bellman_targets,
@@ -698,8 +790,91 @@ mod tests {
     };
     use candle_core::{DType, Device, Error, Tensor};
     use candle_nn::{VarBuilder, VarMap};
+    use rand::{SeedableRng, rngs::StdRng};
 
     struct TestTarget;
+
+    fn assert_device_native_epsilon_greedy(device: &Device) {
+        let observations = Tensor::new(
+            &[[0.0f32, 2.0, 1.0], [3.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
+            device,
+        )
+        .unwrap();
+        let action_space = Discrete::new(3);
+        let actions = epsilon_greedy_actions(
+            &observations,
+            0.0,
+            &action_space,
+            &mut StdRng::seed_from_u64(1),
+            |input| {
+                assert_eq!(input.dims(), &[3, 3]);
+                Ok(input.clone())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(actions.dtype(), DType::U32);
+        assert_eq!(actions.to_vec1::<u32>().unwrap(), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn epsilon_greedy_selects_actions_without_changing_the_batch_shape() {
+        assert_device_native_epsilon_greedy(&Device::Cpu);
+    }
+
+    #[test]
+    fn full_exploration_skips_the_q_network() {
+        let observations = Tensor::zeros((16, 2), DType::F32, &Device::Cpu).unwrap();
+        let actions = epsilon_greedy_actions(
+            &observations,
+            1.0,
+            &Discrete::new(3),
+            &mut StdRng::seed_from_u64(2),
+            |_| panic!("full exploration must not evaluate the Q-network"),
+        )
+        .unwrap();
+
+        assert_eq!(actions.dims(), &[16]);
+        assert!(
+            actions
+                .to_vec1::<u32>()
+                .unwrap()
+                .into_iter()
+                .all(|action| action < 3)
+        );
+    }
+
+    #[test]
+    fn mixed_exploration_forwards_only_greedy_observations() {
+        let observations = Tensor::arange(0u32, 128, &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .reshape((128, 1))
+            .unwrap();
+        let mut forwarded = 0;
+        let actions = epsilon_greedy_actions(
+            &observations,
+            0.5,
+            &Discrete::new(2),
+            &mut StdRng::seed_from_u64(3),
+            |input| {
+                forwarded = input.dim(0)?;
+                Tensor::cat(&[input, &input.affine(-1.0, 0.0)?], 1)
+            },
+        )
+        .unwrap();
+
+        assert!(forwarded > 0 && forwarded < 128);
+        assert_eq!(actions.dims(), &[128]);
+        assert!(
+            actions
+                .to_vec1::<u32>()
+                .unwrap()
+                .into_iter()
+                .all(|action| action < 2)
+        );
+    }
 
     impl QLearningTarget for TestTarget {
         fn requires_online_next_q_values() -> bool {
@@ -730,6 +905,54 @@ mod tests {
         fn log_update(&mut self, _entry: &super::QLogEntry) {}
 
         fn log_collection(&mut self, _entry: &QCollectionLogEntry) {}
+    }
+
+    fn replay_insert(states: &[u8], device: &Device) -> QLearningInsert {
+        let count = states.len();
+        QLearningInsert {
+            states: Tensor::from_vec(states.to_vec(), (count, 1), device).unwrap(),
+            next_states: Tensor::from_vec(
+                states
+                    .iter()
+                    .map(|&state| state.saturating_add(10))
+                    .collect::<Vec<_>>(),
+                (count, 1),
+                device,
+            )
+            .unwrap(),
+            actions: Tensor::from_vec(vec![0u32; count], count, device).unwrap(),
+            rewards: Tensor::from_vec(vec![1.0f32; count], count, device).unwrap(),
+            next_dones: Tensor::zeros(count, DType::F32, device).unwrap(),
+            truncateds: vec![false; count],
+        }
+    }
+
+    #[test]
+    fn preallocated_replay_wraps_and_gathered_batches_do_not_alias_storage() {
+        use crate::buffers::experience_replay::ReplayStorage;
+
+        let device = Device::Cpu;
+        let mut storage = QLearningReplayStorage::new(4, &[1], DType::U8, device.clone()).unwrap();
+        storage.initialize_environment_count(2).unwrap();
+        storage.insert(0, replay_insert(&[1, 2], &device)).unwrap();
+
+        let gathered_before_overwrite = storage.gather(&[0]).unwrap();
+        storage.insert(2, replay_insert(&[3, 4], &device)).unwrap();
+        storage.insert(0, replay_insert(&[5, 6], &device)).unwrap();
+
+        assert_eq!(
+            gathered_before_overwrite.states.to_vec2::<u8>().unwrap(),
+            vec![vec![1]]
+        );
+        assert_eq!(
+            storage
+                .gather(&[0, 1, 2, 3])
+                .unwrap()
+                .states
+                .to_vec2::<u8>()
+                .unwrap(),
+            vec![vec![5], vec![6], vec![15], vec![16]]
+        );
     }
 
     #[test]
@@ -921,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn cadence_and_epsilon_progress_continue_across_learn_calls() {
+    fn learn_initializes_replay_and_preserves_alignment_across_calls() {
         let device = Device::Cpu;
         let mut env: VectorizedGymWrapper<FixedEnv> =
             vec![FixedEnv::new(device.clone()), FixedEnv::new(device.clone())].into();
@@ -960,7 +1183,9 @@ mod tests {
             .update_frequency(2)
             .target_update_interval(4)
             .training_horizon(10)
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device.clone(),
+            )))
             .build()
             .unwrap();
 
@@ -991,6 +1216,20 @@ mod tests {
                 .to_vec1::<f32>()
                 .unwrap()
         );
+
+        let replay_len = agent.experience_replay.len();
+        let mut incompatible_env: VectorizedGymWrapper<FixedEnv> =
+            vec![FixedEnv::new(device)].into();
+        assert!(matches!(
+            agent.learn(&mut incompatible_env, 1, &mut logger),
+            Err(QAgentError::ReplayStorageError(
+                ReplayStorageError::EnvironmentCountMismatch {
+                    expected: 2,
+                    actual: 1,
+                }
+            ))
+        ));
+        assert_eq!(agent.experience_replay.len(), replay_len);
     }
 
     #[test]
@@ -1025,7 +1264,9 @@ mod tests {
             .update_frequency(1)
             .target_update_interval(4)
             .training_horizon(4)
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device,
+            )))
             .build()
             .unwrap();
 

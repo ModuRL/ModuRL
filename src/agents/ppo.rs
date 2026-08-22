@@ -11,7 +11,7 @@ use crate::{
     parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
     sampling::shuffle_with_device_rng,
     spaces,
-    tensor_operations::{normalize_tensor, tensor_has_nan},
+    tensor_operations::normalize_tensor,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1049,50 +1049,42 @@ where
         match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
                 let total_loss = (&actor_loss + &critic_loss)?;
-                if !tensor_has_nan(&total_loss)? {
+                let total_grad = &mut total_loss.backward()?;
+                let _total_grad_norm = crate::tensor_operations::clip_gradients(
+                    &total_loss,
+                    total_grad,
+                    self.gradient_clip,
+                )?;
+                shared_info.optimizer.step(total_grad)?;
+            }
+            PPONetworkInfo::Separate(ref mut separate_info) => match separate_info.combined_loss {
+                true => {
+                    let total_loss = (&actor_loss + &critic_loss)?;
                     let total_grad = &mut total_loss.backward()?;
                     let _total_grad_norm = crate::tensor_operations::clip_gradients(
                         &total_loss,
                         total_grad,
                         self.gradient_clip,
                     )?;
-                    shared_info.optimizer.step(total_grad)?;
-                }
-            }
-            PPONetworkInfo::Separate(ref mut separate_info) => match separate_info.combined_loss {
-                true => {
-                    let total_loss = (&actor_loss + &critic_loss)?;
-                    if !tensor_has_nan(&total_loss)? {
-                        let total_grad = &mut total_loss.backward()?;
-                        let _total_grad_norm = crate::tensor_operations::clip_gradients(
-                            &total_loss,
-                            total_grad,
-                            self.gradient_clip,
-                        )?;
-                        separate_info.actor_optimizer.step(total_grad)?;
-                        separate_info.critic_optimizer.step(total_grad)?;
-                    }
+                    separate_info.actor_optimizer.step(total_grad)?;
+                    separate_info.critic_optimizer.step(total_grad)?;
                 }
                 false => {
-                    if !tensor_has_nan(&actor_loss)? {
-                        let actor_grad = &mut actor_loss.backward()?;
-                        let _actor_grad_norm = crate::tensor_operations::clip_gradients(
-                            &actor_loss,
-                            actor_grad,
-                            self.gradient_clip,
-                        )?;
-                        separate_info.actor_optimizer.step(actor_grad)?;
-                    }
+                    let actor_grad = &mut actor_loss.backward()?;
+                    let _actor_grad_norm = crate::tensor_operations::clip_gradients(
+                        &actor_loss,
+                        actor_grad,
+                        self.gradient_clip,
+                    )?;
+                    separate_info.actor_optimizer.step(actor_grad)?;
 
-                    if !tensor_has_nan(&critic_loss)? {
-                        let critic_grad = &mut critic_loss.backward()?;
-                        let _critic_grad_norm = crate::tensor_operations::clip_gradients(
-                            &critic_loss,
-                            critic_grad,
-                            self.gradient_clip,
-                        )?;
-                        separate_info.critic_optimizer.step(critic_grad)?;
-                    }
+                    let critic_grad = &mut critic_loss.backward()?;
+                    let _critic_grad_norm = crate::tensor_operations::clip_gradients(
+                        &critic_loss,
+                        critic_grad,
+                        self.gradient_clip,
+                    )?;
+                    separate_info.critic_optimizer.step(critic_grad)?;
                 }
             },
         }

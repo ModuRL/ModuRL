@@ -5,7 +5,7 @@
 //! Candle and ModuRL Gym are intentionally left explicit.
 
 pub use crate::agents::{
-    Agent, ReplayDeviceStrategy,
+    Agent, ReplayDeviceStrategy, ReplayStorageConfig,
     a2c::{
         A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
         A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
@@ -30,8 +30,7 @@ pub use crate::agents::{
         DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
         SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
         SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
-        SACStabilizationConfiguration, ScalarStateActionCritic, aggregate_critic_values,
-        sac_alpha_loss, sac_entropy_change_loss,
+        ScalarStateActionCritic,
     },
 };
 pub use crate::distributions::{

@@ -294,7 +294,9 @@ fn dqn(
             .target_update_interval(DQN_TARGET_UPDATE_INTERVAL)
             .training_horizon(warmup_steps + measured_steps)
             .epsilon_schedule(ConstantSchedule::new(0.1))
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device.clone(),
+            )))
             .build(),
     )?;
     debug_result(agent.learn(&mut env, warmup_steps))?;
@@ -425,7 +427,9 @@ fn sac(
             .gamma(0.99)
             .tau(0.005)
             .training_horizon(warmup_steps + measured_steps)
-            .device_strategy(ReplayDeviceStrategy::OneDevice(device.clone()))
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device.clone(),
+            )))
             .build(),
     )?;
     debug_result(agent.learn(&mut env, warmup_steps))?;

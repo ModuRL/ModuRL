@@ -7,23 +7,22 @@
 use std::{fmt::Debug, marker::PhantomData, ops::Deref};
 
 use bon::bon;
-use candle_core::{DType, IndexOp, Tensor};
+use candle_core::{DType, Tensor};
 use candle_nn::{Optimizer, VarMap};
 
 use super::{
-    ReplayDeviceStrategy,
+    ReplayStorageConfig,
     sac::{SACCritic, SACCriticError},
 };
 use crate::{
-    buffers::{
-        experience,
-        experience_replay::{ExperienceReplay, ExperienceReplayError},
+    buffers::experience_replay::{
+        AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
+        ReplayStorageError, TensorReplayColumn, replay_index_tensor,
     },
     gym::{MultiGym, MultiGymStepInfo},
     objectives::bellman_targets,
     parameter_schedule::ScheduleProgress,
     spaces::{BoxSpace, Space},
-    tensor_operations::tensor_has_nan,
 };
 
 pub mod ddpg;
@@ -77,6 +76,7 @@ where
 {
     /// A Candle tensor operation failed.
     TensorError(candle_core::Error),
+    ReplayStorageError(ReplayStorageError),
     /// Critic construction, aggregation, or optimization failed.
     CriticError(SACCriticError),
     /// An agent builder value violated its configuration contract.
@@ -258,15 +258,6 @@ pub(crate) enum CriticCountRequirement {
     NonEmpty,
 }
 
-#[derive(Clone)]
-struct DeterministicExperience {
-    state: Tensor,
-    next_state: Tensor,
-    action: Tensor,
-    reward: f32,
-    terminated: f32,
-}
-
 struct DeterministicBatch {
     states: Tensor,
     next_states: Tensor,
@@ -275,39 +266,138 @@ struct DeterministicBatch {
     terminated: Tensor,
 }
 
-impl experience::Experience for DeterministicExperience {
-    type Batch = DeterministicBatch;
-    type Error = candle_core::Error;
+impl<GE: Debug, SE: Debug> From<ReplayStorageError> for DeterministicActorCriticError<GE, SE> {
+    fn from(error: ReplayStorageError) -> Self {
+        Self::ReplayStorageError(error)
+    }
+}
 
-    fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
-        let first = experiences
-            .first()
-            .expect("cannot batch an empty deterministic replay sample");
-        let device = first.state.device();
-        let dtype = first.state.dtype();
-        Ok(DeterministicBatch {
-            states: experience::stack_tensor_field(experiences, |item| item.state.clone())?,
-            next_states: experience::stack_tensor_field(experiences, |item| {
-                item.next_state.clone()
-            })?,
-            actions: experience::stack_tensor_field(experiences, |item| item.action.clone())?,
-            rewards: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|item| item.reward)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
-            terminated: Tensor::new(
-                experiences
-                    .iter()
-                    .map(|item| item.terminated)
-                    .collect::<Vec<_>>(),
-                device,
-            )?
-            .to_dtype(dtype)?,
+impl<GE: Debug, SE: Debug> From<ExperienceReplayError<ReplayStorageError>>
+    for DeterministicActorCriticError<GE, SE>
+{
+    fn from(error: ExperienceReplayError<ReplayStorageError>) -> Self {
+        Self::ReplayStorageError(error.into())
+    }
+}
+
+struct DeterministicReplayInsert {
+    states: Tensor,
+    next_states: Tensor,
+    actions: Tensor,
+    rewards: Tensor,
+    terminated: Tensor,
+    truncateds: Vec<bool>,
+}
+
+struct DeterministicReplayStorage {
+    observations: AlignedObservationReplay,
+    actions: TensorReplayColumn,
+    rewards: TensorReplayColumn,
+    terminated: TensorReplayColumn,
+    capacity: usize,
+    device: candle_core::Device,
+}
+
+impl DeterministicReplayStorage {
+    fn new(
+        capacity: usize,
+        state_shape: &[usize],
+        action_shape: &[usize],
+        observation_dtype: DType,
+        dtype: DType,
+        device: candle_core::Device,
+    ) -> Result<Self, ReplayStorageError> {
+        Ok(Self {
+            observations: AlignedObservationReplay::new(
+                capacity,
+                state_shape,
+                observation_dtype,
+                &device,
+            ),
+            actions: TensorReplayColumn::new(capacity, action_shape, dtype, &device)?,
+            rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            capacity,
+            device,
         })
+    }
+
+    fn initialize_environment_count(
+        &mut self,
+        environment_count: usize,
+    ) -> Result<(), ReplayStorageError> {
+        self.observations
+            .initialize_environment_count(environment_count)
+    }
+}
+
+impl ReplayStorage for DeterministicReplayStorage {
+    type Insert = DeterministicReplayInsert;
+    type Batch = DeterministicBatch;
+    type Error = ReplayStorageError;
+
+    fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
+        let prepared = DeterministicReplayInsert {
+            states: transitions.states,
+            next_states: transitions.next_states,
+            actions: self.actions.prepare(&transitions.actions)?,
+            rewards: self.rewards.prepare(&transitions.rewards)?,
+            terminated: self.terminated.prepare(&transitions.terminated)?,
+            truncateds: transitions.truncateds,
+        };
+        let count = prepared.states.dim(0)?;
+        for (name, tensor) in [
+            ("actions", &prepared.actions),
+            ("rewards", &prepared.rewards),
+            ("terminated", &prepared.terminated),
+        ] {
+            let actual = tensor.dim(0)?;
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field: name,
+                    expected: count,
+                    actual,
+                });
+            }
+        }
+        self.observations.insert(
+            start,
+            &prepared.states,
+            &prepared.next_states,
+            &prepared.truncateds,
+        )?;
+        for (column, tensor) in [
+            (&self.actions, &prepared.actions),
+            (&self.rewards, &prepared.rewards),
+            (&self.terminated, &prepared.terminated),
+        ] {
+            column.write(start, tensor)?;
+        }
+        Ok(count)
+    }
+
+    fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
+        let (states, next_states) = self.observations.gather(indices)?;
+        let indices = replay_index_tensor(indices, &self.device)?;
+        Ok(DeterministicBatch {
+            states,
+            next_states,
+            actions: self.actions.gather(&indices)?,
+            rewards: self.rewards.gather(&indices)?,
+            terminated: self.terminated.gather(&indices)?,
+        })
+    }
+
+    fn sampleable_len(&self, len: usize) -> usize {
+        self.observations.sampleable_len(len)
+    }
+
+    fn sample_index(&self, index: usize, len: usize) -> usize {
+        self.observations.sample_index(index, len)
     }
 }
 
@@ -349,14 +439,14 @@ where
     strategy: S,
     action_space: BoxSpace,
     observation_space: Box<dyn Space<Error = SE>>,
-    replay: ExperienceReplay<DeterministicExperience>,
+    replay: ExperienceReplay<DeterministicReplayInsert, DeterministicReplayStorage>,
     gamma: f64,
     tau: f64,
     exploration_noise: f64,
     training_start: usize,
     update_frequency: usize,
     schedule_progress: ScheduleProgress,
-    device_strategy: ReplayDeviceStrategy,
+    replay_storage_config: ReplayStorageConfig,
     optimization_steps: usize,
     dtype: DType,
     _errors: PhantomData<GE>,
@@ -382,7 +472,7 @@ where
         strategy: S,
         action_space: BoxSpace,
         observation_space: Box<dyn Space<Error = SE>>,
-        device_strategy: ReplayDeviceStrategy,
+        replay_storage_config: ReplayStorageConfig,
         #[builder(default = 0.99)] gamma: f64,
         #[builder(default = 0.005)] tau: f64,
         #[builder(default = 0.1)] exploration_noise: f64,
@@ -412,6 +502,19 @@ where
             .training_horizon(training_horizon)
             .call()?;
         copy_actor_var_map(online_actor_vars, target_actor_vars, 1.0)?;
+        let storage_device = replay_storage_config.storage_device();
+        let observation_sample = observation_space
+            .sample(&storage_device)
+            .map_err(DeterministicActorCriticError::SpaceError)?;
+        let action_sample = action_space.sample(&storage_device)?;
+        let replay_storage = DeterministicReplayStorage::new(
+            replay_capacity,
+            observation_sample.dims(),
+            action_sample.dims(),
+            replay_storage_config.observation_dtype(),
+            dtype,
+            storage_device.clone(),
+        )?;
         Ok(Self {
             online_actor,
             target_actor,
@@ -422,18 +525,14 @@ where
             strategy,
             action_space,
             observation_space,
-            replay: ExperienceReplay::new(
-                replay_capacity,
-                batch_size,
-                device_strategy.storage_device(),
-            ),
+            replay: ExperienceReplay::with_storage(replay_storage, batch_size),
             gamma,
             tau,
             exploration_noise,
             training_start,
             update_frequency,
             schedule_progress: ScheduleProgress::new(training_horizon),
-            device_strategy,
+            replay_storage_config,
             optimization_steps: 0,
             dtype,
             _errors: PhantomData,
@@ -583,7 +682,9 @@ where
         &self,
         observation: &Tensor,
     ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        let observation = observation.to_dtype(self.dtype)?;
+        let observation = observation
+            .to_device(&self.replay_storage_config.optimization_device())?
+            .to_dtype(self.dtype)?;
         let actions = self.online_actor.forward(&observation)?;
         Ok(self.action_space.tensor_from_neurons(&actions)?)
     }
@@ -594,7 +695,9 @@ where
         &self,
         observation: &Tensor,
     ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        let observation = observation.to_dtype(self.dtype)?;
+        let observation = observation
+            .to_device(&self.replay_storage_config.optimization_device())?
+            .to_dtype(self.dtype)?;
         let actions = self.online_actor.forward(&observation)?;
         let actions = add_gaussian_noise(&actions, self.exploration_noise, None)?;
         Ok(self.action_space.tensor_from_neurons(&actions)?)
@@ -607,7 +710,7 @@ where
         let actions = (0..batch_size)
             .map(|_| {
                 self.action_space
-                    .sample(&self.device_strategy.optimization_device())
+                    .sample(&self.replay_storage_config.optimization_device())
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Tensor::stack(&actions, 0)?.to_dtype(self.dtype)?)
@@ -619,12 +722,8 @@ where
         if self.replay.len() < self.replay.get_batch_size() {
             return Ok(None);
         }
-        let mut batch = match self.replay.sample() {
-            Ok(batch) => batch,
-            Err(ExperienceReplayError::TensorError(error))
-            | Err(ExperienceReplayError::ExperienceError(error)) => return Err(error.into()),
-        };
-        let optimization_device = self.device_strategy.optimization_device();
+        let mut batch = self.replay.sample()?;
+        let optimization_device = self.replay_storage_config.optimization_device();
         for tensor in [
             &mut batch.states,
             &mut batch.next_states,
@@ -632,9 +731,10 @@ where
             &mut batch.rewards,
             &mut batch.terminated,
         ] {
-            *tensor = tensor.to_device(&optimization_device)?;
+            *tensor = tensor
+                .to_device(&optimization_device)?
+                .to_dtype(self.dtype)?;
         }
-        batch.actions = batch.actions.to_dtype(self.dtype)?;
         Ok(Some(batch))
     }
 
@@ -682,9 +782,7 @@ where
         for critic in &mut self.critics {
             let predicted = critic.online_replay_values(&batch.states, &batch.actions)?;
             let loss = candle_nn::loss::mse(&predicted, targets)?;
-            if !tensor_has_nan(&loss)? {
-                critic.optimizer_mut().backward_step(&loss)?;
-            }
+            critic.optimizer_mut().backward_step(&loss)?;
             losses.push(loss);
             q_values.push(predicted);
         }
@@ -712,9 +810,7 @@ where
             .collect::<candle_core::Result<Vec<_>>>()?;
         let values = self.strategy.aggregate_actor_values(values)?;
         let loss = values.mean_all()?.neg()?;
-        if !tensor_has_nan(&loss)? {
-            self.actor_optimizer.backward_step(&loss)?;
-        }
+        self.actor_optimizer.backward_step(&loss)?;
         Ok(ActorUpdate {
             loss,
             q_values: values,
@@ -792,14 +888,13 @@ where
             first_timestep,
         } = transitions;
         let environment_count = dones.len();
-        let state_rows = states.chunk(environment_count, 0)?;
-        let next_state_rows = next_states.chunk(environment_count, 0)?;
-        let action_rows = actions.chunk(environment_count, 0)?;
-        let reward_rows = rewards.chunk(environment_count, 0)?;
-        let storage_device = self.device_strategy.storage_device();
+        let reward_values = rewards
+            .to_dtype(DType::F32)?
+            .to_device(&candle_core::Device::Cpu)?
+            .to_vec1::<f32>()?;
         let mut completed_episodes = Vec::new();
         for environment_index in 0..environment_count {
-            let reward = reward_rows[environment_index].i(0)?.to_scalar::<f32>()?;
+            let reward = reward_values[environment_index];
             let collection_timestep = first_timestep + environment_index + 1;
             if let Some(entry) = episodes.record(
                 environment_index,
@@ -810,23 +905,21 @@ where
             ) {
                 completed_episodes.push(entry);
             }
-            self.replay.add(DeterministicExperience {
-                state: state_rows[environment_index]
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                next_state: next_state_rows[environment_index]
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                action: action_rows[environment_index]
-                    .squeeze(0)?
-                    .detach()
-                    .to_device(&storage_device)?,
-                reward,
-                terminated: f32::from(dones[environment_index]),
-            });
         }
+        let storage_device = self.replay_storage_config.storage_device();
+        self.replay.add(DeterministicReplayInsert {
+            states: states.clone(),
+            next_states: next_states.clone(),
+            actions: actions.clone(),
+            rewards: rewards.clone(),
+            terminated: Tensor::from_vec(
+                dones.iter().map(|&done| u8::from(done)).collect::<Vec<_>>(),
+                environment_count,
+                &storage_device,
+            )?
+            .to_dtype(self.dtype)?,
+            truncateds: truncateds.to_vec(),
+        })?;
         Ok(completed_episodes)
     }
 
@@ -837,11 +930,14 @@ where
         logger: &mut dyn DeterministicActorCriticLogger<I>,
     ) -> Result<(), DeterministicActorCriticError<GE, SE>> {
         let mut elapsed_timesteps = 0;
+        let environment_count = env.num_envs();
+        self.replay
+            .storage_mut()
+            .initialize_environment_count(environment_count)?;
         let mut observations = env
             .reset()
             .map_err(DeterministicActorCriticError::GymError)?
             .to_dtype(self.dtype)?;
-        let environment_count = env.num_envs();
         let mut episodes = EpisodeTracker::new(environment_count);
         while elapsed_timesteps < num_timesteps {
             let first_timestep = self.schedule_progress.elapsed_steps();

@@ -13,6 +13,7 @@ use modurl::prelude::*;
 use modurl_logger::{Aggregation, AggregationConfig, Logger, TensorBoardLogger, TerminalLogger};
 
 const DIAGNOSTIC_SMOOTHING_WINDOW: usize = 10;
+const DQN_LOG_INTERVAL: usize = 100;
 const LOSS_SMOOTHING_WINDOW: usize = 100;
 const REWARD_SMOOTHING_WINDOW: usize = 25;
 const EPISODE_SMOOTHING_WINDOW: usize = 100;
@@ -45,12 +46,31 @@ fn with_episode_smoothing(config: AggregationConfig) -> AggregationConfig {
     )
 }
 
-pub struct DQNGrapher {
+pub struct DQNGrapher<EpisodeSource = AgentEpisodeBoundaries> {
     terminal: TerminalLogger,
+    pending_loss: Option<Tensor>,
+    pending_q_value: Option<Tensor>,
+    pending_updates: usize,
+    pending_timestep: usize,
+    pending_epsilon: f32,
+    episode_source: PhantomData<EpisodeSource>,
 }
 
-impl DQNGrapher {
+impl DQNGrapher<AgentEpisodeBoundaries> {
     pub fn new() -> Self {
+        Self::new_with_episode_source()
+    }
+}
+
+#[cfg(feature = "atari-environment")]
+impl DQNGrapher<RecordedEpisodeBoundaries> {
+    pub fn atari() -> Self {
+        Self::new_with_episode_source()
+    }
+}
+
+impl<EpisodeSource> DQNGrapher<EpisodeSource> {
+    fn new_with_episode_source() -> Self {
         let aggregation = with_episode_smoothing(with_metric_window(
             standard_aggregation(),
             &["DQN Loss"],
@@ -58,22 +78,40 @@ impl DQNGrapher {
         ));
         Self {
             terminal: TerminalLogger::new(aggregation).with_live_updates(),
+            pending_loss: None,
+            pending_q_value: None,
+            pending_updates: 0,
+            pending_timestep: 0,
+            pending_epsilon: 0.0,
+            episode_source: PhantomData,
         }
     }
 
     pub fn display(mut self) {
+        self.flush_updates();
         self.terminal.display();
     }
-}
 
-impl DQNLogger for DQNGrapher {
-    fn log(&mut self, entry: &QLogEntry) {
-        let loss = entry.loss.mean_all().unwrap();
-        let epsilon = Tensor::new(entry.epsilon as f32, &Device::Cpu).unwrap();
-        let mean_q_value = entry.q_values.mean_all().unwrap();
+    /// Adds a scalar `value` shaped `[]` to the detached scalar accumulator.
+    fn accumulate(total: &mut Option<Tensor>, value: Tensor) {
+        *total = Some(match total.take() {
+            Some(total) => (&total + &value).unwrap().detach(),
+            None => value.detach(),
+        });
+    }
+
+    fn flush_updates(&mut self) {
+        if self.pending_updates == 0 {
+            return;
+        }
+
+        let count = self.pending_updates as f64;
+        let loss = (self.pending_loss.take().unwrap() / count).unwrap();
+        let mean_q_value = (self.pending_q_value.take().unwrap() / count).unwrap();
+        let epsilon = Tensor::new(self.pending_epsilon, &Device::Cpu).unwrap();
         self.terminal
             .log(
-                entry.collection_timestep,
+                self.pending_timestep,
                 &[
                     ("DQN Loss", &loss),
                     ("Exploration Epsilon", &epsilon),
@@ -81,21 +119,76 @@ impl DQNLogger for DQNGrapher {
                 ],
             )
             .unwrap();
+        self.pending_updates = 0;
     }
 
-    fn log_collection(&mut self, entry: &QCollectionLogEntry) {
+    fn log_episode(&mut self, timestep: usize, episode_return: f32, episode_length: usize) {
+        let episode_return = Tensor::new(episode_return, &Device::Cpu).unwrap();
+        let episode_length = Tensor::new(episode_length as f32, &Device::Cpu).unwrap();
+        self.terminal
+            .log(
+                timestep,
+                &[
+                    (EPISODE_RETURN_METRIC, &episode_return),
+                    (EPISODE_LENGTH_METRIC, &episode_length),
+                ],
+            )
+            .unwrap();
+    }
+
+    fn log_update(&mut self, entry: &QLogEntry) {
+        let loss = entry.loss.mean_all().unwrap();
+        let mean_q_value = entry.q_values.mean_all().unwrap();
+        Self::accumulate(&mut self.pending_loss, loss);
+        Self::accumulate(&mut self.pending_q_value, mean_q_value);
+        self.pending_updates += 1;
+        self.pending_timestep = entry.collection_timestep;
+        self.pending_epsilon = entry.epsilon as f32;
+        if self.pending_updates == DQN_LOG_INTERVAL {
+            self.flush_updates();
+        }
+    }
+}
+
+impl<I> DQNLogger<I> for DQNGrapher<AgentEpisodeBoundaries> {
+    fn log(&mut self, entry: &QLogEntry) {
+        self.log_update(entry);
+    }
+
+    fn log_collection(&mut self, entry: &QCollectionLogEntry<I>) {
+        self.pending_timestep = self.pending_timestep.max(entry.collection_timestep);
+        // Update logs may have already advanced the monotonic logger to the batch endpoint.
         for episode in &entry.completed_episodes {
-            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
-            self.terminal
-                .log(
-                    episode.collection_timestep,
-                    &[
-                        (EPISODE_RETURN_METRIC, &episode_return),
-                        (EPISODE_LENGTH_METRIC, &episode_length),
-                    ],
-                )
-                .unwrap();
+            self.log_episode(
+                entry.collection_timestep,
+                episode.episode_return,
+                episode.episode_length,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "atari-environment")]
+impl<I> DQNLogger<RawRewardInfo<EpisodeStatisticsInfo<I>>>
+    for DQNGrapher<RecordedEpisodeBoundaries>
+{
+    fn log(&mut self, entry: &QLogEntry) {
+        self.log_update(entry);
+    }
+
+    fn log_collection(
+        &mut self,
+        entry: &QCollectionLogEntry<RawRewardInfo<EpisodeStatisticsInfo<I>>>,
+    ) {
+        self.pending_timestep = self.pending_timestep.max(entry.collection_timestep);
+        for env_info in &entry.infos {
+            if let Some(episode) = env_info.inner.completed_episode {
+                self.log_episode(
+                    entry.collection_timestep,
+                    episode.episode_return,
+                    episode.episode_length,
+                );
+            }
         }
     }
 }
@@ -638,6 +731,139 @@ impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dqn_metrics_are_reduced_before_periodic_host_logging() {
+        let device = Device::Cpu;
+        let mut grapher = DQNGrapher::new();
+        for update_index in 0..DQN_LOG_INTERVAL {
+            DQNLogger::<()>::log(
+                &mut grapher,
+                &QLogEntry {
+                    loss: Tensor::new(2.0f32, &device).unwrap(),
+                    epsilon: 0.1,
+                    learning_rate: 1e-4,
+                    q_values: Tensor::new(&[1.0f32, 3.0], &device).unwrap(),
+                    replay_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                    update_index,
+                    collection_timestep: update_index + 1,
+                },
+            );
+            assert_eq!(
+                grapher.pending_updates,
+                (update_index + 1) % DQN_LOG_INTERVAL
+            );
+        }
+
+        grapher.terminal.finish().unwrap();
+        assert_eq!(
+            grapher.terminal.series("DQN Loss").unwrap(),
+            &[(DQN_LOG_INTERVAL, 2.0)]
+        );
+        assert_eq!(
+            grapher.terminal.series("Mean Selected Q-Value").unwrap(),
+            &[(DQN_LOG_INTERVAL, 2.0)]
+        );
+    }
+
+    #[test]
+    fn dqn_episode_metrics_do_not_go_backwards_after_a_batch_update() {
+        let device = Device::Cpu;
+        let mut grapher = DQNGrapher::new();
+        DQNLogger::<()>::log(
+            &mut grapher,
+            &QLogEntry {
+                loss: Tensor::new(1.0f32, &device).unwrap(),
+                epsilon: 0.1,
+                learning_rate: 1e-4,
+                q_values: Tensor::new(&[1.0f32], &device).unwrap(),
+                replay_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                update_index: 0,
+                collection_timestep: 80_000,
+            },
+        );
+        DQNLogger::<()>::log_collection(
+            &mut grapher,
+            &QCollectionLogEntry {
+                collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                infos: vec![()],
+                epsilon: 0.1,
+                collection_timestep: 80_000,
+                completed_episodes: vec![QEpisodeLogEntry {
+                    environment_index: 3,
+                    episode_return: 10.0,
+                    episode_length: 100,
+                    terminated: true,
+                    truncated: false,
+                    collection_timestep: 79_996,
+                }],
+            },
+        );
+    }
+
+    #[cfg(feature = "atari-environment")]
+    #[test]
+    fn atari_dqn_logs_recorded_full_game_return_instead_of_life_return() {
+        let device = Device::Cpu;
+        let mut grapher = DQNGrapher::atari();
+        let life_boundary = QCollectionLogEntry {
+            collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+            infos: vec![RawRewardInfo {
+                inner: EpisodeStatisticsInfo {
+                    inner: (),
+                    completed_episode: None,
+                },
+                raw_reward: Some(7.0),
+            }],
+            epsilon: 0.01,
+            collection_timestep: 1,
+            completed_episodes: vec![QEpisodeLogEntry {
+                environment_index: 0,
+                episode_return: 21.0,
+                episode_length: 100,
+                terminated: true,
+                truncated: false,
+                collection_timestep: 1,
+            }],
+        };
+        DQNLogger::log_collection(&mut grapher, &life_boundary);
+        assert!(grapher.terminal.series(EPISODE_RETURN_METRIC).is_none());
+
+        let game_boundary = QCollectionLogEntry {
+            collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+            infos: vec![RawRewardInfo {
+                inner: EpisodeStatisticsInfo {
+                    inner: (),
+                    completed_episode: Some(EpisodeStatistics {
+                        episode_return: 367.0,
+                        episode_length: 10_000,
+                    }),
+                },
+                raw_reward: Some(7.0),
+            }],
+            epsilon: 0.01,
+            collection_timestep: 2,
+            completed_episodes: vec![QEpisodeLogEntry {
+                environment_index: 0,
+                episode_return: 18.0,
+                episode_length: 80,
+                terminated: true,
+                truncated: false,
+                collection_timestep: 2,
+            }],
+        };
+        DQNLogger::log_collection(&mut grapher, &game_boundary);
+
+        grapher.terminal.finish().unwrap();
+        assert_eq!(
+            grapher.terminal.series(EPISODE_RETURN_METRIC).unwrap(),
+            &[(2, 367.0)]
+        );
+        assert_eq!(
+            grapher.terminal.series(EPISODE_LENGTH_METRIC).unwrap(),
+            &[(2, 10_000.0)]
+        );
+    }
 
     #[test]
     fn shared_smoothing_windows_have_expected_lengths() {

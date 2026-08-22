@@ -107,7 +107,9 @@ let mut agent = DDPGAgent::builder()
     .critic(critic)
     .action_space(action_space)
     .observation_space(observation_space)
-    .device_strategy(ReplayDeviceStrategy::OneDevice(device))
+    .replay_storage_config(ReplayStorageConfig::new(
+        ReplayDeviceStrategy::OneDevice(device),
+    ))
     .gamma(0.99)
     .tau(0.005)
     .exploration_noise(0.1)
@@ -133,7 +135,7 @@ Important defaults and constraints are:
 | `gamma` | `0.99` | Finite and between zero and one |
 | `tau` | `0.005` | Target-network update coefficient from zero to one |
 | `exploration_noise` | `0.1` | Non-negative Gaussian standard deviation |
-| `replay_capacity` | `1_000_000` | At least `batch_size` |
+| `replay_capacity` | `1_000_000` | At least `batch_size`; at first `learn`, larger than and divisible by `env.num_envs()` |
 | `batch_size` | `256` | Nonzero |
 | `update_frequency` | `1` | Nonzero transition interval |
 | `training_start` | `1_000` | Random-action transitions before optimization |

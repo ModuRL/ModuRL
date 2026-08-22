@@ -57,7 +57,7 @@ scope. `Agent` and `MultiGym` are traits that make `.learn()`,
 
 ### A Few Terms
 
-Before we build the program, it is worth separating two similar names.
+Before we build the program, it is worth separating two similar names; agent and actor.
 
 In ModuRL, an `Agent` is the object that can act in an environment and learn
 from it. For this example, the agent is a `PPOAgent`. It contains the PPO

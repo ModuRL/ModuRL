@@ -69,17 +69,6 @@ pub(crate) fn normalize_tensor(t: &Tensor) -> Result<Tensor, candle_core::Error>
     diff / std_with_eps
 }
 
-/// Checks an arbitrarily shaped tensor for NaN values.
-///
-/// The comparison and reduction remain on the tensor's device; only the final
-/// scalar result is transferred to the host.
-pub fn tensor_has_nan(t: &Tensor) -> Result<bool, candle_core::Error> {
-    if !t.dtype().is_float() || t.elem_count() == 0 {
-        return Ok(false);
-    }
-    Ok(t.ne(t)?.max_all()?.to_scalar::<u8>()? != 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,20 +120,5 @@ mod tests {
         assert!((original_norm - expected_norm).abs() < 1e-6);
         assert!((clipped[0] - expected_scale).abs() < 1e-6);
         assert!((clipped[1] - expected_scale).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_contains_nan() {
-        let a = Tensor::full(1.0, &[2, 2], &candle_core::Device::Cpu).unwrap();
-        assert!(!tensor_has_nan(&a).unwrap());
-        let b = Tensor::full(f32::NAN, &[2, 2], &candle_core::Device::Cpu).unwrap();
-        assert!(tensor_has_nan(&b).unwrap());
-        let c =
-            Tensor::from_vec(vec![1.0, f32::NAN, 3.0], &[3], &candle_core::Device::Cpu).unwrap();
-        assert!(tensor_has_nan(&c).unwrap());
-        let d = Tensor::from_vec(vec![1.0_f64, f64::NAN], 2, &candle_core::Device::Cpu).unwrap();
-        assert!(tensor_has_nan(&d).unwrap());
-        let integers = Tensor::from_vec(vec![1_u32, 2], 2, &candle_core::Device::Cpu).unwrap();
-        assert!(!tensor_has_nan(&integers).unwrap());
     }
 }
