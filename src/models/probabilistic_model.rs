@@ -35,16 +35,6 @@ pub trait ExpectationPolicy: ProbabilisticPolicy {
         samples: NonZeroUsize,
     ) -> Result<ExpectationTerms, Self::Error>;
 
-    /// Builds expectation terms for `state` shaped
-    /// `[batch_size, ...state_shape]`.
-    fn expectation_terms(
-        &self,
-        state: &Tensor,
-        samples: NonZeroUsize,
-    ) -> Result<ExpectationTerms, Self::Error> {
-        self.expectation(state, samples)
-    }
-
     /// Returns the default target entropy for `state` shaped
     /// `[batch_size, ...state_shape]`.
     fn default_target_entropy(&self, state: &Tensor) -> Result<f64, Self::Error>;
@@ -82,10 +72,6 @@ where
             module: Box::new(module),
             distribution,
         }
-    }
-
-    pub fn new_with_distribution(module: impl Module + 'static, distribution: D) -> Self {
-        Self::with_distribution(module, distribution)
     }
 
     pub fn distribution(&self) -> &D {

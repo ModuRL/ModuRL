@@ -30,7 +30,7 @@ pub use crate::agents::{
         DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
         SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
         SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
-        ScalarStateActionCritic, aggregate_critic_values, sac_alpha_loss, sac_entropy_change_loss,
+        ScalarStateActionCritic,
     },
 };
 pub use crate::distributions::{

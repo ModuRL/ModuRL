@@ -105,10 +105,10 @@ impl Particle {
     }
 }
 
-pub struct ContactDetector {
-    pub game_over: bool,
+struct ContactDetector {
+    game_over: bool,
 
-    pub legs_ground_contact: [bool; 2],
+    legs_ground_contact: [bool; 2],
 }
 
 #[cfg(feature = "rendering")]
@@ -123,7 +123,7 @@ struct SideEngineParticleParams<'a> {
 }
 
 impl ContactDetector {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             game_over: false,
             legs_ground_contact: [false; 2],

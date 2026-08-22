@@ -293,7 +293,7 @@ where
 
     /// Evaluates online replay values for states `[batch, ...state_shape]` and
     /// actions `[batch, ...action_shape]`, returning `[batch]`.
-    pub fn online_replay_values(
+    pub(crate) fn online_replay_values(
         &self,
         states: &Tensor,
         actions: &Tensor,
@@ -301,21 +301,10 @@ where
         self.online_network.replay_values(states, actions)
     }
 
-    /// Evaluates online policy values for states `[batch, ...state_shape]` and
-    /// candidates `[batch, candidates, ...action_shape]`, returning
-    /// `[batch, candidates]`.
-    pub fn online_policy_values(
-        &self,
-        states: &Tensor,
-        actions: &Tensor,
-    ) -> candle_core::Result<Tensor> {
-        self.online_network.policy_values(states, actions)
-    }
-
     /// Evaluates actor-loss values for states `[batch, ...state_shape]` and
     /// candidates `[batch, candidates, ...action_shape]`, returning
     /// `[batch, candidates]`.
-    pub fn online_actor_values(
+    pub(crate) fn online_actor_values(
         &self,
         states: &Tensor,
         actions: &Tensor,
@@ -326,7 +315,7 @@ where
     /// Evaluates detached target values for states `[batch, ...state_shape]`
     /// and candidates `[batch, candidates, ...action_shape]`, returning
     /// `[batch, candidates]`.
-    pub fn target_policy_values(
+    pub(crate) fn target_policy_values(
         &self,
         states: &Tensor,
         actions: &Tensor,
@@ -337,7 +326,7 @@ where
     /// Evaluates detached target replay values for states
     /// `[batch, ...state_shape]` and actions `[batch, ...action_shape]`,
     /// returning `[batch]`.
-    pub fn target_replay_values(
+    pub(crate) fn target_replay_values(
         &self,
         states: &Tensor,
         actions: &Tensor,
@@ -345,19 +334,19 @@ where
         Ok(self.target_network.replay_values(states, actions)?.detach())
     }
 
-    pub fn optimizer(&self) -> &O {
+    pub(crate) fn optimizer(&self) -> &O {
         &self.optimizer
     }
 
-    pub fn optimizer_mut(&mut self) -> &mut O {
+    pub(crate) fn optimizer_mut(&mut self) -> &mut O {
         &mut self.optimizer
     }
 
-    pub fn hard_update(&mut self) -> Result<(), SACCriticError> {
+    pub(crate) fn hard_update(&mut self) -> Result<(), SACCriticError> {
         copy_var_map(self.online_vars, self.target_vars, 1.0)
     }
 
-    pub fn polyak_update(&mut self, tau: f64) -> Result<(), SACCriticError> {
+    pub(crate) fn polyak_update(&mut self, tau: f64) -> Result<(), SACCriticError> {
         if !tau.is_finite() || !(0.0..=1.0).contains(&tau) {
             return Err(SACCriticError::InvalidPolyakCoefficient { tau });
         }
@@ -434,7 +423,7 @@ pub enum SACCriticAggregationMode {
 
 /// Differentiably aggregates critic tensors `values[i]`, each shaped
 /// `value_shape`, and returns one tensor shaped `value_shape`.
-pub fn aggregate_critic_values(
+pub(crate) fn aggregate_critic_values(
     values: &[Tensor],
     mode: SACCriticAggregationMode,
 ) -> Result<Tensor, SACCriticError> {
@@ -483,7 +472,7 @@ pub fn aggregate_critic_values(
 
 /// Returns a scalar temperature loss from scalar `log_alpha` shaped `[]` and
 /// `expected_log_probability` shaped `[batch]`.
-pub fn sac_alpha_loss(
+fn sac_alpha_loss(
     log_alpha: &Tensor,
     expected_log_probability: &Tensor,
     target_entropy: f64,
@@ -494,7 +483,7 @@ pub fn sac_alpha_loss(
 
 /// Returns a scalar entropy-drift loss from `current_entropy`,
 /// `collection_entropy`, and `weights`, all shaped `[batch]`.
-pub fn sac_entropy_change_loss(
+fn sac_entropy_change_loss(
     current_entropy: &Tensor,
     collection_entropy: &Tensor,
     weights: &Tensor,
