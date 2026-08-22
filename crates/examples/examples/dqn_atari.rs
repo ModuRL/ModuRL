@@ -298,7 +298,9 @@ fn main() {
     #[cfg(not(feature = "cuda"))]
     let device_strategy = ReplayDeviceStrategy::OneDevice(device.clone());
 
-    let mut grapher = DQNGrapher::new();
+    // Use the statistics recorded inside episodic-life and reward-clipping so
+    // the reported return is the raw score for a complete game, as in CleanRL.
+    let mut grapher = DQNGrapher::atari();
     let mut agent = DQNAgent::builder()
         .dtype(DType::F32)
         .replay_dtype(DType::U8)
