@@ -1000,8 +1000,7 @@ where
         replay_storage_config: ReplayStorageConfig,
         /// Optional update and collection metric sink.
         logger: Option<&'a mut dyn SACLogger<I>>,
-        /// Explicit critic aggregation mode. This takes precedence over the
-        /// default of `Min`.
+        /// Critic aggregation mode. Defaults to `Min`.
         aggregation_mode: Option<SACCriticAggregationMode>,
         /// Coefficient for the replay-to-current entropy-change penalty.
         entropy_change_penalty: Option<f64>,
