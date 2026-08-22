@@ -441,14 +441,12 @@ where
         let observation = observation
             .to_device(&self.replay_storage_config.optimization_device())?
             .to_dtype(self.dtype)?;
-        let action_rng = &mut self.action_rng;
-        let online_q_network = &self.online_q_network;
         Ok(epsilon_greedy_actions(
             &observation,
             self.current_epsilon,
             &self.action_space,
-            action_rng,
-            |observations| online_q_network.forward(observations),
+            &mut self.action_rng,
+            |observations| self.online_q_network.forward(observations),
         )?)
     }
 

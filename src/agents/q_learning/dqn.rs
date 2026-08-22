@@ -105,9 +105,7 @@ where
         training_horizon: usize,
         logger: Option<&'a mut dyn DQNLogger<I>>,
         replay_storage_config: ReplayStorageConfig,
-        /// Floating-point dtype used for network inputs and optimization.
-        #[builder(default = candle_core::DType::F32)]
-        dtype: candle_core::DType,
+        #[builder(default = candle_core::DType::F32)] dtype: candle_core::DType,
     ) -> Result<Self, QAgentError<GE, SE>> {
         let inner = QLearningAgent::<'a, O, GE, SE, DQNTarget>::builder()
             .action_space(action_space)
