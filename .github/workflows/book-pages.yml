@@ -1,9 +1,11 @@
-name: Deploy development book
+name: Deploy versioned book
 
 on:
   push:
     branches:
       - master
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
     paths:
       - ".github/workflows/book-pages.yml"
       - "docs/**"
@@ -27,6 +29,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          # Always build /dev from master. Full history supplies every release
+          # tag used to reconstruct the immutable major/minor documentation.
+          ref: master
+          fetch-depth: 0
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
@@ -43,12 +50,73 @@ jobs:
           printf '%s\n' "$RUNNER_TEMP" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/mdbook" --version
 
-      - name: Build development book
+      - name: Build development and released books
         shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p _site/dev
           mdbook build docs --dest-dir "$GITHUB_WORKSPACE/_site/dev"
+
+          latest_series=""
+          declare -A built_series=()
+          series_order=()
+
+          while IFS= read -r tag; do
+            version="${tag#v}"
+            IFS=. read -r major minor patch <<< "$version"
+            series="$major.$minor"
+
+            # The newest patch tag supplies the docs for each major/minor line.
+            if [[ -n "${built_series[$series]+present}" ]]; then
+              continue
+            fi
+
+            worktree="$RUNNER_TEMP/modurl-docs-$series"
+            git worktree add --detach "$worktree" "$tag"
+
+            if [[ ! -f "$worktree/docs/book.toml" ]]; then
+              echo "Skipping $tag because it does not contain an mdBook"
+              git worktree remove --force "$worktree"
+              continue
+            fi
+
+            # Release tags retain the source configuration they were created
+            # with, so set the canonical URL for this versioned build.
+            sed -i \
+              "s|^site-url = .*|site-url = \"/ModuRL/$series/\"|" \
+              "$worktree/docs/book.toml"
+            mdbook build "$worktree/docs" \
+              --dest-dir "$GITHUB_WORKSPACE/_site/$series"
+            git worktree remove --force "$worktree"
+
+            built_series[$series]=1
+            series_order+=("$series")
+            if [[ -z "$latest_series" ]]; then
+              latest_series="$series"
+            fi
+          done < <(
+            git tag --list --sort=-version:refname |
+              grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true
+          )
+
           cp docs/site/index.html _site/index.html
+          if [[ -n "$latest_series" ]]; then
+            sed -i \
+              -e "s|\./dev/|./$latest_series/|g" \
+              -e "s|development version|latest stable version ($latest_series)|g" \
+              _site/index.html
+          else
+            latest_series="dev"
+          fi
+
+          {
+            printf '{"latest":"%s","versions":["dev"' "$latest_series"
+            for series in "${series_order[@]}"; do
+              printf ',"%s"' "$series"
+            done
+            printf ']}\n'
+          } > _site/versions.json
           touch _site/.nojekyll
 
       - name: Upload GitHub Pages artifact
@@ -58,7 +126,9 @@ jobs:
 
   deploy:
     name: Deploy book
-    if: github.ref == 'refs/heads/master'
+    if: >-
+      github.ref == 'refs/heads/master' ||
+      startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     permissions:

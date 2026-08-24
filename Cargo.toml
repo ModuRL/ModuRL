@@ -29,7 +29,7 @@ resolver = "3"
 rust-version = "1.88"
 authors = ["Ethan Almloff"]
 repository = "https://github.com/ModuRL/ModuRL"
-homepage = "https://modurl.github.io/ModuRL/dev/"
+homepage = "https://modurl.github.io/ModuRL/"
 
 [dependencies]
 bon = "3.7.2"
