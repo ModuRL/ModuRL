@@ -1,4 +1,4 @@
-# ModuRL
+# <img src="docs/modurl-logo-transparent.png" width="70px" height="70px" align="bottom" alt="ModuRL mascot icon"> ModuRL
 
 [![Workspace CI](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml/badge.svg)](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml)
 
