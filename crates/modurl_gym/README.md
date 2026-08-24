@@ -75,4 +75,4 @@ cargo doc -p modurl_gym --no-deps --open
 
 ## License
 
-`modurl_gym` is available under the [MIT License](../../LICENSE).
+`modurl_gym` is available under the [MIT License](LICENSE).

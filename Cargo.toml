@@ -2,6 +2,16 @@
 name = "modurl"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+authors.workspace = true
+description = "Modular reinforcement learning algorithms and utilities built on Candle"
+license = "MIT"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/modurl"
+readme = "README.md"
+keywords = ["reinforcement-learning", "machine-learning", "candle", "rl"]
+categories = ["artificial-intelligence", "science", "algorithms"]
 
 [workspace]
 members = [
@@ -14,6 +24,12 @@ members = [
     "crates/benches",
 ]
 resolver = "3"
+
+[workspace.package]
+rust-version = "1.88"
+authors = ["Ethan Almloff"]
+repository = "https://github.com/ModuRL/ModuRL"
+homepage = "https://modurl.github.io/ModuRL/dev/"
 
 [dependencies]
 bon = "3.7.2"

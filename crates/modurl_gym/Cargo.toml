@@ -2,6 +2,16 @@
 name = "modurl_gym"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+authors.workspace = true
+description = "Gymnasium-compatible classic-control and Box2D environments for ModuRL"
+license = "MIT"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/modurl_gym"
+readme = "README.md"
+keywords = ["reinforcement-learning", "gymnasium", "environments", "simulation"]
+categories = ["artificial-intelligence", "science", "simulation"]
 
 [dependencies]
 modurl = { version = "0.1.0", path = "../.." }

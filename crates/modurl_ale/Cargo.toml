@@ -2,13 +2,16 @@
 name = "modurl_ale"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version.workspace = true
+authors.workspace = true
 description = "Arcade Learning Environment environments for ModuRL"
 license = "GPL-2.0-only"
-repository = "https://github.com/ModuRL/modurl_ale"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/modurl_ale"
 readme = "README.md"
 keywords = ["reinforcement-learning", "atari", "ale"]
-categories = ["science"]
+categories = ["artificial-intelligence", "science", "simulation", "emulators"]
 build = "build.rs"
 include = [
     "/src/**",

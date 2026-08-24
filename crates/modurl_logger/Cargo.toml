@@ -2,6 +2,16 @@
 name = "modurl_logger"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
+authors.workspace = true
+description = "Terminal and TensorBoard metric logging for ModuRL"
+license = "MIT"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/modurl_logger"
+readme = "README.md"
+keywords = ["reinforcement-learning", "logging", "tensorboard", "visualization"]
+categories = ["artificial-intelligence", "development-tools::debugging", "visualization"]
 
 [dependencies]
 candle-core = "0.11.0"
