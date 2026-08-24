@@ -1,6 +1,9 @@
 # <img src="docs/modurl-logo-transparent.png" width="70px" height="70px" align="bottom" alt="ModuRL mascot icon"> ModuRL
 
 [![Workspace CI](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml/badge.svg)](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml)
+[![crates.io](https://img.shields.io/crates/v/modurl.svg)](https://crates.io/crates/modurl)
+[![docs.rs](https://docs.rs/modurl/badge.svg)](https://docs.rs/modurl)
+[![book](https://img.shields.io/github/actions/workflow/status/ModuRL/ModuRL/book-pages.yml?branch=master&label=book)](https://modurl.github.io/ModuRL/)
 
 `ModuRL` is a deep reinforcement learning framework for Rust, built on [Candle](https://github.com/huggingface/candle).
 
