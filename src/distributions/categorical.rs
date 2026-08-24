@@ -15,9 +15,11 @@ use crate::distributions::{DifferentiableExpectation, DistEval, Distribution, Ex
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CategoricalDistribution;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CategoricalDistributionError {
-    TensorError(candle_core::Error),
+    #[error("categorical tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("a categorical distribution requires at least one category")]
     NoCategories,
 }
 

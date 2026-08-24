@@ -83,11 +83,15 @@ pub struct AffineTransform {
     shift: Tensor,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum AffineTransformError {
-    TensorError(candle_core::Error),
+    #[error("affine transform tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("an affine transform scale cannot contain zero")]
     ZeroScale,
+    #[error("affine transform parameters must be finite")]
     NonFiniteParameters,
+    #[error("affine transform bounds must be finite and strictly ordered")]
     InvalidBounds,
 }
 
@@ -218,11 +222,14 @@ pub struct TransformedDistribution<D, T> {
     transform: T,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum TransformedDistributionError<DE, TE> {
-    DistributionError(DE),
-    TransformError(TE),
-    TensorError(candle_core::Error),
+    #[error("distribution failed: {0}")]
+    DistributionError(#[source] DE),
+    #[error("distribution transform failed: {0}")]
+    TransformError(#[source] TE),
+    #[error("transformed distribution tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
 }
 
 impl<DE, TE> From<candle_core::Error> for TransformedDistributionError<DE, TE> {

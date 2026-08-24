@@ -7,10 +7,12 @@ use candle_core::Tensor;
 use crate::gym::{Gym, ResetInfo, StepInfo};
 use crate::spaces::{BoxSpace, Space};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FrameStackGymError<E> {
-    GymError(E),
-    CandleError(candle_core::Error),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("failed to stack observation frames: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 /// Stacks the most recent observations along a leading frame dimension.
@@ -81,10 +83,12 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum MaxAndSkipGymError<E> {
-    GymError(E),
-    CandleError(candle_core::Error),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("failed to process skipped observations: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 /// Repeats each action, sums its rewards, and max-pools the final two observations.

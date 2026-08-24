@@ -48,11 +48,14 @@ pub struct AtariGym {
     timesteps: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum AtariGymError {
-    IoError(std::io::Error),
+    #[error("Atari ROM I/O failed: {0}")]
+    IoError(#[source] std::io::Error),
+    #[error("invalid Atari ROM path: {path}", path = .0.display())]
     InvalidRomPath(PathBuf),
-    CandleError(candle_core::Error),
+    #[error("Atari tensor operation failed: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 #[bon]

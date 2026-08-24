@@ -3,10 +3,13 @@ use rand::RngExt;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ExperienceReplayError<E> {
-    TensorError(candle_core::Error),
-    ExperienceError(E),
+    #[error("replay tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("replay experience failed: {0}")]
+    ExperienceError(#[source] E),
+    #[error("cannot insert {inserted} items into replay capacity {capacity}")]
     InsertionExceedsCapacity { capacity: usize, inserted: usize },
 }
 
@@ -16,35 +19,35 @@ impl<E> From<candle_core::Error> for ExperienceReplayError<E> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ReplayStorageError {
-    TensorError(candle_core::Error),
+    #[error("replay storage tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("replay item is missing its batch dimension")]
     MissingBatchDimension,
+    #[error("replay item shape {actual:?} does not match expected shape {expected:?}")]
     ItemShapeMismatch {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
+    #[error("replay field {field} has length {actual}, expected {expected}")]
     BatchLengthMismatch {
         field: &'static str,
         expected: usize,
         actual: usize,
     },
-    InsertionExceedsCapacity {
-        capacity: usize,
-        inserted: usize,
-    },
-    EnvironmentCountMismatch {
-        expected: usize,
-        actual: usize,
-    },
+    #[error("cannot insert {inserted} items into replay capacity {capacity}")]
+    InsertionExceedsCapacity { capacity: usize, inserted: usize },
+    #[error("replay environment count {actual} does not match expected count {expected}")]
+    EnvironmentCountMismatch { expected: usize, actual: usize },
+    #[error("replay capacity {capacity} is not aligned to environment count {environment_count}")]
     InvalidReplayAlignment {
         capacity: usize,
         environment_count: usize,
     },
-    CapacityOverflow {
-        capacity: usize,
-        additional: usize,
-    },
+    #[error("replay capacity {capacity} overflows when adding {additional} items")]
+    CapacityOverflow { capacity: usize, additional: usize },
+    #[error("the replay environment count has not been initialized")]
     UninitializedEnvironmentCount,
 }
 

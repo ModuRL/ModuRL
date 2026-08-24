@@ -11,12 +11,14 @@ use crate::{
 };
 
 /// An error raised while mapping tensors around a multi-environment gym.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum TensorMapMultiGymError<E> {
     /// An error returned by the wrapped environment.
-    Gym(E),
+    #[error("wrapped gym error: {0}")]
+    Gym(#[source] E),
     /// An error returned by either tensor-mapping function.
-    Candle(candle_core::Error),
+    #[error("tensor mapping failed: {0}")]
+    Candle(#[source] candle_core::Error),
 }
 
 /// Maps every tensor crossing a [`MultiGym`] boundary.

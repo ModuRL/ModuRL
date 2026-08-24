@@ -1,9 +1,12 @@
 use super::experience;
 use crate::sampling::shuffle_with_device_rng;
 
+#[derive(Debug, thiserror::Error)]
 pub enum RolloutBufferError<E> {
-    TensorError(candle_core::Error),
-    ExperienceError(E),
+    #[error("rollout tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("rollout experience failed: {0}")]
+    ExperienceError(#[source] E),
 }
 
 impl<E> From<candle_core::Error> for RolloutBufferError<E> {

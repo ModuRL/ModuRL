@@ -85,13 +85,15 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ProbabilisticPolicyModelError<DE>
 where
     DE: std::fmt::Debug,
 {
-    ModuleError(candle_core::Error),
-    DistError(DE),
+    #[error("policy module failed: {0}")]
+    ModuleError(#[source] candle_core::Error),
+    #[error("policy distribution failed: {0}")]
+    DistError(#[source] DE),
 }
 
 impl<DE> From<candle_core::Error> for ProbabilisticPolicyModelError<DE>

@@ -1843,6 +1843,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "rand 0.10.2",
+ "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -1867,6 +1868,7 @@ dependencies = [
  "cmake",
  "minifb",
  "modurl",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1881,6 +1883,7 @@ dependencies = [
  "modurl",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -1893,6 +1896,7 @@ dependencies = [
  "crc",
  "prost",
  "textplots",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1907,6 +1911,7 @@ dependencies = [
  "rand_distr 0.6.0",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

@@ -37,6 +37,7 @@ candle-core = "0.11.0"
 candle-nn = "0.11.0"
 rand = "0.10.2"
 tracing = { version = "0.1.37", optional = true }
+thiserror = "2.0.20"
 
 [features]
 default = []

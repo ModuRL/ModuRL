@@ -27,10 +27,12 @@ impl<G> NoopResetGym<G> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum NoopResetGymError<E> {
-    GymError(E),
-    CandleError(candle_core::Error),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("failed to create a no-op action tensor: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 impl<G, I> Gym<I> for NoopResetGym<G>
@@ -171,10 +173,12 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FireResetGymError<E> {
-    GymError(E),
-    CandleError(candle_core::Error),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("failed to create a fire-reset action tensor: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 /// Sends the standard FIRE startup actions after reset.
@@ -247,10 +251,12 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WarpGymError<E> {
-    GymError(E),
-    CandleError(candle_core::Error),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("failed to warp an Atari observation: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 /// Converts RGB observations to luminance and resizes them to 84×84.

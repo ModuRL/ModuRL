@@ -14,36 +14,56 @@ use crate::{
     tensor_operations::normalize_tensor,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PPOConfigurationError {
+    #[error("batch size must be nonzero")]
     ZeroBatchSize,
+    #[error("minibatch size must be nonzero")]
     ZeroMiniBatchSize,
+    #[error("the number of optimization epochs must be nonzero")]
     ZeroEpochs,
+    #[error("training horizon must be nonzero")]
     ZeroTrainingHorizon,
+    #[error("gamma must be finite and in 0..=1")]
     InvalidGamma,
+    #[error("GAE lambda must be finite and in 0..=1")]
     InvalidGaeLambda,
+    #[error("value coefficient must be finite and nonnegative")]
     InvalidValueCoefficient,
+    #[error("entropy coefficient must be finite and nonnegative")]
     InvalidEntropyCoefficient,
+    #[error("gradient clip must be finite and positive")]
     InvalidGradientClip,
+    #[error("PPO requires a floating-point dtype")]
     InvalidDType,
+    #[error("the environment count must be nonzero")]
     ZeroEnvironments,
+    #[error("batch size must be divisible by the environment count")]
     BatchNotDivisibleByEnvironmentCount,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PPOError<AE, GE, SE>
 where
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
-    PolicyError(AE),
-    GymError(GE),
-    TensorError(candle_core::Error),
-    SpaceError(SE),
-    ConfigurationError(PPOConfigurationError),
+    #[error("policy failed: {0}")]
+    PolicyError(#[source] AE),
+    #[error("gym failed: {0}")]
+    GymError(#[source] GE),
+    #[error("PPO tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("space operation failed: {0}")]
+    SpaceError(#[source] SE),
+    #[error("invalid PPO configuration: {0}")]
+    ConfigurationError(#[source] PPOConfigurationError),
+    #[error("termination batches differ in length: {dones} dones and {truncateds} truncations")]
     MismatchedTerminationBatch { dones: usize, truncateds: usize },
+    #[error("no prepared rollout is available")]
     MissingPreparedRollout,
+    #[error("old value estimates are missing")]
     MissingOldValues,
 }
 

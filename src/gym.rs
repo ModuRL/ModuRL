@@ -45,13 +45,16 @@ pub trait MultiGym<I = ()> {
     fn reset(&mut self) -> Result<Tensor, Self::Error>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum VectorizedGymError<E>
 where
     E: std::fmt::Debug,
 {
-    Single(E),
-    Batch(candle_core::Error),
+    #[error("single environment failed: {0}")]
+    Single(#[source] E),
+    #[error("batched tensor operation failed: {0}")]
+    Batch(#[source] candle_core::Error),
+    #[error("invalid action batch: expected {expected} rows, got {actual:?}")]
     InvalidActionBatch {
         expected: usize,
         actual: Option<usize>,
@@ -113,39 +116,48 @@ impl<I> MultiGymStepInfo<I> {
 }
 
 /// An error produced while combining several [`MultiGym`] implementations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StackedMultiGymError<E>
 where
     E: std::fmt::Debug,
 {
     /// At least one inner gym is required.
+    #[error("at least one inner gym is required")]
     Empty,
     /// An inner gym reported no batch slots.
+    #[error("inner gym {gym_index} reported no batch slots")]
     EmptyInner { gym_index: usize },
     /// An inner gym has a different per-slot observation shape.
+    #[error("inner gym {gym_index} has observation shape {actual:?}, expected {expected:?}")]
     IncompatibleObservationShape {
         gym_index: usize,
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
     /// An inner gym has a different per-slot action shape.
+    #[error("inner gym {gym_index} has action shape {actual:?}, expected {expected:?}")]
     IncompatibleActionShape {
         gym_index: usize,
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
     /// An inner gym changed its number of batch slots after construction.
+    #[error("inner gym {gym_index} changed batch size from {expected} to {actual}")]
     ChangedBatchSize {
         gym_index: usize,
         expected: usize,
         actual: usize,
     },
     /// The supplied action does not have the combined batch size in dimension zero.
+    #[error("invalid action batch: expected {expected} rows, got {actual:?}")]
     InvalidActionBatch {
         expected: usize,
         actual: Option<usize>,
     },
     /// An inner gym returned a tensor or vector that violates the [`MultiGym`] contract.
+    #[error(
+        "inner gym {gym_index} returned invalid {field} shape {actual:?}, expected {expected:?}"
+    )]
     InvalidOutputShape {
         gym_index: usize,
         field: &'static str,
@@ -153,9 +165,15 @@ where
         actual: Vec<usize>,
     },
     /// An inner gym returned an error.
-    Inner { gym_index: usize, error: E },
+    #[error("inner gym {gym_index} failed: {error}")]
+    Inner {
+        gym_index: usize,
+        #[source]
+        error: E,
+    },
     /// Candle could not slice or concatenate a batch.
-    Batch(candle_core::Error),
+    #[error("failed to slice or concatenate a batch: {0}")]
+    Batch(#[source] candle_core::Error),
 }
 
 impl<E> From<candle_core::Error> for StackedMultiGymError<E>
