@@ -1,5 +1,5 @@
 use candle_core::{DType, Device, Tensor};
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 

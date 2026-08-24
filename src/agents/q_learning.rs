@@ -1,7 +1,7 @@
 use bon::bon;
 use candle_core::{DType, Error, Tensor};
 use candle_nn::{Optimizer, VarMap};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use std::{marker::PhantomData, ops::Deref};
 
 use crate::{
