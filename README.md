@@ -125,7 +125,7 @@ Agents train against these contracts instead of concrete environment, network, o
 | --- | --- | --- | --- |
 | [`modurl`](src/lib.rs) | Agents, models, distributions, buffers, spaces, schedules, and environment traits | Yes, with default features | [MIT](LICENSE) |
 | [`modurl_gym`](crates/modurl_gym) | Classic-control and Box2D environments, rendering, and Gym utilities | Yes, with default features | MIT |
-| [`modurl_mojoco`](crates/modurl_mojoco) | Gymnasium-compatible MuJoCo v5 environments | No; uses the native MuJoCo library | [MIT](crates/modurl_mojoco/LICENSE); [Gymnasium asset license](crates/modurl_mojoco/assets/LICENSE) |
+| [`modurl_mujoco`](crates/modurl_mujoco) | Gymnasium-compatible MuJoCo v5 environments | No; uses the native MuJoCo library | [MIT](crates/modurl_mujoco/LICENSE); [Gymnasium asset license](crates/modurl_mujoco/assets/LICENSE) |
 | [`modurl_ale`](crates/modurl_ale) | Arcade Learning Environment integration and Atari wrappers | No; builds bundled C++ | [GPL-2.0-only](crates/modurl_ale/LICENSE); [third-party notices](crates/modurl_ale/THIRD_PARTY_LICENSES.md) |
 | [`modurl_logger`](crates/modurl_logger) | Terminal graphs and TensorBoard event logging | Yes | MIT |
 | [`examples`](crates/examples/Cargo.toml) | Runnable training programs; not published as a crate | Mixed; depends on the example | MIT |
@@ -159,6 +159,6 @@ cargo test --locked -p modurl -p modurl_gym
 cargo test --locked --all-targets -p examples
 ```
 
-MuJoCo and Atari checks have additional native requirements. See the [`modurl_mojoco` README](crates/modurl_mojoco/README.md) and [`modurl_ale` README](crates/modurl_ale/README.md) before working on those crates.
+MuJoCo and Atari checks have additional native requirements. See the [`modurl_mujoco` README](crates/modurl_mujoco/README.md) and [`modurl_ale` README](crates/modurl_ale/README.md) before working on those crates.
 
 Issues and pull requests are welcome. Open an [issue](https://github.com/ModuRL/ModuRL/issues) before starting a large API change.

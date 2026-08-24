@@ -139,7 +139,7 @@ def run_rust_tests(name: str | None) -> None:
         "test",
         "--locked",
         "-p",
-        "modurl_mojoco",
+        "modurl_mujoco",
         "--test",
         "parity",
     ]

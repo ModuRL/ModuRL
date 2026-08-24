@@ -1,5 +1,5 @@
 [package]
-name = "modurl_mojoco"
+name = "modurl_mujoco"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
@@ -8,7 +8,7 @@ description = "Gymnasium-compatible MuJoCo environments for ModuRL"
 license = "MIT"
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/modurl_mojoco"
+documentation = "https://docs.rs/modurl_mujoco"
 readme = "README.md"
 keywords = ["reinforcement-learning", "mujoco", "gymnasium", "simulation"]
 categories = ["artificial-intelligence", "science", "science::robotics", "simulation"]

@@ -9,22 +9,22 @@ use candle_core::Device;
     feature = "ant",
     not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d"))
 ))]
-use modurl_mojoco::AntV5 as SelectedEnvironment;
+use modurl_mujoco::AntV5 as SelectedEnvironment;
 #[cfg(all(not(feature = "ant"), feature = "half-cheetah"))]
-use modurl_mojoco::HalfCheetahV5 as SelectedEnvironment;
+use modurl_mujoco::HalfCheetahV5 as SelectedEnvironment;
 #[cfg(all(
     not(feature = "ant"),
     not(feature = "half-cheetah"),
     feature = "hopper"
 ))]
-use modurl_mojoco::HopperV5 as SelectedEnvironment;
+use modurl_mujoco::HopperV5 as SelectedEnvironment;
 #[cfg(all(
     not(feature = "ant"),
     not(feature = "half-cheetah"),
     not(feature = "hopper"),
     feature = "walker2d"
 ))]
-use modurl_mojoco::Walker2dV5 as SelectedEnvironment;
+use modurl_mujoco::Walker2dV5 as SelectedEnvironment;
 
 #[cfg(any(
     feature = "ant",

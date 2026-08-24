@@ -1004,7 +1004,7 @@ where
         .detach();
 
         // if the networks are shared, we need to extract the latent state
-        // if it's seperate we just say this is the state as is
+        // if it's separate we just say this is the state as is
         let latent_state = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
                 shared_info.shared_network.forward(states)?

@@ -1,6 +1,6 @@
 use candle_core::{Device, Tensor};
 use modurl::gym::Gym;
-use modurl_mojoco::{
+use modurl_mujoco::{
     AntV5, AntV5Info, HalfCheetahV5, HopperV5, HumanoidV5, HumanoidV5Info, MujocoError, Walker2dV5,
 };
 use serde::Deserialize;

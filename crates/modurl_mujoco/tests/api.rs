@@ -1,6 +1,6 @@
 use candle_core::{DType, Device, Tensor};
 use modurl::gym::Gym;
-use modurl_mojoco::{AntV5, HalfCheetahV5, HopperV5, HumanoidV5, Walker2dV5};
+use modurl_mujoco::{AntV5, HalfCheetahV5, HopperV5, HumanoidV5, Walker2dV5};
 
 #[test]
 fn default_shapes_and_metadata_match_gymnasium() {

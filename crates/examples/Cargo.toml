@@ -71,7 +71,7 @@ modurl = { version = "0.1.0", path = "../.." }
 modurl_ale = { version = "0.1.0", path = "../modurl_ale", optional = true }
 modurl_gym = { version = "0.1.0", path = "../modurl_gym" }
 modurl_logger = { version = "0.1.0", path = "../modurl_logger" }
-modurl_mojoco = { version = "0.1.0", path = "../modurl_mojoco" }
+modurl_mujoco = { version = "0.1.0", path = "../modurl_mujoco", optional = true }
 candle-core = "0.11.0"
 candle-nn = "0.11.0"
 
@@ -81,10 +81,10 @@ ant = ["mujoco-environment"]
 atari-environment = ["dep:modurl_ale"]
 half-cheetah = ["mujoco-environment"]
 hopper = ["mujoco-environment"]
-mujoco-environment = []
+mujoco-environment = ["dep:modurl_mujoco"]
 walker2d = ["mujoco-environment"]
 cuda = ["candle-core/cuda"]
 cudnn = ["cuda", "candle-core/cudnn"]
 metal = ["candle-core/metal"]
 multithreading = ["modurl/multithreading"]
-rendering = ["modurl_ale?/rendering", "modurl_gym/rendering", "modurl_mojoco/rendering"]
+rendering = ["modurl_ale?/rendering", "modurl_gym/rendering", "modurl_mujoco?/rendering"]
