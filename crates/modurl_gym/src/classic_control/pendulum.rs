@@ -145,6 +145,11 @@ impl Gym for PendulumV1 {
             ));
         }
         let action = action.to_dtype(DType::F64)?.to_vec1::<f64>()?;
+        if !action[0].is_finite() {
+            return Err(EnvironmentError::InvalidAction(
+                "Pendulum actions must contain only finite values",
+            ));
+        }
         let torque = action[0].clamp(-2.0, 2.0);
         let [theta, theta_dot] = self.state;
         let normalized = ((theta + PI).rem_euclid(2.0 * PI)) - PI;
@@ -216,6 +221,19 @@ mod tests {
         assert_eq!(environment.reset().unwrap().state.dims(), &[3]);
         assert_eq!(environment.action_space().shape(), vec![1]);
         assert_eq!(environment.observation_space().shape(), vec![3]);
+    }
+
+    #[test]
+    fn rejects_non_finite_actions_without_mutating_state() {
+        let mut environment = PendulumV1::builder().build().unwrap();
+        environment.set_raw_state([0.25, -0.5]);
+
+        let error = environment
+            .step(Tensor::new(&[f32::NAN], &Device::Cpu).unwrap())
+            .unwrap_err();
+
+        assert!(matches!(error, EnvironmentError::InvalidAction(_)));
+        assert_eq!(environment.state, [0.25, -0.5]);
     }
 
     #[cfg(feature = "rendering")]

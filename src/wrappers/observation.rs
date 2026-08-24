@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use candle_core::Tensor;
 
 use crate::gym::{Gym, ResetInfo, StepInfo};
+use crate::spaces::{BoxSpace, Space};
 
 #[derive(Debug)]
 pub enum FrameStackGymError<E> {
@@ -17,22 +18,31 @@ pub struct FrameStackGym<G> {
     gym: G,
     stack_size: usize,
     frames: VecDeque<Tensor>,
+    observation_space: BoxSpace,
 }
 
 impl<G> FrameStackGym<G> {
-    pub fn new(gym: G, stack_size: usize) -> Self {
+    /// Creates a frame stack whose declared observation space already includes
+    /// the leading `stack_size` dimension.
+    pub fn new(gym: G, stack_size: usize, observation_space: BoxSpace) -> Self {
         assert!(stack_size > 0, "stack_size must be at least 1");
+        assert_eq!(
+            observation_space.shape().first().copied(),
+            Some(stack_size),
+            "the pre-stacked observation space must start with stack_size"
+        );
         Self {
             gym,
             stack_size,
             frames: VecDeque::new(),
+            observation_space,
         }
     }
 }
 
 impl<G, I> Gym<I> for FrameStackGym<G>
 where
-    G: Gym<I>,
+    G: Gym<I, SpaceError = candle_core::Error>,
 {
     type Error = FrameStackGymError<<G as Gym<I>>::Error>;
     type SpaceError = <G as Gym<I>>::SpaceError;
@@ -67,7 +77,7 @@ where
     }
 
     fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
-        self.gym.observation_space()
+        Box::new(self.observation_space.clone())
     }
 }
 
@@ -151,6 +161,7 @@ where
 mod tests {
     use crate::{
         gym::Gym,
+        spaces::BoxSpace,
         wrappers::test_support::{TestGym, action, scalar},
     };
 
@@ -159,11 +170,16 @@ mod tests {
     #[test]
     fn frame_stack_duplicates_reset_observation_and_rolls_on_step() {
         let gym = TestGym::new([TestGym::step(2.0, 0.0, false, false, 1)]);
-        let mut wrapper = FrameStackGym::new(gym, 4);
+        let observation_space =
+            BoxSpace::new_with_universal_bounds(vec![4], -100.0, 100.0, &candle_core::Device::Cpu);
+        let mut wrapper = FrameStackGym::new(gym, 4, observation_space);
 
         let reset = wrapper.reset().unwrap();
         let step = wrapper.step(action()).unwrap();
 
+        let observation_space = wrapper.observation_space();
+        assert_eq!(observation_space.shape(), vec![4]);
+        assert!(observation_space.contains(&reset.state));
         assert_eq!(reset.state.to_vec1::<f32>().unwrap(), vec![100.0; 4]);
         assert_eq!(
             step.state.to_vec1::<f32>().unwrap(),

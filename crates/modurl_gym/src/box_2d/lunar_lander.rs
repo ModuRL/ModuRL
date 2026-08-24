@@ -938,6 +938,11 @@ impl Gym for LunarLanderV3 {
             .clone();
 
         let action_u32 = action.to_vec0::<u32>()?;
+        if action_u32 >= 4 {
+            return Err(EnvironmentError::InvalidAction(
+                "LunarLander actions must be in the range 0..4",
+            ));
+        }
 
         // Update wind and apply to the lander
         if self.enable_wind {
@@ -1626,6 +1631,18 @@ mod tests {
             // Reward should be reasonable (not NaN or infinite)
             assert!(step_info.reward.is_finite());
         }
+    }
+
+    #[test]
+    fn rejects_out_of_range_actions() {
+        let mut env = LunarLanderV3::builder().build().unwrap();
+        env.reset().unwrap();
+
+        let error = env
+            .step(Tensor::new(99u32, &Device::Cpu).unwrap())
+            .unwrap_err();
+
+        assert!(matches!(error, EnvironmentError::InvalidAction(_)));
     }
 
     #[test]

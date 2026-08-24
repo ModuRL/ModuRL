@@ -52,6 +52,10 @@ where
 {
     Single(E),
     Batch(candle_core::Error),
+    InvalidActionBatch {
+        expected: usize,
+        actual: Option<usize>,
+    },
 }
 
 impl<E> From<candle_core::Error> for VectorizedGymError<E>
@@ -453,6 +457,13 @@ where
     /// `[num_envs, ...action_shape]`.
     fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
         let env_count = self.envs.len();
+        let action_count = action.dims().first().copied();
+        if action_count != Some(env_count) {
+            return Err(VectorizedGymError::InvalidActionBatch {
+                expected: env_count,
+                actual: action_count,
+            });
+        }
         let actions: Vec<Tensor> = action.chunk(env_count, 0)?;
         // this keeps the dimension for env count it's just 1 now so we squeeze it later
 
@@ -988,6 +999,13 @@ where
     /// `[num_envs, ...action_shape]`.
     fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
         let batch_size = self.envs.len();
+        let action_count = action.dims().first().copied();
+        if action_count != Some(batch_size) {
+            return Err(VectorizedGymError::InvalidActionBatch {
+                expected: batch_size,
+                actual: action_count,
+            });
+        }
         let actions: Vec<Tensor> = action.chunk(batch_size, 0)?;
         let mut step_info_recievers = Vec::with_capacity(batch_size);
 
@@ -1044,7 +1062,7 @@ where
     fn reset(&mut self) -> Result<Tensor, Self::Error> {
         let batch_size = self.envs.len();
 
-        let states: Vec<std::sync::mpsc::Receiver<Result<ResetInfo<I>, <G as Gym<I>>::Error>>> =
+        let states: Vec<ResetReceiver<<G as Gym<I>>::Error, I>> =
             self.envs.iter().map(|env| env.reset()).collect();
         let states: Vec<Result<Tensor, VectorizedGymError<G::Error>>> = states
             .into_iter()
@@ -1094,6 +1112,9 @@ struct ThreadStepInfo<I> {
 }
 
 #[cfg(feature = "multithreading")]
+type ResetReceiver<E, I> = std::sync::mpsc::Receiver<Result<ResetInfo<I>, E>>;
+
+#[cfg(feature = "multithreading")]
 struct GymHandle<E, I>
 where
     E: Send + Sync,
@@ -1111,13 +1132,13 @@ where
     fn step(&self, action: Tensor) -> std::sync::mpsc::Receiver<Result<ThreadStepInfo<I>, E>> {
         let (resp_tx, resp_rx) = mpsc::channel();
         self.tx.send(GymCmd::Step(action, resp_tx)).unwrap();
-        return resp_rx;
+        resp_rx
     }
 
     fn reset(&self) -> std::sync::mpsc::Receiver<Result<ResetInfo<I>, E>> {
         let (resp_tx, resp_rx) = mpsc::channel();
         self.tx.send(GymCmd::Reset(resp_tx)).unwrap();
-        return resp_rx;
+        resp_rx
     }
 }
 
@@ -1524,6 +1545,23 @@ mod tests {
     }
 
     #[test]
+    fn vectorized_gym_rejects_short_action_batches_before_stepping() {
+        let envs: Vec<DummyEnv> = (0..3).map(DummyEnv::new).collect();
+        let mut vec_env = VectorizedGymWrapper::new(envs);
+        let actions =
+            Tensor::zeros((2, 1), candle_core::DType::U32, &candle_core::Device::Cpu).unwrap();
+
+        assert!(matches!(
+            vec_env.step(actions),
+            Err(VectorizedGymError::InvalidActionBatch {
+                expected: 3,
+                actual: Some(2),
+            })
+        ));
+        assert!(vec_env.envs().iter().all(|env| env.step_count == 0));
+    }
+
+    #[test]
     fn stacked_multi_gym_flattens_batches_and_routes_actions() {
         let mut env = StackedMultiGym::new(vec![
             BatchedDummyEnv::new(10, 2),
@@ -1727,6 +1765,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "multithreading")]
+    #[test]
+    fn multithreaded_vectorized_gym_rejects_short_action_batches_before_stepping() {
+        let env_constructors = (0..3).map(|i| move || DummyEnv::new(i)).collect();
+        let obs_space = crate::spaces::BoxSpace::new_unbounded(vec![2], &candle_core::Device::Cpu);
+        let action_space = crate::spaces::Discrete::new(2);
+        let mut vec_env =
+            MultithreadedVectorizedGymWrapper::new(env_constructors, obs_space, action_space);
+
+        vec_env.reset().unwrap();
+        let short_actions =
+            Tensor::zeros((2, 1), candle_core::DType::U32, &candle_core::Device::Cpu).unwrap();
+        assert!(matches!(
+            vec_env.step(short_actions),
+            Err(VectorizedGymError::InvalidActionBatch {
+                expected: 3,
+                actual: Some(2),
+            })
+        ));
+
+        let valid_actions =
+            Tensor::zeros((3, 1), candle_core::DType::U32, &candle_core::Device::Cpu).unwrap();
+        assert_eq!(
+            vec_env
+                .step(valid_actions)
+                .unwrap()
+                .states
+                .to_vec2::<f32>()
+                .unwrap(),
+            vec![vec![0.0, 1.0], vec![1.0, 1.0], vec![2.0, 1.0]]
+        );
     }
 
     #[cfg(feature = "multithreading")]

@@ -222,12 +222,7 @@ where
             .step(second_action)
             .map_err(FireResetGymError::GymError)?;
         reset = if step.done || step.truncated {
-            let reset = ResetInfo {
-                state: step.state,
-                info: step.info,
-            };
-            self.gym.reset().map_err(FireResetGymError::GymError)?;
-            reset
+            self.gym.reset().map_err(FireResetGymError::GymError)?
         } else {
             ResetInfo {
                 state: step.state,
@@ -692,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn fire_reset_resets_after_second_reset_action_done_but_returns_step_obs() {
+    fn fire_reset_returns_the_new_reset_observation_after_second_action_done() {
         let gym = ScriptGym::new(vec![
             ScriptGym::step(11.0, 0.0, false, false, 3),
             ScriptGym::step(12.0, 0.0, true, false, 0),
@@ -703,7 +698,7 @@ mod tests {
 
         assert_eq!(wrapper.gym.actions, vec![1, 2]);
         assert_eq!(wrapper.gym.reset_count, 2);
-        assert_eq!(scalar(&obs.state), 12.0);
+        assert_eq!(scalar(&obs.state), 200.0);
     }
 
     #[test]

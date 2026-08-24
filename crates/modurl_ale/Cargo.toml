@@ -15,6 +15,8 @@ include = [
     "/tests/**",
     "/native/ale/CMakeLists.txt",
     "/native/ale/cmake/**",
+    "/native/ale/ale_py/ale_c_wrapper.cpp",
+    "/native/ale/ale_py/ale_c_wrapper.h",
     "/native/ale/src/**",
     "/native/ale/License.txt",
     "/native/ale/Copyright.txt",

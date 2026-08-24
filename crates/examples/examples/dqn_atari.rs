@@ -123,7 +123,9 @@ fn make_atari_env(
     let env = RecordRawRewardGym::new(env);
     let env = ClipRewardGym::new(env);
     let env = WarpGym::new(env);
-    FrameStackGym::new(env, FRAME_STACK)
+    let observation_space =
+        BoxSpace::new_with_universal_bounds(vec![FRAME_STACK, 84, 84], 0.0, 255.0, &Device::Cpu);
+    FrameStackGym::new(env, FRAME_STACK, observation_space)
 }
 
 /// The convolutional Q-network used by CleanRL's Atari DQN.
