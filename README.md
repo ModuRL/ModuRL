@@ -50,6 +50,9 @@ The example uses the CPU by default. [Additional examples](crates/examples/examp
 
 ModuRL completed the matched PPO, DQN, and SAC workloads faster than all three Python runners in this CPU benchmark.
 
+> [!NOTE]
+> These benchmarks use small 2x64 networks on CartPole (PPO and DQN) and Pendulum (SAC). ModuRL's speed advantage is expected to be smaller with larger networks, where neural-network computation dominates runtime.
+
 | Algorithm | ModuRL median | vs. SB3 runner | vs. CleanRL runner | vs. Tianshou runner |
 | --- | ---: | ---: | ---: | ---: |
 | PPO | 2.102 s | 4.54x | 4.47x | 6.19x |
@@ -60,7 +63,7 @@ These CPU results were measured on a 12th Gen Intel Core i7-1255U with one compu
 
 The CleanRL runners adapt upstream reference scripts. The DQN Stable-Baselines3 and Tianshou runners also use documented adaptations so all frameworks perform the matched workload.
 
-Compare frameworks within one algorithm. The algorithms perform different amounts of optimizer work per transition. These measurements cover small-network implementation throughput, not sample efficiency, reward, or large-model performance. CUDA and Metal were not measured.
+Compare frameworks within one algorithm. The algorithms perform different amounts of optimizer work per transition. These measurements do not cover sample efficiency, reward, or large-model performance. CUDA and Metal were not measured.
 
 See the [benchmark workloads, fairness controls, and accelerator commands](crates/benches/README.md), plus the raw [PPO](crates/benches/results/ppo-cpu-windows-20260810.json), [DQN](crates/benches/results/dqn-cpu-windows-20260820.json), and [SAC](crates/benches/results/sac-cpu-windows-20260820.json) samples.
 
