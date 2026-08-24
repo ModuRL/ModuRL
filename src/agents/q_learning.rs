@@ -463,6 +463,15 @@ where
         )?)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "q_learning.optimize",
+            target = "modurl::performance",
+            skip_all,
+            fields(collection_timestep)
+        )
+    )]
     fn optimize<I>(
         &mut self,
         collection_timestep: usize,
@@ -617,6 +626,15 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "q_learning.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     pub(crate) fn learn<I>(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,

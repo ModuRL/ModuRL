@@ -133,6 +133,9 @@ Agents train against these contracts instead of concrete environment, network, o
 
 The core `modurl` crate has no default Cargo features. Enable its
 `multithreading` feature for multithreaded vectorized and stacked environments.
+Enable `tracing` to emit performance spans for agent learning, rollout
+collection, and optimization. All spans use the `modurl::performance` target;
+install a `tracing` subscriber in the application to record or display them.
 Workspace crates define additional features for rendering and environment
 support.
 

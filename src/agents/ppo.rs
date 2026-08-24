@@ -662,6 +662,10 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(name = "ppo.optimize", target = "modurl::performance", skip_all)
+    )]
     fn optimize(&mut self) -> Result<(), PPOError<AE, GE, SE>> {
         let rollout_explained_variance = self.add_advantages_and_returns()?;
 
@@ -730,6 +734,15 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.prepare_rollout",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     fn add_advantages_and_returns(&mut self) -> Result<Tensor, PPOError<AE, GE, SE>> {
         let batch =
             <PPOExperience as experience::Experience>::batch(self.rollout_buffer.get_raw())?;
@@ -956,12 +969,21 @@ where
         }
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.compute_loss",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
+    #[builder]
     /// Computes losses from `states` `[batch, ...state_shape]`, `actions`
     /// `[batch, ...action_shape]`, and vector statistics (`old_log_probs`,
     /// `advantages`, `returns`, and `rewards`) shaped `[batch]`. `old_values`
     /// is present only when value-loss clipping is enabled.
     /// `explained_variance` is scalar `[]`.
-    #[builder]
     fn compute_loss(
         &mut self,
         states: &candle_core::Tensor,
@@ -1062,6 +1084,15 @@ where
         })
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.backpropagate",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     fn backpropagate_loss(&mut self, losses: PPOLosses) -> Result<(), PPOError<AE, GE, SE>> {
         let actor_loss = losses.actor_loss;
         let critic_loss = losses.critic_loss;
@@ -1291,6 +1322,14 @@ where
         Ok(states)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.collect_rollout",
+            target = "modurl::performance",
+            skip_all
+        )
+    )]
     /// Fills the rollout buffer, updating `next_states` shaped
     /// `[environment_count, ...observation_shape]` after each environment step.
     fn collect_rollout(
@@ -1392,6 +1431,15 @@ where
         Ok(actions)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     fn learn(
         &mut self,
         env: &mut dyn MultiGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,

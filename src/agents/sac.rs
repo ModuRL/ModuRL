@@ -1281,6 +1281,15 @@ where
         )?)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.optimize_critics",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     /// Optimizes each critic against Bellman `targets` shaped `[batch]`.
     ///
     /// Returns one scalar loss tensor per critic.
@@ -1313,6 +1322,15 @@ where
         Ok(critic_losses)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.optimize_actor",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     fn optimize_actor(
         &mut self,
         batch: &SACOptimizationBatch,
@@ -1370,6 +1388,15 @@ where
         })
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.optimize_temperature",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     /// Optimizes automatic entropy temperature from states shaped
     /// `[batch, ...state_shape]`.
     fn optimize_temperature(
@@ -1459,6 +1486,15 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.optimize",
+            target = "modurl::performance",
+            skip_all,
+            fields(collection_timestep)
+        )
+    )]
     fn optimize(&mut self, collection_timestep: usize) -> Result<(), SACError<PE, GE, SE>> {
         let Some(batch) = self.sample_optimization_batch()? else {
             return Ok(());
@@ -1597,6 +1633,15 @@ where
         Ok(completed_episodes)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     fn learn_inner(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,

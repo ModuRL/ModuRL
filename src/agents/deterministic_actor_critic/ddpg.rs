@@ -224,6 +224,15 @@ where
         self.inner.act(observation)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ddpg.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     fn learn(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,

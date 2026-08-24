@@ -792,6 +792,15 @@ where
         .detach())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "deterministic_actor_critic.optimize_critics",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     /// Optimizes critics from a replay batch and targets shaped `[batch]`,
     /// returning one scalar loss and one `[batch]` Q tensor per critic.
     fn optimize_critics(
@@ -811,6 +820,15 @@ where
         Ok(CriticUpdate { losses, q_values })
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "deterministic_actor_critic.optimize_actor",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     /// Optimizes the actor from states `[batch, ...observation_shape]`,
     /// returning its scalar loss, `[batch]` Q values, and
     /// `[batch, ...action_shape]` actions.
@@ -848,6 +866,15 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "deterministic_actor_critic.optimize",
+            target = "modurl::performance",
+            skip_all,
+            fields(collection_timestep)
+        )
+    )]
     fn optimize<I>(
         &mut self,
         collection_timestep: usize,
@@ -945,6 +972,15 @@ where
         Ok(completed_episodes)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "deterministic_actor_critic.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     pub(crate) fn learn<I>(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
