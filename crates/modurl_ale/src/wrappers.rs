@@ -411,7 +411,9 @@ impl<G> WarpGym<G> {
             let luminance: Vec<f32> = match dims {
                 [_, _] => bytes.into_iter().map(f32::from).collect(),
                 [_, _, 3] => bytes
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .map(|pixel| {
                         pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114
                     })
@@ -433,7 +435,9 @@ impl<G> WarpGym<G> {
             [_, _, 3] => obs
                 .flatten_all()?
                 .to_vec1::<f32>()?
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|pixel| pixel[0] * 0.299 + pixel[1] * 0.587 + pixel[2] * 0.114)
                 .collect(),
             _ => unreachable!(),
@@ -607,7 +611,9 @@ mod tests {
             .map(|index| ((index * 37 + 11) % 256) as u8)
             .collect::<Vec<_>>();
         let luminance = rgb
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|pixel| {
                 pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114
             })
@@ -628,7 +634,9 @@ mod tests {
             .map(|index| ((index * 37 + 11) % 256) as u8)
             .collect::<Vec<_>>();
         let normalized_luminance = rgb
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|pixel| {
                 (pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114)
                     / 255.0
