@@ -37,7 +37,7 @@ jobs:
               "modurl_gym",
               "modurl_ale",
               "modurl_logger",
-              "modurl_mojoco",
+              "modurl_mujoco",
           }
           non_publishable = {"examples", "modurl-benches"}
           expected = publishable | non_publishable
@@ -223,11 +223,11 @@ jobs:
           cargo clippy --locked -p modurl_ale --all-targets --features rendering
           --no-deps -- -D warnings
       - name: Validate MuJoCo parity CLI
-        run: python crates/modurl_mojoco/python_tests/parity.py --list
+        run: python crates/modurl_mujoco/python_tests/parity.py --list
       - name: Test MuJoCo default package
-        run: cargo test --locked -p modurl_mojoco
+        run: cargo test --locked -p modurl_mujoco
       - name: Build MuJoCo rendering feature
-        run: cargo build --locked -p modurl_mojoco --features rendering
+        run: cargo build --locked -p modurl_mujoco --features rendering
 
   packaging:
     name: Package validation
@@ -238,7 +238,7 @@ jobs:
       - name: List package contents
         shell: bash
         run: |
-          for package in modurl modurl_gym modurl_ale modurl_logger modurl_mojoco; do
+          for package in modurl modurl_gym modurl_ale modurl_logger modurl_mujoco; do
             files="$(cargo package --locked --allow-dirty --list -p "$package")"
             printf '%s\n' "$files"
             if printf '%s\n' "$files" | grep -Eiq \
@@ -257,7 +257,7 @@ jobs:
         run: |
           # The initial 0.1.0 internal crates are not yet available from crates.io.
           # CLI-only patches let Cargo normalize every archive without changing manifests.
-          for package in modurl modurl_gym modurl_ale modurl_logger modurl_mojoco; do
+          for package in modurl modurl_gym modurl_ale modurl_logger modurl_mujoco; do
             cargo package --locked --allow-dirty --no-verify -p "$package" \
               --config "patch.crates-io.modurl.path='.'" \
               --config "patch.crates-io.modurl_gym.path='crates/modurl_gym'"
@@ -278,7 +278,7 @@ jobs:
               "modurl_gym",
               "modurl_ale",
               "modurl_logger",
-              "modurl_mojoco",
+              "modurl_mujoco",
           }
           non_publishable = {"examples", "modurl-benches"}
           workspace_packages = publishable | non_publishable
@@ -287,7 +287,7 @@ jobs:
               "modurl_gym": {"modurl"},
               "modurl_ale": {"modurl"},
               "modurl_logger": set(),
-              "modurl_mojoco": {"modurl"},
+              "modurl_mujoco": {"modurl"},
           }
           metadata = json.loads(Path("target/package-metadata.json").read_text())
           members = set(metadata["workspace_members"])

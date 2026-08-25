@@ -220,7 +220,7 @@ impl AtariGym {
         #[cfg(feature = "rendering")]
         {
             self.timesteps += 1;
-            if self.timesteps % self.render_every == 0 {
+            if self.timesteps.is_multiple_of(self.render_every) {
                 self.render();
             }
         }
