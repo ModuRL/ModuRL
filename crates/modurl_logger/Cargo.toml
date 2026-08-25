@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/modurl_logger"
 readme = "README.md"
-keywords = ["reinforcement-learning", "logging", "tensorboard", "visualization"]
+keywords = ["reinforcement", "logging", "tensorboard", "visualization"]
 categories = ["artificial-intelligence", "development-tools::debugging", "visualization"]
 
 [dependencies]

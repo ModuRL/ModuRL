@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/modurl_gym"
 readme = "README.md"
-keywords = ["reinforcement-learning", "gymnasium", "environments", "simulation"]
+keywords = ["reinforcement", "gymnasium", "environments", "simulation"]
 categories = ["artificial-intelligence", "science", "simulation"]
 
 [dependencies]
