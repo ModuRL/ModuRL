@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/modurl"
 readme = "README.md"
-keywords = ["reinforcement-learning", "machine-learning", "candle", "rl"]
+keywords = ["reinforcement", "machine-learning", "candle", "rl"]
 categories = ["artificial-intelligence", "science", "algorithms"]
 
 [workspace]

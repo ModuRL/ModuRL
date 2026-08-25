@@ -10,7 +10,7 @@ repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/modurl_mujoco"
 readme = "README.md"
-keywords = ["reinforcement-learning", "mujoco", "gymnasium", "simulation"]
+keywords = ["reinforcement", "mujoco", "gymnasium", "simulation"]
 categories = ["artificial-intelligence", "science", "science::robotics", "simulation"]
 
 [dependencies]
