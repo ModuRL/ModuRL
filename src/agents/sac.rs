@@ -53,16 +53,20 @@ pub trait SACCriticNetwork {
 }
 
 /// Failures from SAC critic construction, aggregation, and optimization.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SACCriticError {
-    TensorError(candle_core::Error),
-    InvalidPolyakCoefficient {
-        tau: f64,
-    },
+    #[error("critic tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("invalid Polyak coefficient {tau}; expected a finite value in 0..=1")]
+    InvalidPolyakCoefficient { tau: f64 },
+    #[error(
+        "online and target critic parameter maps differ (online only: {online_only:?}, target only: {target_only:?})"
+    )]
     ParameterMapMismatch {
         online_only: Vec<String>,
         target_only: Vec<String>,
     },
+    #[error("the critic ensemble produced no values")]
     NoCriticValues,
 }
 
@@ -564,35 +568,53 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SACConfigurationError {
+    #[error("at least one critic is required")]
     NoCritics,
+    #[error("replay capacity must be nonzero")]
     ZeroReplayCapacity,
+    #[error("batch size must be nonzero")]
     ZeroBatchSize,
+    #[error("replay capacity must be at least the batch size")]
     ReplayCapacityBelowBatchSize,
+    #[error("gamma must be finite and in 0..=1")]
     InvalidGamma,
+    #[error("tau must be finite and in 0..=1")]
     InvalidTau,
+    #[error("alpha must be finite and nonnegative")]
     InvalidAlpha,
+    #[error("the target entropy schedule is invalid")]
     InvalidTargetEntropySchedule,
+    #[error("entropy change penalty must be finite and nonnegative")]
     InvalidEntropyChangePenalty,
+    #[error("Q-value clip must be finite and positive")]
     InvalidQValueClip,
+    #[error("training horizon must be nonzero")]
     ZeroTrainingHorizon,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SACError<PE, GE, SE>
 where
     PE: Debug,
     GE: Debug,
     SE: Debug,
 {
-    PolicyError(PE),
-    GymError(GE),
-    SpaceError(SE),
-    TensorError(candle_core::Error),
-    ReplayStorageError(ReplayStorageError),
-    CriticError(SACCriticError),
-    ConfigurationError(SACConfigurationError),
+    #[error("policy failed: {0}")]
+    PolicyError(#[source] PE),
+    #[error("gym failed: {0}")]
+    GymError(#[source] GE),
+    #[error("space operation failed: {0}")]
+    SpaceError(#[source] SE),
+    #[error("SAC tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("replay storage failed: {0}")]
+    ReplayStorageError(#[source] ReplayStorageError),
+    #[error("critic failed: {0}")]
+    CriticError(#[source] SACCriticError),
+    #[error("invalid SAC configuration: {0}")]
+    ConfigurationError(#[source] SACConfigurationError),
 }
 
 impl<PE: Debug, GE: Debug, SE: Debug> From<candle_core::Error> for SACError<PE, GE, SE> {
@@ -1259,6 +1281,15 @@ where
         )?)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.optimize_critics",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     /// Optimizes each critic against Bellman `targets` shaped `[batch]`.
     ///
     /// Returns one scalar loss tensor per critic.
@@ -1291,6 +1322,15 @@ where
         Ok(critic_losses)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.optimize_actor",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     fn optimize_actor(
         &mut self,
         batch: &SACOptimizationBatch,
@@ -1348,6 +1388,15 @@ where
         })
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.optimize_temperature",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     /// Optimizes automatic entropy temperature from states shaped
     /// `[batch, ...state_shape]`.
     fn optimize_temperature(
@@ -1437,6 +1486,15 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.optimize",
+            target = "modurl::performance",
+            skip_all,
+            fields(collection_timestep)
+        )
+    )]
     fn optimize(&mut self, collection_timestep: usize) -> Result<(), SACError<PE, GE, SE>> {
         let Some(batch) = self.sample_optimization_batch()? else {
             return Ok(());
@@ -1575,6 +1633,15 @@ where
         Ok(completed_episodes)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "sac.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     fn learn_inner(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,

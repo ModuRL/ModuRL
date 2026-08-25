@@ -1,6 +1,9 @@
-# ModuRL
+# <img src="docs/modurl-logo-transparent.png" width="70px" height="70px" align="bottom" alt="ModuRL mascot icon"> ModuRL
 
 [![Workspace CI](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml/badge.svg)](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml)
+[![crates.io](https://img.shields.io/crates/v/modurl.svg)](https://crates.io/crates/modurl)
+[![docs.rs](https://docs.rs/modurl/badge.svg)](https://docs.rs/modurl)
+[![book](https://img.shields.io/github/actions/workflow/status/ModuRL/ModuRL/book-pages.yml?branch=master&label=book)](https://modurl.github.io/ModuRL/)
 
 `ModuRL` is a deep reinforcement learning framework for Rust, built on [Candle](https://github.com/huggingface/candle).
 
@@ -47,6 +50,9 @@ The example uses the CPU by default. [Additional examples](crates/examples/examp
 
 ModuRL completed the matched PPO, DQN, and SAC workloads faster than all three Python runners in this CPU benchmark.
 
+> [!NOTE]
+> These benchmarks use small 2x64 networks on CartPole (PPO and DQN) and Pendulum (SAC). ModuRL's speed advantage is expected to be smaller with larger networks, where neural-network computation dominates runtime.
+
 | Algorithm | ModuRL median | vs. SB3 runner | vs. CleanRL runner | vs. Tianshou runner |
 | --- | ---: | ---: | ---: | ---: |
 | PPO | 2.102 s | 4.54x | 4.47x | 6.19x |
@@ -57,7 +63,7 @@ These CPU results were measured on a 12th Gen Intel Core i7-1255U with one compu
 
 The CleanRL runners adapt upstream reference scripts. The DQN Stable-Baselines3 and Tianshou runners also use documented adaptations so all frameworks perform the matched workload.
 
-Compare frameworks within one algorithm. The algorithms perform different amounts of optimizer work per transition. These measurements cover small-network implementation throughput, not sample efficiency, reward, or large-model performance. CUDA and Metal were not measured.
+Compare frameworks within one algorithm. The algorithms perform different amounts of optimizer work per transition. These measurements do not cover sample efficiency, reward, or large-model performance. CUDA and Metal were not measured.
 
 See the [benchmark workloads, fairness controls, and accelerator commands](crates/benches/README.md), plus the raw [PPO](crates/benches/results/ppo-cpu-windows-20260810.json), [DQN](crates/benches/results/dqn-cpu-windows-20260820.json), and [SAC](crates/benches/results/sac-cpu-windows-20260820.json) samples.
 
@@ -119,7 +125,7 @@ Agents train against these contracts instead of concrete environment, network, o
 | --- | --- | --- | --- |
 | [`modurl`](src/lib.rs) | Agents, models, distributions, buffers, spaces, schedules, and environment traits | Yes, with default features | [MIT](LICENSE) |
 | [`modurl_gym`](crates/modurl_gym) | Classic-control and Box2D environments, rendering, and Gym utilities | Yes, with default features | MIT |
-| [`modurl_mojoco`](crates/modurl_mojoco) | Gymnasium-compatible MuJoCo v5 environments | No; uses the native MuJoCo library | [MIT](crates/modurl_mojoco/LICENSE); [Gymnasium asset license](crates/modurl_mojoco/assets/LICENSE) |
+| [`modurl_mujoco`](crates/modurl_mujoco) | Gymnasium-compatible MuJoCo v5 environments | No; uses the native MuJoCo library | [MIT](crates/modurl_mujoco/LICENSE); [Gymnasium asset license](crates/modurl_mujoco/assets/LICENSE) |
 | [`modurl_ale`](crates/modurl_ale) | Arcade Learning Environment integration and Atari wrappers | No; builds bundled C++ | [GPL-2.0-only](crates/modurl_ale/LICENSE); [third-party notices](crates/modurl_ale/THIRD_PARTY_LICENSES.md) |
 | [`modurl_logger`](crates/modurl_logger) | Terminal graphs and TensorBoard event logging | Yes | MIT |
 | [`examples`](crates/examples/Cargo.toml) | Runnable training programs; not published as a crate | Mixed; depends on the example | MIT |
@@ -127,6 +133,9 @@ Agents train against these contracts instead of concrete environment, network, o
 
 The core `modurl` crate has no default Cargo features. Enable its
 `multithreading` feature for multithreaded vectorized and stacked environments.
+Enable `tracing` to emit performance spans for agent learning, rollout
+collection, and optimization. All spans use the `modurl::performance` target;
+install a `tracing` subscriber in the application to record or display them.
 Workspace crates define additional features for rendering and environment
 support.
 
@@ -150,6 +159,6 @@ cargo test --locked -p modurl -p modurl_gym
 cargo test --locked --all-targets -p examples
 ```
 
-MuJoCo and Atari checks have additional native requirements. See the [`modurl_mojoco` README](crates/modurl_mojoco/README.md) and [`modurl_ale` README](crates/modurl_ale/README.md) before working on those crates.
+MuJoCo and Atari checks have additional native requirements. See the [`modurl_mujoco` README](crates/modurl_mujoco/README.md) and [`modurl_ale` README](crates/modurl_ale/README.md) before working on those crates.
 
 Issues and pull requests are welcome. Open an [issue](https://github.com/ModuRL/ModuRL/issues) before starting a large API change.

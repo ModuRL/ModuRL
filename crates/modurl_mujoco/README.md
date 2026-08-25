@@ -1,4 +1,4 @@
-# modurl_mojoco
+# modurl_mujoco
 
 Native Rust MuJoCo environments for [ModuRL](https://github.com/ModuRL/ModuRL), using Candle tensors and [`mujoco-rs`](https://github.com/davidhozic/mujoco-rs) physics.
 
@@ -14,7 +14,7 @@ Implemented Gymnasium v5 environments:
 
 MuJoCo 3.9 is automatically downloaded by `mujoco-rs` on Windows and Linux. A clone of this repository works without extra configuration because [`.cargo/config.toml`](../../.cargo/config.toml) supplies a project-local cache. On Windows, this crate's build script also copies `mujoco.dll` next to Cargo-built executables and tests.
 
-When adding `modurl_mojoco` as a dependency, Cargo does not read configuration files from dependencies. Add this to the consuming project's `.cargo/config.toml`:
+When adding `modurl_mujoco` as a dependency, Cargo does not read configuration files from dependencies. Add this to the consuming project's `.cargo/config.toml`:
 
 ```toml
 [env]
@@ -27,7 +27,7 @@ That limitation comes from `mujoco-rs`, which requires an absolute `MUJOCO_DOWNL
 
 ```rust
 use candle_core::Device;
-use modurl_mojoco::prelude::*;
+use modurl_mujoco::prelude::*;
 
 let mut environment = HalfCheetahV5::builder().device(&Device::Cpu).build()?;
 let observation = environment.reset()?.state;
@@ -62,7 +62,7 @@ Gymnasium-compatible environments; apply it in an environment wrapper.
 Enable the optional interactive MuJoCo viewer in your dependency:
 
 ```toml
-modurl_mojoco = { version = "0.1", features = ["rendering"] }
+modurl_mujoco = { version = "0.1", features = ["rendering"] }
 ```
 
 Then opt an environment into rendering through its builder:
@@ -82,7 +82,7 @@ viewers should be created on the application's main thread. Without the
 
 ## License
 
-`modurl_mojoco` is MIT-licensed and does not depend on GPL-licensed ALE code.
+`modurl_mujoco` is MIT-licensed and does not depend on GPL-licensed ALE code.
 MuJoCo is Apache-2.0, `mujoco-rs` is used under its MIT option, and the
 Gymnasium-derived XML models retain their upstream MIT notice in
 [`assets/LICENSE`](assets/LICENSE). When available, the build places MuJoCo's

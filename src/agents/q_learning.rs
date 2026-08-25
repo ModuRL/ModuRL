@@ -1,7 +1,7 @@
 use bon::bon;
 use candle_core::{DType, Error, Tensor};
 use candle_nn::{Optimizer, VarMap};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use std::{marker::PhantomData, ops::Deref};
 
 use crate::{
@@ -18,29 +18,42 @@ use crate::{
 pub mod ddqn;
 pub mod dqn;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum QLearningConfigurationError {
+    #[error("replay capacity must be nonzero")]
     ZeroReplayCapacity,
+    #[error("batch size must be nonzero")]
     ZeroBatchSize,
+    #[error("target update interval must be nonzero")]
     ZeroTargetUpdateInterval,
+    #[error("update frequency must be nonzero")]
     ZeroUpdateFrequency,
+    #[error("training horizon must be nonzero")]
     ZeroTrainingHorizon,
+    #[error("replay capacity must be at least the batch size")]
     ReplayCapacityBelowBatchSize,
+    #[error("gamma must be finite and in 0..=1")]
     InvalidGamma,
+    #[error("epsilon schedule values must be finite and in 0..=1")]
     InvalidEpsilon,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum QAgentError<GE, SE>
 where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
-    TensorError(candle_core::Error),
-    ReplayStorageError(ReplayStorageError),
-    ConfigurationError(QLearningConfigurationError),
-    GymError(GE),
-    SpaceError(SE),
+    #[error("Q-learning tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("replay storage failed: {0}")]
+    ReplayStorageError(#[source] ReplayStorageError),
+    #[error("invalid Q-learning configuration: {0}")]
+    ConfigurationError(#[source] QLearningConfigurationError),
+    #[error("gym failed: {0}")]
+    GymError(#[source] GE),
+    #[error("space operation failed: {0}")]
+    SpaceError(#[source] SE),
 }
 
 impl<GE, SE> From<candle_core::Error> for QAgentError<GE, SE>
@@ -450,6 +463,15 @@ where
         )?)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "q_learning.optimize",
+            target = "modurl::performance",
+            skip_all,
+            fields(collection_timestep)
+        )
+    )]
     fn optimize<I>(
         &mut self,
         collection_timestep: usize,
@@ -604,6 +626,15 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "q_learning.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     pub(crate) fn learn<I>(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,

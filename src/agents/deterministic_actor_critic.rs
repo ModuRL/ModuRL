@@ -32,33 +32,46 @@ pub mod td3;
 pub type DeterministicCritic<'a, O> = SACCritic<'a, O>;
 
 /// Invalid deterministic actor-critic configuration.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum DeterministicActorCriticConfigurationError {
     /// TD3 received an empty critic ensemble.
+    #[error("at least one critic is required")]
     NoCritics,
     /// Replay capacity was zero.
+    #[error("replay capacity must be nonzero")]
     ZeroReplayCapacity,
     /// Replay batch size was zero.
+    #[error("batch size must be nonzero")]
     ZeroBatchSize,
     /// Replay cannot retain one complete optimization batch.
+    #[error("replay capacity must be at least the batch size")]
     ReplayCapacityBelowBatchSize,
     /// The replay-update frequency was zero.
+    #[error("update frequency must be nonzero")]
     ZeroUpdateFrequency,
     /// The global collection horizon was zero.
+    #[error("training horizon must be nonzero")]
     ZeroTrainingHorizon,
     /// Gamma was non-finite or outside `0.0..=1.0`.
+    #[error("gamma must be finite and in 0..=1")]
     InvalidGamma,
     /// Tau was non-finite or outside `0.0..=1.0`.
+    #[error("tau must be finite and in 0..=1")]
     InvalidTau,
     /// The collection exploration-noise deviation was invalid.
+    #[error("exploration noise must be finite and nonnegative")]
     InvalidExplorationNoise,
     /// The target-policy-noise deviation was invalid.
+    #[error("target policy noise must be finite and nonnegative")]
     InvalidTargetPolicyNoise,
     /// The target-policy-noise clip was invalid.
+    #[error("target noise clip must be finite and nonnegative")]
     InvalidTargetNoiseClip,
     /// The actor-update interval was zero.
+    #[error("actor update interval must be nonzero")]
     ZeroActorUpdateInterval,
     /// An algorithm received a different number of critics than it requires.
+    #[error("incorrect critic count: expected {expected}, got {actual}")]
     IncorrectCriticCount {
         /// Number of critics required by the algorithm.
         expected: usize,
@@ -68,20 +81,27 @@ pub enum DeterministicActorCriticConfigurationError {
 }
 
 /// DDPG and TD3 construction or training failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DeterministicActorCriticError<GE, SE>
 where
     GE: Debug,
     SE: Debug,
 {
     /// A Candle tensor operation failed.
-    TensorError(candle_core::Error),
-    ReplayStorageError(ReplayStorageError),
+    #[error("actor-critic tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("replay storage failed: {0}")]
+    ReplayStorageError(#[source] ReplayStorageError),
     /// Critic construction, aggregation, or optimization failed.
-    CriticError(SACCriticError),
+    #[error("critic failed: {0}")]
+    CriticError(#[source] SACCriticError),
     /// An agent builder value violated its configuration contract.
-    ConfigurationError(DeterministicActorCriticConfigurationError),
+    #[error("invalid actor-critic configuration: {0}")]
+    ConfigurationError(#[source] DeterministicActorCriticConfigurationError),
     /// The online and target actors contain different parameter names.
+    #[error(
+        "online and target actor parameter maps differ (online only: {online_only:?}, target only: {target_only:?})"
+    )]
     ActorParameterMapMismatch {
         /// Parameter names found only in the online actor.
         online_only: Vec<String>,
@@ -89,9 +109,11 @@ where
         target_only: Vec<String>,
     },
     /// The vectorized environment returned an error.
-    GymError(GE),
+    #[error("gym failed: {0}")]
+    GymError(#[source] GE),
     /// The action or observation space returned an error.
-    SpaceError(SE),
+    #[error("space operation failed: {0}")]
+    SpaceError(#[source] SE),
 }
 
 /// Result type returned by DDPG and TD3 construction and training operations.
@@ -770,6 +792,15 @@ where
         .detach())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "deterministic_actor_critic.optimize_critics",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     /// Optimizes critics from a replay batch and targets shaped `[batch]`,
     /// returning one scalar loss and one `[batch]` Q tensor per critic.
     fn optimize_critics(
@@ -789,6 +820,15 @@ where
         Ok(CriticUpdate { losses, q_values })
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "deterministic_actor_critic.optimize_actor",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     /// Optimizes the actor from states `[batch, ...observation_shape]`,
     /// returning its scalar loss, `[batch]` Q values, and
     /// `[batch, ...action_shape]` actions.
@@ -826,6 +866,15 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "deterministic_actor_critic.optimize",
+            target = "modurl::performance",
+            skip_all,
+            fields(collection_timestep)
+        )
+    )]
     fn optimize<I>(
         &mut self,
         collection_timestep: usize,
@@ -923,6 +972,15 @@ where
         Ok(completed_episodes)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "deterministic_actor_critic.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     pub(crate) fn learn<I>(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,

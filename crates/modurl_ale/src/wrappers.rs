@@ -27,10 +27,12 @@ impl<G> NoopResetGym<G> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum NoopResetGymError<E> {
-    GymError(E),
-    CandleError(candle_core::Error),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("failed to create a no-op action tensor: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 impl<G, I> Gym<I> for NoopResetGym<G>
@@ -171,10 +173,12 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FireResetGymError<E> {
-    GymError(E),
-    CandleError(candle_core::Error),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("failed to create a fire-reset action tensor: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 /// Sends the standard FIRE startup actions after reset.
@@ -222,12 +226,7 @@ where
             .step(second_action)
             .map_err(FireResetGymError::GymError)?;
         reset = if step.done || step.truncated {
-            let reset = ResetInfo {
-                state: step.state,
-                info: step.info,
-            };
-            self.gym.reset().map_err(FireResetGymError::GymError)?;
-            reset
+            self.gym.reset().map_err(FireResetGymError::GymError)?
         } else {
             ResetInfo {
                 state: step.state,
@@ -252,10 +251,12 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WarpGymError<E> {
-    GymError(E),
-    CandleError(candle_core::Error),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("failed to warp an Atari observation: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 /// Converts RGB observations to luminance and resizes them to 84×84.
@@ -410,7 +411,9 @@ impl<G> WarpGym<G> {
             let luminance: Vec<f32> = match dims {
                 [_, _] => bytes.into_iter().map(f32::from).collect(),
                 [_, _, 3] => bytes
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .map(|pixel| {
                         pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114
                     })
@@ -432,7 +435,9 @@ impl<G> WarpGym<G> {
             [_, _, 3] => obs
                 .flatten_all()?
                 .to_vec1::<f32>()?
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|pixel| pixel[0] * 0.299 + pixel[1] * 0.587 + pixel[2] * 0.114)
                 .collect(),
             _ => unreachable!(),
@@ -606,7 +611,9 @@ mod tests {
             .map(|index| ((index * 37 + 11) % 256) as u8)
             .collect::<Vec<_>>();
         let luminance = rgb
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|pixel| {
                 pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114
             })
@@ -627,7 +634,9 @@ mod tests {
             .map(|index| ((index * 37 + 11) % 256) as u8)
             .collect::<Vec<_>>();
         let normalized_luminance = rgb
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|pixel| {
                 (pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114)
                     / 255.0
@@ -692,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn fire_reset_resets_after_second_reset_action_done_but_returns_step_obs() {
+    fn fire_reset_returns_the_new_reset_observation_after_second_action_done() {
         let gym = ScriptGym::new(vec![
             ScriptGym::step(11.0, 0.0, false, false, 3),
             ScriptGym::step(12.0, 0.0, true, false, 0),
@@ -703,7 +712,7 @@ mod tests {
 
         assert_eq!(wrapper.gym.actions, vec![1, 2]);
         assert_eq!(wrapper.gym.reset_count, 2);
-        assert_eq!(scalar(&obs.state), 12.0);
+        assert_eq!(scalar(&obs.state), 200.0);
     }
 
     #[test]

@@ -21,14 +21,17 @@ const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 static FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// An error produced by a [`TensorBoardLogger`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum TensorBoardError {
     /// A metric could not be accepted or aggregated.
-    Metric(MetricError),
+    #[error("metric logging failed: {0}")]
+    Metric(#[source] MetricError),
     /// A timestep could not be represented by TensorBoard's signed step type.
+    #[error("timestep {timestep} cannot be represented by TensorBoard")]
     TimestepOutOfRange { timestep: usize },
     /// The event file could not be created, written, or flushed.
-    Io(io::Error),
+    #[error("TensorBoard event file I/O failed: {0}")]
+    Io(#[source] io::Error),
 }
 
 impl From<MetricError> for TensorBoardError {

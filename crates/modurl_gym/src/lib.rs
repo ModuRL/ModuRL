@@ -2,15 +2,21 @@ pub mod box_2d;
 pub mod classic_control;
 pub(crate) mod testing;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EnvironmentError {
-    Tensor(candle_core::Error),
+    #[error("environment tensor operation failed: {0}")]
+    Tensor(#[source] candle_core::Error),
+    #[error("invalid environment configuration: {0}")]
     InvalidConfiguration(&'static str),
+    #[error("invalid action: {0}")]
     InvalidAction(&'static str),
+    #[error("environment is not initialized: {0}")]
     NotInitialized(&'static str),
+    #[error("invalid physics state: {0}")]
     InvalidPhysicsState(&'static str),
     #[cfg(feature = "rendering")]
-    Rendering(minifb::Error),
+    #[error("environment rendering failed: {0}")]
+    Rendering(#[source] minifb::Error),
 }
 
 impl From<candle_core::Error> for EnvironmentError {

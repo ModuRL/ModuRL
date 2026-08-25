@@ -27,20 +27,28 @@ use crate::{
     parameter_schedule::ParameterSchedule, spaces::Space,
 };
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum A2CError<AE, GE, SE>
 where
     AE: Debug,
     GE: Debug,
     SE: Debug,
 {
-    PolicyError(AE),
-    GymError(GE),
-    TensorError(candle_core::Error),
-    SpaceError(SE),
-    ConfigurationError(PPOConfigurationError),
+    #[error("policy failed: {0}")]
+    PolicyError(#[source] AE),
+    #[error("gym failed: {0}")]
+    GymError(#[source] GE),
+    #[error("A2C tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("space operation failed: {0}")]
+    SpaceError(#[source] SE),
+    #[error("invalid A2C configuration: {0}")]
+    ConfigurationError(#[source] PPOConfigurationError),
+    #[error("termination batches differ in length: {dones} dones and {truncateds} truncations")]
     MismatchedTerminationBatch { dones: usize, truncateds: usize },
+    #[error("no prepared rollout is available")]
     MissingPreparedRollout,
+    #[error("old value estimates are missing")]
     MissingOldValues,
 }
 
@@ -279,6 +287,15 @@ where
         self.inner.act(observation).map_err(A2CError::from)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "a2c.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     fn learn(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,

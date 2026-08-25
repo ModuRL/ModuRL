@@ -36,10 +36,12 @@ impl RunningMeanStd {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum NormalizeObservationGymError<E> {
-    GymError(E),
-    CandleError(candle_core::Error),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("failed to normalize an observation: {0}")]
+    CandleError(#[source] candle_core::Error),
 }
 
 /// Normalizes each observation component using its running mean and variance.

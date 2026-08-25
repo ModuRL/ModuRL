@@ -3,7 +3,7 @@ use modurl::spaces::{BoxSpace, Space};
 use mujoco_rs::prelude::{MjData, MjModel};
 #[cfg(feature = "rendering")]
 use mujoco_rs::viewer::MjViewer;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rand_distr::StandardNormal;
 
 use crate::MujocoError;
@@ -53,7 +53,7 @@ impl MujocoCore {
             initial_qvel,
             frame_skip,
             device: device.clone(),
-            rng: StdRng::from_os_rng(),
+            rng: rand::make_rng(),
             #[cfg(feature = "rendering")]
             viewer,
         })

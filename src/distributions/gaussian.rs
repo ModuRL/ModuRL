@@ -24,11 +24,15 @@ pub struct GaussianDistribution {
     action_shape: Option<Vec<usize>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum GaussianDistributionError {
-    TensorError(candle_core::Error),
+    #[error("Gaussian tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("the Gaussian action shape is too large")]
     ActionShapeTooLarge,
+    #[error("a Gaussian distribution requires a nonzero action dimension")]
     ZeroActionDimension,
+    #[error("invalid Gaussian output width {output_width}")]
     InvalidOutputWidth { output_width: usize },
 }
 

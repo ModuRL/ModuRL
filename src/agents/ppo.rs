@@ -14,36 +14,56 @@ use crate::{
     tensor_operations::normalize_tensor,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PPOConfigurationError {
+    #[error("batch size must be nonzero")]
     ZeroBatchSize,
+    #[error("minibatch size must be nonzero")]
     ZeroMiniBatchSize,
+    #[error("the number of optimization epochs must be nonzero")]
     ZeroEpochs,
+    #[error("training horizon must be nonzero")]
     ZeroTrainingHorizon,
+    #[error("gamma must be finite and in 0..=1")]
     InvalidGamma,
+    #[error("GAE lambda must be finite and in 0..=1")]
     InvalidGaeLambda,
+    #[error("value coefficient must be finite and nonnegative")]
     InvalidValueCoefficient,
+    #[error("entropy coefficient must be finite and nonnegative")]
     InvalidEntropyCoefficient,
+    #[error("gradient clip must be finite and positive")]
     InvalidGradientClip,
+    #[error("PPO requires a floating-point dtype")]
     InvalidDType,
+    #[error("the environment count must be nonzero")]
     ZeroEnvironments,
+    #[error("batch size must be divisible by the environment count")]
     BatchNotDivisibleByEnvironmentCount,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PPOError<AE, GE, SE>
 where
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
-    PolicyError(AE),
-    GymError(GE),
-    TensorError(candle_core::Error),
-    SpaceError(SE),
-    ConfigurationError(PPOConfigurationError),
+    #[error("policy failed: {0}")]
+    PolicyError(#[source] AE),
+    #[error("gym failed: {0}")]
+    GymError(#[source] GE),
+    #[error("PPO tensor operation failed: {0}")]
+    TensorError(#[source] candle_core::Error),
+    #[error("space operation failed: {0}")]
+    SpaceError(#[source] SE),
+    #[error("invalid PPO configuration: {0}")]
+    ConfigurationError(#[source] PPOConfigurationError),
+    #[error("termination batches differ in length: {dones} dones and {truncateds} truncations")]
     MismatchedTerminationBatch { dones: usize, truncateds: usize },
+    #[error("no prepared rollout is available")]
     MissingPreparedRollout,
+    #[error("old value estimates are missing")]
     MissingOldValues,
 }
 
@@ -642,6 +662,10 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(name = "ppo.optimize", target = "modurl::performance", skip_all)
+    )]
     fn optimize(&mut self) -> Result<(), PPOError<AE, GE, SE>> {
         let rollout_explained_variance = self.add_advantages_and_returns()?;
 
@@ -710,6 +734,15 @@ where
         Ok(())
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.prepare_rollout",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     fn add_advantages_and_returns(&mut self) -> Result<Tensor, PPOError<AE, GE, SE>> {
         let batch =
             <PPOExperience as experience::Experience>::batch(self.rollout_buffer.get_raw())?;
@@ -936,12 +969,21 @@ where
         }
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.compute_loss",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
+    #[builder]
     /// Computes losses from `states` `[batch, ...state_shape]`, `actions`
     /// `[batch, ...action_shape]`, and vector statistics (`old_log_probs`,
     /// `advantages`, `returns`, and `rewards`) shaped `[batch]`. `old_values`
     /// is present only when value-loss clipping is enabled.
     /// `explained_variance` is scalar `[]`.
-    #[builder]
     fn compute_loss(
         &mut self,
         states: &candle_core::Tensor,
@@ -962,7 +1004,7 @@ where
         .detach();
 
         // if the networks are shared, we need to extract the latent state
-        // if it's seperate we just say this is the state as is
+        // if it's separate we just say this is the state as is
         let latent_state = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
                 shared_info.shared_network.forward(states)?
@@ -1042,6 +1084,15 @@ where
         })
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.backpropagate",
+            target = "modurl::performance",
+            level = "trace",
+            skip_all
+        )
+    )]
     fn backpropagate_loss(&mut self, losses: PPOLosses) -> Result<(), PPOError<AE, GE, SE>> {
         let actor_loss = losses.actor_loss;
         let critic_loss = losses.critic_loss;
@@ -1271,6 +1322,14 @@ where
         Ok(states)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.collect_rollout",
+            target = "modurl::performance",
+            skip_all
+        )
+    )]
     /// Fills the rollout buffer, updating `next_states` shaped
     /// `[environment_count, ...observation_shape]` after each environment step.
     fn collect_rollout(
@@ -1372,6 +1431,15 @@ where
         Ok(actions)
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "ppo.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
     fn learn(
         &mut self,
         env: &mut dyn MultiGym<I, Error = Self::GymError, SpaceError = Self::SpaceError>,

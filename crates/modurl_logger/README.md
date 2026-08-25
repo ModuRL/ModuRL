@@ -63,4 +63,4 @@ See the [workspace examples](../examples/examples) for integration with ModuRL t
 
 ## License
 
-`modurl_logger` is available under the [MIT License](../../LICENSE).
+`modurl_logger` is available under the [MIT License](LICENSE).

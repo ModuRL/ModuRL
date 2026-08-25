@@ -3,11 +3,14 @@ use candle_core::{DType, Device, Tensor};
 const MAX_EXACT_F32_INTEGER: u32 = 1 << 24;
 
 /// Failures from sampling with Candle's device RNG.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SamplingError {
+    #[error("invalid inclusive sampling range {start}..={end}")]
     InvalidInclusiveRange { start: u32, end: u32 },
+    #[error("inclusive sampling range end {end} exceeds the maximum {maximum}")]
     InclusiveRangeTooLarge { end: u32, maximum: u32 },
-    TensorError(candle_core::Error),
+    #[error("tensor sampling failed: {0}")]
+    TensorError(#[source] candle_core::Error),
 }
 
 impl From<candle_core::Error> for SamplingError {

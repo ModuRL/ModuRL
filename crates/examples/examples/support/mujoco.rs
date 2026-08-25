@@ -1,37 +1,35 @@
 use candle_core::Device;
 
-#[cfg(not(any(
-    feature = "ant",
-    feature = "half-cheetah",
-    feature = "hopper",
-    feature = "walker2d"
-)))]
-compile_error!(
-    "enable exactly one MuJoCo environment feature: ant, half-cheetah, hopper, or walker2d"
-);
-
 // Cargo features are additive. When several environment features are enabled
 // (for example by `--all-features`), select the first in this documented
-// priority order so every example remains buildable.
-#[cfg(feature = "ant")]
-use modurl_mojoco::AntV5 as SelectedEnvironment;
+// priority order so every example remains buildable. The umbrella
+// `mujoco-environment` feature defaults to Ant when no specific environment is
+// selected.
+#[cfg(any(
+    feature = "ant",
+    not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d"))
+))]
+use modurl_mujoco::AntV5 as SelectedEnvironment;
 #[cfg(all(not(feature = "ant"), feature = "half-cheetah"))]
-use modurl_mojoco::HalfCheetahV5 as SelectedEnvironment;
+use modurl_mujoco::HalfCheetahV5 as SelectedEnvironment;
 #[cfg(all(
     not(feature = "ant"),
     not(feature = "half-cheetah"),
     feature = "hopper"
 ))]
-use modurl_mojoco::HopperV5 as SelectedEnvironment;
+use modurl_mujoco::HopperV5 as SelectedEnvironment;
 #[cfg(all(
     not(feature = "ant"),
     not(feature = "half-cheetah"),
     not(feature = "hopper"),
     feature = "walker2d"
 ))]
-use modurl_mojoco::Walker2dV5 as SelectedEnvironment;
+use modurl_mujoco::Walker2dV5 as SelectedEnvironment;
 
-#[cfg(feature = "ant")]
+#[cfg(any(
+    feature = "ant",
+    not(any(feature = "half-cheetah", feature = "hopper", feature = "walker2d"))
+))]
 pub const ENVIRONMENT_NAME: &str = "Ant-v5";
 #[cfg(all(not(feature = "ant"), feature = "half-cheetah"))]
 pub const ENVIRONMENT_NAME: &str = "HalfCheetah-v5";

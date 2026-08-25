@@ -1,6 +1,7 @@
 pub mod graphers;
 
 #[cfg(any(
+    feature = "mujoco-environment",
     feature = "ant",
     feature = "half-cheetah",
     feature = "hopper",

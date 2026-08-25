@@ -4,9 +4,10 @@ use candle_core::Tensor;
 
 use crate::gym::{Gym, ResetInfo, StepInfo};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ClipRewardGymError<E> {
-    GymError(E),
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
 }
 
 /// Maps each nonzero reward to its sign.

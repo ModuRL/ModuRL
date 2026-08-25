@@ -61,7 +61,6 @@ The crate has no default Cargo features.
 | --- | --- |
 | `rendering` | Adds `render` builder options and renders environments through `minifb`. |
 | `logging` | Emits the CartPole post-termination warning through the `log` crate. |
-| `tracing` | Enables the optional `tracing` dependency. The environment code does not emit tracing events. |
 
 ## Documentation
 
@@ -75,4 +74,4 @@ cargo doc -p modurl_gym --no-deps --open
 
 ## License
 
-`modurl_gym` is available under the [MIT License](../../LICENSE).
+`modurl_gym` is available under the [MIT License](LICENSE).

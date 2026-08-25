@@ -26,16 +26,20 @@ pub mod prelude {
 }
 
 /// Errors returned while constructing or stepping an environment.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum MujocoError {
     /// MuJoCo could not compile an embedded model.
-    Model(mujoco_rs::error::MjModelError),
+    #[error("MuJoCo model compilation failed: {0}")]
+    Model(#[source] mujoco_rs::error::MjModelError),
     /// A Candle tensor operation failed.
-    Tensor(candle_core::Error),
+    #[error("MuJoCo tensor operation failed: {0}")]
+    Tensor(#[source] candle_core::Error),
     /// The optional interactive viewer could not initialize or draw a frame.
     #[cfg(feature = "rendering")]
-    Viewer(mujoco_rs::viewer::MjViewerError),
+    #[error("MuJoCo viewer failed: {0}")]
+    Viewer(#[source] mujoco_rs::viewer::MjViewerError),
     /// An action or explicit simulator state had an invalid shape or value.
+    #[error("invalid MuJoCo input: {0}")]
     InvalidInput(String),
 }
 
