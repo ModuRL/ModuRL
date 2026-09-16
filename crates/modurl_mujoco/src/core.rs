@@ -5,6 +5,7 @@ use mujoco_rs::prelude::{MjData, MjModel};
 use mujoco_rs::viewer::MjViewer;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rand_distr::StandardNormal;
+use std::path::Path;
 
 use crate::MujocoError;
 
@@ -26,13 +27,30 @@ impl MujocoCore {
         device: &Device,
         render: bool,
     ) -> Result<Self, MujocoError> {
+        Self::from_model(MjModel::from_xml_string(xml)?, frame_skip, device, render)
+    }
+
+    pub(crate) fn from_xml_path(
+        path: &Path,
+        frame_skip: usize,
+        device: &Device,
+        render: bool,
+    ) -> Result<Self, MujocoError> {
+        Self::from_model(MjModel::from_xml(path)?, frame_skip, device, render)
+    }
+
+    fn from_model(
+        model: MjModel,
+        frame_skip: usize,
+        device: &Device,
+        render: bool,
+    ) -> Result<Self, MujocoError> {
         if frame_skip == 0 {
             return Err(MujocoError::InvalidInput(
                 "frame_skip must be greater than zero".into(),
             ));
         }
-        let model = Box::new(MjModel::from_xml_string(xml)?);
-        let data = MjData::new(model);
+        let data = MjData::new(Box::new(model));
         let initial_qpos = data.qpos().to_vec();
         let initial_qvel = data.qvel().to_vec();
         #[cfg(feature = "rendering")]
@@ -71,12 +89,28 @@ impl MujocoCore {
         self.data.qvel()
     }
 
+    pub(crate) fn set_task_state(
+        &mut self,
+        qpos: &[f64],
+        qvel: &[f64],
+    ) -> Result<(), MujocoError> {
+        self.set_state(qpos, qvel)
+    }
+
     pub(crate) fn nq(&self) -> usize {
         self.data.qpos().len()
     }
 
     pub(crate) fn nv(&self) -> usize {
         self.data.qvel().len()
+    }
+
+    pub(crate) fn sensor_data(&self) -> &[f64] {
+        self.data.sensordata()
+    }
+
+    pub(crate) fn controls(&self) -> &[f64] {
+        self.data.ctrl()
     }
 
     pub(crate) fn nu(&self) -> usize {
@@ -252,6 +286,49 @@ impl MujocoCore {
         Ok(values)
     }
 
+    /// Maps normalized policy actions `[-1, 1]` into each limited actuator's
+    /// XML control range before stepping. Unbounded actuators receive the raw value.
+    pub(crate) fn step_normalized(&mut self, action: &Tensor) -> Result<Vec<f64>, MujocoError> {
+        if action.rank() != 1 || action.dims()[0] != self.nu() || !action.dtype().is_float() {
+            return Err(MujocoError::InvalidInput(format!(
+                "normalized action must be a floating tensor of shape ({},)",
+                self.nu()
+            )));
+        }
+        let mut values = action.to_dtype(DType::F64)?.to_vec1::<f64>()?;
+        if !values
+            .iter()
+            .all(|value| value.is_finite() && (-1.0 - 1e-6..=1.0 + 1e-6).contains(value))
+        {
+            return Err(MujocoError::InvalidInput(format!(
+                "normalized actions must be finite and within [-1, 1]; got {:?}",
+                values
+            )));
+        }
+        values
+            .iter_mut()
+            .for_each(|value| *value = value.clamp(-1.0, 1.0));
+        let model = self.data.model();
+        let physical = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if model.actuator_ctrllimited()[index] {
+                    let [minimum, maximum] = model.actuator_ctrlrange()[index];
+                    minimum + (value + 1.0) * 0.5 * (maximum - minimum)
+                } else {
+                    *value
+                }
+            })
+            .collect::<Vec<_>>();
+        self.data.ctrl_mut().copy_from_slice(&physical);
+        for _ in 0..self.frame_skip {
+            self.data.step();
+        }
+        self.data.rne_post_constraint();
+        Ok(values)
+    }
+
     pub(crate) fn observation(&self, exclude_x: bool, clip_velocity: bool) -> Vec<f64> {
         let mut observation = Vec::with_capacity(self.nq() + self.nv() - usize::from(exclude_x));
         observation.extend_from_slice(&self.qpos()[usize::from(exclude_x)..]);
@@ -267,6 +344,17 @@ impl MujocoCore {
         let values = values.iter().map(|value| *value as f32).collect::<Vec<_>>();
         let len = values.len();
         Ok(Tensor::from_vec(values, len, &self.device)?)
+    }
+
+    pub(crate) fn viewer_running(&self) -> bool {
+        #[cfg(feature = "rendering")]
+        {
+            return self.viewer.as_ref().is_some_and(MjViewer::running);
+        }
+        #[cfg(not(feature = "rendering"))]
+        {
+            false
+        }
     }
 
     pub(crate) fn render(&mut self) -> Result<(), MujocoError> {

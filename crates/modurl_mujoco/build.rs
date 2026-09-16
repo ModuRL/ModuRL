@@ -1,6 +1,30 @@
-use std::{env, fs, path::PathBuf};
+use std::{
+    env, fs, io,
+    path::{Path, PathBuf},
+};
 
 const MUJOCO_VERSION: &str = "3.9.0";
+
+fn copy_if_needed(source: &Path, destination: &Path) -> io::Result<()> {
+    if destination.is_file() && fs::read(source)? == fs::read(destination)? {
+        return Ok(());
+    }
+    match fs::copy(source, destination) {
+        Ok(_) => Ok(()),
+        Err(error)
+            if destination.is_file()
+                && (error.kind() == io::ErrorKind::PermissionDenied
+                    || error.raw_os_error() == Some(32)) =>
+        {
+            println!(
+                "cargo::warning=kept locked MuJoCo runtime at {}; stop the running executable to replace it",
+                destination.display()
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
 
 fn main() {
     println!("cargo::rerun-if-env-changed=MUJOCO_DOWNLOAD_DIR");
@@ -49,7 +73,7 @@ fn main() {
         fs::create_dir_all(&directory).expect("failed to create Cargo output directory");
         for (source, destination) in &files {
             if source.is_file() {
-                fs::copy(source, directory.join(destination))
+                copy_if_needed(source, &directory.join(destination))
                     .expect("failed to place a MuJoCo runtime or notice file beside Cargo output");
             }
         }

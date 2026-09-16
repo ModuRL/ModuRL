@@ -144,3 +144,9 @@ Observation bounds also include one `f32` conversion epsilon scaled by the
 reference value. Walker2d keeps all impact transitions in the baseline; its
 velocity-only allowance accounts for solver-order differences between the
 official Python and `mujoco-rs` binary builds instead of shortening the fixture.
+
+## Custom MJCF environments
+
+`CustomMujoco::from_xml_path` loads a user-supplied XML file and its relative assets. Implement `MujocoTask` to provide a fixed-size observation, step reward, and episode endings. The task can hold a sampled goal and update it on reset. `MujocoState` exposes qpos, qvel, actuator controls, and body positions by MuJoCo body index. Policy actions use `[-1, 1]`; limited actuators map each normalized value into its own XML `ctrlrange`, while unlimited actuators receive the raw value. A custom environment implements `modurl::gym::Gym` and can be collected with `MultithreadedVectorizedGymWrapper` when `modurl/multithreading` is enabled.
+
+
