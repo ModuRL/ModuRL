@@ -5,12 +5,50 @@ use mujoco_rs::prelude::{MjData, MjModel};
 use mujoco_rs::viewer::MjViewer;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rand_distr::StandardNormal;
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
 
 use crate::MujocoError;
 
+// Weak entries let a model disappear when the last environment using it is dropped.
+// Hold the mutex during compilation so simultaneous constructors compile only once.
+fn shared_xml_model(xml: &str) -> Result<Arc<MjModel>, MujocoError> {
+    static MODELS: OnceLock<Mutex<HashMap<String, Weak<MjModel>>>> = OnceLock::new();
+    let mut models = MODELS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    if let Some(model) = models.get(xml).and_then(Weak::upgrade) {
+        return Ok(model);
+    }
+    let model = Arc::new(MjModel::from_xml_string(xml)?);
+    models.insert(xml.to_owned(), Arc::downgrade(&model));
+    Ok(model)
+}
+
+fn shared_path_model(path: &Path) -> Result<Arc<MjModel>, MujocoError> {
+    static MODELS: OnceLock<Mutex<HashMap<PathBuf, Weak<MjModel>>>> = OnceLock::new();
+    // Preserve MuJoCo's original error for paths that cannot be canonicalized.
+    let Ok(key) = path.canonicalize() else {
+        return Ok(Arc::new(MjModel::from_xml(path)?));
+    };
+    let mut models = MODELS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    if let Some(model) = models.get(&key).and_then(Weak::upgrade) {
+        return Ok(model);
+    }
+    let model = Arc::new(MjModel::from_xml(&key)?);
+    models.insert(key, Arc::downgrade(&model));
+    Ok(model)
+}
+
 pub(crate) struct MujocoCore {
-    data: MjData<Box<MjModel>>,
+    data: MjData<Arc<MjModel>>,
     initial_qpos: Vec<f64>,
     initial_qvel: Vec<f64>,
     frame_skip: usize,
@@ -27,7 +65,7 @@ impl MujocoCore {
         device: &Device,
         render: bool,
     ) -> Result<Self, MujocoError> {
-        Self::from_model(MjModel::from_xml_string(xml)?, frame_skip, device, render)
+        Self::from_model(shared_xml_model(xml)?, frame_skip, device, render)
     }
 
     pub(crate) fn from_xml_path(
@@ -36,11 +74,11 @@ impl MujocoCore {
         device: &Device,
         render: bool,
     ) -> Result<Self, MujocoError> {
-        Self::from_model(MjModel::from_xml(path)?, frame_skip, device, render)
+        Self::from_model(shared_path_model(path)?, frame_skip, device, render)
     }
 
     fn from_model(
-        model: MjModel,
+        model: Arc<MjModel>,
         frame_skip: usize,
         device: &Device,
         render: bool,
@@ -50,7 +88,7 @@ impl MujocoCore {
                 "frame_skip must be greater than zero".into(),
             ));
         }
-        let data = MjData::new(Box::new(model));
+        let data = MjData::new(model);
         let initial_qpos = data.qpos().to_vec();
         let initial_qvel = data.qvel().to_vec();
         #[cfg(feature = "rendering")]
@@ -89,11 +127,7 @@ impl MujocoCore {
         self.data.qvel()
     }
 
-    pub(crate) fn set_task_state(
-        &mut self,
-        qpos: &[f64],
-        qvel: &[f64],
-    ) -> Result<(), MujocoError> {
+    pub(crate) fn set_task_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<(), MujocoError> {
         self.set_state(qpos, qvel)
     }
 
@@ -423,5 +457,20 @@ pub(crate) fn validate_range(
         Err(MujocoError::InvalidInput(format!(
             "{name} must have a non-NaN minimum no greater than its maximum"
         )))
+    }
+}
+
+#[cfg(test)]
+mod shared_model_tests {
+    use super::*;
+
+    #[test]
+    fn same_xml_shares_model_but_not_data() {
+        let xml = "<mujoco><worldbody><body><freejoint/><geom size=\"0.1\" mass=\"1\"/></body></worldbody></mujoco>";
+        let mut first = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        let second = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        assert!(std::ptr::eq(first.data.model(), second.data.model()));
+        first.data.qpos_mut()[0] = 2.0;
+        assert_ne!(first.data.qpos()[0], second.data.qpos()[0]);
     }
 }
