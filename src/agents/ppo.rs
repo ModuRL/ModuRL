@@ -827,49 +827,33 @@ where
         let next_dones = next_dones.to_dtype(self.dtype)?;
         let next_truncateds = next_truncateds.to_dtype(self.dtype)?;
         let bootstrapped_values = bootstrapped_values.to_dtype(self.dtype)?;
-        let gamma_tensor = Tensor::new(self.gamma, device)?.to_dtype(self.dtype)?;
-        let gae_lambda_tensor = Tensor::new(self.gae_lambda, device)?.to_dtype(self.dtype)?;
+        let env_count = rewards.dim(1)?;
+        let gamma_tensor = Tensor::new(self.gamma, device)?
+            .to_dtype(self.dtype)?
+            .broadcast_as(env_count)?;
+        let gae_lambda_tensor = Tensor::new(self.gae_lambda, device)?
+            .to_dtype(self.dtype)?
+            .broadcast_as(env_count)?;
 
         let values = values.squeeze(D::Minus1)?;
-        let mut advantages = vec![];
+        let time_steps = rewards.dim(0)?;
+        let mut advantages = Vec::with_capacity(time_steps);
+        let mut next_value = bootstrapped_values.detach();
+        let mut gae = Tensor::zeros(env_count, self.dtype, device)?;
 
-        for env_idx in 0..rewards.shape().dims()[1] {
-            let env_rewards = rewards.i((.., env_idx))?.detach();
-            let env_next_dones = next_dones.i((.., env_idx))?.detach();
-            let env_next_truncateds = next_truncateds.i((.., env_idx))?.detach();
-            let env_values = values.i((.., env_idx))?.detach();
-            let mut env_advantages = vec![];
-
-            let mut next_value = bootstrapped_values.i(env_idx)?.detach();
-            let mut gae = Tensor::zeros((), self.dtype, device)?;
-            // Compute GAE backwards through the trajectory
-            for i in (0..env_rewards.shape().dims()[0]).rev() {
-                let same_episode =
-                    ((1.0 - env_next_dones.i(i)?)? * (1.0 - env_next_truncateds.i(i)?)?)?;
-
-                // TD error: δ = r + γ * V(s') - V(s)
-                let delta = (env_rewards.i(i)?
-                    + next_value.clone() * same_episode.clone() * gamma_tensor.clone()
-                    - env_values.i(i)?)?;
-
-                // GAE: A = δ + γ * λ * next_gae * (1 - next_done)
-                gae = (delta
-                    + gamma_tensor.clone() * gae_lambda_tensor.clone() * gae * same_episode)?;
-                env_advantages.push(gae.clone());
-                next_value = env_values.i(i)?;
-            }
-
-            // Reverse because our loop went backwards
-            let env_advantages_tensor = Tensor::stack(
-                &env_advantages.into_iter().rev().collect::<Vec<Tensor>>(),
-                0,
-            )?;
-            advantages.push(env_advantages_tensor);
+        // Keep the recurrence over time, but compute every environment together.
+        for i in (0..time_steps).rev() {
+            let same_episode = ((1.0 - next_dones.i(i)?)? * (1.0 - next_truncateds.i(i)?)?)?;
+            let value = values.i(i)?.detach();
+            let delta = (rewards.i(i)?
+                + next_value.clone() * same_episode.clone() * gamma_tensor.clone()
+                - value.clone())?;
+            gae = (delta + gamma_tensor.clone() * gae_lambda_tensor.clone() * gae * same_episode)?;
+            advantages.push(gae.clone());
+            next_value = value;
         }
 
-        let advantages_tensor = Tensor::stack(&advantages, 1)?; // shape [time_steps, env_count]
-
-        Ok(advantages_tensor)
+        Tensor::stack(&advantages.into_iter().rev().collect::<Vec<_>>(), 0)
     }
 
     /// Forwards latent or raw `states` shaped `[batch, ...state_shape]` and
@@ -2066,5 +2050,92 @@ mod schedule_tests {
         };
         assert_close(network.actor_optimizer.learning_rate(), 0.25);
         assert_close(network.critic_optimizer.learning_rate(), 0.25);
+    }
+    #[test]
+    fn gae_matches_scalar_reference_across_environments_and_episode_boundaries() {
+        let device = Device::Cpu;
+        let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = (0..3)
+            .map(|_| TwoStepTestGym::new(device.clone(), false))
+            .collect::<Vec<_>>()
+            .into();
+        let actor_vars = VarMap::new();
+        let critic_vars = VarMap::new();
+        let actor = MLP::builder()
+            .input_size(4)
+            .output_size(2)
+            .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let critic = MLP::builder()
+            .input_size(4)
+            .output_size(1)
+            .vb(VarBuilder::from_varmap(&critic_vars, DType::F32, &device))
+            .hidden_layer_sizes(vec![2])
+            .build()
+            .unwrap();
+        let networks = PPONetworkInfo::Separate(
+            SeparatePPONetwork::builder()
+                .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
+                .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                    actor,
+                ))
+                .critic_network(critic)
+                .build(),
+        );
+        let mut agent = PPOAgent::builder()
+            .action_space(env.action_space())
+            .network_info(networks)
+            .batch_size(6)
+            .mini_batch_size(6)
+            .num_epochs(1)
+            .training_horizon(6)
+            .gamma(0.9)
+            .gae_lambda(0.8)
+            .device(device.clone())
+            .build()
+            .unwrap();
+        agent.learn(&mut env, 0).unwrap();
+
+        let rewards = [[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        let values = [[0.2_f32, 0.3, 0.4], [0.5, 0.6, 0.7], [0.8, 0.9, 1.0]];
+        let dones = [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let truncateds = [[0.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let bootstrap = [1.1_f32, 1.2, 1.3];
+        let flat = |rows: [[f32; 3]; 3]| rows.into_iter().flatten().collect::<Vec<_>>();
+        let reward_tensor = Tensor::from_vec(flat(rewards), (3, 3), &device).unwrap();
+        let value_tensor = Tensor::from_vec(flat(values), (3, 3, 1), &device).unwrap();
+        let done_tensor = Tensor::from_vec(flat(dones), (3, 3), &device).unwrap();
+        let truncated_tensor = Tensor::from_vec(flat(truncateds), (3, 3), &device).unwrap();
+        let bootstrap_tensor = Tensor::from_vec(bootstrap.to_vec(), 3, &device).unwrap();
+
+        let actual = agent
+            .compute_gae(
+                &reward_tensor,
+                &value_tensor,
+                &done_tensor,
+                &truncated_tensor,
+                &bootstrap_tensor,
+            )
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+        for env_idx in 0..3 {
+            let mut next_value = bootstrap[env_idx];
+            let mut gae = 0.0_f32;
+            for time in (0..3).rev() {
+                let mask = (1.0 - dones[time][env_idx]) * (1.0 - truncateds[time][env_idx]);
+                let value = values[time][env_idx];
+                let delta = rewards[time][env_idx] + 0.9 * next_value * mask - value;
+                gae = delta + 0.9 * 0.8 * gae * mask;
+                assert!(
+                    (actual[time][env_idx] - gae).abs() < 1e-5,
+                    "time {time}, env {env_idx}: expected {gae}, got {}",
+                    actual[time][env_idx]
+                );
+                next_value = value;
+            }
+        }
     }
 }
