@@ -1,0 +1,16 @@
+<mujoco model="self_contact">
+  <option timestep="0.002"/>
+  <worldbody>
+    <body name="base" pos="0 0 0.2">
+      <geom type="sphere" size="0.01" density="1000" contype="0" conaffinity="0"/>
+      <body name="left" pos="-0.02 0 0">
+        <joint type="slide" axis="1 0 0"/>
+        <geom type="sphere" size="0.04" density="1000"/>
+      </body>
+      <body name="right" pos="0.02 0 0">
+        <joint type="slide" axis="1 0 0"/>
+        <geom type="sphere" size="0.04" density="1000"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

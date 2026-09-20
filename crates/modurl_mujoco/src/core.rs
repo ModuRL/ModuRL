@@ -1,6 +1,6 @@
 use candle_core::{DType, Device, Tensor};
 use modurl::spaces::{BoxSpace, Space};
-use mujoco_rs::prelude::{MjData, MjModel};
+use mujoco_rs::prelude::{MjData, MjModel, MjtObj};
 #[cfg(feature = "rendering")]
 use mujoco_rs::viewer::MjViewer;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
@@ -48,7 +48,11 @@ fn shared_path_model(path: &Path) -> Result<Arc<MjModel>, MujocoError> {
 }
 
 pub(crate) struct MujocoCore {
-    data: MjData<Arc<MjModel>>,
+    data: MjData<Box<MjModel>>,
+    template: Arc<MjModel>,
+    randomize_physics: bool,
+    physics_initialized: bool,
+    contact_substeps: Vec<Vec<[usize; 2]>>,
     initial_qpos: Vec<f64>,
     initial_qvel: Vec<f64>,
     frame_skip: usize,
@@ -65,7 +69,7 @@ impl MujocoCore {
         device: &Device,
         render: bool,
     ) -> Result<Self, MujocoError> {
-        Self::from_model(shared_xml_model(xml)?, frame_skip, device, render)
+        Self::from_model(shared_xml_model(xml)?, frame_skip, device, render, false)
     }
 
     pub(crate) fn from_xml_path(
@@ -74,7 +78,15 @@ impl MujocoCore {
         device: &Device,
         render: bool,
     ) -> Result<Self, MujocoError> {
-        Self::from_model(shared_path_model(path)?, frame_skip, device, render)
+        Self::from_model(shared_path_model(path)?, frame_skip, device, render, false)
+    }
+
+    pub(crate) fn from_xml_path_with_randomization(
+        path: &Path,
+        frame_skip: usize,
+        device: &Device,
+    ) -> Result<Self, MujocoError> {
+        Self::from_model(shared_path_model(path)?, frame_skip, device, false, true)
     }
 
     fn from_model(
@@ -82,13 +94,17 @@ impl MujocoCore {
         frame_skip: usize,
         device: &Device,
         render: bool,
+        randomize_physics: bool,
     ) -> Result<Self, MujocoError> {
         if frame_skip == 0 {
             return Err(MujocoError::InvalidInput(
                 "frame_skip must be greater than zero".into(),
             ));
         }
-        let data = MjData::new(model);
+        // Keep the XML cache shared, but give every environment a private model.
+        // Microduck randomizes physics per environment; mutating a shared model
+        // would otherwise apply one environment's sample to every worker.
+        let data = MjData::new(Box::new(model.as_ref().clone()));
         let initial_qpos = data.qpos().to_vec();
         let initial_qvel = data.qvel().to_vec();
         #[cfg(feature = "rendering")]
@@ -105,6 +121,10 @@ impl MujocoCore {
         let _ = render;
         Ok(Self {
             data,
+            template: model,
+            randomize_physics,
+            physics_initialized: false,
+            contact_substeps: Vec::new(),
             initial_qpos,
             initial_qvel,
             frame_skip,
@@ -117,6 +137,51 @@ impl MujocoCore {
 
     pub(crate) fn seed(&mut self, seed: u64) {
         self.rng = StdRng::seed_from_u64(seed);
+    }
+
+    pub(crate) fn randomize_nano_owl_physics(&mut self, step: usize) {
+        if !self.randomize_physics { return; }
+        let base = {
+            let model = unsafe { self.data.model_mut() };
+            model.name_to_id(MjtObj::mjOBJ_BODY, "base").unwrap_or(1)
+        };
+        let ramp = |stages: &[(usize, f64)]| {
+            stages.iter().rev().find(|(at, _)| step >= *at).map(|(_, v)| *v).unwrap_or(stages[0].1)
+        };
+        if !self.physics_initialized {
+            let scale = self.rng.random_range(0.95..=1.05);
+            let model = unsafe { self.data.model_mut() };
+            model.body_mass_mut()[base] = self.template.body_mass()[base] * scale;
+            model.body_inertia_mut()[base] = self.template.body_inertia()[base].map(|v| v * scale);
+            self.physics_initialized = true;
+        }
+        let com_range = ramp(&[(0, 0.003), (500 * 24, 0.005), (1000 * 24, 0.01), (1500 * 24, 0.015)]);
+        let base_com = {
+            let model = unsafe { self.data.model_mut() };
+            model.body_ipos_mut().copy_from_slice(self.template.body_ipos());
+            model.body_ipos()[base]
+        };
+        let new_base = [
+            base_com[0] + self.rng.random_range(-com_range..=com_range),
+            base_com[1] + self.rng.random_range(-com_range..=com_range),
+            base_com[2] + self.rng.random_range(-com_range..=com_range),
+        ];
+        let model = unsafe { self.data.model_mut() };
+        model.body_ipos_mut()[base] = new_base;
+        model.dof_armature_mut().copy_from_slice(self.template.dof_armature());
+        for value in model.dof_armature_mut().iter_mut() {
+            *value *= self.rng.random_range(0.9..=1.1);
+        }
+        model.dof_frictionloss_mut().copy_from_slice(self.template.dof_frictionloss());
+        for value in model.dof_frictionloss_mut().iter_mut() {
+            *value *= self.rng.random_range(0.9..=1.1);
+        }
+        for name in ["left_ankle_pitch_foot_collision", "right_ankle_pitch_foot_collision"] {
+            if let Some(id) = model.name_to_id(MjtObj::mjOBJ_GEOM, name) {
+                model.geom_friction_mut()[id] = self.template.geom_friction()[id]
+                    .map(|v| v * self.rng.random_range(0.7..=1.3));
+            }
+        }
     }
 
     pub(crate) fn qpos(&self) -> &[f64] {
@@ -147,6 +212,10 @@ impl MujocoCore {
         self.data.ctrl()
     }
 
+    pub(crate) fn actuator_forces(&self) -> &[f64] {
+        self.data.actuator_force()
+    }
+
     pub(crate) fn nu(&self) -> usize {
         self.data.ctrl().len()
     }
@@ -157,6 +226,82 @@ impl MujocoCore {
 
     pub(crate) fn body_position(&self, body_index: usize) -> [f64; 3] {
         self.data.xpos()[body_index]
+    }
+
+    /// Body IDs for each active MuJoCo contact, including ground contacts.
+    pub(crate) fn contact_body_pairs(&self) -> Vec<[usize; 2]> {
+        let geom_bodies = self.data.model().geom_bodyid();
+        self.data.contact().iter().filter_map(|contact| {
+            let geom1 = usize::try_from(contact.geom1).ok()?;
+            let geom2 = usize::try_from(contact.geom2).ok()?;
+            Some([
+                usize::try_from(*geom_bodies.get(geom1)?).ok()?,
+                usize::try_from(*geom_bodies.get(geom2)?).ok()?,
+            ])
+        }).collect()
+    }
+
+    /// Sum world-frame contact forces exerted by the world body on each body.
+    /// MuJoCo reports each contact's force in its contact frame, acting on geom2.
+    pub(crate) fn world_contact_forces(&self) -> Vec<[f64; 3]> {
+        let geom_bodies = self.data.model().geom_bodyid();
+        let mut forces = vec![[0.0; 3]; self.nbody()];
+        for (index, contact) in self.data.contact().iter().enumerate() {
+            let Ok(geom1) = usize::try_from(contact.geom1) else { continue };
+            let Ok(geom2) = usize::try_from(contact.geom2) else { continue };
+            let Some(&body1) = geom_bodies.get(geom1) else { continue };
+            let Some(&body2) = geom_bodies.get(geom2) else { continue };
+            let (body, sign) = match (body1, body2) {
+                (0, other) if other > 0 => (other as usize, 1.0),
+                (other, 0) if other > 0 => (other as usize, -1.0),
+                _ => continue,
+            };
+            let force = self.data.contact_force(index);
+            for axis in 0..3 {
+                forces[body][axis] += sign * (0..3)
+                    .map(|component| force[component] * contact.frame[component * 3 + axis])
+                    .sum::<f64>();
+            }
+        }
+        forces
+    }
+
+    pub(crate) fn body_parent_ids(&self) -> Vec<usize> {
+        self.data.model().body_parentid().iter()
+            .map(|&id| usize::try_from(id).unwrap_or(0))
+            .collect()
+    }
+
+    pub(crate) fn contact_substeps(&self) -> Vec<Vec<[usize; 2]>> { self.contact_substeps.clone() }
+    pub(crate) fn physics_timestep(&self) -> f64 { self.data.model().opt().timestep }
+
+    pub(crate) fn subtree_angular_momenta(&self) -> Vec<[f64; 3]> {
+        self.data.subtree_angmom().to_vec()
+    }
+
+    pub(crate) fn joint_position_limits(&self) -> Vec<[f64; 2]> {
+        let model = self.data.model();
+        model.jnt_range().iter().zip(model.jnt_type()).filter_map(|(range, kind)| {
+            // Hinge/slide only; exclude robot and ball free joints.
+            if *kind as i32 >= 2 { Some(*range) } else { None }
+        }).collect()
+    }
+
+    pub(crate) fn site_positions(&self) -> Vec<[f64; 3]> {
+        self.data.site_xpos().to_vec()
+    }
+
+    pub(crate) fn site_linear_velocities(&self) -> Vec<[f64; 3]> {
+        (0..self.data.site_xpos().len()).map(|id| {
+            let velocity = self.data.object_velocity(MjtObj::mjOBJ_SITE, id, false);
+            [velocity[3], velocity[4], velocity[5]]
+        }).collect()
+    }
+
+    pub(crate) fn site_body_ids(&self) -> Vec<usize> {
+        self.data.model().site_bodyid().iter()
+            .map(|&id| usize::try_from(id).unwrap_or(0))
+            .collect()
     }
 
     pub(crate) fn tendon_lengths(&self) -> &[f64] {
@@ -192,7 +337,9 @@ impl MujocoCore {
         self.data.reset();
         self.data.qpos_mut().copy_from_slice(qpos);
         self.data.qvel_mut().copy_from_slice(qvel);
+        self.contact_substeps.clear();
         self.data.forward();
+        self.data.subtree_vel();
         Ok(())
     }
 
@@ -317,7 +464,31 @@ impl MujocoCore {
         // runs this pass after simulation, so do the same before environments
         // read `cfrc_ext` for observations and contact costs.
         self.data.rne_post_constraint();
+        self.data.subtree_vel();
         Ok(values)
+    }
+
+    /// Sends physical actuator targets directly, as required by unbounded
+    /// joint-position action tasks. The MJCF actuator defines the control units.
+    pub(crate) fn step_physical(&mut self, action: &Tensor) -> Result<(), MujocoError> {
+        if action.rank() != 1 || action.dims()[0] != self.nu() || !action.dtype().is_float() {
+            return Err(MujocoError::InvalidInput(format!(
+                "physical action must be a floating tensor of shape ({},)", self.nu()
+            )));
+        }
+        let targets = action.to_dtype(DType::F64)?.to_vec1::<f64>()?;
+        if !targets.iter().all(|value| value.is_finite()) {
+            return Err(MujocoError::InvalidInput("physical actions must be finite".into()));
+        }
+        self.data.ctrl_mut().copy_from_slice(&targets);
+        self.contact_substeps.clear();
+        for _ in 0..self.frame_skip {
+            self.data.step();
+            self.contact_substeps.push(self.contact_body_pairs());
+        }
+        self.data.rne_post_constraint();
+        self.data.subtree_vel();
+        Ok(())
     }
 
     /// Maps normalized policy actions `[-1, 1]` into each limited actuator's
@@ -356,10 +527,13 @@ impl MujocoCore {
             })
             .collect::<Vec<_>>();
         self.data.ctrl_mut().copy_from_slice(&physical);
+        self.contact_substeps.clear();
         for _ in 0..self.frame_skip {
             self.data.step();
+            self.contact_substeps.push(self.contact_body_pairs());
         }
         self.data.rne_post_constraint();
+        self.data.subtree_vel();
         Ok(values)
     }
 
@@ -404,6 +578,16 @@ impl MujocoCore {
 
     pub(crate) fn action_space(&self) -> Box<dyn Space<Error = candle_core::Error>> {
         self.action_space_bounded(-1.0, 1.0)
+    }
+
+    pub(crate) fn unbounded_action_space_for_dim(&self, dim: usize) -> Box<dyn Space<Error = candle_core::Error>> {
+        Box::new(BoxSpace::new_unbounded(vec![dim], &self.device))
+    }
+
+    pub(crate) fn action_space_for_dim(&self, dim: usize) -> Box<dyn Space<Error = candle_core::Error>> {
+        Box::new(BoxSpace::new_with_universal_bounds(
+            vec![dim], -1.0, 1.0, &self.device,
+        ))
     }
 
     pub(crate) fn action_space_bounded(
@@ -469,7 +653,7 @@ mod shared_model_tests {
         let xml = "<mujoco><worldbody><body><freejoint/><geom size=\"0.1\" mass=\"1\"/></body></worldbody></mujoco>";
         let mut first = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
         let second = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
-        assert!(std::ptr::eq(first.data.model(), second.data.model()));
+        assert!(!std::ptr::eq(first.data.model(), second.data.model()));
         first.data.qpos_mut()[0] = 2.0;
         assert_ne!(first.data.qpos()[0], second.data.qpos()[0]);
     }

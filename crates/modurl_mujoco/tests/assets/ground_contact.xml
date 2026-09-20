@@ -1,0 +1,13 @@
+<mujoco model="ground_contact">
+  <option timestep="0.002"/>
+  <worldbody>
+    <geom name="floor" type="plane" size="1 1 0.1"/>
+    <body name="foot" pos="0 0 0.09">
+      <joint name="vertical" type="slide" axis="0 0 1"/>
+      <geom type="sphere" size="0.1" mass="1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor joint="vertical" ctrllimited="true" ctrlrange="-1 1"/>
+  </actuator>
+</mujoco>
