@@ -205,6 +205,32 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
     }
 
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
+        if action.rank() != 1 || !action.dtype().is_float() {
+            return Err(MujocoError::InvalidInput(
+                "invalid policy action shape or dtype".into(),
+            ));
+        }
+        let action_values = action.to_dtype(candle_core::DType::F64)?.to_vec1::<f64>()?;
+        if action_values.len() != self.action_dim || !action_values.iter().all(|a| a.is_finite()) {
+            return Err(MujocoError::InvalidInput(
+                "invalid policy action shape or nonfinite action".into(),
+            ));
+        }
+        let mapped = self.task.map_action(&action)?;
+        let physical = self.task.physical_control_targets();
+        if mapped.rank() != 1 || mapped.dims()[0] != self.core.nu() || !mapped.dtype().is_float() {
+            return Err(MujocoError::InvalidInput(
+                "invalid mapped action shape or dtype".into(),
+            ));
+        }
+        let mapped_values = mapped.to_dtype(candle_core::DType::F64)?.to_vec1::<f64>()?;
+        if !mapped_values.iter().all(|value| {
+            value.is_finite() && (physical || (-1.0 - 1e-6..=1.0 + 1e-6).contains(value))
+        }) {
+            return Err(MujocoError::InvalidInput(
+                "invalid mapped action value".into(),
+            ));
+        }
         let mut previous = MujocoState::capture(&self.core);
         let original_qpos = previous.qpos.clone();
         let original_qvel = previous.qvel.clone();
@@ -213,12 +239,7 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
             self.core.set_task_state(&previous.qpos, &previous.qvel)?;
             previous = MujocoState::capture(&self.core);
         }
-        let action_values = action.to_dtype(candle_core::DType::F64)?.to_vec1::<f64>()?;
-        if action_values.len() != self.action_dim || !action_values.iter().all(|a| a.is_finite()) {
-            return Err(MujocoError::InvalidInput("invalid policy action shape or nonfinite action".into()));
-        }
-        let mapped = self.task.map_action(&action)?;
-        if self.task.physical_control_targets() {
+        if physical {
             self.core.step_physical(&mapped)?;
         } else {
             self.core.step_normalized(&mapped)?;

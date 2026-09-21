@@ -1,8 +1,11 @@
 use candle_core::{DType, Device, Tensor};
 use modurl::spaces::{BoxSpace, Space};
-use mujoco_rs::prelude::{MjData, MjModel, MjtObj};
 #[cfg(feature = "rendering")]
 use mujoco_rs::viewer::MjViewer;
+use mujoco_rs::{
+    mujoco_c::mj_setConst,
+    prelude::{MjData, MjModel, MjtObj},
+};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rand_distr::StandardNormal;
 use std::{
@@ -50,7 +53,7 @@ fn shared_path_model(path: &Path) -> Result<Arc<MjModel>, MujocoError> {
 pub(crate) struct MujocoCore {
     data: MjData<Box<MjModel>>,
     template: Arc<MjModel>,
-    randomize_physics: bool,
+    base_body: Option<usize>,
     physics_initialized: bool,
     contact_substeps: Vec<Vec<[usize; 2]>>,
     initial_qpos: Vec<f64>,
@@ -101,6 +104,19 @@ impl MujocoCore {
                 "frame_skip must be greater than zero".into(),
             ));
         }
+        let base_body = if randomize_physics {
+            Some(
+                model
+                    .name_to_id(MjtObj::mjOBJ_BODY, "base")
+                    .ok_or_else(|| {
+                        MujocoError::InvalidInput(
+                            "physics randomization requires a body named 'base'".into(),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
         // Keep the XML cache shared, but give every environment a private model.
         // Microduck randomizes physics per environment; mutating a shared model
         // would otherwise apply one environment's sample to every worker.
@@ -122,7 +138,7 @@ impl MujocoCore {
         Ok(Self {
             data,
             template: model,
-            randomize_physics,
+            base_body,
             physics_initialized: false,
             contact_substeps: Vec::new(),
             initial_qpos,
@@ -140,48 +156,75 @@ impl MujocoCore {
     }
 
     pub(crate) fn randomize_nano_owl_physics(&mut self, step: usize) {
-        if !self.randomize_physics { return; }
-        let base = {
-            let model = unsafe { self.data.model_mut() };
-            model.name_to_id(MjtObj::mjOBJ_BODY, "base").unwrap_or(1)
-        };
+        let Some(base) = self.base_body else { return };
         let ramp = |stages: &[(usize, f64)]| {
-            stages.iter().rev().find(|(at, _)| step >= *at).map(|(_, v)| *v).unwrap_or(stages[0].1)
+            stages
+                .iter()
+                .rev()
+                .find(|(at, _)| step >= *at)
+                .map(|(_, v)| *v)
+                .unwrap_or(stages[0].1)
         };
-        if !self.physics_initialized {
-            let scale = self.rng.random_range(0.95..=1.05);
-            let model = unsafe { self.data.model_mut() };
-            model.body_mass_mut()[base] = self.template.body_mass()[base] * scale;
-            model.body_inertia_mut()[base] = self.template.body_inertia()[base].map(|v| v * scale);
-            self.physics_initialized = true;
-        }
-        let com_range = ramp(&[(0, 0.003), (500 * 24, 0.005), (1000 * 24, 0.01), (1500 * 24, 0.015)]);
-        let base_com = {
-            let model = unsafe { self.data.model_mut() };
-            model.body_ipos_mut().copy_from_slice(self.template.body_ipos());
-            model.body_ipos()[base]
-        };
+        let mass_scale = (!self.physics_initialized).then(|| self.rng.random_range(0.95..=1.05));
+        let com_range = ramp(&[
+            (0, 0.003),
+            (500 * 24, 0.005),
+            (1000 * 24, 0.01),
+            (1500 * 24, 0.015),
+        ]);
+        let base_com = self.template.body_ipos()[base];
         let new_base = [
             base_com[0] + self.rng.random_range(-com_range..=com_range),
             base_com[1] + self.rng.random_range(-com_range..=com_range),
             base_com[2] + self.rng.random_range(-com_range..=com_range),
         ];
-        let model = unsafe { self.data.model_mut() };
-        model.body_ipos_mut()[base] = new_base;
-        model.dof_armature_mut().copy_from_slice(self.template.dof_armature());
-        for value in model.dof_armature_mut().iter_mut() {
-            *value *= self.rng.random_range(0.9..=1.1);
-        }
-        model.dof_frictionloss_mut().copy_from_slice(self.template.dof_frictionloss());
-        for value in model.dof_frictionloss_mut().iter_mut() {
-            *value *= self.rng.random_range(0.9..=1.1);
-        }
-        for name in ["left_ankle_pitch_foot_collision", "right_ankle_pitch_foot_collision"] {
-            if let Some(id) = model.name_to_id(MjtObj::mjOBJ_GEOM, name) {
-                model.geom_friction_mut()[id] = self.template.geom_friction()[id]
-                    .map(|v| v * self.rng.random_range(0.7..=1.3));
+        {
+            // SAFETY: this MjData owns a private model; only numerical physics
+            // parameters are changed, and its model signature is unchanged.
+            let model = unsafe { self.data.model_mut() };
+            if let Some(scale) = mass_scale {
+                model.body_mass_mut()[base] = self.template.body_mass()[base] * scale;
+                model.body_inertia_mut()[base] =
+                    self.template.body_inertia()[base].map(|v| v * scale);
+            }
+            model
+                .body_ipos_mut()
+                .copy_from_slice(self.template.body_ipos());
+            model.body_ipos_mut()[base] = new_base;
+            model
+                .dof_armature_mut()
+                .copy_from_slice(self.template.dof_armature());
+            for value in model.dof_armature_mut().iter_mut() {
+                *value *= self.rng.random_range(0.9..=1.1);
+            }
+            model
+                .dof_frictionloss_mut()
+                .copy_from_slice(self.template.dof_frictionloss());
+            for value in model.dof_frictionloss_mut().iter_mut() {
+                *value *= self.rng.random_range(0.9..=1.1);
+            }
+            for name in [
+                "left_ankle_pitch_foot_collision",
+                "right_ankle_pitch_foot_collision",
+            ] {
+                if let Some(id) = model.name_to_id(MjtObj::mjOBJ_GEOM, name) {
+                    model.geom_friction_mut()[id] = self.template.geom_friction()[id]
+                        .map(|v| v * self.rng.random_range(0.7..=1.3));
+                }
             }
         }
+        // mj_setConst propagates mass, inertia, COM, and armature edits into
+        // the compiled model's dependent fields before the next reset/step.
+        // SAFETY: both pointers come from the same live MjData and are used
+        // exclusively here; the model layout and signature are unchanged.
+        let data_ptr = unsafe { self.data.ffi_mut() as *mut _ };
+        // SAFETY: the private model remains owned by self.data, and no model
+        // swap or structural edit occurs.
+        let model_ptr = unsafe { self.data.model_mut().ffi_mut() as *mut _ };
+        // SAFETY: the pointers are valid, compatible MuJoCo objects and there
+        // are no outstanding Rust references to either object.
+        unsafe { mj_setConst(model_ptr, data_ptr) };
+        self.physics_initialized = true;
     }
 
     pub(crate) fn qpos(&self) -> &[f64] {
@@ -193,7 +236,28 @@ impl MujocoCore {
     }
 
     pub(crate) fn set_task_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<(), MujocoError> {
-        self.set_state(qpos, qvel)
+        if qpos.len() != self.nq() || qvel.len() != self.nv() {
+            return Err(MujocoError::InvalidInput(format!(
+                "state shape mismatch: expected qpos ({},) and qvel ({},), got ({},) and ({},)",
+                self.nq(),
+                self.nv(),
+                qpos.len(),
+                qvel.len()
+            )));
+        }
+        if !qpos.iter().chain(qvel).all(|value| value.is_finite()) {
+            return Err(MujocoError::InvalidInput(
+                "qpos and qvel must contain only finite values".into(),
+            ));
+        }
+        // Preserve time, actuator activation, controls, and history during an
+        // in-episode disturbance; only recompute quantities derived from qpos/qvel.
+        self.data.qpos_mut().copy_from_slice(qpos);
+        self.data.qvel_mut().copy_from_slice(qvel);
+        self.contact_substeps.clear();
+        self.data.forward();
+        self.data.subtree_vel();
+        Ok(())
     }
 
     pub(crate) fn nq(&self) -> usize {
@@ -647,6 +711,31 @@ pub(crate) fn validate_range(
 #[cfg(test)]
 mod shared_model_tests {
     use super::*;
+
+    #[test]
+    fn randomization_recomputes_derived_mass() {
+        let xml = "<mujoco><worldbody><body name=\"base\"><freejoint/><geom size=\"0.1\" mass=\"1\"/></body></worldbody></mujoco>";
+        let model = Arc::new(MjModel::from_xml_string(xml).unwrap());
+        let mut core = MujocoCore::from_model(model, 1, &Device::Cpu, false, true).unwrap();
+        core.seed(7);
+        core.randomize_nano_owl_physics(0);
+        let model = core.data.model();
+        assert!((model.body_mass()[1] - 1.0).abs() > 1e-6);
+        assert!((model.body_subtreemass()[1] - model.body_mass()[1]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn task_state_edit_preserves_simulation_time() {
+        let xml = "<mujoco><worldbody><body><freejoint/><geom size=\"0.1\" mass=\"1\"/></body></worldbody></mujoco>";
+        let mut core = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        core.data.step();
+        let time = core.data.ffi().time;
+        let mut qpos = core.qpos().to_vec();
+        let qvel = core.qvel().to_vec();
+        qpos[0] += 0.1;
+        core.set_task_state(&qpos, &qvel).unwrap();
+        assert_eq!(core.data.ffi().time, time);
+    }
 
     #[test]
     fn same_xml_shares_model_but_not_data() {

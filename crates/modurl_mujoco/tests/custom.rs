@@ -77,3 +77,47 @@ fn exposes_ground_contact_force_vector() {
     assert!(force[2] > 0.0, "floor reaction should point upward: {force:?}");
     assert!(force[0].abs() < 1e-5 && force[1].abs() < 1e-5);
 }
+
+#[test]
+fn randomization_rejects_models_without_base() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/assets/slide.xml");
+    let result =
+        CustomMujoco::from_xml_path_with_randomization(path, 1, &Device::Cpu, SlideTask, 2);
+    assert!(matches!(
+        result,
+        Err(modurl_mujoco::MujocoError::InvalidInput(_))
+    ));
+}
+
+struct DisturbTask(std::rc::Rc<std::cell::Cell<usize>>);
+
+impl MujocoTask for DisturbTask {
+    fn observation(&self, state: &MujocoState) -> Vec<f64> {
+        [state.qpos.as_slice(), state.qvel.as_slice()].concat()
+    }
+
+    fn before_step(&mut self, state: &mut MujocoState) {
+        self.0.set(self.0.get() + 1);
+        state.qvel[0] += 1.0;
+    }
+
+    fn transition(&mut self, _: &MujocoState, _: &MujocoState, _: &[f64]) -> TaskStep {
+        TaskStep {
+            reward: 0.0,
+            done: false,
+            truncated: false,
+        }
+    }
+}
+
+#[test]
+fn invalid_action_does_not_apply_pre_step_disturbance() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/assets/slide.xml");
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut env =
+        CustomMujoco::from_xml_path(path, 1, &Device::Cpu, DisturbTask(calls.clone()), 2).unwrap();
+    env.reset().unwrap();
+    let invalid = candle_core::Tensor::new(&[f32::NAN], &Device::Cpu).unwrap();
+    assert!(env.step(invalid).is_err());
+    assert_eq!(calls.get(), 0);
+}
