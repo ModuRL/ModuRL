@@ -9,7 +9,7 @@ use modurl::{
     spaces::Space,
 };
 
-use crate::{MujocoError, core::MujocoCore};
+use crate::{MjModel, MujocoError, core::MujocoCore};
 
 /// Simulator state available to task callbacks. Body positions use MuJoCo body indices.
 #[derive(Debug, Clone, Default)]
@@ -136,6 +136,31 @@ impl<T: MujocoTask> CustomMujoco<T> {
         };
         env.make_observation()?;
         Ok(env)
+    }
+
+    /// Read the current MuJoCo model, including name lookup and physics settings.
+    pub fn model(&self) -> &MjModel {
+        self.core.model()
+    }
+
+    /// Edit the current model between steps, without resetting the episode.
+    ///
+    /// Edits run on a private candidate and persist across resets. An error or
+    /// panic in the closure leaves the live model unchanged. Model sharing is
+    /// retained until the first successful edit. Each edit clones the model.
+    /// Derived constants and current-state quantities are recomputed on success;
+    /// time, positions, velocities, controls, and actuator activation are preserved.
+    ///
+    /// Use MuJoCo's runtime-editable numerical parameters. Structural changes
+    /// (a different compiled signature) are rejected. The caller is responsible
+    /// for valid MuJoCo parameter values and combinations; this API does not
+    /// validate every field. Randomness, scheduling, and baselines belong to the
+    /// caller. Rebuild the environment to change model structure or render assets.
+    pub fn edit_model(
+        &mut self,
+        edit: impl FnOnce(&mut MjModel) -> Result<(), MujocoError>,
+    ) -> Result<(), MujocoError> {
+        self.core.edit_model(edit)
     }
 
     /// Returns false after the interactive viewer window closes.

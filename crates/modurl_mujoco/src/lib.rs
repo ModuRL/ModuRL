@@ -16,13 +16,14 @@ pub use custom::{CustomMujoco, MujocoState, MujocoTask, TaskStep};
 pub use half_cheetah::HalfCheetahV5;
 pub use hopper::HopperV5;
 pub use humanoid::{HumanoidV5, HumanoidV5Info};
+pub use mujoco_rs::prelude::{MjModel, MjtObj};
 pub use walker2d::Walker2dV5;
 
 /// Convenient imports for applications using this crate.
 pub mod prelude {
     pub use crate::{
         AntV5, AntV5Info, CustomMujoco, HalfCheetahV5, HopperV5, HumanoidV5, HumanoidV5Info,
-        MujocoError, MujocoState, MujocoTask, TaskStep, Walker2dV5,
+        MjModel, MjtObj, MujocoError, MujocoState, MujocoTask, TaskStep, Walker2dV5,
     };
     pub use modurl::gym::{Gym, MultiGym, MultiGymStepInfo, ResetInfo, StepInfo};
 }

@@ -171,9 +171,8 @@ after editing the XML or its assets then loads the updated model.
 
 Implement `MujocoTask` to provide observations, rewards, and episode endings.
 Tasks can hold sampled goals, update them on reset, and edit generalized positions
-and velocities through `reset_state` and `before_step`. Physics parameters remain
-those defined by the XML; no robot-specific physics randomization or curriculum
-is applied by the environment.
+and velocities through `reset_state` and `before_step`. Physics parameters default to those defined by the XML and can be changed
+between steps through `edit_model`.
 
 `MujocoState` exposes generalized positions and velocities, actuator controls,
 sensors, contacts, and body/site state using MuJoCo indices. By default, policy
@@ -184,3 +183,38 @@ or opt into physical control targets and an unbounded policy action space.
 Custom environments implement `modurl::gym::Gym` and can be collected with
 `MultithreadedVectorizedGymWrapper` when `modurl/multithreading` is enabled and
 the task is `Send`.
+
+### Runtime physics edits
+
+`environment.model()` exposes the current `MjModel` for inspection and name
+lookup. `environment.edit_model(...)` gives a closure mutable access to a private
+candidate of that model. Use MuJoCo's numerical parameter API directly:
+
+```rust,ignore
+environment.edit_model(|model| {
+    model.opt_mut().gravity = [0.0, 0.0, -3.0];
+    model.opt_mut().timestep = 0.005;
+    let body = model.name_to_id(MjtObj::mjOBJ_BODY, "my_body")
+        .ok_or_else(|| MujocoError::InvalidInput("unknown body".into()))?;
+    model.body_mass_mut()[body] *= 1.1;
+    model.body_inertia_mut()[body] = model.body_inertia()[body].map(|v| v * 1.1);
+    Ok(())
+})?;
+```
+
+Call this whenever your application needs a physics change, including during an
+episode. Sampling, curriculum schedules, and restoration of baseline values are
+ordinary application code. No callback timing or supported-parameter list is
+imposed by ModuRL. `MjModel` and `MjtObj` are re-exported in the prelude.
+
+Successful edits persist across resets. The environment keeps its time,
+positions, velocities, controls, and actuator activation, and recomputes derived
+constants and current-state quantities. Other environments retain their original
+shared model. Each edit clones the model so errors or panics in the closure leave
+the live model unchanged; batch related changes in one call.
+
+Edits must use MuJoCo's runtime-editable numerical parameters with valid values
+and combinations. A changed compiled model signature is rejected. Rebuild the
+environment for structural changes or render-asset changes. Model editing does
+not reset application-owned task state or automatically refresh a previously
+returned observation.

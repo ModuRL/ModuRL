@@ -117,6 +117,45 @@ impl MujocoCore {
         })
     }
 
+    pub(crate) fn model(&self) -> &MjModel {
+        self.data.model()
+    }
+
+    pub(crate) fn edit_model(
+        &mut self,
+        edit: impl FnOnce(&mut MjModel) -> Result<(), MujocoError>,
+    ) -> Result<(), MujocoError> {
+        // Edit a candidate so errors and unwinding cannot corrupt the live model
+        // or any other environment sharing it.
+        let mut candidate = self.data.model().clone();
+        edit(&mut candidate)?;
+        if candidate.signature() != self.data.model().signature() {
+            return Err(MujocoError::InvalidInput(
+                "runtime model edits must preserve the compiled model signature".into(),
+            ));
+        }
+        {
+            // mj_setConst uses scratch data because it can overwrite state while
+            // calculating constants at qpos0. Preserve the live integration state.
+            let mut scratch = MjData::new(&mut candidate);
+            // SAFETY: scratch exclusively borrows the candidate model; its layout
+            // is unchanged. Both pointers remain valid for this call.
+            let model_ptr = unsafe { scratch.model_mut().ffi_mut() as *mut _ };
+            let data_ptr = unsafe { scratch.ffi_mut() as *mut _ };
+            unsafe { mujoco_rs::mujoco_c::mj_setConst(model_ptr, data_ptr) };
+        }
+        self.data
+            .try_swap_model(Arc::new(candidate))
+            .map_err(|error| {
+                MujocoError::InvalidInput(format!("incompatible runtime model: {error}"))
+            })?;
+        self.contact_substeps.clear();
+        self.data.forward();
+        self.data.rne_post_constraint();
+        self.data.subtree_vel();
+        Ok(())
+    }
+
     pub(crate) fn seed(&mut self, seed: u64) {
         self.rng = StdRng::seed_from_u64(seed);
     }
@@ -651,6 +690,67 @@ pub(crate) fn validate_range(
 #[cfg(test)]
 mod shared_model_tests {
     use super::*;
+
+    #[test]
+    fn runtime_edits_isolate_models_and_preserve_state() {
+        let xml = r#"<mujoco><worldbody><body><freejoint/><geom size="0.1" mass="1"/></body></worldbody></mujoco>"#;
+        let mut edited = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        let shared = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        assert!(std::ptr::eq(edited.model(), shared.model()));
+        edited.data.step();
+        let time = edited.data.ffi().time;
+        let qpos = edited.qpos().to_vec();
+        let qvel = edited.qvel().to_vec();
+        edited
+            .edit_model(|model| {
+                model.body_mass_mut()[1] = 2.0;
+                model.body_inertia_mut()[1] = model.body_inertia()[1].map(|v| v * 2.0);
+                model.opt_mut().gravity = [0.0, 0.0, -2.0];
+                model.opt_mut().timestep = 0.005;
+                Ok(())
+            })
+            .unwrap();
+        assert!(!std::ptr::eq(edited.model(), shared.model()));
+        assert_eq!(shared.model().body_mass()[1], 1.0);
+        assert_eq!(edited.model().body_subtreemass()[1], 2.0);
+        assert_eq!(edited.model().opt().gravity[2], -2.0);
+        assert_eq!(edited.dt(), 0.005);
+        assert_eq!(edited.data.ffi().time, time);
+        assert_eq!(edited.qpos(), qpos);
+        assert_eq!(edited.qvel(), qvel);
+        edited.reset_uniform(0.0).unwrap();
+        assert_eq!(edited.model().body_mass()[1], 2.0);
+    }
+
+    #[test]
+    fn failed_or_incompatible_edits_leave_live_model_unchanged() {
+        let xml = r#"<mujoco><worldbody><body><freejoint/><geom size="0.1" mass="1"/></body></worldbody></mujoco>"#;
+        let mut core = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        let peer = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        assert!(
+            core.edit_model(|model| {
+                model.body_mass_mut()[1] = 3.0;
+                Err(MujocoError::InvalidInput("application error".into()))
+            })
+            .is_err()
+        );
+        assert!(
+            core.edit_model(|model| {
+                *model = MjModel::from_xml_string("<mujoco/>")?;
+                Ok(())
+            })
+            .is_err()
+        );
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = core.edit_model(|model| {
+                model.body_mass_mut()[1] = 4.0;
+                panic!("application panic");
+            });
+        }));
+        assert!(panic.is_err());
+        assert!(std::ptr::eq(core.model(), peer.model()));
+        assert_eq!(core.model().body_mass()[1], 1.0);
+    }
 
     #[test]
     fn task_state_edit_preserves_simulation_time() {

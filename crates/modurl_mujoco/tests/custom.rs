@@ -187,3 +187,27 @@ fn invalid_action_does_not_apply_pre_step_disturbance() {
     assert!(env.step(invalid).is_err());
     assert_eq!(calls.get(), 0);
 }
+
+#[test]
+fn runtime_model_edits_change_dynamics_and_persist_across_reset() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/assets/slide.xml");
+    let mut env = CustomMujoco::builder()
+        .path(path)
+        .task(SlideTask)
+        .observation_dim(2)
+        .build()
+        .unwrap();
+    env.reset().unwrap();
+    let action = candle_core::Tensor::new(&[1.0_f32], &Device::Cpu).unwrap();
+    let normal = env.step(action.clone()).unwrap();
+    env.edit_model(|model| {
+        model.body_mass_mut()[1] *= 2.0;
+        model.body_inertia_mut()[1] = model.body_inertia()[1].map(|v| v * 2.0);
+        Ok(())
+    })
+    .unwrap();
+    env.reset().unwrap();
+    let heavier = env.step(action).unwrap();
+    assert!(heavier.reward > 0.0 && heavier.reward < normal.reward);
+    assert_eq!(env.model().body_mass()[1], 2.0);
+}
