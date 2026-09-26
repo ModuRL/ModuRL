@@ -1,0 +1,12 @@
+<mujoco model="slide">
+  <option timestep="0.01" gravity="0 0 0"/>
+  <worldbody>
+    <body name="slider">
+      <joint name="slide" type="slide" axis="1 0 0"/>
+      <geom type="sphere" size="0.05" mass="1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <motor joint="slide" ctrllimited="true" ctrlrange="-1 1"/>
+  </actuator>
+</mujoco>

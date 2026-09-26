@@ -144,3 +144,80 @@ Observation bounds also include one `f32` conversion epsilon scaled by the
 reference value. Walker2d keeps all impact transitions in the baseline; its
 velocity-only allowance accounts for solver-order differences between the
 official Python and `mujoco-rs` binary builds instead of shortening the fixture.
+
+## Custom MJCF environments
+
+`CustomMujoco::builder()` loads a user-supplied XML file and its relative
+assets. Supply the path, a `MujocoTask`, and its fixed observation size:
+
+```rust,ignore
+let mut environment = CustomMujoco::builder()
+    .path("assets/my_model.xml")
+    .task(my_task)
+    .observation_dim(12)
+    .frame_skip(4)
+    .device(&Device::Cpu)
+    .build()?;
+```
+
+The device defaults to CPU and frame skip defaults to 1. With the `rendering`
+feature enabled, `.render(true)` opens a viewer. Construction rejects zero
+observation size, zero frame skip, and invalid initial task observations.
+
+Environments loaded from the same XML path share one immutable compiled MuJoCo
+model, including across threads, while owning separate simulation state. The
+model is released after the last environment is dropped; recreating environments
+after editing the XML or its assets then loads the updated model.
+
+Implement `MujocoTask` to provide observations, rewards, and episode endings.
+Tasks can hold sampled goals, update them on reset, and edit generalized positions
+and velocities through `reset_state` and `before_step`. Physics parameters default to those defined by the XML and can be changed
+between steps through `edit_model`.
+
+`MujocoState` exposes generalized positions and velocities, actuator controls,
+sensors, contacts, and body/site state using MuJoCo indices. By default, policy
+actions use `[-1, 1]`: limited actuators map to their XML `ctrlrange`, and unlimited
+actuators receive the raw value. Tasks may override action dimensions and mapping,
+or opt into physical control targets and an unbounded policy action space.
+
+Custom environments implement `modurl::gym::Gym` and can be collected with
+`MultithreadedVectorizedGymWrapper` when `modurl/multithreading` is enabled and
+the task is `Send`.
+
+### Runtime physics edits
+
+`environment.model()` exposes the current `MjModel` for inspection and name
+lookup. `environment.edit_model(...)` gives a closure mutable access to a private
+candidate of that model. Use MuJoCo's numerical parameter API directly:
+
+```rust,ignore
+environment.edit_model(|model| {
+    model.opt_mut().gravity = [0.0, 0.0, -3.0];
+    model.opt_mut().timestep = 0.005;
+    let body = model.name_to_id(MjtObj::mjOBJ_BODY, "my_body")
+        .ok_or_else(|| MujocoError::InvalidInput("unknown body".into()))?;
+    model.body_mass_mut()[body] *= 1.1;
+    model.body_inertia_mut()[body] = model.body_inertia()[body].map(|v| v * 1.1);
+    Ok(())
+})?;
+```
+
+Call this whenever your application needs a physics change, including during an
+episode. Sampling, curriculum schedules, and restoration of baseline values are
+ordinary application code. No callback timing or supported-parameter list is
+imposed by ModuRL. `MjModel` and `MjtObj` are re-exported in the prelude.
+
+Successful edits persist across resets. Changes to `qpos0` update the pose used
+by subsequent resets, without moving the current episode to that pose. An open
+viewer reloads the updated model in its existing window; a closed viewer stays
+closed. The environment keeps its time,
+positions, velocities, controls, and actuator activation, and recomputes derived
+constants and current-state quantities. Other environments retain their original
+shared model. Each edit clones the model so errors or panics in the closure leave
+the live model unchanged; batch related changes in one call.
+
+Edits must use MuJoCo's runtime-editable numerical parameters with valid values
+and combinations. A changed compiled model signature is rejected. Rebuild the
+environment for structural changes or render-asset changes. Model editing does
+not reset application-owned task state or automatically refresh a previously
+returned observation.

@@ -5,22 +5,25 @@
 
 mod ant;
 mod core;
+mod custom;
 mod half_cheetah;
 mod hopper;
 mod humanoid;
 mod walker2d;
 
 pub use ant::{AntV5, AntV5Info};
+pub use custom::{CustomMujoco, MujocoState, MujocoTask, TaskStep};
 pub use half_cheetah::HalfCheetahV5;
 pub use hopper::HopperV5;
 pub use humanoid::{HumanoidV5, HumanoidV5Info};
+pub use mujoco_rs::prelude::{MjModel, MjtObj};
 pub use walker2d::Walker2dV5;
 
 /// Convenient imports for applications using this crate.
 pub mod prelude {
     pub use crate::{
-        AntV5, AntV5Info, HalfCheetahV5, HopperV5, HumanoidV5, HumanoidV5Info, MujocoError,
-        Walker2dV5,
+        AntV5, AntV5Info, CustomMujoco, HalfCheetahV5, HopperV5, HumanoidV5, HumanoidV5Info,
+        MjModel, MjtObj, MujocoError, MujocoState, MujocoTask, TaskStep, Walker2dV5,
     };
     pub use modurl::gym::{Gym, MultiGym, MultiGymStepInfo, ResetInfo, StepInfo};
 }
@@ -28,7 +31,7 @@ pub mod prelude {
 /// Errors returned while constructing or stepping an environment.
 #[derive(Debug, thiserror::Error)]
 pub enum MujocoError {
-    /// MuJoCo could not compile an embedded model.
+    /// MuJoCo could not compile an embedded or user-supplied model.
     #[error("MuJoCo model compilation failed: {0}")]
     Model(#[source] mujoco_rs::error::MjModelError),
     /// A Candle tensor operation failed.
