@@ -76,6 +76,8 @@ pub trait MujocoTask {
     fn physical_control_targets(&self) -> bool {
         false
     }
+    /// Maps a policy action of shape `[action_dim]` to actuator controls of shape
+    /// `[nu]`. By default, `action_dim` is the model actuator count `nu`.
     fn map_action(&self, action: &Tensor) -> Result<Tensor, candle_core::Error> {
         Ok(action.clone())
     }
@@ -214,6 +216,8 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
         })
     }
 
+    /// Steps with a floating policy action of shape `[action_dim]`; the task
+    /// maps it to the model's `[nu]` actuator controls.
     fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
         if action.rank() != 1 || !action.dtype().is_float() {
             return Err(MujocoError::InvalidInput(

@@ -516,6 +516,7 @@ impl MujocoCore {
 
     /// Sends physical actuator targets directly, as required by unbounded
     /// joint-position action tasks. The MJCF actuator defines the control units.
+    /// The action tensor has shape `[nu]`, with one target per actuator.
     pub(crate) fn step_physical(&mut self, action: &Tensor) -> Result<(), MujocoError> {
         if action.rank() != 1 || action.dims()[0] != self.nu() || !action.dtype().is_float() {
             return Err(MujocoError::InvalidInput(format!(
