@@ -147,6 +147,40 @@ official Python and `mujoco-rs` binary builds instead of shortening the fixture.
 
 ## Custom MJCF environments
 
-`CustomMujoco::from_xml_path` loads a user-supplied XML file and its relative assets. Environments created from the same XML path in one process share the compiled MuJoCo model while keeping separate simulation state. The model is released after the last environment is dropped; recreating environments after editing the XML or its assets loads the updated model. Implement `MujocoTask` to provide a fixed-size observation, step reward, and episode endings. The task can hold a sampled goal and update it on reset. `MujocoState` exposes qpos, qvel, actuator controls, and body positions by MuJoCo body index. Policy actions use `[-1, 1]`; limited actuators map each normalized value into its own XML `ctrlrange`, while unlimited actuators receive the raw value. A custom environment implements `modurl::gym::Gym` and can be collected with `MultithreadedVectorizedGymWrapper` when `modurl/multithreading` is enabled.
+`CustomMujoco::builder()` loads a user-supplied XML file and its relative
+assets. Supply the path, a `MujocoTask`, and its fixed observation size:
 
+```rust,ignore
+let mut environment = CustomMujoco::builder()
+    .path("assets/my_model.xml")
+    .task(my_task)
+    .observation_dim(12)
+    .frame_skip(4)
+    .device(&Device::Cpu)
+    .build()?;
+```
 
+The device defaults to CPU and frame skip defaults to 1. With the `rendering`
+feature enabled, `.render(true)` opens a viewer. Construction rejects zero
+observation size, zero frame skip, and invalid initial task observations.
+
+Environments loaded from the same XML path share one immutable compiled MuJoCo
+model, including across threads, while owning separate simulation state. The
+model is released after the last environment is dropped; recreating environments
+after editing the XML or its assets then loads the updated model.
+
+Implement `MujocoTask` to provide observations, rewards, and episode endings.
+Tasks can hold sampled goals, update them on reset, and edit generalized positions
+and velocities through `reset_state` and `before_step`. Physics parameters remain
+those defined by the XML; no robot-specific physics randomization or curriculum
+is applied by the environment.
+
+`MujocoState` exposes generalized positions and velocities, actuator controls,
+sensors, contacts, and body/site state using MuJoCo indices. By default, policy
+actions use `[-1, 1]`: limited actuators map to their XML `ctrlrange`, and unlimited
+actuators receive the raw value. Tasks may override action dimensions and mapping,
+or opt into physical control targets and an unbounded policy action space.
+
+Custom environments implement `modurl::gym::Gym` and can be collected with
+`MultithreadedVectorizedGymWrapper` when `modurl/multithreading` is enabled and
+the task is `Send`.

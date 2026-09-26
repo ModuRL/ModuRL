@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use bon::bon;
 use candle_core::{Device, Tensor};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
@@ -69,15 +70,20 @@ pub struct TaskStep {
 /// A task may hold episode state such as a sampled goal.
 pub trait MujocoTask {
     /// Optional policy space and control mapping. Rewards receive original actions.
-    fn action_dim(&self) -> Option<usize> { None }
-    fn physical_control_targets(&self) -> bool { false }
-    fn map_action(&self, action: &Tensor) -> Result<Tensor, candle_core::Error> { Ok(action.clone()) }
+    fn action_dim(&self) -> Option<usize> {
+        None
+    }
+    fn physical_control_targets(&self) -> bool {
+        false
+    }
+    fn map_action(&self, action: &Tensor) -> Result<Tensor, candle_core::Error> {
+        Ok(action.clone())
+    }
 
     /// Optionally edits generalized position or velocity after the simulator's
     /// default reset and before the task observes the new episode.
     fn reset_state(&mut self, _state: &mut MujocoState) {}
     fn reset(&mut self, _state: &MujocoState) {}
-    fn randomization_step(&self) -> usize { 0 }
     /// Optionally edits generalized position or velocity immediately before a
     /// control step. This supports task disturbances such as push impulses.
     fn before_step(&mut self, _state: &mut MujocoState) {}
@@ -98,47 +104,24 @@ pub struct CustomMujoco<T: MujocoTask> {
     action_dim: usize,
 }
 
+#[bon]
 impl<T: MujocoTask> CustomMujoco<T> {
-    /// Loads XML from disk, including assets resolved relative to that XML.
-    pub fn from_xml_path(
+    /// Loads XML and relative assets, sharing an immutable compiled model with
+    /// other environments loaded from the same path. Each owns its simulation state.
+    #[builder]
+    pub fn new(
         path: impl AsRef<Path>,
-        frame_skip: usize,
-        device: &Device,
         task: T,
         observation_dim: usize,
-    ) -> Result<Self, MujocoError> {
-        if observation_dim == 0 {
-            return Err(MujocoError::InvalidInput(
-                "observation_dim must be nonzero".into(),
-            ));
-        }
-        Self::from_xml_path_with_rendering(path, frame_skip, device, task, observation_dim, false)
-    }
-
-    /// Loads XML with Microduck-compatible per-environment physics randomization.
-    pub fn from_xml_path_with_randomization(
-        path: impl AsRef<Path>,
-        frame_skip: usize,
-        device: &Device,
-        task: T,
-        observation_dim: usize,
-    ) -> Result<Self, MujocoError> {
-        let core = MujocoCore::from_xml_path_with_randomization(path.as_ref(), frame_skip, device)?;
-        let action_dim = task.action_dim().unwrap_or(core.nu());
-        let env = Self { core, task, observation_dim, action_dim };
-        env.make_observation()?;
-        Ok(env)
-    }
-
-    /// Loads XML and opens an interactive viewer when `render` is true.
-    pub fn from_xml_path_with_rendering(
-        path: impl AsRef<Path>,
-        frame_skip: usize,
-        device: &Device,
-        task: T,
-        observation_dim: usize,
+        #[builder(default = 1)] frame_skip: usize,
+        #[builder(default = &Device::Cpu)] device: &Device,
+        #[cfg(feature = "rendering")]
+        #[builder(default = false)]
         render: bool,
     ) -> Result<Self, MujocoError> {
+        #[cfg(not(feature = "rendering"))]
+        let render = false;
+
         if observation_dim == 0 {
             return Err(MujocoError::InvalidInput(
                 "observation_dim must be nonzero".into(),
@@ -186,7 +169,6 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
-        self.core.randomize_nano_owl_physics(self.task.randomization_step());
         self.core.reset_uniform(0.0)?;
         let mut state = MujocoState::capture(&self.core);
         let original_qpos = state.qpos.clone();
