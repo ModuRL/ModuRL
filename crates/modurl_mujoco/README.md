@@ -207,7 +207,10 @@ episode. Sampling, curriculum schedules, and restoration of baseline values are
 ordinary application code. No callback timing or supported-parameter list is
 imposed by ModuRL. `MjModel` and `MjtObj` are re-exported in the prelude.
 
-Successful edits persist across resets. The environment keeps its time,
+Successful edits persist across resets. Changes to `qpos0` update the pose used
+by subsequent resets, without moving the current episode to that pose. An open
+viewer reloads the updated model in its existing window; a closed viewer stays
+closed. The environment keeps its time,
 positions, velocities, controls, and actuator activation, and recomputes derived
 constants and current-state quantities. Other environments retain their original
 shared model. Each edit clones the model so errors or panics in the closure leave

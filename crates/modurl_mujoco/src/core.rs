@@ -144,15 +144,30 @@ impl MujocoCore {
             let data_ptr = unsafe { scratch.ffi_mut() as *mut _ };
             unsafe { mujoco_rs::mujoco_c::mj_setConst(model_ptr, data_ptr) };
         }
+        // Force the viewer's signature-based reload through a distinct model.
+        // Numerical edits preserve the signature, so syncing the candidate alone
+        // would leave most of the viewer's model arrays stale. No frame is drawn
+        // with this intermediate model, and the existing window is retained.
+        #[cfg(feature = "rendering")]
+        if let Some(viewer) = self.viewer.as_mut().filter(|viewer| viewer.running()) {
+            let mut intermediate = MjModel::from_xml_string("<mujoco/>")?;
+            viewer.sync_model(&mut intermediate);
+            viewer.sync_model(&mut candidate);
+        }
         self.data
             .try_swap_model(Arc::new(candidate))
             .map_err(|error| {
                 MujocoError::InvalidInput(format!("incompatible runtime model: {error}"))
             })?;
+        self.initial_qpos.copy_from_slice(self.data.model().qpos0());
         self.contact_substeps.clear();
         self.data.forward();
         self.data.rne_post_constraint();
         self.data.subtree_vel();
+        #[cfg(feature = "rendering")]
+        if let Some(viewer) = self.viewer.as_mut().filter(|viewer| viewer.running()) {
+            viewer.sync_data(&mut self.data);
+        }
         Ok(())
     }
 
@@ -692,6 +707,59 @@ mod shared_model_tests {
     use super::*;
 
     #[test]
+    fn edited_default_pose_applies_on_reset_not_during_episode() {
+        let xml = r#"<mujoco><worldbody><body><freejoint/><geom size="0.1" mass="1"/></body></worldbody></mujoco>"#;
+        let mut core = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        core.data.step();
+        let pose = core.qpos().to_vec();
+        let time = core.data.ffi().time;
+        core.edit_model(|model| {
+            model.qpos0_mut()[0] = 2.0;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(core.qpos(), pose);
+        assert_eq!(core.data.ffi().time, time);
+        core.reset_uniform(0.0).unwrap();
+        assert_eq!(core.qpos()[0], 2.0);
+        assert!(
+            core.edit_model(|model| {
+                model.qpos0_mut()[0] = 3.0;
+                Err(MujocoError::InvalidInput("rejected".into()))
+            })
+            .is_err()
+        );
+        core.reset_uniform_positions_normal_velocities(0.0).unwrap();
+        assert_eq!(core.qpos()[0], 2.0);
+    }
+
+    #[cfg(feature = "rendering")]
+    #[test]
+    #[ignore = "opens interactive windows; run manually with a desktop"]
+    fn runtime_edit_refreshes_open_viewer() {
+        let xml = r#"<mujoco><worldbody><body><freejoint/><geom size="0.1" mass="1"/></body></worldbody></mujoco>"#;
+        let mut core = MujocoCore::new(xml, 1, &Device::Cpu, true).unwrap();
+        let previous_state = Arc::clone(core.viewer.as_ref().unwrap().state());
+        core.edit_model(|model| {
+            model.body_mass_mut()[1] = 2.0;
+            model.qpos0_mut()[0] = 1.0;
+            Ok(())
+        })
+        .unwrap();
+        assert!(Arc::ptr_eq(
+            &previous_state,
+            core.viewer.as_ref().unwrap().state()
+        ));
+        assert!(core.viewer_running());
+        assert_eq!(
+            core.qpos()[0],
+            0.0,
+            "viewer sync must preserve the live pose"
+        );
+        core.render().unwrap();
+    }
+
+    #[test]
     fn runtime_edits_isolate_models_and_preserve_state() {
         let xml = r#"<mujoco><worldbody><body><freejoint/><geom size="0.1" mass="1"/></body></worldbody></mujoco>"#;
         let mut edited = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
@@ -776,11 +844,12 @@ mod shared_model_tests {
         let first = MujocoCore::from_xml_path(path, 1, &Device::Cpu, false).unwrap();
         assert!(std::ptr::eq(model.as_ref(), first.data.model()));
         let other = std::thread::spawn(move || {
-            MujocoCore::from_xml_path(path, 1, &Device::Cpu, false).unwrap()
+            let core = MujocoCore::from_xml_path(path, 1, &Device::Cpu, false).unwrap();
+            core.data.model_clone()
         })
         .join()
         .unwrap();
-        assert!(std::ptr::eq(first.data.model(), other.data.model()));
+        assert!(std::ptr::eq(first.data.model(), other.as_ref()));
         drop(model);
         drop(first);
         assert!(weak.upgrade().is_some());

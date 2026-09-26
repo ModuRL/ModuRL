@@ -150,6 +150,9 @@ impl<T: MujocoTask> CustomMujoco<T> {
     /// retained until the first successful edit. Each edit clones the model.
     /// Derived constants and current-state quantities are recomputed on success;
     /// time, positions, velocities, controls, and actuator activation are preserved.
+    /// Edits to `qpos0` become the default pose for subsequent resets. An open
+    /// viewer reloads the edited model without replacing its window; a closed
+    /// viewer stays closed.
     ///
     /// Use MuJoCo's runtime-editable numerical parameters. Structural changes
     /// (a different compiled signature) are rejected. The caller is responsible
