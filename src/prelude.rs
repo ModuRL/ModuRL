@@ -57,8 +57,9 @@ pub use crate::parameter_schedule::{
 };
 pub use crate::spaces::{BoxSpace, Discrete, Space};
 pub use crate::wrappers::{
-    ClipRewardGym, ClipRewardGymError, EpisodeStatistics, EpisodeStatisticsInfo, FrameStackGym,
-    FrameStackGymError, MaxAndSkipGym, MaxAndSkipGymError, NormalizeObservationGym,
-    NormalizeObservationGymError, NormalizeRewardGym, RawRewardInfo, RecordEpisodeStatisticsGym,
-    RecordRawRewardGym, TensorMapMultiGymError, TensorMapMultiGymWrapper, TimeLimitGym,
+    ClipRewardGym, ClipRewardGymError, DeviceMultiGymWrapper, EpisodeStatistics,
+    EpisodeStatisticsInfo, FrameStackGym, FrameStackGymError, InputMapMultiGymWrapper,
+    MaxAndSkipGym, MaxAndSkipGymError, NormalizeObservationGym, NormalizeObservationGymError,
+    NormalizeRewardGym, OutputMapMultiGymWrapper, RawRewardInfo, RecordEpisodeStatisticsGym,
+    RecordRawRewardGym, TensorMapMultiGymError, TimeLimitGym,
 };

@@ -1,5 +1,3 @@
-use candle_core::Device;
-
 // Cargo features are additive. When several environment features are enabled
 // (for example by `--all-features`), select the first in this documented
 // priority order so every example remains buildable. The umbrella
@@ -47,8 +45,8 @@ pub const ENVIRONMENT_NAME: &str = "Hopper-v5";
 ))]
 pub const ENVIRONMENT_NAME: &str = "Walker2d-v5";
 
-pub fn build_environment(device: &Device) -> SelectedEnvironment {
-    let builder = SelectedEnvironment::builder().device(device);
+pub fn build_environment() -> SelectedEnvironment {
+    let builder = SelectedEnvironment::builder();
     #[cfg(feature = "rendering")]
     let builder = builder.render(true);
     builder.build().unwrap()

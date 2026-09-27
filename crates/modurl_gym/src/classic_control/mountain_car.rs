@@ -10,6 +10,7 @@ use crate::EnvironmentError;
 /// The classic Mountain Car environment.
 /// Converted from the OpenAI Gym Mountain Car environment.
 pub struct MountainCarV0 {
+    rng_device: Device,
     state: Tensor,
     action_space: spaces::Discrete,
     observation_space: spaces::BoxSpace,
@@ -28,7 +29,9 @@ pub struct MountainCarV0 {
 impl MountainCarV0 {
     #[builder]
     pub fn new(
-        #[builder(default = &Device::Cpu)] device: &Device,
+        /// Device used only for random draws; observations and space bounds stay on CPU.
+        #[builder(default = &Device::Cpu)]
+        rng_device: &Device,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
@@ -43,14 +46,15 @@ impl MountainCarV0 {
 
         let low = vec![min_position, -max_speed];
         let high = vec![max_position, max_speed];
-        let low = Tensor::from_vec(low, vec![2], device)?;
-        let high = Tensor::from_vec(high, vec![2], device)?;
+        let low = Tensor::from_vec(low, vec![2], &Device::Cpu)?;
+        let high = Tensor::from_vec(high, vec![2], &Device::Cpu)?;
 
         let action_space = spaces::Discrete::new(3);
         let observation_space = spaces::BoxSpace::new(low, high);
 
         Ok(Self {
-            state: Tensor::zeros(vec![2], candle_core::DType::F32, device)?,
+            rng_device: rng_device.clone(),
+            state: Tensor::zeros(vec![2], candle_core::DType::F32, &Device::Cpu)?,
             action_space,
             observation_space,
             min_position,
@@ -289,9 +293,10 @@ impl Gym for MountainCarV0 {
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         // Initialize position uniformly between -0.6 and -0.4
-        let position = Tensor::rand(-0.6, -0.4, vec![1], self.state.device())?
+        let position = Tensor::rand(-0.6, -0.4, vec![1], &self.rng_device)?
+            .to_device(&Device::Cpu)?
             .to_dtype(candle_core::DType::F32)?;
-        let velocity = Tensor::zeros(vec![1], candle_core::DType::F32, self.state.device())?;
+        let velocity = Tensor::zeros(vec![1], candle_core::DType::F32, &Device::Cpu)?;
 
         self.state = Tensor::cat(&[position, velocity], 0)?;
 
@@ -331,7 +336,7 @@ impl Gym for MountainCarV0 {
             velocity = 0.0;
         }
 
-        self.state = Tensor::from_vec(vec![position, velocity], vec![2], self.state.device())?;
+        self.state = Tensor::from_vec(vec![position, velocity], vec![2], &Device::Cpu)?;
 
         // Check if goal is reached
         let terminated = position >= self.goal_position && velocity >= self.goal_velocity;
@@ -457,7 +462,11 @@ mod tests {
         env.reset().unwrap();
         let action_space = env.action_space();
         for _ in 0..200 {
-            let action = action_space.sample(&Device::Cpu).unwrap();
+            let action = action_space
+                .sample_batch(1, &Device::Cpu)
+                .unwrap()
+                .squeeze(0)
+                .unwrap();
             let StepInfo {
                 state: _,
                 reward: _,

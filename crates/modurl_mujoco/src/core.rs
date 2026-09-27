@@ -53,35 +53,27 @@ pub(crate) struct MujocoCore {
     initial_qpos: Vec<f64>,
     initial_qvel: Vec<f64>,
     frame_skip: usize,
-    device: Device,
     rng: StdRng,
     #[cfg(feature = "rendering")]
     viewer: Option<MjViewer>,
 }
 
 impl MujocoCore {
-    pub(crate) fn new(
-        xml: &str,
-        frame_skip: usize,
-        device: &Device,
-        render: bool,
-    ) -> Result<Self, MujocoError> {
-        Self::from_model(shared_xml_model(xml)?, frame_skip, device, render)
+    pub(crate) fn new(xml: &str, frame_skip: usize, render: bool) -> Result<Self, MujocoError> {
+        Self::from_model(shared_xml_model(xml)?, frame_skip, render)
     }
 
     pub(crate) fn from_xml_path(
         path: &Path,
         frame_skip: usize,
-        device: &Device,
         render: bool,
     ) -> Result<Self, MujocoError> {
-        Self::from_model(shared_path_model(path)?, frame_skip, device, render)
+        Self::from_model(shared_path_model(path)?, frame_skip, render)
     }
 
     fn from_model(
         model: Arc<MjModel>,
         frame_skip: usize,
-        device: &Device,
         render: bool,
     ) -> Result<Self, MujocoError> {
         if frame_skip == 0 {
@@ -110,7 +102,6 @@ impl MujocoCore {
             initial_qpos,
             initial_qvel,
             frame_skip,
-            device: device.clone(),
             rng: rand::make_rng(),
             #[cfg(feature = "rendering")]
             viewer,
@@ -601,7 +592,7 @@ impl MujocoCore {
     pub(crate) fn tensor(&self, values: &[f64]) -> Result<Tensor, MujocoError> {
         let values = values.iter().map(|value| *value as f32).collect::<Vec<_>>();
         let len = values.len();
-        Ok(Tensor::from_vec(values, len, &self.device)?)
+        Ok(Tensor::from_vec(values, len, &Device::Cpu)?)
     }
 
     pub(crate) fn viewer_running(&self) -> bool {
@@ -634,7 +625,7 @@ impl MujocoCore {
         &self,
         dim: usize,
     ) -> Box<dyn Space<Error = candle_core::Error>> {
-        Box::new(BoxSpace::new_unbounded(vec![dim], &self.device))
+        Box::new(BoxSpace::new_unbounded(vec![dim], &Device::Cpu))
     }
 
     pub(crate) fn action_space_for_dim(
@@ -645,7 +636,7 @@ impl MujocoCore {
             vec![dim],
             -1.0,
             1.0,
-            &self.device,
+            &Device::Cpu,
         ))
     }
 
@@ -658,7 +649,7 @@ impl MujocoCore {
             vec![self.nu()],
             minimum as f32,
             maximum as f32,
-            &self.device,
+            &Device::Cpu,
         ))
     }
 
@@ -668,7 +659,7 @@ impl MujocoCore {
     ) -> Box<dyn Space<Error = candle_core::Error>> {
         Box::new(BoxSpace::new_unbounded(
             vec![self.nq() + self.nv() - usize::from(exclude_x)],
-            &self.device,
+            &Device::Cpu,
         ))
     }
 
@@ -676,7 +667,7 @@ impl MujocoCore {
         &self,
         size: usize,
     ) -> Box<dyn Space<Error = candle_core::Error>> {
-        Box::new(BoxSpace::new_unbounded(vec![size], &self.device))
+        Box::new(BoxSpace::new_unbounded(vec![size], &Device::Cpu))
     }
 }
 
@@ -710,7 +701,7 @@ mod shared_model_tests {
     #[test]
     fn edited_default_pose_applies_on_reset_not_during_episode() {
         let xml = r#"<mujoco><worldbody><body><freejoint/><geom size="0.1" mass="1"/></body></worldbody></mujoco>"#;
-        let mut core = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        let mut core = MujocoCore::new(xml, 1, false).unwrap();
         core.data.step();
         let pose = core.qpos().to_vec();
         let time = core.data.ffi().time;
@@ -739,7 +730,7 @@ mod shared_model_tests {
     #[ignore = "opens interactive windows; run manually with a desktop"]
     fn runtime_edit_refreshes_open_viewer() {
         let xml = r#"<mujoco><worldbody><body><freejoint/><geom size="0.1" mass="1"/></body></worldbody></mujoco>"#;
-        let mut core = MujocoCore::new(xml, 1, &Device::Cpu, true).unwrap();
+        let mut core = MujocoCore::new(xml, 1, true).unwrap();
         let previous_state = Arc::clone(core.viewer.as_ref().unwrap().state());
         core.edit_model(|model| {
             model.body_mass_mut()[1] = 2.0;
@@ -763,8 +754,8 @@ mod shared_model_tests {
     #[test]
     fn runtime_edits_isolate_models_and_preserve_state() {
         let xml = r#"<mujoco><worldbody><body><freejoint/><geom size="0.1" mass="1"/></body></worldbody></mujoco>"#;
-        let mut edited = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
-        let shared = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        let mut edited = MujocoCore::new(xml, 1, false).unwrap();
+        let shared = MujocoCore::new(xml, 1, false).unwrap();
         assert!(std::ptr::eq(edited.model(), shared.model()));
         edited.data.step();
         let time = edited.data.ffi().time;
@@ -794,8 +785,8 @@ mod shared_model_tests {
     #[test]
     fn failed_or_incompatible_edits_leave_live_model_unchanged() {
         let xml = r#"<mujoco><worldbody><body><freejoint/><geom size="0.1" mass="1"/></body></worldbody></mujoco>"#;
-        let mut core = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
-        let peer = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        let mut core = MujocoCore::new(xml, 1, false).unwrap();
+        let peer = MujocoCore::new(xml, 1, false).unwrap();
         assert!(
             core.edit_model(|model| {
                 model.body_mass_mut()[1] = 3.0;
@@ -824,7 +815,7 @@ mod shared_model_tests {
     #[test]
     fn task_state_edit_preserves_simulation_time() {
         let xml = "<mujoco><worldbody><body><freejoint/><geom size=\"0.1\" mass=\"1\"/></body></worldbody></mujoco>";
-        let mut core = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        let mut core = MujocoCore::new(xml, 1, false).unwrap();
         core.data.step();
         let time = core.data.ffi().time;
         let mut qpos = core.qpos().to_vec();
@@ -842,10 +833,10 @@ mod shared_model_tests {
         ));
         let model = shared_path_model(path).unwrap();
         let weak = Arc::downgrade(&model);
-        let first = MujocoCore::from_xml_path(path, 1, &Device::Cpu, false).unwrap();
+        let first = MujocoCore::from_xml_path(path, 1, false).unwrap();
         assert!(std::ptr::eq(model.as_ref(), first.data.model()));
         let other = std::thread::spawn(move || {
-            let core = MujocoCore::from_xml_path(path, 1, &Device::Cpu, false).unwrap();
+            let core = MujocoCore::from_xml_path(path, 1, false).unwrap();
             core.data.model_clone()
         })
         .join()
@@ -861,8 +852,8 @@ mod shared_model_tests {
     #[test]
     fn same_xml_shares_model_but_not_data() {
         let xml = "<mujoco><worldbody><body><freejoint/><geom size=\"0.1\" mass=\"1\"/></body></worldbody></mujoco>";
-        let mut first = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
-        let second = MujocoCore::new(xml, 1, &Device::Cpu, false).unwrap();
+        let mut first = MujocoCore::new(xml, 1, false).unwrap();
+        let second = MujocoCore::new(xml, 1, false).unwrap();
         assert!(std::ptr::eq(first.data.model(), second.data.model()));
         first.data.qpos_mut()[0] = 2.0;
         assert_ne!(first.data.qpos()[0], second.data.qpos()[0]);

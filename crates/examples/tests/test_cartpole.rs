@@ -12,8 +12,9 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
-    let envs = vec![CartPoleV1::builder().device(device).build().unwrap()];
-    let mut vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
+    let envs = vec![CartPoleV1::builder().rng_device(device).build().unwrap()];
+    let vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
+    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
     let mut total_steps = 0;
 
     let mut total_done_count = 0;
@@ -44,7 +45,7 @@ struct DebugCartpoleV1 {
 
 impl DebugCartpoleV1 {
     fn new(device: &Device) -> Self {
-        let env = CartPoleV1::builder().device(device).build().unwrap();
+        let env = CartPoleV1::builder().rng_device(device).build().unwrap();
         Self {
             env,
             steps_since_print: 0,
@@ -99,7 +100,8 @@ fn ppo_cartpole() {
     device.set_seed(42).unwrap();
 
     let envs = vec![DebugCartpoleV1::new(&device)];
-    let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+    let vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
 
     let observation_space = vec_env.observation_space();
     let action_space = vec_env.action_space();
@@ -223,7 +225,8 @@ fn ppo_cartpole_shared() {
         let env = DebugCartpoleV1::new(&device);
         envs.push(env);
     }
-    let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+    let vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
 
     let observation_space = vec_env.observation_space();
     let action_space = vec_env.action_space();
@@ -351,7 +354,7 @@ fn ppo_cartpole_shared_multithreaded() {
         })
         .collect();
 
-    let probe_env = CartPoleV1::builder().device(&device).build().unwrap();
+    let probe_env = CartPoleV1::builder().rng_device(&device).build().unwrap();
     let obs_space_shape: usize = probe_env.observation_space().shape()[0];
     let obs_space = modurl::spaces::BoxSpace::new(
         Tensor::full(-1000.0f32, &[obs_space_shape], &device).unwrap(),
@@ -359,8 +362,9 @@ fn ppo_cartpole_shared_multithreaded() {
     );
     let action_space = Discrete::new(2);
 
-    let mut vec_env =
+    let vec_env =
         MultithreadedVectorizedGymWrapper::new(env_constructors, obs_space, action_space.clone());
+    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
 
     let var_map = VarMap::new();
     let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
@@ -460,7 +464,8 @@ fn dqn_cartpole() {
 
     let envs = vec![DebugCartpoleV1::new(&device)];
 
-    let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+    let vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
     let observation_space = vec_env.observation_space();
     let online_var_map = VarMap::new();
     let online_vb = VarBuilder::from_varmap(&online_var_map, candle_core::DType::F32, &device);
@@ -550,7 +555,8 @@ fn ddqn_cartpole() {
     device.set_seed(42).unwrap();
 
     let envs = vec![DebugCartpoleV1::new(&device)];
-    let mut vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+    let vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
+    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
     let observation_space = vec_env.observation_space();
 
     let online_var_map = VarMap::new();

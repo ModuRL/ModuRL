@@ -827,33 +827,23 @@ where
         let next_dones = next_dones.to_dtype(self.dtype)?;
         let next_truncateds = next_truncateds.to_dtype(self.dtype)?;
         let bootstrapped_values = bootstrapped_values.to_dtype(self.dtype)?;
-        let env_count = rewards.dim(1)?;
-        let gamma_tensor = Tensor::new(self.gamma, device)?
-            .to_dtype(self.dtype)?
-            .broadcast_as(env_count)?;
-        let gae_lambda_tensor = Tensor::new(self.gae_lambda, device)?
-            .to_dtype(self.dtype)?
-            .broadcast_as(env_count)?;
-
-        let values = values.squeeze(D::Minus1)?;
-        let time_steps = rewards.dim(0)?;
-        let mut advantages = Vec::with_capacity(time_steps);
+        let values = values.squeeze(D::Minus1)?.detach();
+        let masks = ((1.0 - next_dones)? * (1.0 - next_truncateds)?)?;
         let mut next_value = bootstrapped_values.detach();
-        let mut gae = Tensor::zeros(env_count, self.dtype, device)?;
-
-        // Keep the recurrence over time, but compute every environment together.
-        for i in (0..time_steps).rev() {
-            let same_episode = ((1.0 - next_dones.i(i)?)? * (1.0 - next_truncateds.i(i)?)?)?;
-            let value = values.i(i)?.detach();
-            let delta = (rewards.i(i)?
-                + next_value.clone() * same_episode.clone() * gamma_tensor.clone()
-                - value.clone())?;
-            gae = (delta + gamma_tensor.clone() * gae_lambda_tensor.clone() * gae * same_episode)?;
+        let mut gae = Tensor::zeros(next_value.shape(), self.dtype, device)?;
+        let mut advantages = Vec::with_capacity(rewards.dim(0)?);
+        // Environments are independent; only time has a recurrence.
+        for time in (0..rewards.dim(0)?).rev() {
+            let mask = masks.i(time)?;
+            let value = values.i(time)?;
+            let delta =
+                (rewards.i(time)? + ((&next_value * &mask)? * self.gamma as f64)? - &value)?;
+            gae = (delta + ((&gae * &mask)? * (self.gamma as f64 * self.gae_lambda as f64))?)?;
             advantages.push(gae.clone());
             next_value = value;
         }
-
-        Tensor::stack(&advantages.into_iter().rev().collect::<Vec<_>>(), 0)
+        advantages.reverse();
+        Tensor::stack(&advantages, 0)
     }
 
     /// Forwards latent or raw `states` shaped `[batch, ...state_shape]` and

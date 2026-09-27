@@ -18,8 +18,9 @@ fn main() {
 
     println!("Using device: {device:?}");
 
-    let envs = vec![CartPoleV1::builder().device(&device).build().unwrap()];
-    let mut env = VectorizedGymWrapper::from(envs);
+    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
+    let env = VectorizedGymWrapper::from(envs);
+    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
     let observation_space = env.observation_space();
 
     let online_var_map = VarMap::new();

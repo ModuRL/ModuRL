@@ -187,17 +187,32 @@ impl Aggregator {
 
 /// Converts named scalar tensors shaped `[]` into host values.
 fn read_metrics(metrics: &[(&str, &Tensor)]) -> Result<Vec<(String, f32)>> {
-    metrics
-        .iter()
-        .map(|(name, tensor)| {
-            if !tensor.dims().is_empty() {
-                return Err(Error::NonScalar {
-                    metric: (*name).to_owned(),
-                    shape: tensor.dims().to_vec(),
-                });
-            }
-            let value = tensor.to_dtype(DType::F32)?.to_scalar::<f32>()?;
-            Ok(((*name).to_owned(), value))
-        })
-        .collect()
+    let mut groups: Vec<Vec<(usize, Tensor)>> = Vec::new();
+    let mut result = Vec::with_capacity(metrics.len());
+    for (index, (name, tensor)) in metrics.iter().enumerate() {
+        if !tensor.dims().is_empty() {
+            return Err(Error::NonScalar {
+                metric: (*name).to_owned(),
+                shape: tensor.dims().to_vec(),
+            });
+        }
+        result.push(((*name).to_owned(), 0.0));
+        let tensor = tensor.to_dtype(DType::F32)?;
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| group[0].1.device().same_device(tensor.device()))
+        {
+            group.push((index, tensor));
+        } else {
+            groups.push(vec![(index, tensor)]);
+        }
+    }
+    for group in groups {
+        let tensors = group.iter().map(|(_, tensor)| tensor).collect::<Vec<_>>();
+        let values = Tensor::stack(&tensors, 0)?.to_vec1::<f32>()?;
+        for ((index, _), value) in group.into_iter().zip(values) {
+            result[index].1 = value;
+        }
+    }
+    Ok(result)
 }

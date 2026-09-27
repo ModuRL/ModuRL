@@ -60,7 +60,7 @@ fn main() {
     let env1 = DebugLunarLander::new(
         LunarLanderV3::builder()
             .render(true)
-            .device(device.clone())
+            .rng_device(device.clone())
             .build()
             .unwrap(),
     );
@@ -68,14 +68,15 @@ fn main() {
     for _ in 0..15 {
         let env = DebugLunarLander::new(
             LunarLanderV3::builder()
-                .device(device.clone())
+                .rng_device(device.clone())
                 .build()
                 .unwrap(),
         );
         envs.push(env);
     }
 
-    let mut env = VectorizedGymWrapper::from(envs);
+    let env = VectorizedGymWrapper::from(envs);
+    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let actor_var_map = VarMap::new();

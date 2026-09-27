@@ -273,18 +273,23 @@ fn main() {
     );
     let action_device = environment_device.clone();
     let observation_device = device.clone();
-    let mut envs = TensorMapMultiGymWrapper::new(
-        envs,
-        move |tensor: Tensor| tensor.to_device(&action_device),
-        move |tensor: Tensor| {
-            let tensor = tensor.to_device(&observation_device)?;
-            if tensor.dtype() == DType::U8 {
-                tensor.to_dtype(DType::F32)? / 255.0
-            } else {
-                Ok(tensor)
+    let envs =
+        InputMapMultiGymWrapper::new(envs, move |tensor: Tensor| tensor.to_device(&action_device));
+    let observation = |tensor: Tensor| -> candle_core::Result<Tensor> {
+        tensor
+            .to_device(&observation_device)?
+            .to_dtype(DType::F32)?
+            / 255.0
+    };
+    let mut envs =
+        OutputMapMultiGymWrapper::new(envs, &observation, |mut step: MultiGymStepInfo<_>| {
+            step.states = observation(step.states)?;
+            step.rewards = step.rewards.to_device(&observation_device)?;
+            for state in step.terminal_states.iter_mut().flatten() {
+                *state = observation(state.clone())?;
             }
-        },
-    );
+            Ok(step)
+        });
 
     let variables = VarMap::new();
     let vb = VarBuilder::from_varmap(&variables, DType::F32, &device);

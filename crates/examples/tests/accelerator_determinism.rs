@@ -74,12 +74,16 @@ fn cartpole_tensors_are_device_deterministic() {
 
     for iteration in 0..10 {
         device.set_seed(42).unwrap();
-        let mut env = CartPoleV1::builder().device(&device).build().unwrap();
+        let mut env = CartPoleV1::builder().rng_device(&device).build().unwrap();
         let action_space = env.action_space();
         let mut state = env.reset().unwrap().state;
 
         for _ in 0..10 {
-            let action = action_space.sample(&device).unwrap();
+            let action = action_space
+                .sample_batch(1, &device)
+                .unwrap()
+                .squeeze(0)
+                .unwrap();
             let step = env.step(action).unwrap();
             state = step.state;
             if step.done {

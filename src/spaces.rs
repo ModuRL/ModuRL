@@ -1,13 +1,13 @@
 use candle_core::{D, Device, Tensor};
 
-use crate::sampling::sample_u32_inclusive;
-
 pub trait Space {
     type Error;
 
-    /// Returns one unbatched environment action. Concrete spaces document its
-    /// exact shape.
-    fn sample(&self, device: &Device) -> Result<Tensor, Self::Error>;
+    /// Samples `[batch_size, ...action_shape]` using the requested device RNG.
+    /// Discrete actions have shape `[batch_size]`; box actions have shape
+    /// `[batch_size, ...self.shape()]`.
+    fn sample_batch(&self, batch_size: usize, device: &Device) -> Result<Tensor, Self::Error>;
+
     /// Returns true if `x` has the concrete space's unbatched environment
     /// action shape and is within the space.
     fn contains(&self, x: &Tensor) -> bool;
@@ -31,10 +31,20 @@ pub struct Discrete {
 impl Space for Discrete {
     type Error = candle_core::Error;
 
-    /// Samples one scalar environment action shaped `[]`.
-    fn sample(&self, device: &Device) -> Result<Tensor, Self::Error> {
-        let value = sample_u32_inclusive(0, self.possible_values as u32 - 1, device)?;
-        Tensor::from_vec(vec![value], vec![], device)
+    fn sample_batch(&self, batch_size: usize, device: &Device) -> Result<Tensor, Self::Error> {
+        if self.possible_values == 0 || self.possible_values > (1 << 24) {
+            return Err(candle_core::Error::Msg(
+                "discrete sampling requires 1..=2^24 categories".into(),
+            )
+            .into());
+        }
+        // Preserve one scalar RNG draw per environment, including stream advancement.
+        let draws = (0..batch_size)
+            .map(|_| Tensor::rand(0.0_f32, self.possible_values as f32, (), device))
+            .collect::<candle_core::Result<Vec<_>>>()?;
+        Ok(Tensor::stack(&draws, 0)?
+            .floor()?
+            .to_dtype(candle_core::DType::U32)?)
     }
 
     /// Tests one scalar environment action `x` shaped `[]`.
@@ -90,49 +100,35 @@ pub struct BoxSpace {
 impl Space for BoxSpace {
     type Error = candle_core::Error;
 
-    /// Samples one environment action shaped `self.shape()`.
-    fn sample(&self, device: &Device) -> Result<Tensor, Self::Error> {
-        let mut values = vec![];
+    fn sample_batch(&self, batch_size: usize, device: &Device) -> Result<Tensor, Self::Error> {
         let dtype = self.low.dtype();
-
-        // Perform host-side sampling in F64 so F64-backed spaces retain their
-        // precision. The final sample still uses the space's declared dtype.
-        let low = self
-            .low
-            .to_dtype(candle_core::DType::F64)?
-            .flatten_all()
-            .expect("Failed to flatten tensor.");
-        let high = self
-            .high
-            .to_dtype(candle_core::DType::F64)?
-            .flatten_all()
-            .expect("Failed to flatten tensor.");
-        let rng_bases = Tensor::rand(0.0_f64, 1.0_f64, low.shape(), device)?;
-        for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
-            let mut low = low
-                .get(i)
-                .expect("Failed to get value.")
-                .to_vec0::<f64>()
-                .expect("Failed to convert to f64.");
-            let mut high = high
-                .get(i)
-                .expect("Failed to get value.")
-                .to_vec0::<f64>()
-                .expect("Failed to convert to f64.");
-            low = finitize(low, dtype);
-            high = finitize(high, dtype);
-
-            let rng_base = rng_bases
-                .get(i)
-                .expect("Failed to get value.")
-                .to_vec0::<f64>()
-                .expect("Failed to convert to f64.");
-            let adjusted_range = high - low;
-            let rand_num = low + adjusted_range * rng_base;
-
-            values.push(rand_num);
-        }
-        Tensor::from_vec(values, low.shape(), device)?.to_dtype(dtype)
+        // Preserve F64 arithmetic and the existing finite substitutes for
+        // infinite bounds, without scalar device-to-host reads.
+        let prepare = |bounds: &Tensor| -> candle_core::Result<Tensor> {
+            let bounds = bounds
+                .to_device(device)?
+                .to_dtype(candle_core::DType::F64)?;
+            let positive = bounds.eq(f64::INFINITY)?;
+            let negative = bounds.eq(f64::NEG_INFINITY)?;
+            let limit = finitize(f64::INFINITY, dtype);
+            let bounds =
+                positive.where_cond(&Tensor::full(limit, bounds.shape(), device)?, &bounds)?;
+            negative.where_cond(&Tensor::full(-limit, bounds.shape(), device)?, &bounds)
+        };
+        let low = prepare(&self.low)?;
+        let high = prepare(&self.high)?;
+        let mut shape = vec![batch_size];
+        shape.extend(self.shape());
+        // Preserve the original flattened RNG draw per environment. Combining
+        // draws changes stream advancement on device backends.
+        let draws = (0..batch_size)
+            .map(|_| Tensor::rand(0.0_f64, 1.0_f64, self.low.elem_count(), device))
+            .collect::<candle_core::Result<Vec<_>>>()?;
+        let random = Tensor::stack(&draws, 0)?.reshape(shape.as_slice())?;
+        Ok(random
+            .broadcast_mul(&(&high - &low)?)?
+            .broadcast_add(&low)?
+            .to_dtype(dtype)?)
     }
 
     /// Tests one environment action `x` shaped `self.shape()`.
@@ -156,28 +152,15 @@ impl Space for BoxSpace {
             .to_dtype(candle_core::DType::F64)
             .and_then(|tensor| tensor.flatten_all())
             .expect("Failed to flatten tensor.");
-        // So inefficient :*(
-        for i in 0..low.shape().dim(0).expect("Failed to get dim.") {
-            let low = low
-                .get(i)
-                .expect("Failed to get value.")
-                .to_vec0::<f64>()
-                .expect("Failed to convert to f64.");
-            let high = high
-                .get(i)
-                .expect("Failed to get value.")
-                .to_vec0::<f64>()
-                .expect("Failed to convert to f64.");
-            let value = x
-                .get(i)
-                .expect("Failed to get value.")
-                .to_vec0::<f64>()
-                .expect("Failed to convert to f64.");
-            if value < low || value > high {
-                return false;
-            }
-        }
-        true
+        // One read per tensor rather than one read per component.
+        let low = low.to_vec1::<f64>().expect("Failed to read bounds.");
+        let high = high.to_vec1::<f64>().expect("Failed to read bounds.");
+        let values = x.to_vec1::<f64>().expect("Failed to read action.");
+        values
+            .iter()
+            .zip(low)
+            .zip(high)
+            .all(|((&value, low), high)| !(value < low || value > high))
     }
 
     fn shape(&self) -> Vec<usize> {
@@ -260,6 +243,114 @@ mod tests {
     use super::*;
 
     #[test]
+    fn batched_sampling_preserves_device_rng_draws_and_advancement() {
+        let device = Device::cuda_if_available(0).unwrap();
+        if device.is_cpu() {
+            return;
+        }
+        let space = BoxSpace::new_with_universal_bounds(vec![3], 0.0, 1.0, &device);
+        device.set_seed(123).unwrap();
+        let expected = (0..5)
+            .map(|_| Tensor::rand(0.0_f64, 1.0_f64, 3, &device).unwrap())
+            .collect::<Vec<_>>();
+        let expected = Tensor::stack(&expected, 0)
+            .unwrap()
+            .to_dtype(space.low.dtype())
+            .unwrap();
+        let next = Tensor::rand(0.0_f32, 1.0, 7, &device).unwrap();
+        device.set_seed(123).unwrap();
+        let actual = space.sample_batch(5, &device).unwrap();
+        let actual_next = Tensor::rand(0.0_f32, 1.0, 7, &device).unwrap();
+        assert_eq!(
+            actual.to_vec2::<f32>().unwrap(),
+            expected.to_vec2::<f32>().unwrap()
+        );
+        assert_eq!(
+            actual_next.to_vec1::<f32>().unwrap(),
+            next.to_vec1::<f32>().unwrap()
+        );
+
+        device.set_seed(456).unwrap();
+        let expected = (0..5)
+            .map(|_| crate::sampling::sample_u32_inclusive(0, 4, &device).unwrap())
+            .collect::<Vec<_>>();
+        let next = Tensor::rand(0.0_f32, 1.0, 7, &device).unwrap();
+        device.set_seed(456).unwrap();
+        let actual = Discrete::new(5).sample_batch(5, &device).unwrap();
+        let actual_next = Tensor::rand(0.0_f32, 1.0, 7, &device).unwrap();
+        assert_eq!(actual.to_vec1::<u32>().unwrap(), expected);
+        assert_eq!(
+            actual_next.to_vec1::<f32>().unwrap(),
+            next.to_vec1::<f32>().unwrap()
+        );
+    }
+
+    #[test]
+    fn batched_sampling_preserves_shapes_bounds_and_dtypes() {
+        for device in [Device::Cpu, Device::cuda_if_available(0).unwrap()] {
+            for dtype in [candle_core::DType::F32, candle_core::DType::F64] {
+                let low = Tensor::new(&[[-2.0f64, 3.0], [7.0, -1.0]], &device)
+                    .unwrap()
+                    .to_dtype(dtype)
+                    .unwrap();
+                let high = Tensor::new(&[[2.0f64, 3.0], [8.0, 0.0]], &device)
+                    .unwrap()
+                    .to_dtype(dtype)
+                    .unwrap();
+                let space = BoxSpace::new(low, high);
+                let samples = space.sample_batch(32, &device).unwrap();
+                assert_eq!(samples.dims(), &[32, 2, 2]);
+                assert_eq!(samples.dtype(), dtype);
+                for row in 0..32 {
+                    assert!(space.contains(&samples.get(row).unwrap()));
+                }
+                assert_eq!(
+                    space
+                        .sample_batch(1, &device)
+                        .unwrap()
+                        .squeeze(0)
+                        .unwrap()
+                        .dims(),
+                    &[2, 2]
+                );
+                let unbounded = BoxSpace::new(
+                    Tensor::new(&[f64::NEG_INFINITY], &device)
+                        .unwrap()
+                        .to_dtype(dtype)
+                        .unwrap(),
+                    Tensor::new(&[f64::INFINITY], &device)
+                        .unwrap()
+                        .to_dtype(dtype)
+                        .unwrap(),
+                );
+                assert!(
+                    unbounded
+                        .sample_batch(32, &device)
+                        .unwrap()
+                        .flatten_all()
+                        .unwrap()
+                        .to_dtype(candle_core::DType::F64)
+                        .unwrap()
+                        .to_vec1::<f64>()
+                        .unwrap()
+                        .iter()
+                        .all(|value| value.is_finite())
+                );
+            }
+            let actions = Discrete::new(5).sample_batch(128, &device).unwrap();
+            assert_eq!(actions.dims(), &[128]);
+            assert!(
+                actions
+                    .to_vec1::<u32>()
+                    .unwrap()
+                    .iter()
+                    .all(|&value| value < 5)
+            );
+            assert!(Discrete::new(0).sample_batch(1, &device).is_err());
+        }
+    }
+
+    #[test]
     fn box_space_clips_batched_policy_outputs_to_bounds() {
         let space = BoxSpace::new_with_universal_bounds(vec![3], -1.0, 1.0, &Device::Cpu);
         let neurons = Tensor::from_vec(
@@ -299,7 +390,11 @@ mod tests {
     #[test]
     fn box_space_samples_are_f32() {
         let space = BoxSpace::new_with_universal_bounds(vec![3], -1.0, 1.0, &Device::Cpu);
-        let sample = space.sample(&Device::Cpu).unwrap();
+        let sample = space
+            .sample_batch(1, &Device::Cpu)
+            .unwrap()
+            .squeeze(0)
+            .unwrap();
 
         assert_eq!(sample.dtype(), candle_core::DType::F32);
         assert!(space.contains(&sample));
@@ -311,7 +406,11 @@ mod tests {
         let high = Tensor::new(&[1.0_f64], &Device::Cpu).unwrap();
         let space = BoxSpace::new(low, high);
 
-        let sample = space.sample(&Device::Cpu).unwrap();
+        let sample = space
+            .sample_batch(1, &Device::Cpu)
+            .unwrap()
+            .squeeze(0)
+            .unwrap();
         let just_outside = Tensor::new(&[1.0_f64 + 1e-12], &Device::Cpu).unwrap();
 
         assert_eq!(sample.dtype(), candle_core::DType::F64);

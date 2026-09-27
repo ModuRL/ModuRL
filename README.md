@@ -32,10 +32,10 @@ use modurl_gym::EnvironmentError;
 
 fn main() -> Result<(), EnvironmentError> {
     let device = Device::Cpu;
-    let mut env = CartPoleV1::builder().device(&device).build()?;
+    let mut env = CartPoleV1::builder().rng_device(&device).build()?;
 
     let observation = env.reset()?.state;
-    let action = env.action_space().sample(&device)?;
+    let action = env.action_space().sample_batch(1, &device)?.squeeze(0)?;
     let transition = env.step(action)?;
 
     println!("observation shape: {:?}", observation.dims());

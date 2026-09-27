@@ -12,7 +12,7 @@ use modurl::{
 pub struct PendulumV1 {
     state: [f64; 2],
     gravity: f64,
-    device: Device,
+    rng_device: Device,
     action_space: BoxSpace,
     observation_space: BoxSpace,
     #[cfg(feature = "rendering")]
@@ -24,7 +24,9 @@ impl PendulumV1 {
     /// Creates a pendulum with Gymnasium's default dynamics.
     #[builder]
     pub fn new(
-        #[builder(default = &Device::Cpu)] device: &Device,
+        /// Device used only for random draws; observations and space bounds stay on CPU.
+        #[builder(default = &Device::Cpu)]
+        rng_device: &Device,
         #[builder(default = 10.0)] gravity: f64,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
@@ -36,7 +38,7 @@ impl PendulumV1 {
             ));
         }
         Self::from_config(
-            device,
+            rng_device,
             gravity,
             #[cfg(feature = "rendering")]
             render,
@@ -44,19 +46,19 @@ impl PendulumV1 {
     }
 
     fn from_config(
-        device: &Device,
+        rng_device: &Device,
         gravity: f64,
         #[cfg(feature = "rendering")] render: bool,
     ) -> Result<Self, EnvironmentError> {
-        let action_space = BoxSpace::new_with_universal_bounds(vec![1], -2.0, 2.0, device);
+        let action_space = BoxSpace::new_with_universal_bounds(vec![1], -2.0, 2.0, &Device::Cpu);
         let observation_space = BoxSpace::new(
-            Tensor::from_vec(vec![-1.0_f32, -1.0, -8.0], 3, device)?,
-            Tensor::from_vec(vec![1.0_f32, 1.0, 8.0], 3, device)?,
+            Tensor::from_vec(vec![-1.0_f32, -1.0, -8.0], 3, &Device::Cpu)?,
+            Tensor::from_vec(vec![1.0_f32, 1.0, 8.0], 3, &Device::Cpu)?,
         );
         Ok(Self {
             state: [0.0; 2],
             gravity,
-            device: device.clone(),
+            rng_device: rng_device.clone(),
             action_space,
             observation_space,
             #[cfg(feature = "rendering")]
@@ -74,7 +76,7 @@ impl PendulumV1 {
                 self.state[1] as f32,
             ],
             3,
-            &self.device,
+            &Device::Cpu,
         )
     }
 
@@ -124,7 +126,7 @@ impl Gym for PendulumV1 {
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
-        let random = Tensor::rand(0.0_f32, 1.0, 2, &self.device)?.to_vec1::<f32>()?;
+        let random = Tensor::rand(0.0_f32, 1.0, 2, &self.rng_device)?.to_vec1::<f32>()?;
         self.state = [
             -PI + f64::from(random[0]) * 2.0 * PI,
             -1.0 + f64::from(random[1]) * 2.0,

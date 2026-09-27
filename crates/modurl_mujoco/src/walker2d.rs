@@ -1,5 +1,5 @@
 use bon::bon;
-use candle_core::{Device, Tensor};
+use candle_core::Tensor;
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces::Space,
@@ -30,7 +30,6 @@ impl Walker2dV5 {
     /// Creates an environment. All parameters default to Gymnasium v5 values.
     #[builder]
     pub fn new(
-        #[builder(default = &Device::Cpu)] device: &Device,
         #[builder(default = 4)] frame_skip: usize,
         #[builder(default = 1.0)] forward_reward_weight: f64,
         #[builder(default = 1e-3)] ctrl_cost_weight: f64,
@@ -51,7 +50,7 @@ impl Walker2dV5 {
         validate_range("healthy_z_range", healthy_z_range)?;
         validate_range("healthy_angle_range", healthy_angle_range)?;
         Ok(Self {
-            core: MujocoCore::new(MODEL, frame_skip, device, render)?,
+            core: MujocoCore::new(MODEL, frame_skip, render)?,
             forward_reward_weight,
             control_cost_weight: ctrl_cost_weight,
             healthy_reward,

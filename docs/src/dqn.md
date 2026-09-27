@@ -32,8 +32,10 @@ use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn main() {
     let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().device(&device).build().unwrap()];
-    let mut env = VectorizedGymWrapper::from(envs);
+    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
+    let mut env = DeviceMultiGymWrapper::new(
+        VectorizedGymWrapper::from(envs), Device::Cpu, device.clone(),
+    );
     let observation_space = env.observation_space();
 
     let online_var_map = VarMap::new();

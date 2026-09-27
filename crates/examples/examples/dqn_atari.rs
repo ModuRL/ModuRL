@@ -263,11 +263,7 @@ fn main() {
     // Keep ALE and replay on CPU; the agent moves inference and samples as needed.
     let action_device = Device::Cpu;
     let observation_device = Device::Cpu;
-    let mut envs = TensorMapMultiGymWrapper::new(
-        envs,
-        move |action: Tensor| action.to_device(&action_device),
-        move |observation: Tensor| observation.to_device(&observation_device),
-    );
+    let mut envs = DeviceMultiGymWrapper::new(envs, action_device, observation_device);
 
     let online_vars = VarMap::new();
     let online_q_network = AtariQNetwork::new(

@@ -1047,11 +1047,13 @@ where
             .call()?;
         let storage_device = replay_storage_config.storage_device();
         let observation_sample = observation_space
-            .sample(&storage_device)
-            .map_err(SACError::SpaceError)?;
+            .sample_batch(1, &storage_device)
+            .map_err(SACError::SpaceError)?
+            .squeeze(0)?;
         let action_sample = action_space
-            .sample(&storage_device)
-            .map_err(SACError::SpaceError)?;
+            .sample_batch(1, &storage_device)
+            .map_err(SACError::SpaceError)?
+            .squeeze(0)?;
         let replay_storage = SACReplayStorage::new(
             replay_capacity,
             observation_sample.dims(),
@@ -1190,14 +1192,13 @@ where
     }
 
     fn random_actions(&self, batch_size: usize) -> Result<Tensor, SACError<PE, GE, SE>> {
-        let actions = (0..batch_size)
-            .map(|_| {
-                self.action_space
-                    .sample(&self.replay_storage_config.optimization_device())
-                    .map_err(SACError::SpaceError)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let actions = Tensor::stack(&actions, 0)?;
+        let actions = self
+            .action_space
+            .sample_batch(
+                batch_size,
+                &self.replay_storage_config.optimization_device(),
+            )
+            .map_err(SACError::SpaceError)?;
         if actions.dtype().is_float() {
             Ok(actions.to_dtype(self.dtype)?)
         } else {
@@ -1869,6 +1870,37 @@ mod tests {
 
     fn tensor(values: &[f32], shape: impl Into<candle_core::Shape>) -> Tensor {
         Tensor::from_vec(values.to_vec(), shape, &Device::Cpu).unwrap()
+    }
+
+    #[test]
+    fn polyak_preserves_names_shapes_and_variable_identity() {
+        for device in [Device::Cpu, Device::cuda_if_available(0).unwrap()] {
+            let online = VarMap::new();
+            let mut target = VarMap::new();
+            let mut references = Vec::new();
+            for (name, shape, initial) in [
+                ("bias", vec![3], 2.0),
+                ("weight", vec![2, 3], 4.0),
+                ("scalar", vec![], 6.0),
+            ] {
+                VarBuilder::from_varmap(&online, DType::F32, &device)
+                    .get_with_hints(shape.clone(), name, Init::Const(initial))
+                    .unwrap();
+                let value = VarBuilder::from_varmap(&target, DType::F32, &device)
+                    .get_with_hints(shape.clone(), name, Init::Const(-2.0))
+                    .unwrap();
+                references.push((name, shape, initial, value));
+            }
+            copy_var_map(&online, &mut target, 0.25).unwrap();
+            for (name, shape, initial, reference) in references {
+                let updated = target.data().lock().unwrap()[name].as_tensor().clone();
+                assert_eq!(updated.id(), reference.id());
+                assert_eq!(updated.dims(), shape);
+                for value in reference.flatten_all().unwrap().to_vec1::<f32>().unwrap() {
+                    assert_eq!(value, initial as f32 * 0.25 - 1.5);
+                }
+            }
+        }
     }
 
     #[test]

@@ -252,7 +252,7 @@ pub struct LunarLanderV3 {
     // Deterministic mode flag for testing
     deterministic_mode: bool,
 
-    device: Device,
+    rng_device: Device,
 
     #[cfg(feature = "rendering")]
     renderer: Option<Renderer>,
@@ -266,7 +266,9 @@ impl LunarLanderV3 {
         #[builder(default = false)] enable_wind: bool,
         #[builder(default = 15.0)] wind_power: f32,
         #[builder(default = 1.5)] turbulence_power: f32,
-        #[builder(default = Device::Cpu)] device: Device,
+        /// Device used only for random draws; observations and space bounds stay on CPU.
+        #[builder(default = Device::Cpu)]
+        rng_device: Device,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
@@ -313,7 +315,7 @@ impl LunarLanderV3 {
             wind_idx: 0,
             torque_idx: 0,
             deterministic_mode: false,
-            device,
+            rng_device,
             #[cfg(feature = "rendering")]
             renderer: render
                 .then(|| Renderer::new(VIEWPORT_W as usize, VIEWPORT_H as usize, "Lunar Lander"))
@@ -322,7 +324,7 @@ impl LunarLanderV3 {
     }
 
     fn random_uniform(&self, low: f32, high: f32) -> Result<f32, candle_core::Error> {
-        Tensor::rand(low, high, (), &self.device)?.to_vec0()
+        Tensor::rand(low, high, (), &self.rng_device)?.to_vec0()
     }
 
     fn destroy(&mut self) {
@@ -909,7 +911,7 @@ impl Gym for LunarLanderV3 {
         }
 
         // Step once to ensure proper initialization
-        let step_info = self.step(Tensor::from_vec(vec![0u32], vec![], &self.device)?)?;
+        let step_info = self.step(Tensor::from_vec(vec![0u32], vec![], &Device::Cpu)?)?;
 
         #[cfg(feature = "rendering")]
         self.render()?;
@@ -1141,7 +1143,7 @@ impl Gym for LunarLanderV3 {
             if leg_contact_2 { 1.0 } else { 0.0 },
         ];
 
-        let state_tensor = Tensor::from_vec(state.clone(), vec![8], &self.device)?;
+        let state_tensor = Tensor::from_vec(state.clone(), vec![8], &Device::Cpu)?;
 
         // Calculate reward
         let mut reward = 0.0;
@@ -1210,9 +1212,9 @@ impl Gym for LunarLanderV3 {
             1.0,
         ];
         let low_tensor =
-            Tensor::from_vec(low, vec![8], &self.device).expect("Failed to create low tensor");
+            Tensor::from_vec(low, vec![8], &Device::Cpu).expect("Failed to create low tensor");
         let high_tensor =
-            Tensor::from_vec(high, vec![8], &self.device).expect("Failed to create high tensor");
+            Tensor::from_vec(high, vec![8], &Device::Cpu).expect("Failed to create high tensor");
         Box::new(spaces::BoxSpace::new(low_tensor, high_tensor))
     }
 
@@ -1258,11 +1260,11 @@ mod tests {
                     if leg_contact_2 { 1.0 } else { 0.0 },
                 ];
 
-                Tensor::from_vec(state, vec![8], &self.device)
+                Tensor::from_vec(state, vec![8], &Device::Cpu)
             } else {
                 // Return zeros if no lander exists
                 let state = vec![0.0f32; 8];
-                Tensor::from_vec(state, vec![8], &self.device)
+                Tensor::from_vec(state, vec![8], &Device::Cpu)
             }
         }
     }

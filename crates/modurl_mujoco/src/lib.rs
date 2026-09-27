@@ -2,6 +2,9 @@
 //!
 //! The environments use MuJoCo for physics through [`mujoco_rs`] and expose
 //! ModuRL's [`modurl::gym::Gym`] and [`modurl::gym::MultiGym`] interfaces.
+//! Observations and space bounds reside on CPU. Use
+//! [`modurl::wrappers::DeviceMultiGymWrapper`] for batched accelerator transfers;
+//! simulation randomness remains controlled by each environment's seed.
 
 mod ant;
 mod core;
