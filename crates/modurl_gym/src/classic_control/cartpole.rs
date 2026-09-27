@@ -13,6 +13,7 @@ use crate::rendering::Renderer;
 /// The classic CartPole environment.
 /// Converted from the OpenAI Gym CartPole environment.
 pub struct CartPoleV1 {
+    rng_device: Device,
     gravity: f32,
     masspole: f32,
     total_mass: f32,
@@ -37,7 +38,9 @@ pub struct CartPoleV1 {
 impl CartPoleV1 {
     #[builder]
     pub fn new(
-        #[builder(default = &Device::Cpu)] device: &Device,
+        /// Device used only for random draws; observations and space bounds stay on CPU.
+        #[builder(default = &Device::Cpu)]
+        rng_device: &Device,
         #[builder(default = false)] sutton_barto_reward: bool,
         #[builder(default = true)] is_euler: bool,
         #[cfg(feature = "rendering")]
@@ -64,8 +67,8 @@ impl CartPoleV1 {
             f32::INFINITY,
         ];
         let low = high.iter().map(|x| -x).collect::<Vec<_>>();
-        let high = Tensor::from_vec(high, vec![4], device)?;
-        let low = Tensor::from_vec(low, vec![4], device)?;
+        let high = Tensor::from_vec(high, vec![4], &Device::Cpu)?;
+        let low = Tensor::from_vec(low, vec![4], &Device::Cpu)?;
 
         let action_space = spaces::Discrete::new(2);
         let observation_space = spaces::BoxSpace::new(low, high);
@@ -84,7 +87,8 @@ impl CartPoleV1 {
             is_euler,
             action_space,
             observation_space,
-            state: Tensor::zeros(vec![4], candle_core::DType::F32, device)?,
+            rng_device: rng_device.clone(),
+            state: Tensor::zeros(vec![4], candle_core::DType::F32, &Device::Cpu)?,
             steps_since_reset: 0,
             sutton_barto_reward,
             #[cfg(feature = "rendering")]
@@ -234,7 +238,8 @@ impl Gym for CartPoleV1 {
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.steps_beyond_terminated = None;
-        let state = Tensor::rand(-0.05, 0.05, vec![4], self.state.device())?
+        let state = Tensor::rand(-0.05, 0.05, vec![4], &self.rng_device)?
+            .to_device(&Device::Cpu)?
             .to_dtype(candle_core::DType::F32)?;
         self.state = state;
         self.steps_since_reset = 0;
@@ -287,11 +292,7 @@ impl Gym for CartPoleV1 {
             theta_dot += 0.5 * self.tau * (thetaacc + temp);
         }
 
-        self.state = Tensor::from_vec(
-            vec![x, x_dot, theta, theta_dot],
-            vec![4],
-            self.state.device(),
-        )?;
+        self.state = Tensor::from_vec(vec![x, x_dot, theta, theta_dot], vec![4], &Device::Cpu)?;
         let terminated = x < -self.x_threshold
             || x > self.x_threshold
             || theta < -self.theta_threshold_radians
@@ -454,8 +455,7 @@ mod tests {
         fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error> {
             self.steps_beyond_terminated = None;
             self.steps_since_reset = 0;
-            self.state =
-                Tensor::from_vec(vec![0.0f32, 0.0, 0.0, 0.0], vec![4], self.state.device())?;
+            self.state = Tensor::from_vec(vec![0.0f32, 0.0, 0.0, 0.0], vec![4], &Device::Cpu)?;
             Ok(self.state.clone())
         }
 
@@ -483,7 +483,11 @@ mod tests {
         let _state = env.reset().expect("Failed to reset environment.");
         let action_space = env.action_space();
         for _ in 0..200 {
-            let action = action_space.sample(&Device::Cpu).unwrap();
+            let action = action_space
+                .sample_batch(1, &Device::Cpu)
+                .unwrap()
+                .squeeze(0)
+                .unwrap();
             let StepInfo {
                 state: _,
                 reward: _,

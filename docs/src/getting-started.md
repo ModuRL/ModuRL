@@ -92,9 +92,11 @@ environments and wrap them as one vectorized environment:
 
 ```rust,ignore
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
+        .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
         .collect::<Vec<_>>();
-    let mut env = VectorizedGymWrapper::from(envs);
+    let mut env = DeviceMultiGymWrapper::new(
+        VectorizedGymWrapper::from(envs), Device::Cpu, device.clone(),
+    );
 ```
 
 Each inner `CartPoleV1` is a single environment. `VectorizedGymWrapper` stacks
@@ -249,9 +251,11 @@ fn main() {
     let device = Device::Cpu;
 
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
+        .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
         .collect::<Vec<_>>();
-    let mut env = VectorizedGymWrapper::from(envs);
+    let mut env = DeviceMultiGymWrapper::new(
+        VectorizedGymWrapper::from(envs), Device::Cpu, device.clone(),
+    );
 
     let observation_space = env.observation_space();
     let action_space = env.action_space();

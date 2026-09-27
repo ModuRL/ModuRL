@@ -288,12 +288,19 @@ impl AlignedObservationReplay {
         states_column.write(start, &states)?;
         next_states_column.write(start, &next_states)?;
 
-        for (offset, &truncated) in truncateds.iter().enumerate() {
-            if truncated {
-                let row = replay_index_tensor(&[offset], &self.device)?;
+        let offsets = truncateds
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, &truncated)| truncated.then_some(offset))
+            .collect::<Vec<_>>();
+        if !offsets.is_empty() {
+            let rows = replay_index_tensor(&offsets, &self.device)?;
+            let terminal_states = next_states.index_select(&rows, 0)?.detach();
+            for (row, offset) in offsets.into_iter().enumerate() {
+                // Views share the compact truncation batch, not the full rollout.
                 self.truncated_next_states.insert(
                     (start + offset) % self.capacity,
-                    next_states.index_select(&row, 0)?.detach(),
+                    terminal_states.narrow(0, row, 1)?,
                 );
             }
         }
@@ -338,10 +345,23 @@ impl AlignedObservationReplay {
             .as_ref()
             .ok_or(ReplayStorageError::UninitializedEnvironmentCount)?
             .gather(&index_tensor)?;
+        let mut positions = Vec::new();
+        let mut terminals = Vec::new();
         for (batch_index, replay_index) in indices.iter().copied().enumerate() {
             if let Some(terminal_state) = self.truncated_next_states.get(&replay_index) {
-                next_states.slice_set(terminal_state, 0, batch_index)?;
+                positions.push(batch_index);
+                terminals.push(terminal_state);
             }
+        }
+        if !positions.is_empty() {
+            let terminal_states = Tensor::cat(&terminals, 0)?;
+            let mut index_shape = vec![1; next_states.rank()];
+            index_shape[0] = positions.len();
+            let rows = replay_index_tensor(&positions, &self.device)?
+                .reshape(index_shape.as_slice())?
+                .broadcast_as(terminal_states.shape())?
+                .contiguous()?;
+            next_states.scatter_set(&rows, &terminal_states, 0)?;
         }
         Ok((states, next_states))
     }
@@ -471,6 +491,45 @@ mod tests {
 
         fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
             Ok(indices.to_vec())
+        }
+    }
+
+    #[test]
+    fn batched_terminal_patches_preserve_bytes_duplicates_and_overwrites() {
+        for device in [Device::Cpu, Device::cuda_if_available(0).unwrap()] {
+            let mut replay = AlignedObservationReplay::new(6, &[2, 2], DType::U8, &device);
+            let batch = |value| Tensor::full(value, (3, 2, 2), &device).unwrap();
+            let terminals =
+                Tensor::from_vec((20u8..32).collect::<Vec<_>>(), (3, 2, 2), &device).unwrap();
+            replay
+                .insert(0, &batch(1u8), &terminals, &[true, false, true])
+                .unwrap();
+            replay
+                .insert(3, &batch(2u8), &batch(3u8), &[false; 3])
+                .unwrap();
+            let (_, next) = replay.gather(&[2, 0, 2, 1]).unwrap();
+            assert_eq!(
+                next.flatten_all().unwrap().to_vec1::<u8>().unwrap(),
+                vec![28, 29, 30, 31, 20, 21, 22, 23, 28, 29, 30, 31, 2, 2, 2, 2]
+            );
+            replay
+                .insert(0, &batch(4u8), &batch(5u8), &[false; 3])
+                .unwrap();
+            let (_, overwritten) = replay.gather(&[0, 2]).unwrap();
+            assert_eq!(
+                overwritten.flatten_all().unwrap().to_vec1::<u8>().unwrap(),
+                vec![5; 8]
+            );
+            // Already gathered batches own their data.
+            assert_eq!(
+                next.get(0)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<u8>()
+                    .unwrap(),
+                vec![28, 29, 30, 31]
+            );
         }
     }
 

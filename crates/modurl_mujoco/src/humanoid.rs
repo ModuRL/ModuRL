@@ -1,5 +1,5 @@
 use bon::bon;
-use candle_core::{Device, Tensor};
+use candle_core::Tensor;
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces::Space,
@@ -52,7 +52,6 @@ impl HumanoidV5 {
     /// Creates an environment. All parameters default to Gymnasium v5 values.
     #[builder]
     pub fn new(
-        #[builder(default = &Device::Cpu)] device: &Device,
         #[builder(default = 5)] frame_skip: usize,
         #[builder(default = 1.25)] forward_reward_weight: f64,
         #[builder(default = 0.1)] ctrl_cost_weight: f64,
@@ -78,7 +77,7 @@ impl HumanoidV5 {
         validate_range("contact_cost_range", contact_cost_range)?;
         validate_range("healthy_z_range", healthy_z_range)?;
         Ok(Self {
-            core: MujocoCore::new(MODEL, frame_skip, device, render)?,
+            core: MujocoCore::new(MODEL, frame_skip, render)?,
             forward_reward_weight,
             control_cost_weight: ctrl_cost_weight,
             contact_cost_weight,

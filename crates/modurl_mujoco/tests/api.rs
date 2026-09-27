@@ -6,6 +6,7 @@ use modurl_mujoco::{AntV5, HalfCheetahV5, HopperV5, HumanoidV5, Walker2dV5};
 fn default_shapes_and_metadata_match_gymnasium() {
     let mut ant = AntV5::builder().build().unwrap();
     let ant_reset = ant.reset().unwrap();
+    assert!(ant_reset.state.device().is_cpu());
     assert_eq!(ant_reset.state.dims(), &[105]);
     assert_eq!(ant_reset.state.dtype(), DType::F32);
     assert_eq!(ant.action_space().shape(), vec![8]);
@@ -14,16 +15,19 @@ fn default_shapes_and_metadata_match_gymnasium() {
 
     let mut half_cheetah = HalfCheetahV5::builder().build().unwrap();
     let half_cheetah_reset = half_cheetah.reset().unwrap();
+    assert!(half_cheetah_reset.state.device().is_cpu());
     assert_eq!(half_cheetah_reset.state.dims(), &[17]);
     assert_eq!(half_cheetah.action_space().shape(), vec![6]);
 
     let mut hopper = HopperV5::builder().build().unwrap();
     let hopper_reset = hopper.reset().unwrap();
+    assert!(hopper_reset.state.device().is_cpu());
     assert_eq!(hopper_reset.state.dims(), &[11]);
     assert_eq!(hopper.action_space().shape(), vec![3]);
 
     let mut humanoid = HumanoidV5::builder().build().unwrap();
     let humanoid_reset = humanoid.reset().unwrap();
+    assert!(humanoid_reset.state.device().is_cpu());
     assert_eq!(humanoid_reset.state.dims(), &[348]);
     assert_eq!(humanoid.action_space().shape(), vec![17]);
     assert_eq!(humanoid_reset.info.tendon_length.len(), 2);
@@ -32,6 +36,7 @@ fn default_shapes_and_metadata_match_gymnasium() {
 
     let mut walker = Walker2dV5::builder().build().unwrap();
     let walker_reset = walker.reset().unwrap();
+    assert!(walker_reset.state.device().is_cpu());
     assert_eq!(walker_reset.state.dims(), &[17]);
     assert_eq!(walker.action_space().shape(), vec![6]);
 }
@@ -40,33 +45,60 @@ fn default_shapes_and_metadata_match_gymnasium() {
 fn sampled_actions_are_f32_and_can_step_every_environment() {
     let mut ant = AntV5::builder().build().unwrap();
     ant.reset().unwrap();
-    let action = ant.action_space().sample(&Device::Cpu).unwrap();
+    let action = ant
+        .action_space()
+        .sample_batch(1, &Device::Cpu)
+        .unwrap()
+        .squeeze(0)
+        .unwrap();
     let step = ant.step(action).unwrap();
     assert_eq!(step.state.dtype(), DType::F32);
+    assert!(step.state.device().is_cpu());
     assert!(step.info.x_velocity.is_some());
     assert!(step.info.reward_forward.is_some());
 
     let mut half_cheetah = HalfCheetahV5::builder().build().unwrap();
     half_cheetah.reset().unwrap();
-    let action = half_cheetah.action_space().sample(&Device::Cpu).unwrap();
+    let action = half_cheetah
+        .action_space()
+        .sample_batch(1, &Device::Cpu)
+        .unwrap()
+        .squeeze(0)
+        .unwrap();
     assert_eq!(half_cheetah.step(action).unwrap().state.dtype(), DType::F32);
 
     let mut hopper = HopperV5::builder().build().unwrap();
     hopper.reset().unwrap();
-    let action = hopper.action_space().sample(&Device::Cpu).unwrap();
+    let action = hopper
+        .action_space()
+        .sample_batch(1, &Device::Cpu)
+        .unwrap()
+        .squeeze(0)
+        .unwrap();
     assert_eq!(hopper.step(action).unwrap().state.dtype(), DType::F32);
 
     let mut humanoid = HumanoidV5::builder().build().unwrap();
     humanoid.reset().unwrap();
-    let action = humanoid.action_space().sample(&Device::Cpu).unwrap();
+    let action = humanoid
+        .action_space()
+        .sample_batch(1, &Device::Cpu)
+        .unwrap()
+        .squeeze(0)
+        .unwrap();
     let step = humanoid.step(action).unwrap();
     assert_eq!(step.state.dtype(), DType::F32);
+    assert!(step.state.device().is_cpu());
     assert!(step.info.y_velocity.is_some());
     assert!(step.info.reward_contact.is_some());
 
     let mut walker = Walker2dV5::builder().build().unwrap();
     walker.reset().unwrap();
-    let action = walker.action_space().sample(&Device::Cpu).unwrap();
+    let action = walker
+        .action_space()
+        .sample_batch(1, &Device::Cpu)
+        .unwrap()
+        .squeeze(0)
+        .unwrap();
     assert_eq!(walker.step(action).unwrap().state.dtype(), DType::F32);
 }
 

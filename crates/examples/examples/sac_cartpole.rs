@@ -70,8 +70,10 @@ fn main() {
         .unwrap_or(100_000);
     let device = Device::cuda_if_available(0).unwrap();
     println!("Using device: {device:?}");
-    let mut env =
-        VectorizedGymWrapper::from(vec![CartPoleV1::builder().device(&device).build().unwrap()]);
+    let env = VectorizedGymWrapper::from(vec![
+        CartPoleV1::builder().rng_device(&device).build().unwrap(),
+    ]);
+    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let observation_size = observation_space.shape()[0];

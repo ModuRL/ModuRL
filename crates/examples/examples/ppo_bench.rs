@@ -21,10 +21,11 @@ fn ppo_cartpole() {
 
     let mut envs = vec![];
     for _ in 0..8 {
-        let env = CartPoleV1::builder().device(&device).build().unwrap();
+        let env = CartPoleV1::builder().rng_device(&device).build().unwrap();
         envs.push(env);
     }
-    let mut vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
+    let vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
+    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
 
     let observation_space = vec_env.observation_space();
     let action_space = vec_env.action_space();

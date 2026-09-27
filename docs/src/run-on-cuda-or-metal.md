@@ -37,13 +37,19 @@ let device = Device::new_metal(0)?;
 `0` selects the first Metal device. Metal builds require a supported Apple
 platform.
 
-## Keep Values on One Device
+## Transfer at the Environment Batch Boundary
 
-Pass the same `device` to the environment builder and to `VarBuilder`. That
-places environment observations and model parameters on the same backend.
+CPU environments always return CPU observations. Set `rng_device` only to
+choose where classic-control and Box2D random draws occur; it does not change
+observation placement. MuJoCo uses its existing seeded CPU RNG and has no
+device setting. Wrap vectorized environments to transfer actions and observations
+once per batch, and build model parameters on the agent device.
 
 ```rust,ignore
-let env = CartPoleV1::builder().device(&device).build().unwrap();
+let env = CartPoleV1::builder().rng_device(&device).build().unwrap();
+let mut envs = DeviceMultiGymWrapper::new(
+    VectorizedGymWrapper::from(vec![env]), Device::Cpu, device.clone(),
+);
 let vb = VarBuilder::from_varmap(&var_map, candle_core::DType::F32, &device);
 ```
 
@@ -60,9 +66,12 @@ let optimization_device = Device::new_cuda(0)?;
 let storage_device = Device::Cpu;
 
 let env = CartPoleV1::builder()
-    .device(&optimization_device)
+    .rng_device(&optimization_device)
     .build()
     .unwrap();
+let mut envs = DeviceMultiGymWrapper::new(
+    VectorizedGymWrapper::from(vec![env]), Device::Cpu, optimization_device.clone(),
+);
 
 let actor_vb = VarBuilder::from_varmap(
     &actor_vars,
@@ -88,8 +97,9 @@ let mut agent = SACAgent::builder()
 `ReplayDeviceStrategy` to move replay entries and sampled batches. It does not
 move an environment or model parameters for you.
 
-Set up everything you create for SAC on `optimization_device`: the environment,
-actor, critics, target critics, optimizers, and automatic entropy variable. For
+Build SAC's actor, critics, target critics, optimizers, and automatic entropy
+variable on `optimization_device`. Use `DeviceMultiGymWrapper` to connect CPU
+environments to that device. For
 DDPG or TD3, this includes both the online and target actors as well as every
 critic pair. You do not create any of these components on `storage_device`.
 

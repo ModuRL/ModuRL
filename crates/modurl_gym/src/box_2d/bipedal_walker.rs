@@ -122,7 +122,7 @@ pub struct BipedalWalkerV3 {
     joints: Vec<B2jointPtr<WalkerUserData>>,
     contact_detector: Option<Rc<RefCell<WalkerContactDetector>>>,
     previous_shaping: Option<f32>,
-    device: Device,
+    rng_device: Device,
     action_space: BoxSpace,
     observation_space: BoxSpace,
     #[cfg(feature = "rendering")]
@@ -134,7 +134,9 @@ impl BipedalWalkerV3 {
     /// Creates the standard Gymnasium v3 walker.
     #[builder]
     pub fn new(
-        #[builder(default = &Device::Cpu)] device: &Device,
+        /// Device used only for random draws; observations and space bounds stay on CPU.
+        #[builder(default = &Device::Cpu)]
+        rng_device: &Device,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
@@ -186,11 +188,11 @@ impl BipedalWalkerV3 {
             joints: Vec::new(),
             contact_detector: None,
             previous_shaping: None,
-            device: device.clone(),
-            action_space: BoxSpace::new_with_universal_bounds(vec![4], -1.0, 1.0, device),
+            rng_device: rng_device.clone(),
+            action_space: BoxSpace::new_with_universal_bounds(vec![4], -1.0, 1.0, &Device::Cpu),
             observation_space: BoxSpace::new(
-                Tensor::from_vec(low, 24, device)?,
-                Tensor::from_vec(high, 24, device)?,
+                Tensor::from_vec(low, 24, &Device::Cpu)?,
+                Tensor::from_vec(high, 24, &Device::Cpu)?,
             ),
             #[cfg(feature = "rendering")]
             renderer: render
@@ -211,7 +213,7 @@ impl BipedalWalkerV3 {
                 "BipedalWalker received an invalid random-sampling range",
             ));
         }
-        Ok(Tensor::rand(low, high, (), &self.device)?.to_vec0::<f32>()?)
+        Ok(Tensor::rand(low, high, (), &self.rng_device)?.to_vec0::<f32>()?)
     }
 
     fn clear_world(&mut self) {
@@ -435,7 +437,7 @@ impl BipedalWalkerV3 {
             self.legs.push(lower);
         }
 
-        let zero_action = Tensor::zeros(4, DType::F32, &self.device)?;
+        let zero_action = Tensor::zeros(4, DType::F32, &Device::Cpu)?;
         Ok(self.step(zero_action)?.state)
     }
 
@@ -691,7 +693,7 @@ impl Gym for BipedalWalkerV3 {
         #[cfg(feature = "rendering")]
         self.render()?;
         Ok(StepInfo {
-            state: Tensor::from_vec(state, 24, &self.device)?,
+            state: Tensor::from_vec(state, 24, &Device::Cpu)?,
             reward,
             done,
             truncated: false,

@@ -160,10 +160,11 @@ fn ppo(
 ) -> Result<Value, Box<dyn Error>> {
     let envs = debug_result(
         (0..PPO_ENV_COUNT)
-            .map(|_| CartPoleV1::builder().device(device).build())
+            .map(|_| CartPoleV1::builder().rng_device(device).build())
             .collect::<Result<Vec<_>, _>>(),
     )?;
-    let mut env: VectorizedGymWrapper<CartPoleV1> = envs.into();
+    let env: VectorizedGymWrapper<CartPoleV1> = envs.into();
+    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
     let action_space = env.action_space();
     let actor_vars = VarMap::new();
     let actor = MLP::builder()
@@ -255,8 +256,9 @@ fn dqn(
     measured_steps: usize,
     warmup_steps: usize,
 ) -> Result<Value, Box<dyn Error>> {
-    let cartpole = debug_result(CartPoleV1::builder().device(device).build())?;
-    let mut env = VectorizedGymWrapper::from(vec![cartpole]);
+    let cartpole = debug_result(CartPoleV1::builder().rng_device(device).build())?;
+    let env = VectorizedGymWrapper::from(vec![cartpole]);
+    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
     let observation_space = env.observation_space();
     let online_vars = VarMap::new();
     let online = MLP::builder()
@@ -376,8 +378,9 @@ fn sac(
     measured_steps: usize,
     warmup_steps: usize,
 ) -> Result<Value, Box<dyn Error>> {
-    let pendulum = debug_result(PendulumV1::builder().device(device).build())?;
-    let mut env = VectorizedGymWrapper::from(vec![TimeLimitGym::new(pendulum, 200)]);
+    let pendulum = debug_result(PendulumV1::builder().rng_device(device).build())?;
+    let env = VectorizedGymWrapper::from(vec![TimeLimitGym::new(pendulum, 200)]);
+    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let actor_vars = VarMap::new();

@@ -43,14 +43,15 @@ fn main() {
 
     let env = NormalizeRewardGym::new(
         NormalizeObservationGym::new(RecordRawRewardGym::new(TimeLimitGym::new(
-            mujoco::build_environment(&device),
+            mujoco::build_environment(),
             1_000,
         )))
         .with_clip(10.0),
         0.99,
     )
     .with_clip(10.0);
-    let mut env = VectorizedGymWrapper::from(vec![env]);
+    let env = VectorizedGymWrapper::from(vec![env]);
+    let mut env = DeviceMultiGymWrapper::new(env, candle_core::Device::Cpu, device.clone());
     let observation_size = env.observation_space().shape()[0];
     let action_space = env.action_space();
     let action_shape = action_space.shape();

@@ -27,7 +27,10 @@ fn mlp(
 
 fn cartpole() -> VectorizedGymWrapper<CartPoleV1> {
     VectorizedGymWrapper::from(vec![
-        CartPoleV1::builder().device(&Device::Cpu).build().unwrap(),
+        CartPoleV1::builder()
+            .rng_device(&Device::Cpu)
+            .build()
+            .unwrap(),
     ])
 }
 

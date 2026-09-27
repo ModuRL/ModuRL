@@ -132,3 +132,18 @@ fn live_updates_preserve_completed_series() {
 
     assert_eq!(logger.series("loss"), Some(&[(10, 1.0), (20, 2.0)][..]));
 }
+
+#[test]
+fn batches_mixed_device_and_dtype_metrics_without_reordering_duplicates() {
+    let device = Device::cuda_if_available(0).unwrap();
+    let mut logger = TerminalLogger::new(AggregationConfig::new(Aggregation::last()));
+    let first = Tensor::new(2.0f64, &device).unwrap();
+    let middle = Tensor::new(7u32, &Device::Cpu).unwrap();
+    let last = Tensor::new(3.0f32, &device).unwrap();
+    logger
+        .log(1, &[("loss", &first), ("count", &middle), ("loss", &last)])
+        .unwrap();
+    logger.finish().unwrap();
+    assert_eq!(logger.series("loss"), Some(&[(1, 3.0)][..]));
+    assert_eq!(logger.series("count"), Some(&[(1, 7.0)][..]));
+}

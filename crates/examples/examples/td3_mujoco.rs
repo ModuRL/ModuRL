@@ -66,10 +66,9 @@ fn main() {
     println!("Environment: {ENVIRONMENT_NAME}");
     println!("Using device: {device:?}");
 
-    let mut env = VectorizedGymWrapper::from(vec![TimeLimitGym::new(
-        mujoco::build_environment(&device),
-        1_000,
-    )]);
+    let env =
+        VectorizedGymWrapper::from(vec![TimeLimitGym::new(mujoco::build_environment(), 1_000)]);
+    let mut env = DeviceMultiGymWrapper::new(env, candle_core::Device::Cpu, device.clone());
     let observation_space = env.observation_space();
     let environment_action_space = env.action_space();
     let observation_size = observation_space.shape()[0];

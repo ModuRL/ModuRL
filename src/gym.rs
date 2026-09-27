@@ -100,18 +100,25 @@ pub struct MultiGymStepInfo<I = ()> {
 
 impl<I> MultiGymStepInfo<I> {
     pub fn transition_next_states(&self) -> candle_core::Result<Tensor> {
-        let env_count = self.dones.len();
-        let state_chunks = self.states.chunk(env_count, 0)?;
-        let mut next_states = Vec::with_capacity(env_count);
-
-        for (i, state_chunk) in state_chunks.iter().enumerate().take(env_count) {
-            match &self.terminal_states[i] {
-                Some(state) => next_states.push(state.clone()),
-                None => next_states.push(state_chunk.clone().squeeze(0)?),
+        let mut indices = Vec::new();
+        let mut terminals = Vec::new();
+        for (index, state) in self.terminal_states.iter().enumerate() {
+            if let Some(state) = state {
+                indices.push(index as u32);
+                terminals.push(state);
             }
         }
-
-        Tensor::stack(&next_states, 0)
+        if indices.is_empty() {
+            return Ok(self.states.clone());
+        }
+        let terminal_states = Tensor::stack(&terminals, 0)?;
+        let mut shape = vec![1; self.states.rank()];
+        shape[0] = indices.len();
+        let indices = Tensor::from_vec(indices, shape[0], self.states.device())?
+            .reshape(shape.as_slice())?
+            .broadcast_as(terminal_states.shape())?
+            .contiguous()?;
+        self.states.scatter(&indices, &terminal_states, 0)
     }
 }
 

@@ -526,9 +526,10 @@ where
         copy_actor_var_map(online_actor_vars, target_actor_vars, 1.0)?;
         let storage_device = replay_storage_config.storage_device();
         let observation_sample = observation_space
-            .sample(&storage_device)
-            .map_err(DeterministicActorCriticError::SpaceError)?;
-        let action_sample = action_space.sample(&storage_device)?;
+            .sample_batch(1, &storage_device)
+            .map_err(DeterministicActorCriticError::SpaceError)?
+            .squeeze(0)?;
+        let action_sample = action_space.sample_batch(1, &storage_device)?.squeeze(0)?;
         let replay_storage = DeterministicReplayStorage::new(
             replay_capacity,
             observation_sample.dims(),
@@ -729,13 +730,11 @@ where
         &self,
         batch_size: usize,
     ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        let actions = (0..batch_size)
-            .map(|_| {
-                self.action_space
-                    .sample(&self.replay_storage_config.optimization_device())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Tensor::stack(&actions, 0)?.to_dtype(self.dtype)?)
+        let actions = self.action_space.sample_batch(
+            batch_size,
+            &self.replay_storage_config.optimization_device(),
+        )?;
+        Ok(actions.to_dtype(self.dtype)?)
     }
 
     fn sample_batch(

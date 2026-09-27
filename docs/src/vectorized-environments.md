@@ -8,9 +8,11 @@ vectorized environment:
 
 ```rust,ignore
 let envs = (0..4)
-    .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
+    .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
     .collect::<Vec<_>>();
-let mut env = VectorizedGymWrapper::from(envs);
+let mut env = DeviceMultiGymWrapper::new(
+    VectorizedGymWrapper::from(envs), Device::Cpu, device.clone(),
+);
 ```
 
 With the `multithreading` feature enabled,
@@ -23,14 +25,15 @@ spaces:
 let constructors = (0..4)
     .map(|_| {
         let device = device.clone();
-        move || CartPoleV1::builder().device(&device).build().unwrap()
+        move || CartPoleV1::builder().rng_device(&device).build().unwrap()
     })
     .collect();
-let mut env = MultithreadedVectorizedGymWrapper::new(
+let env = MultithreadedVectorizedGymWrapper::new(
     constructors,
     observation_space,
     action_space,
 );
+let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
 ```
 
 Each inner environment remains one unit of work. The wrapper preserves the

@@ -24,20 +24,28 @@ pub(crate) fn clip_gradients(
     // Sort the scalar norm contributions before summing because floating-point
     // addition is not associative. Tensor IDs are allocation-dependent and
     // therefore are not a deterministic ordering across runs.
-    let mut norm_sqrs: Vec<f64> = vec![];
+    // The outer vector groups by device. Each inner vector holds that device's scalar norms.
+    let mut norm_groups: Vec<Vec<Tensor>> = vec![];
 
     for id in variable_ids {
         if let Some(grad) = grad_store.get_id(id) {
-            let norm_sq = grad
-                .sqr()?
-                .sum_all()?
-                .to_dtype(candle_core::DType::F64)?
-                .to_scalar::<f64>()?;
-            norm_sqrs.push(norm_sq);
+            let norm_sq = grad.sqr()?.sum_all()?.to_dtype(candle_core::DType::F64)?;
+            if let Some(group) = norm_groups
+                .iter_mut()
+                .find(|group| group[0].device().same_device(norm_sq.device()))
+            {
+                group.push(norm_sq);
+            } else {
+                norm_groups.push(vec![norm_sq]);
+            }
             grads.push((id, grad.clone()));
         }
     }
 
+    let mut norm_sqrs = Vec::new();
+    for group in norm_groups {
+        norm_sqrs.extend(Tensor::stack(&group, 0)?.to_vec1::<f64>()?);
+    }
     norm_sqrs.sort_by(f64::total_cmp);
     let total_norm_sq = norm_sqrs.into_iter().sum::<f64>();
 
@@ -46,8 +54,7 @@ pub(crate) fn clip_gradients(
         // Match PyTorch's clip_grad_norm_ denominator, including its epsilon.
         let scale = f64::from(max_norm) / (total_norm + 1e-6);
         for (id, grad) in &grads {
-            let scale_t = Tensor::new(scale, grad.device())?.to_dtype(grad.dtype())?;
-            let clipped = grad.broadcast_mul(&scale_t)?;
+            let clipped = (grad * scale)?;
             grad_store.insert_id(*id, clipped);
         }
     }

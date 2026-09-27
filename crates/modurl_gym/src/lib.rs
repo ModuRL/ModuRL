@@ -1,3 +1,9 @@
+//! CPU classic-control and Box2D environments.
+//!
+//! Observations and space bounds always reside on CPU. Builders expose
+//! `rng_device` solely for random draws; use
+//! [`modurl::wrappers::DeviceMultiGymWrapper`] for batched accelerator transfers.
+
 pub mod box_2d;
 pub mod classic_control;
 pub(crate) mod testing;

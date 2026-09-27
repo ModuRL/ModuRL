@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use bon::bon;
-use candle_core::{Device, Tensor};
+use candle_core::Tensor;
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces::Space,
@@ -116,7 +116,6 @@ impl<T: MujocoTask> CustomMujoco<T> {
         task: T,
         observation_dim: usize,
         #[builder(default = 1)] frame_skip: usize,
-        #[builder(default = &Device::Cpu)] device: &Device,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
@@ -129,7 +128,7 @@ impl<T: MujocoTask> CustomMujoco<T> {
                 "observation_dim must be nonzero".into(),
             ));
         }
-        let core = MujocoCore::from_xml_path(path.as_ref(), frame_skip, device, render)?;
+        let core = MujocoCore::from_xml_path(path.as_ref(), frame_skip, render)?;
         let env = Self {
             action_dim: task.action_dim().unwrap_or(core.nu()),
             core,

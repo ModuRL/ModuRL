@@ -26,10 +26,10 @@ use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn main() -> Result<(), EnvironmentError> {
     let device = Device::Cpu;
-    let mut env = CartPoleV1::builder().device(&device).build()?;
+    let mut env = CartPoleV1::builder().rng_device(&device).build()?;
 
     let observation = env.reset()?.state;
-    let action = env.action_space().sample(&device)?;
+    let action = env.action_space().sample_batch(1, &device)?.squeeze(0)?;
     let transition = env.step(action)?;
 
     println!("observation shape: {:?}", observation.dims());
@@ -39,6 +39,12 @@ fn main() -> Result<(), EnvironmentError> {
 ```
 
 ## Environments
+
+All environments produce observations and space bounds on CPU. The optional
+builder setting `rng_device` controls only random draws and defaults to CPU.
+Use `DeviceMultiGymWrapper` around vectorized environments to transfer whole
+action and observation batches to an accelerator. The former `.device(...)`
+builder setting is now `.rng_device(...)`; observation-device overrides are removed.
 
 | Module | Environment | Action space | Observation shape |
 | --- | --- | --- | --- |

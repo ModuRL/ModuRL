@@ -1,5 +1,9 @@
 # modurl_mujoco
 
+Environments always produce CPU observations and space bounds. Builders have no
+device setting; the existing per-environment seeded CPU RNG is unchanged.
+Use `DeviceMultiGymWrapper` around vectorized environments for accelerator transfers.
+
 Native Rust MuJoCo environments for [ModuRL](https://github.com/ModuRL/ModuRL), using Candle tensors and [`mujoco-rs`](https://github.com/davidhozic/mujoco-rs) physics.
 
 Implemented Gymnasium v5 environments:
@@ -29,9 +33,9 @@ That limitation comes from `mujoco-rs`, which requires an absolute `MUJOCO_DOWNL
 use candle_core::Device;
 use modurl_mujoco::prelude::*;
 
-let mut environment = HalfCheetahV5::builder().device(&Device::Cpu).build()?;
+let mut environment = HalfCheetahV5::builder().build()?;
 let observation = environment.reset()?.state;
-let action = environment.action_space().sample(&Device::Cpu)?;
+let action = environment.action_space().sample_batch(1, &Device::Cpu)?.squeeze(0)?;
 let transition = environment.step(action)?;
 # Ok::<(), MujocoError>(())
 ```
@@ -156,7 +160,6 @@ let mut environment = CustomMujoco::builder()
     .task(my_task)
     .observation_dim(12)
     .frame_skip(4)
-    .device(&Device::Cpu)
     .build()?;
 ```
 

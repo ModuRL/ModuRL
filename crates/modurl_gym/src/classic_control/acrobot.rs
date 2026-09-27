@@ -24,7 +24,7 @@ pub struct AcrobotV1 {
     state: [f64; 4],
     use_nips_dynamics: bool,
     torque_noise_max: f64,
-    device: Device,
+    rng_device: Device,
     action_space: Discrete,
     observation_space: BoxSpace,
     #[cfg(feature = "rendering")]
@@ -36,7 +36,9 @@ impl AcrobotV1 {
     /// Creates an Acrobot. The default equations match Sutton and Barto's book.
     #[builder]
     pub fn new(
-        #[builder(default = &Device::Cpu)] device: &Device,
+        /// Device used only for random draws; observations and space bounds stay on CPU.
+        #[builder(default = &Device::Cpu)]
+        rng_device: &Device,
         #[builder(default = false)] use_nips_dynamics: bool,
         #[builder(default = 0.0)] torque_noise_max: f64,
         #[cfg(feature = "rendering")]
@@ -49,7 +51,7 @@ impl AcrobotV1 {
             ));
         }
         Self::from_config(
-            device,
+            rng_device,
             use_nips_dynamics,
             torque_noise_max,
             #[cfg(feature = "rendering")]
@@ -58,7 +60,7 @@ impl AcrobotV1 {
     }
 
     fn from_config(
-        device: &Device,
+        rng_device: &Device,
         use_nips_dynamics: bool,
         torque_noise_max: f64,
         #[cfg(feature = "rendering")] render: bool,
@@ -76,11 +78,11 @@ impl AcrobotV1 {
             state: [0.0; 4],
             use_nips_dynamics,
             torque_noise_max,
-            device: device.clone(),
+            rng_device: rng_device.clone(),
             action_space: Discrete::new(3),
             observation_space: BoxSpace::new(
-                Tensor::from_vec(low, 6, device)?,
-                Tensor::from_vec(high, 6, device)?,
+                Tensor::from_vec(low, 6, &Device::Cpu)?,
+                Tensor::from_vec(high, 6, &Device::Cpu)?,
             ),
             #[cfg(feature = "rendering")]
             renderer: render
@@ -100,7 +102,7 @@ impl AcrobotV1 {
                 self.state[3] as f32,
             ],
             6,
-            &self.device,
+            &Device::Cpu,
         )
     }
 
@@ -214,7 +216,7 @@ impl Gym for AcrobotV1 {
     type SpaceError = candle_core::Error;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
-        let random = Tensor::rand(-0.1_f32, 0.1, 4, &self.device)?.to_vec1::<f32>()?;
+        let random = Tensor::rand(-0.1_f32, 0.1, 4, &self.rng_device)?.to_vec1::<f32>()?;
         self.state = std::array::from_fn(|index| f64::from(random[index]));
         #[cfg(feature = "rendering")]
         self.render()?;
@@ -242,7 +244,7 @@ impl Gym for AcrobotV1 {
                 -self.torque_noise_max as f32,
                 self.torque_noise_max as f32,
                 (),
-                &self.device,
+                &self.rng_device,
             )?
             .to_vec0::<f32>()?;
             torque += f64::from(noise);

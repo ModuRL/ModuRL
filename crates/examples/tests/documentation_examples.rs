@@ -98,9 +98,13 @@ fn getting_started_program() {
     let device = Device::Cpu;
 
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
+        .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
         .collect::<Vec<_>>();
-    let mut env = VectorizedGymWrapper::from(envs);
+    let mut env = DeviceMultiGymWrapper::new(
+        VectorizedGymWrapper::from(envs),
+        Device::Cpu,
+        device.clone(),
+    );
 
     let observation_space = env.observation_space();
     let action_space = env.action_space();
@@ -169,8 +173,12 @@ fn getting_started_program() {
 // compile-only: running it would turn a documentation check into training.
 fn dqn_program() {
     let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().device(&device).build().unwrap()];
-    let mut env = VectorizedGymWrapper::from(envs);
+    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
+    let mut env = DeviceMultiGymWrapper::new(
+        VectorizedGymWrapper::from(envs),
+        Device::Cpu,
+        device.clone(),
+    );
     let observation_space = env.observation_space();
 
     let online_var_map = VarMap::new();
@@ -242,8 +250,12 @@ fn dqn_program() {
 // docs/src/ddqn.md. Keep this test compile-only for the same reason.
 fn ddqn_program() {
     let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().device(&device).build().unwrap()];
-    let mut env = VectorizedGymWrapper::from(envs);
+    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
+    let mut env = DeviceMultiGymWrapper::new(
+        VectorizedGymWrapper::from(envs),
+        Device::Cpu,
+        device.clone(),
+    );
     let observation_space = env.observation_space();
 
     let online_var_map = VarMap::new();
@@ -318,9 +330,13 @@ fn understand_ppo_training_configuration() {
     let device = Device::Cpu;
 
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().device(&device).build().unwrap())
+        .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
         .collect::<Vec<_>>();
-    let mut env = VectorizedGymWrapper::from(envs);
+    let mut env = DeviceMultiGymWrapper::new(
+        VectorizedGymWrapper::from(envs),
+        Device::Cpu,
+        device.clone(),
+    );
 
     let observation_space = env.observation_space();
     let action_space = env.action_space();
