@@ -1,81 +1,105 @@
-use candle_core::Tensor;
+use burn::tensor::{Bool, Tensor};
 
 /// Builds one-step Bellman targets from `rewards`, `terminated`, and
 /// `next_values`, all shaped `[batch]`, returning `[batch]`.
 ///
-/// This function does not detach any input. Callers control the gradient
-/// boundary appropriate for their algorithm.
+/// `terminated` is a boolean mask: true means the episode terminated and the
+/// next value must not contribute. Truncation alone should not set this mask.
+/// Rewards and next values remain differentiable; callers control detachment.
 pub fn bellman_targets(
-    rewards: &Tensor,
-    terminated: &Tensor,
-    next_values: &Tensor,
+    rewards: Tensor<1>,
+    terminated: Tensor<1, Bool>,
+    next_values: Tensor<1>,
     gamma: f64,
-) -> candle_core::Result<Tensor> {
-    let continuation = (1.0 - terminated)?;
-    rewards + ((next_values * continuation)? * gamma)?
+) -> Tensor<1> {
+    rewards + next_values.mask_fill(terminated, 0.0) * gamma
 }
 
-/// Returns a scalar clipped value loss from `prediction`, `target`, and
+/// Returns a clipped value loss shaped `[1]` from `prediction`, `target`, and
 /// `anchor`, all shaped `[batch]`.
 ///
 /// The prediction update is clipped around `anchor`, and the larger of the
 /// clipped and unclipped squared errors is averaged. This function does not
 /// detach any input.
 pub fn clipped_value_loss(
-    prediction: &Tensor,
-    target: &Tensor,
-    anchor: &Tensor,
+    prediction: Tensor<1>,
+    target: Tensor<1>,
+    anchor: Tensor<1>,
     epsilon: f64,
-) -> candle_core::Result<Tensor> {
-    let delta = (prediction - anchor)?.clamp(-epsilon, epsilon)?;
-    let clipped = (anchor + delta)?;
-    let loss = (prediction - target)?.sqr()?;
-    let clipped_loss = (clipped - target)?.sqr()?;
-    loss.maximum(&clipped_loss)?.mean_all()
+) -> Tensor<1> {
+    let delta = (prediction.clone() - anchor.clone()).clamp(-epsilon, epsilon);
+    let clipped = anchor + delta;
+    let loss = (prediction - target.clone()).square();
+    let clipped_loss = (clipped - target).square();
+    loss.max_pair(clipped_loss).mean()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, Var};
+    use burn::tensor::Device;
 
     #[test]
     fn bellman_targets_mask_termination_without_implicit_detachment() {
-        let rewards = Var::from_vec(vec![1.0_f32, 2.0], 2, &Device::Cpu).unwrap();
-        let terminated = Var::from_vec(vec![0.0_f32, 1.0], 2, &Device::Cpu).unwrap();
-        let next_values = Var::from_vec(vec![10.0_f32, 20.0], 2, &Device::Cpu).unwrap();
-        let targets = bellman_targets(
-            rewards.as_tensor(),
-            terminated.as_tensor(),
-            next_values.as_tensor(),
-            0.9,
-        )
-        .unwrap();
+        let device = Device::flex().autodiff();
+        let rewards = Tensor::<1>::from_floats([1.0, 2.0], &device).require_grad();
+        let terminated = Tensor::<1, Bool>::from_data([false, true], &device);
+        let next_values = Tensor::<1>::from_floats([10.0, 20.0], &device).require_grad();
+        let targets = bellman_targets(rewards.clone(), terminated, next_values.clone(), 0.9);
 
-        assert_eq!(targets.to_vec1::<f32>().unwrap(), vec![10.0, 2.0]);
-        let gradients = targets.sum_all().unwrap().backward().unwrap();
-        assert!(gradients.get(rewards.as_tensor()).is_some());
-        assert!(gradients.get(terminated.as_tensor()).is_some());
-        assert!(gradients.get(next_values.as_tensor()).is_some());
+        assert_eq!(
+            targets.clone().into_data().try_to_vec::<f32>().unwrap(),
+            vec![10.0, 2.0]
+        );
+        let gradients = targets.sum().backward();
+        assert_eq!(
+            rewards
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![1.0, 1.0]
+        );
+        assert_eq!(
+            next_values
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![0.9, 0.0]
+        );
     }
 
     #[test]
     fn clipped_value_loss_leaves_gradient_boundaries_to_the_caller() {
-        let prediction = Var::from_vec(vec![0.0_f32, 0.0], 2, &Device::Cpu).unwrap();
-        let anchor = Var::from_vec(vec![2.0_f32, 0.0], 2, &Device::Cpu).unwrap();
-        let target = Var::from_vec(vec![0.0_f32, 0.0], 2, &Device::Cpu).unwrap();
-        let loss = clipped_value_loss(
-            prediction.as_tensor(),
-            target.as_tensor(),
-            anchor.as_tensor(),
-            0.5,
-        )
-        .unwrap();
+        let device = Device::flex().autodiff();
+        let prediction = Tensor::<1>::from_floats([0.0, 2.0], &device).require_grad();
+        let anchor = Tensor::<1>::from_floats([2.0, 0.0], &device).require_grad();
+        let target = Tensor::<1>::from_floats([0.0, 0.0], &device).require_grad();
+        let loss = clipped_value_loss(prediction.clone(), target.clone(), anchor.clone(), 0.5);
 
-        assert_eq!(loss.to_scalar::<f32>().unwrap(), 1.125);
-        let gradients = loss.backward().unwrap();
-        assert!(gradients.get(prediction.as_tensor()).is_some());
-        assert!(gradients.get(anchor.as_tensor()).is_some());
-        assert!(gradients.get(target.as_tensor()).is_some());
+        assert_eq!(loss.dims(), [1]);
+        assert_eq!(
+            loss.clone().into_data().try_to_vec::<f32>().unwrap(),
+            vec![3.125]
+        );
+        let gradients = loss.backward();
+        for (tensor, expected) in [
+            (prediction, vec![0.0, 2.0]),
+            (anchor, vec![1.5, 0.0]),
+            (target, vec![-1.5, -2.0]),
+        ] {
+            assert_eq!(
+                tensor
+                    .grad(&gradients)
+                    .unwrap()
+                    .into_data()
+                    .try_to_vec::<f32>()
+                    .unwrap(),
+                expected
+            );
+        }
     }
 }
