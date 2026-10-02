@@ -26,18 +26,22 @@ members = [
 resolver = "3"
 
 [workspace.package]
-rust-version = "1.88"
+rust-version = "1.95"
 authors = ["Ethan Almloff"]
 repository = "https://github.com/ModuRL/ModuRL"
 homepage = "https://modurl.github.io/ModuRL/"
 
 [dependencies]
 bon = "3.7.2"
+burn = { version = "=0.22.0-pre.4", default-features = false, features = ["std"] }
 candle-core = "0.11.0"
 candle-nn = "0.11.0"
 rand = "0.10.2"
 tracing = { version = "0.1.37", optional = true }
 thiserror = "2.0.20"
+
+[dev-dependencies]
+burn = { version = "=0.22.0-pre.4", default-features = false, features = ["std", "flex", "autodiff"] }
 
 [features]
 default = []
