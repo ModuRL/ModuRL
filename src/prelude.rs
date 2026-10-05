@@ -55,9 +55,7 @@ pub use crate::objectives::{bellman_targets, clipped_value_loss};
 pub use crate::parameter_schedule::{
     ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
 };
-pub use crate::spaces::{
-    ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace, Space, SpaceError,
-};
+pub use crate::spaces::{ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace, SpaceError};
 pub use crate::wrappers::{
     ClipRewardGym, ClipRewardGymError, DeviceMultiGymWrapper, EpisodeStatistics,
     EpisodeStatisticsInfo, FrameStackGym, FrameStackGymError, InputMapMultiGymWrapper,
