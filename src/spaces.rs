@@ -1,21 +1,25 @@
 use burn::tensor::{DType, Device, Distribution, Float, Int, Tensor, kind::Basic};
 
-/// Geometry and membership for rank-`R` batches. A single environment value
-/// uses a batch of one; the leading axis always identifies environments.
-pub trait Space<const R: usize> {
+/// Admissible rank-`O` observation batches, independent of policy representation.
+/// A single environment uses a batch of one.
+pub trait ObservationSpace<const O: usize> {
     type Kind: Basic;
     /// Returns true when every batch value has the space's shape and bounds.
-    fn contains(&self, values: &Tensor<R, Self::Kind>) -> bool;
+    fn contains(&self, values: &Tensor<O, Self::Kind>) -> bool;
     /// Returns the shape of one environment value, excluding the batch axis.
     fn shape(&self) -> Vec<usize>;
 }
 
-/// Admissible environment observations, independent of policy representation.
-pub trait ObservationSpace<const O: usize>: Space<O> {}
-
 /// Admissible environment actions and random action sampling.
-pub trait ActionSpace<const A: usize>: Space<A> {
+/// A single environment uses a batch of one.
+pub trait ActionSpace<const A: usize> {
+    type Kind: Basic;
     type Error;
+
+    /// Returns true when every action has the space's shape and bounds.
+    fn contains(&self, values: &Tensor<A, Self::Kind>) -> bool;
+    /// Returns the shape of one environment action, excluding the batch axis.
+    fn shape(&self) -> Vec<usize>;
 
     /// Samples a batch using the requested device RNG.
     fn sample_batch(
@@ -53,10 +57,9 @@ pub struct Discrete {
     possible_values: usize,
 }
 
-impl Space<1> for Discrete {
-    type Kind = Int;
-
-    fn contains(&self, values: &Tensor<1, Int>) -> bool {
+impl Discrete {
+    /// Returns true when every index is in `0..possible_values`.
+    pub fn contains(&self, values: &Tensor<1, Int>) -> bool {
         values
             .clone()
             .greater_equal_scalar(0)
@@ -66,15 +69,32 @@ impl Space<1> for Discrete {
     }
 
     /// Discrete environment values are scalar indices.
-    fn shape(&self) -> Vec<usize> {
+    pub fn shape(&self) -> Vec<usize> {
         vec![]
     }
 }
 
-impl ObservationSpace<1> for Discrete {}
+impl ObservationSpace<1> for Discrete {
+    type Kind = Int;
+
+    fn contains(&self, values: &Tensor<1, Int>) -> bool {
+        self.contains(values)
+    }
+    fn shape(&self) -> Vec<usize> {
+        self.shape()
+    }
+}
 
 impl ActionSpace<1> for Discrete {
+    type Kind = Int;
     type Error = SpaceError;
+
+    fn contains(&self, values: &Tensor<1, Int>) -> bool {
+        self.contains(values)
+    }
+    fn shape(&self) -> Vec<usize> {
+        self.shape()
+    }
 
     /// Samples integer action indices shaped `[batch_size]`.
     fn sample_batch(
@@ -130,10 +150,9 @@ pub struct BoxSpace<const R: usize = 2> {
     high: Tensor<R>,
 }
 
-impl<const R: usize> Space<R> for BoxSpace<R> {
-    type Kind = Float;
-
-    fn contains(&self, values: &Tensor<R>) -> bool {
+impl<const R: usize> BoxSpace<R> {
+    /// Returns true when every value has the event shape and lies within bounds.
+    pub fn contains(&self, values: &Tensor<R>) -> bool {
         if values.dims()[1..] != self.low.dims()[1..] {
             return false;
         }
@@ -154,15 +173,33 @@ impl<const R: usize> Space<R> for BoxSpace<R> {
             .into_scalar::<bool>()
     }
 
-    fn shape(&self) -> Vec<usize> {
+    /// Returns the event shape, excluding the leading batch axis.
+    pub fn shape(&self) -> Vec<usize> {
         self.low.dims()[1..].to_vec()
     }
 }
 
-impl<const R: usize> ObservationSpace<R> for BoxSpace<R> {}
+impl<const R: usize> ObservationSpace<R> for BoxSpace<R> {
+    type Kind = Float;
+
+    fn contains(&self, values: &Tensor<R>) -> bool {
+        self.contains(values)
+    }
+    fn shape(&self) -> Vec<usize> {
+        self.shape()
+    }
+}
 
 impl<const R: usize> ActionSpace<R> for BoxSpace<R> {
+    type Kind = Float;
     type Error = SpaceError;
+
+    fn contains(&self, values: &Tensor<R>) -> bool {
+        self.contains(values)
+    }
+    fn shape(&self) -> Vec<usize> {
+        self.shape()
+    }
 
     /// Samples `[batch_size, ...self.shape()]` in the bounds' dtype.
     /// Infinite endpoints use finite substitutes of half the dtype's maximum.
