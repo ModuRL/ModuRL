@@ -63,13 +63,13 @@ pub fn shuffle_with_device_rng<T>(values: &mut [T], device: &Device) -> Result<(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
     // Flex shares its RNG across devices, so seeded checks must not interleave
     // with random draws from the other tests in this module.
-    static RNG_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static RNG_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn sample_is_inclusive() {
