@@ -1,4 +1,4 @@
-use candle_core::{DType, Device};
+use burn::tensor::{DType, Device};
 
 /// Strategy for selecting devices used by replay-based agents.
 ///
@@ -37,10 +37,6 @@ impl ReplayStorageConfig {
 
     /// Sets the dtype used by observations while retained in replay.
     pub fn with_observation_dtype(mut self, observation_dtype: DType) -> Self {
-        assert!(
-            observation_dtype.is_float() || observation_dtype == DType::U8,
-            "replay observation dtype must be floating-point or u8"
-        );
         self.observation_dtype = observation_dtype;
         self
     }
@@ -73,6 +69,50 @@ impl ReplayDeviceStrategy {
                 optimization_device,
                 ..
             } => optimization_device.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hybrid_keeps_storage_separate_from_autodiff_optimization() {
+        let storage = Device::flex();
+        let optimization = storage.clone().autodiff();
+        let config = ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
+            optimization_device: optimization.clone(),
+            storage_device: storage.clone(),
+        });
+        assert_eq!(config.storage_device(), storage);
+        assert_eq!(config.optimization_device(), optimization);
+        assert!(!config.storage_device().is_autodiff());
+        assert!(config.optimization_device().is_autodiff());
+        assert_eq!(config.observation_dtype(), DType::F32);
+    }
+
+    #[test]
+    fn one_device_retains_placement_when_storage_dtype_changes() {
+        let device = Device::flex();
+        for dtype in [
+            DType::F32,
+            DType::F64,
+            DType::F16,
+            DType::BF16,
+            DType::Flex32,
+            DType::U8,
+            DType::U32,
+            DType::U64,
+            DType::I32,
+            DType::I64,
+            DType::Bool(burn::tensor::BoolStore::Native),
+        ] {
+            let config = ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(device.clone()))
+                .with_observation_dtype(dtype);
+            assert_eq!(config.storage_device(), device);
+            assert_eq!(config.optimization_device(), device);
+            assert_eq!(config.observation_dtype(), dtype);
         }
     }
 }
