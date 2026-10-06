@@ -1,27 +1,27 @@
 use burn::tensor::{DType, Device, Distribution, Float, Int, Tensor, kind::Basic};
 
-/// Admissible rank-`O` observation batches, independent of policy representation.
+/// Checks which rank-`O` observation batches are valid.
 /// A single environment uses a batch of one.
 pub trait ObservationSpace<const O: usize> {
     type Kind: Basic;
-    /// Returns true when every batch value has the space's shape and bounds.
+    /// Checks observations `[batch, ...self.shape()]` against the shape and bounds.
     fn contains(&self, values: &Tensor<O, Self::Kind>) -> bool;
     /// Returns the shape of one environment value, excluding the batch axis.
     fn shape(&self) -> Vec<usize>;
 }
 
-/// Admissible environment actions and random action sampling.
+/// Checks valid environment actions and supplies random action batches.
 /// A single environment uses a batch of one.
 pub trait ActionSpace<const A: usize> {
     type Kind: Basic;
     type Error;
 
-    /// Returns true when every action has the space's shape and bounds.
+    /// Checks actions `[batch, ...self.shape()]` against the shape and bounds.
     fn contains(&self, values: &Tensor<A, Self::Kind>) -> bool;
     /// Returns the shape of one environment action, excluding the batch axis.
     fn shape(&self) -> Vec<usize>;
 
-    /// Samples a batch using the requested device RNG.
+    /// Samples actions `[batch_size, ...self.shape()]` using the device RNG.
     fn sample_batch(
         &self,
         batch_size: usize,
@@ -29,12 +29,13 @@ pub trait ActionSpace<const A: usize> {
     ) -> Result<Tensor<A, Self::Kind>, Self::Error>;
 }
 
-/// Converts rank-`L` latent policy actions into rank-`A` environment actions.
+/// Converts original policy samples of rank `L` into environment actions of rank `A`.
 pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A> {
-    /// Returns the shape of one latent policy action, excluding the batch axis.
+    /// Returns the shape of one policy sample, excluding the batch axis.
     fn policy_shape(&self) -> Vec<usize>;
-    /// Converts latent policy outputs into batched environment actions.
-    /// Continuous actions are clamped; callers retain latent actions separately
+    /// Converts policy samples `[batch, ...self.policy_shape()]` of rank `L`
+    /// into environment actions `[batch, ...self.shape()]` of rank `A`.
+    /// Continuous actions are clamped; callers retain original samples separately
     /// for probability calculations.
     fn tensor_from_neurons(&self, neurons: Tensor<L>)
     -> Result<Tensor<A, Self::Kind>, Self::Error>;
@@ -58,7 +59,7 @@ pub struct Discrete {
 }
 
 impl Discrete {
-    /// Returns true when every index is in `0..possible_values`.
+    /// Checks that every index in `[batch]` is in `0..possible_values`.
     pub fn contains(&self, values: &Tensor<1, Int>) -> bool {
         values
             .clone()
@@ -142,7 +143,7 @@ impl Discrete {
 }
 
 /// Inclusive component bounds for rank-`R` continuous batches. Bounds have a
-/// singleton leading batch axis: vector bounds are `[1, features]`, and image
+/// leading batch axis of length one: vector bounds are `[1, features]`, and image
 /// bounds are `[1, channels, height, width]`.
 #[derive(Clone)]
 pub struct BoxSpace<const R: usize = 2> {
@@ -151,7 +152,8 @@ pub struct BoxSpace<const R: usize = 2> {
 }
 
 impl<const R: usize> BoxSpace<R> {
-    /// Returns true when every value has the event shape and lies within bounds.
+    /// Returns true when every value has the expected action/observation shape
+    /// and lies within bounds. Inputs are `[batch, ...self.shape()]`.
     pub fn contains(&self, values: &Tensor<R>) -> bool {
         if values.dims()[1..] != self.low.dims()[1..] {
             return false;
@@ -173,7 +175,7 @@ impl<const R: usize> BoxSpace<R> {
             .into_scalar::<bool>()
     }
 
-    /// Returns the event shape, excluding the leading batch axis.
+    /// Returns the action/observation shape, excluding the leading batch axis.
     pub fn shape(&self) -> Vec<usize> {
         self.low.dims()[1..].to_vec()
     }
@@ -219,7 +221,7 @@ impl<const R: usize> ActionSpace<R> for BoxSpace<R> {
         let mut shape = self.low.dims();
         shape[0] = batch_size;
         let random = Tensor::<R>::random(shape, Distribution::Uniform(0.0, 1.0), (device, dtype));
-        // Convex interpolation avoids overflowing high - low for wide bounds.
+        // A weighted average of the bounds avoids overflowing high - low.
         let samples: Tensor<R> = low.clone() * (1.0 - random.clone()) + high.clone() * random;
         Ok(samples.max_pair(low).min_pair(high))
     }
@@ -249,8 +251,8 @@ impl<const R: usize> ActionMap<R, R> for BoxSpace<R> {
 }
 
 impl<const R: usize> BoxSpace<R> {
-    /// Creates bounds with matching shapes, dtypes, and devices. Their leading
-    /// batch axis must have length one.
+    /// Creates bounds `low` and `high`, both rank `R` and shaped
+    /// `[1, ...action_shape]`, with matching dtypes and devices.
     pub fn new(low: Tensor<R>, high: Tensor<R>) -> Self {
         assert!(R > 0, "box bounds require a batch axis");
         assert_eq!(
