@@ -10,10 +10,10 @@ use crate::distributions::{
     validate_statistics,
 };
 
-/// Stateless categorical operations over logits `[batch, categories]`.
-/// Samples and modes retain that latent layout; evaluations reduce the
-/// category axis to `[batch]`. Exact expectation candidates are integer
-/// indices `[batch, categories]`, independent of the latent representation.
+/// Categorical operations over scores (logits) `[batch, categories]`.
+/// Samples and modes keep that shape; evaluation returns `[batch]` statistics.
+/// Computing an average over all categories uses integer indices
+/// `[batch, categories]`, rather than the scores used for action selection.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CategoricalDistribution;
 
@@ -66,13 +66,14 @@ impl Distribution<2, 2> for CategoricalDistribution {
         Ok(outputs + noise)
     }
 
-    /// Returns logits `[batch, categories]` unchanged for modal action decoding.
+    /// Returns scores `[batch, categories]` unchanged so an action map can
+    /// select the category with the highest score.
     fn mode(&self, outputs: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
         Self::validate(&outputs)?;
         Ok(outputs)
     }
 
-    /// Evaluates latent actions and logits, both `[batch, categories]`, reducing
+    /// Evaluates sampled scores and model logits, both `[batch, categories]`, reducing
     /// log probability and entropy to `[batch]`. Inputs share dtype and device.
     fn dist_eval(&self, outputs: Tensor<2>, actions: Tensor<2>) -> Result<DistEval, Self::Error> {
         Self::validate(&outputs)?;
@@ -91,7 +92,7 @@ impl Distribution<2, 2> for CategoricalDistribution {
 impl DifferentiableExpectation<2, 2, 2> for CategoricalDistribution {
     type CandidateKind = Int;
 
-    /// Enumerates integer candidates `[batch, categories]` from logits with the
+    /// Lists all category indices `[batch, categories]` from logits with the
     /// same shape. Log probabilities and normalized weights preserve both axes.
     fn expectation(
         &self,
