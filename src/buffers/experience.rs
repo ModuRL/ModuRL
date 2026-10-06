@@ -35,7 +35,7 @@ pub enum ExperienceBatchError {
 }
 
 /// Adds a leading experience axis to rank-`D` fields, returning rank `B = D + 1`.
-/// The rank relationship is asserted at compile time during monomorphization.
+/// Invalid rank combinations are rejected when the compiler builds the function.
 /// Fields must share shape, dtype, and device. Gradients remain connected;
 /// callers control detachment before storing or batching experience.
 pub(crate) fn stack_tensor_field<T, const D: usize, const B: usize, K: Basic>(

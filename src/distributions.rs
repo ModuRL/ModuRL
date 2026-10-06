@@ -32,13 +32,10 @@ pub enum DistributionTensorError {
     },
 }
 
-/// Validates that paired distribution statistics have matching dimensions,
-/// dtype, and device. Used for entropy versus log probability and expectation
-/// weights versus candidate log probabilities; `field` identifies the invalid
-/// statistic in the returned error.
-/// Both inputs are rank-`D` tensors with identical `[...]` shapes: `[batch]`
-/// for evaluation statistics, or `[batch, candidates]` for expectation
-/// statistics. Validation preserves all axes and returns no tensor.
+/// Checks that two rank-`D` statistic tensors have the same shape, dtype, and
+/// device. Inputs are `[batch]` for entropy/log probability or
+/// `[batch, candidates]` for weights/log probabilities. No axes are changed;
+/// `field` names the tensor in any returned error.
 fn validate_statistics<const D: usize>(
     field: &'static str,
     expected: &Tensor<D>,
@@ -78,22 +75,24 @@ impl DistEval {
         Ok(Self { log_prob, entropy })
     }
 
+    /// Returns one log probability per batch item, shaped `[batch]`.
     pub fn log_prob(&self) -> &Tensor<1> {
         &self.log_prob
     }
 
+    /// Returns one entropy value per batch item, shaped `[batch]`.
     pub fn entropy(&self) -> &Tensor<1> {
         &self.entropy
     }
 }
 
-/// Interprets model output tensors as a probability distribution family.
+/// Samples and evaluates actions using a model's distribution parameters.
 ///
 /// Each implementation defines its own output layout. For example,
 /// [`GaussianDistribution`] expects a rank-2 `[mean, log_std]` tensor, while
 /// [`CategoricalDistribution`] interprets its output as category logits.
-/// `P` is the parameter rank and `A` the latent sample rank. These samples are
-/// floats; decoding them into environment actions is a separate operation.
+/// `P` counts the parameter tensor's axes; `A` counts the sampled action tensor's
+/// axes. Samples are floats; a separate action map prepares them for the environment.
 pub trait Distribution<const P: usize = 2, const A: usize = 2> {
     type Error;
     /// Samples from `outputs` shaped `[batch_size, ...parameter_shape]` and
@@ -109,7 +108,9 @@ pub trait Distribution<const P: usize = 2, const A: usize = 2> {
     fn dist_eval(&self, outputs: Tensor<P>, actions: Tensor<A>) -> Result<DistEval, Self::Error>;
 }
 
-/// The differentiable candidates used to evaluate a policy expectation.
+/// Actions and weights used to compute a policy's average result.
+/// The `candidates` axis lists possible actions: all categories for categorical
+/// distributions, or sampled actions for Gaussian distributions.
 #[derive(Clone, Debug)]
 pub struct ExpectationTerms<const D: usize = 3, K: Basic = Float> {
     /// Candidate actions shaped `[batch, candidates, ...event_shape]`.
@@ -166,27 +167,32 @@ impl<const D: usize, K: Basic> ExpectationTerms<D, K> {
         })
     }
 
+    /// Returns action choices `[batch, candidates, ...action_shape]` of rank `D`.
     pub fn actions(&self) -> &Tensor<D, K> {
         &self.actions
     }
 
+    /// Returns log probabilities for the choices, shaped `[batch, candidates]`.
     pub fn log_probabilities(&self) -> &Tensor<2> {
         &self.log_probabilities
     }
 
+    /// Returns averaging weights `[batch, candidates]`.
     pub fn weights(&self) -> &Tensor<2> {
         &self.weights
     }
 
+    /// Returns the rank-`D` actions `[batch, candidates, ...action_shape]` and
+    /// rank-2 log probabilities and weights `[batch, candidates]` without changing axes.
     pub fn into_parts(self) -> (Tensor<D, K>, Tensor<2>, Tensor<2>) {
         (self.actions, self.log_probabilities, self.weights)
     }
 }
 
-/// A distribution whose expectation can be optimized by backpropagation.
-/// Candidate rank `C` and kind are independent of latent sample rank `A`:
-/// categorical candidates are integer indices, while Gaussian candidates are
-/// continuous values with an additional candidate axis.
+/// Supplies action choices and averaging weights that retain gradients.
+/// `C` counts the axes of these choices, separately from sampled action rank `A`.
+/// Categorical choices are integer indices; Gaussian choices are float samples
+/// with an additional samples axis.
 pub trait DifferentiableExpectation<const P: usize = 2, const A: usize = 2, const C: usize = 3>:
     Distribution<P, A>
 {
@@ -197,8 +203,8 @@ pub trait DifferentiableExpectation<const P: usize = 2, const A: usize = 2, cons
     /// are `[batch_size, candidates, ...event_shape]`; returned log
     /// probabilities and weights are `[batch_size, candidates]`.
     ///
-    /// `samples` is the requested Monte Carlo sample count. Distributions with
-    /// tractable finite support may instead enumerate that support exactly.
+    /// `samples` requests how many random actions to draw. Categorical
+    /// distributions instead list all categories, allowing an exact average.
     fn expectation(
         &self,
         outputs: Tensor<P>,
