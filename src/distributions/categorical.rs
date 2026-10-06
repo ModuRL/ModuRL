@@ -1,219 +1,289 @@
 use std::num::NonZeroUsize;
 
-use candle_core::{D, Device, Tensor};
-use candle_nn::ops::softmax;
+use burn::tensor::{
+    DType, Distribution as RandomDistribution, Int, Tensor,
+    activation::{log_softmax, softmax},
+};
 
-use crate::distributions::{DifferentiableExpectation, DistEval, Distribution, ExpectationTerms};
+use crate::distributions::{
+    DifferentiableExpectation, DistEval, Distribution, DistributionTensorError, ExpectationTerms,
+    validate_statistics,
+};
 
-/// Stateless categorical distribution operations over unnormalized logits
-/// shaped `[batch_size, category_count]`.
-///
-/// Samples and modes preserve that latent-logit shape. Distribution evaluation
-/// accepts latent actions with the same shape and reduces statistics to
-/// `[batch_size]`. Exact expectation candidates are scalar category indices
-/// shaped `[batch_size, category_count]`.
+/// Stateless categorical operations over logits `[batch, categories]`.
+/// Samples and modes retain that latent layout; evaluations reduce the
+/// category axis to `[batch]`. Exact expectation candidates are integer
+/// indices `[batch, categories]`, independent of the latent representation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CategoricalDistribution;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CategoricalDistributionError {
-    #[error("categorical tensor operation failed: {0}")]
-    TensorError(#[source] candle_core::Error),
+    #[error("categorical tensor validation failed: {0}")]
+    TensorError(#[from] DistributionTensorError),
     #[error("a categorical distribution requires at least one category")]
     NoCategories,
-}
-
-impl From<candle_core::Error> for CategoricalDistributionError {
-    fn from(error: candle_core::Error) -> Self {
-        Self::TensorError(error)
-    }
-}
-
-/// Applies log-softmax to `tensor` of arbitrary shape `[...]`, preserving that
-/// shape.
-fn log_softmax(tensor: &Tensor, dim: D) -> Result<Tensor, candle_core::Error> {
-    let max = tensor.max_keepdim(dim)?.expand(tensor.dims())?;
-    let exps = (tensor - &max)?.exp()?;
-    let sum_exps = exps.sum_keepdim(dim)?.expand(tensor.dims())?;
-    let log_sum_exps = sum_exps.log()?;
-    tensor - max - log_sum_exps
+    #[error("categorical sampling requires a floating-point dtype, got {0:?}")]
+    UnsupportedLogitDType(DType),
+    #[error("category count {0} exceeds the integer index range")]
+    TooManyCategories(usize),
 }
 
 impl CategoricalDistribution {
-    /// Validates categorical `outputs` shaped `[batch_size, category_count]`.
-    fn validate(outputs: &Tensor) -> Result<(usize, usize), CategoricalDistributionError> {
-        let shape = outputs.dims2()?;
-        if shape.1 == 0 {
+    /// Validates logits `[batch, categories]` and returns the two axis lengths.
+    fn validate(outputs: &Tensor<2>) -> Result<[usize; 2], CategoricalDistributionError> {
+        let shape = outputs.dims();
+        if shape[1] == 0 {
             return Err(CategoricalDistributionError::NoCategories);
         }
         Ok(shape)
     }
 
-    /// Converts logits shaped `[batch_size, category_count]` to probabilities
-    /// with the same shape.
-    fn probs(&self, outputs: &Tensor) -> Result<Tensor, CategoricalDistributionError> {
-        Self::validate(outputs)?;
-        Ok(softmax(outputs, D::Minus1)?)
-    }
-
-    /// Converts logits shaped `[batch_size, category_count]` to log
-    /// probabilities with the same shape.
-    fn log_probs(&self, outputs: &Tensor) -> Result<Tensor, CategoricalDistributionError> {
-        Self::validate(outputs)?;
-        Ok(log_softmax(outputs, D::Minus1)?)
-    }
-
-    fn gumbel_noise(
-        shape: &[usize],
-        dtype: candle_core::DType,
-        device: &Device,
-    ) -> Result<Tensor, candle_core::Error> {
-        // sample uniform(0,1), then transform: -log(-log(U))
-        let u = Tensor::rand(0f32, 1f32, shape, device)?.to_dtype(dtype)?;
-        let gumbel = (-1.0 * (&u.log()?))?.log()?;
-        gumbel.neg() // -log(-log(u))
+    /// Generates Gumbel noise `[batch, categories]` matching the logits' shape,
+    /// dtype, and device. Uniform endpoints are clamped to keep logarithms finite.
+    fn gumbel_noise(outputs: &Tensor<2>) -> Result<Tensor<2>, CategoricalDistributionError> {
+        let info =
+            outputs
+                .dtype()
+                .finfo()
+                .ok_or(CategoricalDistributionError::UnsupportedLogitDType(
+                    outputs.dtype(),
+                ))?;
+        let uniform = outputs
+            .random_like(RandomDistribution::Uniform(0.0, 1.0))
+            .clamp(info.min_positive, 1.0 - info.epsilon);
+        Ok(uniform.log().neg().log().neg())
     }
 }
 
-impl Distribution for CategoricalDistribution {
+impl Distribution<2, 2> for CategoricalDistribution {
     type Error = CategoricalDistributionError;
 
-    /// Samples perturbed logits `[batch_size, category_count]` from logits with
-    /// that same shape.
-    fn sample(&self, outputs: &Tensor) -> Result<Tensor, Self::Error> {
-        Self::validate(outputs)?;
-        let shape = outputs.dims();
-        let device = outputs.device();
-
-        // add Gumbel noise to logits
-        let noise = Self::gumbel_noise(shape, outputs.dtype(), device)?;
-
-        Ok((outputs + noise)?)
+    /// Adds Gumbel noise to logits `[batch, categories]`, preserving both axes.
+    fn sample(&self, outputs: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+        Self::validate(&outputs)?;
+        let noise = Self::gumbel_noise(&outputs)?;
+        Ok(outputs + noise)
     }
 
-    /// Returns modal logits `[batch_size, category_count]` from logits with that
-    /// same shape.
-    fn mode(&self, outputs: &Tensor) -> Result<Tensor, Self::Error> {
-        Self::validate(outputs)?;
-        Ok(outputs.clone())
+    /// Returns logits `[batch, categories]` unchanged for modal action decoding.
+    fn mode(&self, outputs: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+        Self::validate(&outputs)?;
+        Ok(outputs)
     }
 
-    /// Evaluates latent actions `[batch_size, category_count]` under logits of
-    /// the same shape, returning statistics `[batch_size]`.
-    fn dist_eval(&self, outputs: &Tensor, actions: &Tensor) -> Result<DistEval, Self::Error> {
-        let log_probs = self.log_probs(outputs)?; // [batch, num_classes]
-
-        let actions_argmax = actions.argmax(D::Minus1)?; // [batch]
-        let log_prob = log_probs
-            .gather(&actions_argmax.unsqueeze(1)?, D::Minus1)?
-            .squeeze(1)?;
-
-        // entropy = -∑ p * log p over classes
-        let probs = self.probs(outputs)?;
-        let entropy = (probs.clone() * log_probs)?.sum(D::Minus1)?.neg()?;
-
-        Ok(DistEval::new(log_prob, entropy))
+    /// Evaluates latent actions and logits, both `[batch, categories]`, reducing
+    /// log probability and entropy to `[batch]`. Inputs share dtype and device.
+    fn dist_eval(&self, outputs: Tensor<2>, actions: Tensor<2>) -> Result<DistEval, Self::Error> {
+        Self::validate(&outputs)?;
+        validate_statistics("categorical latent actions", &outputs, &actions)?;
+        let log_probs = log_softmax(outputs.clone(), 1);
+        let indices = actions.argmax(1);
+        let log_prob = log_probs.clone().gather(1, indices).squeeze_dim(1);
+        let entropy = (softmax(outputs, 1) * log_probs)
+            .sum_dim(1)
+            .neg()
+            .squeeze_dim(1);
+        Ok(DistEval::new(log_prob, entropy)?)
     }
 }
 
-impl DifferentiableExpectation for CategoricalDistribution {
-    /// Enumerates scalar candidates `[batch_size, category_count]` for logits
-    /// `[batch_size, category_count]`; log probabilities and weights have the
-    /// same two-dimensional shape.
+impl DifferentiableExpectation<2, 2, 2> for CategoricalDistribution {
+    type CandidateKind = Int;
+
+    /// Enumerates integer candidates `[batch, categories]` from logits with the
+    /// same shape. Log probabilities and normalized weights preserve both axes.
     fn expectation(
         &self,
-        outputs: &Tensor,
+        outputs: Tensor<2>,
         _samples: NonZeroUsize,
-    ) -> Result<ExpectationTerms, Self::Error> {
-        let (batch_size, categories) = Self::validate(outputs)?;
-        let actions = Tensor::arange(0u32, categories as u32, outputs.device())?
-            .broadcast_left(batch_size)?;
-        let log_probabilities = self.log_probs(outputs)?;
-        let weights = self.probs(outputs)?;
+    ) -> Result<ExpectationTerms<2, Int>, Self::Error> {
+        let [batch_size, categories] = Self::validate(&outputs)?;
+        let end = i64::try_from(categories)
+            .map_err(|_| CategoricalDistributionError::TooManyCategories(categories))?;
+        let actions = Tensor::<1, Int>::arange(0..end, &outputs.device())
+            .unsqueeze::<2>()
+            .expand([batch_size, categories]);
+        let log_probabilities = log_softmax(outputs.clone(), 1);
+        let weights = softmax(outputs, 1);
         Ok(ExpectationTerms::new(actions, log_probabilities, weights)?)
     }
 
-    /// Computes target entropy from logits shaped
-    /// `[batch_size, category_count]`.
-    fn default_target_entropy(&self, outputs: &Tensor) -> Result<f64, Self::Error> {
-        // A near-uniform policy is a useful default without making exact
-        // uniformity the entropy optimizer's only fixed point.
-        Ok(0.98 * (Self::validate(outputs)?.1 as f64).ln())
+    /// Computes scalar target entropy from logits `[batch, categories]` without
+    /// altering the tensor. The target is 98% of uniform categorical entropy.
+    fn default_target_entropy(&self, outputs: &Tensor<2>) -> Result<f64, Self::Error> {
+        Ok(0.98 * (Self::validate(outputs)?[1] as f64).ln())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use burn::tensor::Device;
 
     #[test]
-    fn test_log_softmax() {
-        // Test against PyTorch's F.log_softmax
-        // x = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        // F.log_softmax(x, dim=-1) =
-        // tensor([[-2.4076, -1.4076, -0.4076],
-        //         [-2.4076, -1.4076, -0.4076]])
-
-        let device = Device::Cpu;
-        let x = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], &device).unwrap();
-
-        let result = log_softmax(&x, D::Minus1).unwrap();
-        let result_vec = result.to_vec2::<f32>().unwrap();
-
-        // Expected values from PyTorch
-        let expected = [
-            vec![-2.407606f32, -1.4076059, -0.40760595],
-            vec![-2.407606f32, -1.4076059, -0.40760595],
-        ];
-
-        for i in 0..2 {
-            for j in 0..3 {
-                let diff = (result_vec[i][j] - expected[i][j]).abs();
-                assert!(
-                    diff < 1e-5,
-                    "Mismatch at [{}, {}]: got {}, expected {}, diff {}",
-                    i,
-                    j,
-                    result_vec[i][j],
-                    expected[i][j],
-                    diff
-                );
+    fn log_softmax_matches_reference_for_large_logits() {
+        let device = Device::flex();
+        for dtype in [DType::F32, DType::F64] {
+            let logits = Tensor::<2>::from_data(
+                [[1.0f64, 2.0, 3.0], [1001.0, 1002.0, 1003.0]],
+                (&device, dtype),
+            );
+            let result = log_softmax(logits, 1)
+                .cast(DType::F64)
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap();
+            let expected = [-2.40760596444438, -1.40760596444438, -0.40760596444438];
+            for (index, value) in result.iter().enumerate() {
+                assert!((value - expected[index % 3]).abs() < 1e-5);
             }
         }
     }
 
     #[test]
-    fn expectation_enumerates_actions_with_normalized_weights() {
-        let logits = Tensor::from_vec(vec![0.0f32, 1.0, 2.0], (1, 3), &Device::Cpu).unwrap();
-        let distribution = CategoricalDistribution;
-        let terms = distribution
-            .expectation(&logits, NonZeroUsize::MIN)
+    fn expectation_enumerates_every_category_per_batch_row() {
+        let device = Device::flex();
+        let logits = Tensor::from_floats([[0.0, 1.0, 2.0], [2.0, 1.0, 0.0]], &device);
+        let terms = CategoricalDistribution
+            .expectation(logits.clone(), NonZeroUsize::MIN)
             .unwrap();
-
-        assert_eq!(terms.actions().dims(), &[1, 3]);
+        assert_eq!(terms.actions().dims(), [2, 3]);
         assert_eq!(
-            terms.actions().to_vec2::<u32>().unwrap(),
-            vec![vec![0, 1, 2]]
+            terms
+                .actions()
+                .clone()
+                .into_data()
+                .try_to_vec::<i32>()
+                .unwrap(),
+            vec![0, 1, 2, 0, 1, 2]
         );
-        let weight_sum = terms
+        let sums = terms
             .weights()
-            .sum_all()
-            .unwrap()
-            .to_scalar::<f32>()
+            .clone()
+            .sum_dim(1)
+            .into_data()
+            .try_to_vec::<f32>()
             .unwrap();
-        assert!((weight_sum - 1.0).abs() < 1e-6);
+        assert!(sums.iter().all(|sum| (sum - 1.0).abs() < 1e-6));
         assert!(
-            (distribution.default_target_entropy(&logits).unwrap() - 0.98 * 3.0f64.ln()).abs()
+            (CategoricalDistribution
+                .default_target_entropy(&logits)
+                .unwrap()
+                - 0.98 * 3.0f64.ln())
+            .abs()
                 < 1e-12
         );
     }
 
     #[test]
-    fn categorical_distribution_requires_a_category() {
-        let outputs = Tensor::zeros((2, 0), candle_core::DType::F32, &Device::Cpu).unwrap();
+    fn evaluation_matches_uniform_entropy_and_preserves_gradients() {
+        let device = Device::flex().autodiff();
+        let logits = Tensor::<2>::from_floats([[0.0, 0.0]], &device).require_grad();
+        let actions = Tensor::from_floats([[2.0, 1.0]], &device);
+        let evaluation = CategoricalDistribution
+            .dist_eval(logits.clone(), actions)
+            .unwrap();
+        assert!((evaluation.log_prob().clone().into_scalar::<f32>() + 2.0f32.ln()).abs() < 1e-6);
+        assert!((evaluation.entropy().clone().into_scalar::<f32>() - 2.0f32.ln()).abs() < 1e-6);
+        let gradients = evaluation.log_prob().clone().sum().backward();
+        assert_eq!(
+            logits
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![0.5, -0.5]
+        );
+    }
+
+    #[test]
+    fn exact_expectation_weights_have_the_policy_gradient() {
+        let device = Device::flex().autodiff();
+        let logits = Tensor::<2>::from_floats([[0.0, 0.0]], &device).require_grad();
+        let terms = CategoricalDistribution
+            .expectation(logits.clone(), NonZeroUsize::MIN)
+            .unwrap();
+        let payoff = terms.actions().clone().float();
+        let gradients = (terms.weights().clone() * payoff).sum().backward();
+        assert_eq!(
+            logits
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![-0.25, 0.25]
+        );
+    }
+
+    #[test]
+    fn samples_preserve_dtype_shape_and_seeded_randomness() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        for dtype in [DType::F32, DType::F64] {
+            let logits = Tensor::<2>::zeros([8, 3], (&device, dtype));
+            device.seed(42);
+            let first = CategoricalDistribution.sample(logits.clone()).unwrap();
+            device.seed(42);
+            let second = CategoricalDistribution.sample(logits.clone()).unwrap();
+            assert_eq!(first.dims(), [8, 3]);
+            assert_eq!(first.dtype(), dtype);
+            assert_eq!(first.clone().into_data(), second.into_data());
+            assert!(
+                first
+                    .cast(DType::F64)
+                    .into_data()
+                    .try_to_vec::<f64>()
+                    .unwrap()
+                    .iter()
+                    .all(|value| value.is_finite())
+            );
+            assert_eq!(
+                CategoricalDistribution
+                    .mode(logits.clone())
+                    .unwrap()
+                    .into_data(),
+                logits.into_data()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_categories_and_latent_shapes_return_errors() {
+        let device = Device::flex();
         assert!(matches!(
-            CategoricalDistribution.sample(&outputs),
+            CategoricalDistribution.sample(Tensor::zeros([2, 0], &device)),
             Err(CategoricalDistributionError::NoCategories)
         ));
+        assert!(matches!(
+            CategoricalDistribution.dist_eval(
+                Tensor::zeros([2, 3], &device),
+                Tensor::zeros([1, 3], &device)
+            ),
+            Err(CategoricalDistributionError::TensorError(
+                DistributionTensorError::ShapeMismatch { .. }
+            ))
+        ));
+        let single = Tensor::<2>::zeros([2, 1], &device);
+        let evaluation = CategoricalDistribution
+            .dist_eval(single.clone(), single.clone())
+            .unwrap();
+        assert_eq!(
+            evaluation
+                .entropy()
+                .clone()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![0.0, 0.0]
+        );
+        assert_eq!(
+            CategoricalDistribution
+                .default_target_entropy(&single)
+                .unwrap(),
+            0.0
+        );
     }
 }
