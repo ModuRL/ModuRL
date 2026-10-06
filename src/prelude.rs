@@ -35,9 +35,9 @@ pub use crate::agents::{
 };
 pub use crate::distributions::{
     AffineTransform, AffineTransformError, CategoricalDistribution, CategoricalDistributionError,
-    DifferentiableExpectation, DistEval, Distribution, DistributionTransform, ExpectationTerms,
-    GaussianDistribution, GaussianDistributionError, TanhTransform, TransformedDistribution,
-    TransformedDistributionError,
+    DifferentiableExpectation, DistEval, Distribution, DistributionTensorError,
+    DistributionTransform, ExpectationTerms, GaussianDistribution, GaussianDistributionError,
+    TanhTransform, TransformedDistribution, TransformedDistributionError,
 };
 pub use crate::gym::{
     Gym, MultiGym, MultiGymStepInfo, ResetInfo, StackedMultiGym, StackedMultiGymError, StepInfo,
