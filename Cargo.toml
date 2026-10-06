@@ -41,7 +41,7 @@ tracing = { version = "0.1.37", optional = true }
 thiserror = "2.0.20"
 
 [dev-dependencies]
-burn = { version = "=0.22.0-pre.4", default-features = false, features = ["std", "flex", "autodiff"] }
+burn = { version = "=0.22.0-pre.4", default-features = false, features = ["std", "flex", "autodiff", "optim"] }
 
 [features]
 default = []
