@@ -1,33 +1,38 @@
 use std::num::NonZeroUsize;
 
-use candle_core::Tensor;
+use burn::tensor::{Distribution as RandomDistribution, Float, Tensor};
 
-use crate::distributions::{DifferentiableExpectation, DistEval, Distribution, ExpectationTerms};
+use crate::distributions::{
+    DifferentiableExpectation, DistEval, Distribution, DistributionTensorError, ExpectationTerms,
+    validate_statistics,
+};
 
-/// Operations for batches of independent Gaussian distributions.
+/// Samples independent Gaussian values from parameters `[batch, 2 * event_size]`,
+/// where `event_size` is the number of values in one action.
+/// Means occupy the first half of the parameter axis, followed by log standard
+/// deviations. Action batches have rank `A`: `[batch, ...action_shape]`.
+/// Drawing multiple samples adds an axis: `[batch, samples, ...action_shape]`,
+/// with rank `C = A + 1`. Vector actions use ranks 2 and 3, respectively.
 ///
-/// `GaussianDistribution` expects a rank-2 parameter tensor with shape
-/// `[batch_size, 2 * action_size]`. The first half of dimension 1 contains the
-/// action means. The second half contains their log standard deviations. By
-/// default, sampling returns `[batch_size, action_size]`. A configured action
-/// shape reshapes those flat parameters and samples to
-/// `[batch_size, ...action_shape]`; log probability and entropy always reduce
-/// every action-event dimension to `[batch_size]`.
-///
-/// The distribution does not squash or clamp samples. A bounded [`BoxSpace`]
-/// clamps the separate action tensor sent to an environment while PPO retains
-/// the original sample for probability calculations.
-///
-/// [`BoxSpace`]: crate::spaces::BoxSpace
-#[derive(Clone, Debug, Default)]
-pub struct GaussianDistribution {
-    action_shape: Option<Vec<usize>>,
+/// The default uses vector actions `[batch, features]`. Other action shapes use
+/// `[batch, ...action_shape]`; statistics always reduce to `[batch]`.
+/// Samples are not squashed or clipped. A separate action map prepares them
+/// for the environment; probability calculations use the original samples.
+#[derive(Clone, Debug)]
+pub struct GaussianDistribution<const A: usize = 2, const C: usize = 3> {
+    action_shape: Option<[usize; A]>,
+}
+
+impl Default for GaussianDistribution<2, 3> {
+    fn default() -> Self {
+        Self { action_shape: None }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum GaussianDistributionError {
-    #[error("Gaussian tensor operation failed: {0}")]
-    TensorError(#[source] candle_core::Error),
+    #[error("Gaussian tensor validation failed: {0}")]
+    TensorError(#[from] DistributionTensorError),
     #[error("the Gaussian action shape is too large")]
     ActionShapeTooLarge,
     #[error("a Gaussian distribution requires a nonzero action dimension")]
@@ -36,15 +41,17 @@ pub enum GaussianDistributionError {
     InvalidOutputWidth { output_width: usize },
 }
 
-impl From<candle_core::Error> for GaussianDistributionError {
-    fn from(error: candle_core::Error) -> Self {
-        Self::TensorError(error)
-    }
-}
-
-impl GaussianDistribution {
-    /// Configures the shape of one action event. Model parameters remain flat.
-    pub fn new(action_shape: Vec<usize>) -> Result<Self, GaussianDistributionError> {
+impl<const A: usize, const C: usize> GaussianDistribution<A, C> {
+    /// Sets the shape of one action. Parameters remain `[batch, 2 * event_size]`.
+    /// `action_shape` has `E` axes. Adding batch requires `A = E + 1`;
+    /// adding samples requires `C = A + 1`.
+    pub fn new<const E: usize>(
+        action_shape: [usize; E],
+    ) -> Result<Self, GaussianDistributionError> {
+        const {
+            assert!(A == E + 1, "Gaussian action rank must be event rank + 1");
+            assert!(C == A + 1, "Gaussian samples axis requires C == A + 1");
+        }
         let event_size = action_shape.iter().try_fold(1usize, |size, dimension| {
             size.checked_mul(*dimension)
                 .ok_or(GaussianDistributionError::ActionShapeTooLarge)
@@ -52,280 +59,350 @@ impl GaussianDistribution {
         if event_size == 0 {
             return Err(GaussianDistributionError::ZeroActionDimension);
         }
+        if event_size > usize::MAX / 2 {
+            return Err(GaussianDistributionError::ActionShapeTooLarge);
+        }
+        // Reserve a batch axis of length one before the action dimensions.
+        let mut shape = [1; A];
+        shape[1..].copy_from_slice(&action_shape);
         Ok(Self {
-            action_shape: Some(action_shape),
+            action_shape: Some(shape),
         })
     }
 
+    /// Returns the configured action shape without the batch axis.
     pub fn action_shape(&self) -> Option<&[usize]> {
-        self.action_shape.as_deref()
+        self.action_shape.as_ref().map(|shape| &shape[1..])
     }
 
-    /// Splits `outputs` shaped `[batch_size, 2 * event_size]` into mean and
-    /// log-standard-deviation tensors shaped `[batch_size, ...action_shape]`.
-    fn parameters(&self, outputs: &Tensor) -> Result<(Tensor, Tensor), GaussianDistributionError> {
-        let (_, output_size) = outputs.dims2()?;
-        if output_size == 0 || output_size % 2 != 0 {
-            return Err(GaussianDistributionError::InvalidOutputWidth {
-                output_width: output_size,
-            });
+    /// Splits `[batch, 2 * event_size]` into mean and log-standard-deviation
+    /// tensors `[batch, ...action_shape]`, both rank `A`, preserving dtype,
+    /// device, and gradients. Adding a samples axis requires `C = A + 1`.
+    fn parameters(
+        &self,
+        outputs: Tensor<2>,
+    ) -> Result<(Tensor<A>, Tensor<A>), GaussianDistributionError> {
+        const {
+            assert!(A >= 1, "Gaussian actions require a batch axis");
+            assert!(C == A + 1, "Gaussian samples axis requires C == A + 1");
         }
-        let half = output_size / 2;
-        let Some(action_shape) = &self.action_shape else {
-            return Ok((outputs.narrow(1, 0, half)?, outputs.narrow(1, half, half)?));
-        };
-        let event_size = action_shape.iter().product::<usize>();
-        if event_size != half {
-            return Err(GaussianDistributionError::TensorError(
-                candle_core::Error::UnexpectedShape {
-                    msg: "Gaussian model output must describe the configured action shape".into(),
-                    expected: (outputs.dim(0)?, event_size * 2).into(),
-                    got: outputs.shape().clone(),
-                },
-            ));
+        let [batch_size, output_width] = outputs.dims();
+        if output_width == 0 || output_width % 2 != 0 {
+            return Err(GaussianDistributionError::InvalidOutputWidth { output_width });
         }
-        let mut batched_shape = Vec::with_capacity(action_shape.len() + 1);
-        batched_shape.push(outputs.dim(0)?);
-        batched_shape.extend(action_shape);
-        Ok((
-            outputs
-                .narrow(1, 0, half)?
-                .reshape(batched_shape.as_slice())?,
-            outputs
-                .narrow(1, half, half)?
-                .reshape(batched_shape.as_slice())?,
-        ))
+        let half = output_width / 2;
+        let mut shape = self.action_shape.unwrap_or([1; A]);
+        if self.action_shape.is_some() {
+            let event_size = shape[1..].iter().product::<usize>();
+            if event_size != half {
+                return Err(DistributionTensorError::ShapeMismatch {
+                    field: "Gaussian parameters",
+                    expected: vec![batch_size, event_size * 2],
+                    actual: outputs.dims().to_vec(),
+                }
+                .into());
+            }
+        } else {
+            shape[A - 1] = half;
+        }
+        shape[0] = batch_size;
+        let mean = outputs
+            .clone()
+            .slice([0..batch_size, 0..half])
+            .reshape(shape);
+        let log_std = outputs
+            .slice([0..batch_size, half..output_width])
+            .reshape(shape);
+        Ok((mean, log_std))
     }
 }
 
-/// Reduces `values` shaped `[batch_size, ...event_shape]` to `[batch_size]`.
-fn sum_event_dimensions(values: &Tensor) -> candle_core::Result<Tensor> {
-    let mut result = values.clone();
-    while result.rank() > 1 {
-        result = result.sum(result.rank() - 1)?;
+/// Sums the action dimensions of rank-`A` values `[batch, ...action_shape]`,
+/// returning `[batch]` in the same batch order. Scalar actions have no trailing axes.
+fn sum_event_dimensions<const A: usize>(values: Tensor<A>) -> Tensor<1> {
+    const {
+        assert!(A >= 1, "event reduction requires a batch axis");
     }
-    Ok(result)
+    let batch_size = values.dims()[0];
+    let event_size = values.dims()[1..].iter().product::<usize>();
+    values
+        .reshape([batch_size, event_size])
+        .sum_dim(1)
+        .squeeze_dim(1)
 }
 
-impl Distribution for GaussianDistribution {
+impl<const A: usize, const C: usize> Distribution<2, A> for GaussianDistribution<A, C> {
     type Error = GaussianDistributionError;
 
-    /// Samples actions `[batch_size, ...action_shape]` from parameters
-    /// `[batch_size, 2 * event_size]`.
-    fn sample(&self, outputs: &Tensor) -> Result<Tensor, Self::Error> {
-        let (action_mean, action_log_std) = self.parameters(outputs)?;
-        let mut unit_normal = Tensor::randn(0.0, 1.0, action_mean.dims(), action_mean.device())?;
-        let dtype = action_mean.dtype();
-        unit_normal = unit_normal.to_dtype(dtype)?;
-        let action_std = action_log_std.exp()?;
-
-        Ok((action_mean + unit_normal * action_std)?)
+    /// Draws actions from parameters `[batch, 2 * event_size]`, returning
+    /// `[batch, ...action_shape]` of rank `A`, retaining gradients through mean
+    /// and standard deviation. Noise shares parameter dtype and device.
+    fn sample(&self, outputs: Tensor<2>) -> Result<Tensor<A>, Self::Error> {
+        let (mean, log_std) = self.parameters(outputs)?;
+        let noise = mean.random_like(RandomDistribution::Normal(0.0, 1.0));
+        Ok(mean + noise * log_std.exp())
     }
 
-    /// Returns means `[batch_size, ...action_shape]` from parameters
-    /// `[batch_size, 2 * event_size]`.
-    fn mode(&self, outputs: &Tensor) -> Result<Tensor, Self::Error> {
+    /// Extracts means `[batch, ...action_shape]` from `[batch, 2 * event_size]` parameters.
+    fn mode(&self, outputs: Tensor<2>) -> Result<Tensor<A>, Self::Error> {
         Ok(self.parameters(outputs)?.0)
     }
 
-    /// Evaluates actions `[batch_size, ...action_shape]` under parameters
-    /// `[batch_size, 2 * event_size]`, returning statistics `[batch_size]`.
-    fn dist_eval(&self, outputs: &Tensor, actions: &Tensor) -> Result<DistEval, Self::Error> {
-        let (action_mean, action_log_std) = self.parameters(outputs)?;
-        let action_std = action_log_std.exp()?;
-        let action = actions;
-        // Break down each component
-        let action_diff = (action.clone() - action_mean)?;
-        let normalized_diff = (action_diff.powf(2.0)? / action_std.powf(2.0))?;
-        let log_det_term = (2.0 * &action_log_std)?;
-        // This term is applied per action component before the reduction.
+    /// Evaluates rank-`A` actions `[batch, ...action_shape]` under rank-2
+    /// parameters `[batch, 2 * event_size]`, summing action dimensions to `[batch]`
+    /// log probability and entropy. Actions share parameter dtype and device.
+    fn dist_eval(&self, outputs: Tensor<2>, actions: Tensor<A>) -> Result<DistEval, Self::Error> {
+        let (mean, log_std) = self.parameters(outputs)?;
+        validate_statistics("Gaussian actions", &mean, &actions)?;
+        let normalized_diff = (actions - mean).square() / log_std.clone().exp().square();
         let normalization = (2.0 * std::f64::consts::PI).ln();
-
-        let total_inside = ((&normalized_diff + &log_det_term)? + normalization)?;
-        let log_prob = -0.5 * total_inside;
-
-        let log_prob = sum_event_dimensions(&log_prob?)?;
-        // H[N(mu, sigma^2)] = log(sigma) + 0.5 * log(2*pi*e)
-        // for each independent action component.
+        let log_prob =
+            sum_event_dimensions((normalized_diff + log_std.clone() * 2.0 + normalization) * -0.5);
         let entropy = sum_event_dimensions(
-            &(&action_log_std + 0.5 * (std::f64::consts::PI * 2.0 * std::f64::consts::E).ln())?,
-        )?;
-
-        Ok(DistEval::new(log_prob, entropy))
+            log_std + 0.5 * (2.0 * std::f64::consts::PI * std::f64::consts::E).ln(),
+        );
+        Ok(DistEval::new(log_prob, entropy)?)
     }
 }
 
-impl DifferentiableExpectation for GaussianDistribution {
-    /// Samples candidates `[batch_size, samples, ...action_shape]` from
-    /// parameters `[batch_size, 2 * event_size]`.
+impl<const A: usize, const C: usize> DifferentiableExpectation<2, A, C>
+    for GaussianDistribution<A, C>
+{
+    type CandidateKind = Float;
+
+    /// Draws multiple actions `[batch, samples, ...action_shape]` of rank `C` from
+    /// `[batch, 2 * event_size]` parameters. Log probabilities and uniform
+    /// weights are `[batch, samples]`; `C = A + 1` inserts the sample axis.
     fn expectation(
         &self,
-        outputs: &Tensor,
+        outputs: Tensor<2>,
         samples: NonZeroUsize,
-    ) -> Result<ExpectationTerms, Self::Error> {
+    ) -> Result<ExpectationTerms<C>, Self::Error> {
+        const {
+            assert!(C == A + 1, "Gaussian samples axis requires C == A + 1");
+        }
         let sample_count = samples.get();
         let mut actions = Vec::with_capacity(sample_count);
         let mut log_probabilities = Vec::with_capacity(sample_count);
         for _ in 0..sample_count {
-            let sample = self.sample(outputs)?;
-            log_probabilities.push(self.dist_eval(outputs, &sample)?.log_prob().clone());
+            let sample = self.sample(outputs.clone())?;
+            log_probabilities.push(
+                self.dist_eval(outputs.clone(), sample.clone())?
+                    .log_prob()
+                    .clone(),
+            );
             actions.push(sample);
         }
-        let actions = Tensor::stack(&actions, 1)?;
-        let log_probabilities = Tensor::stack(&log_probabilities, 1)?;
-        let weights = (Tensor::ones(
-            log_probabilities.shape(),
-            log_probabilities.dtype(),
-            log_probabilities.device(),
-        )? * (1.0 / sample_count as f64))?;
+        let actions = Tensor::<A>::stack::<C>(actions, 1);
+        let log_probabilities = Tensor::<1>::stack::<2>(log_probabilities, 1);
+        let weights = Tensor::<2>::full(
+            log_probabilities.dims(),
+            1.0 / sample_count as f64,
+            (&log_probabilities.device(), log_probabilities.dtype()),
+        );
         Ok(ExpectationTerms::new(actions, log_probabilities, weights)?)
     }
 
-    /// Computes target entropy from parameters
-    /// `[batch_size, 2 * event_size]`.
-    fn default_target_entropy(&self, outputs: &Tensor) -> Result<f64, Self::Error> {
-        let event_size = self.parameters(outputs)?.0.elem_count() / outputs.dim(0)?;
-        Ok(-(event_size as f64))
+    /// Returns scalar target entropy `-event_size` from `[batch, 2 * event_size]`
+    /// parameters. The batch axis is excluded, including for empty batches.
+    fn default_target_entropy(&self, outputs: &Tensor<2>) -> Result<f64, Self::Error> {
+        let mean = self.parameters(outputs.clone())?.0;
+        Ok(-(mean.dims()[1..].iter().product::<usize>() as f64))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use burn::tensor::{DType, Device};
 
     #[test]
-    fn diagonal_gaussian_entropy_and_log_prob_match_closed_form() {
-        const ACTION_DIMS: usize = 3;
-        let log_std = 0.5_f32.ln();
-        let outputs = Tensor::from_vec(
-            [vec![0.0_f32; ACTION_DIMS], vec![log_std; ACTION_DIMS]].concat(),
-            (1, ACTION_DIMS * 2),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let actions =
-            Tensor::zeros((1, ACTION_DIMS), candle_core::DType::F32, &Device::Cpu).unwrap();
-
+    fn evaluation_matches_closed_form_in_both_precisions() {
+        let device = Device::flex();
         let distribution = GaussianDistribution::default();
-        let evaluation = distribution.dist_eval(&outputs, &actions).unwrap();
-        let actual_entropy = evaluation.entropy().to_vec1::<f32>().unwrap()[0];
-        let actual_log_prob = evaluation.log_prob().to_vec1::<f32>().unwrap()[0];
-
-        let component_entropy =
-            log_std + 0.5 * (2.0 * std::f32::consts::PI * std::f32::consts::E).ln();
-        let expected_entropy = ACTION_DIMS as f32 * component_entropy;
-        let component_log_prob = -log_std - 0.5 * (2.0 * std::f32::consts::PI).ln();
-        let expected_log_prob = ACTION_DIMS as f32 * component_log_prob;
-
-        assert!((actual_entropy - expected_entropy).abs() < 1e-6);
-        assert!((actual_log_prob - expected_log_prob).abs() < 1e-6);
+        for dtype in [DType::F32, DType::F64] {
+            let log_std = 0.5f64.ln();
+            let outputs = Tensor::from_data(
+                [[0.0f64, 0.0, 0.0, log_std, log_std, log_std]],
+                (&device, dtype),
+            );
+            let evaluation = distribution
+                .dist_eval(outputs, Tensor::zeros([1, 3], (&device, dtype)))
+                .unwrap();
+            let log_probability = evaluation.log_prob().clone().into_scalar::<f64>();
+            let entropy = evaluation.entropy().clone().into_scalar::<f64>();
+            let expected_log_probability =
+                3.0 * (-log_std - 0.5 * (2.0 * std::f64::consts::PI).ln());
+            let expected_entropy =
+                3.0 * (log_std + 0.5 * (2.0 * std::f64::consts::PI * std::f64::consts::E).ln());
+            assert!((log_probability - expected_log_probability).abs() < 1e-6);
+            assert!((entropy - expected_entropy).abs() < 1e-6);
+            assert_eq!(evaluation.entropy().dtype(), dtype);
+        }
     }
 
     #[test]
-    fn mode_is_the_configured_mean() {
-        let outputs = Tensor::from_vec(
-            vec![0.25_f32, -0.5, 0.75, -1.0, 0.0, 1.0],
-            (1, 6),
-            &Device::Cpu,
-        )
-        .unwrap();
+    fn mode_and_scalar_events_preserve_configured_shapes() {
+        let device = Device::flex();
         let distribution = GaussianDistribution::default();
-
+        let outputs = Tensor::from_floats([[0.25, -0.5, 0.75, -1.0, 0.0, 1.0]], &device);
         assert_eq!(
             distribution
-                .mode(&outputs)
+                .mode(outputs)
                 .unwrap()
-                .to_vec2::<f32>()
+                .into_data()
+                .try_to_vec::<f32>()
                 .unwrap(),
-            vec![vec![0.25, -0.5, 0.75]]
+            vec![0.25, -0.5, 0.75]
+        );
+        let scalar = GaussianDistribution::<1, 2>::new([]).unwrap();
+        assert_eq!(
+            scalar
+                .mode(Tensor::from_floats([[2.0, 0.0], [3.0, 0.0]], &device))
+                .unwrap()
+                .dims(),
+            [2]
         );
     }
 
     #[test]
-    fn differentiable_expectation_is_one_reparameterized_sample() {
-        let mean = candle_core::Var::from_vec(vec![0.0f32, 0.0], (1, 2), &Device::Cpu).unwrap();
-        let log_std = Tensor::zeros((1, 2), candle_core::DType::F32, &Device::Cpu).unwrap();
-        let outputs = Tensor::cat(&[mean.as_tensor(), &log_std], 1).unwrap();
+    fn reparameterization_retains_mean_and_log_std_gradients() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mean = Tensor::<2>::from_floats([[0.0, 0.0]], &device).require_grad();
+        let log_std = Tensor::<2>::zeros([1, 2], &device).require_grad();
+        let outputs = Tensor::cat(vec![mean.clone(), log_std.clone()], 1);
         let distribution = GaussianDistribution::default();
         let terms = distribution
-            .expectation(&outputs, NonZeroUsize::MIN)
+            .expectation(outputs.clone(), NonZeroUsize::MIN)
             .unwrap();
-
-        assert_eq!(terms.actions().dims(), &[1, 1, 2]);
-        assert_eq!(terms.log_probabilities().dims(), &[1, 1]);
-        assert_eq!(terms.weights().to_vec2::<f32>().unwrap(), vec![vec![1.0]]);
+        assert_eq!(terms.actions().dims(), [1, 1, 2]);
+        assert_eq!(
+            terms
+                .weights()
+                .clone()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![1.0]
+        );
         assert_eq!(distribution.default_target_entropy(&outputs).unwrap(), -2.0);
-
-        let loss = terms.actions().sum_all().unwrap();
-        let gradients = loss.backward().unwrap();
+        let sample = terms
+            .actions()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        let gradients = terms.actions().clone().sum().backward();
         assert_eq!(
-            gradients
-                .get(mean.as_tensor())
+            mean.grad(&gradients)
                 .unwrap()
-                .to_vec2::<f32>()
+                .into_data()
+                .try_to_vec::<f32>()
                 .unwrap(),
-            vec![vec![1.0, 1.0]]
+            vec![1.0, 1.0]
         );
+        let std_gradient = log_std
+            .grad(&gradients)
+            .unwrap()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        for (actual, expected) in std_gradient.iter().zip(sample) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
     }
 
     #[test]
-    fn expectation_uses_requested_sample_count_and_uniform_weights() {
-        let outputs = Tensor::zeros((2, 4), candle_core::DType::F32, &Device::Cpu).unwrap();
-        let distribution = GaussianDistribution::default();
-        let terms = distribution
-            .expectation(&outputs, NonZeroUsize::new(4).unwrap())
-            .unwrap();
-
-        assert_eq!(terms.actions().dims(), &[2, 4, 2]);
-        assert_eq!(terms.log_probabilities().dims(), &[2, 4]);
+    fn high_rank_events_and_uniform_candidate_weights_are_preserved() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let distribution = GaussianDistribution::<6, 7>::new([2, 1, 2, 1, 2]).unwrap();
         assert_eq!(
-            terms.weights().to_vec2::<f32>().unwrap(),
-            vec![vec![0.25; 4]; 2]
+            distribution.action_shape(),
+            Some([2, 1, 2, 1, 2].as_slice())
         );
-    }
-
-    #[test]
-    fn configured_event_shape_preserves_five_action_dimensions() {
-        let action_shape = vec![2, 1, 2, 1, 2];
-        let event_size = action_shape.iter().product::<usize>();
-        let distribution = GaussianDistribution::new(action_shape).unwrap();
-        let outputs =
-            Tensor::zeros((3, event_size * 2), candle_core::DType::F32, &Device::Cpu).unwrap();
-
-        let actions = distribution.sample(&outputs).unwrap();
-        assert_eq!(actions.dims(), &[3, 2, 1, 2, 1, 2]);
-        let evaluation = distribution.dist_eval(&outputs, &actions).unwrap();
-        assert_eq!(evaluation.log_prob().dims(), &[3]);
-        assert_eq!(evaluation.entropy().dims(), &[3]);
-        assert_eq!(distribution.default_target_entropy(&outputs).unwrap(), -8.0);
-
+        let outputs = Tensor::<2>::zeros([3, 16], &device);
+        let sample = distribution.sample(outputs.clone()).unwrap();
+        assert_eq!(sample.dims(), [3, 2, 1, 2, 1, 2]);
+        assert_eq!(
+            distribution
+                .dist_eval(outputs.clone(), sample)
+                .unwrap()
+                .entropy()
+                .dims(),
+            [3]
+        );
         let terms = distribution
-            .expectation(&outputs, NonZeroUsize::new(4).unwrap())
+            .expectation(outputs.clone(), NonZeroUsize::new(4).unwrap())
             .unwrap();
-        assert_eq!(terms.actions().dims(), &[3, 4, 2, 1, 2, 1, 2]);
-        assert_eq!(terms.log_probabilities().dims(), &[3, 4]);
-        assert_eq!(terms.weights().dims(), &[3, 4]);
+        assert_eq!(terms.actions().dims(), [3, 4, 2, 1, 2, 1, 2]);
+        assert_eq!(terms.log_probabilities().dims(), [3, 4]);
+        assert_eq!(
+            terms
+                .weights()
+                .clone()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![0.25; 12]
+        );
+        assert_eq!(distribution.default_target_entropy(&outputs).unwrap(), -8.0);
     }
 
     #[test]
-    fn configured_event_shape_must_match_model_output_width() {
-        let distribution = GaussianDistribution::new(vec![2, 3]).unwrap();
-        let outputs = Tensor::zeros((1, 10), candle_core::DType::F32, &Device::Cpu).unwrap();
+    fn native_sampling_preserves_dtype_and_seeded_randomness() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let distribution = GaussianDistribution::default();
+        for dtype in [DType::F32, DType::F64] {
+            let outputs = Tensor::<2>::zeros([8, 4], (&device, dtype));
+            device.seed(123);
+            let first = distribution.sample(outputs.clone()).unwrap();
+            device.seed(123);
+            let second = distribution.sample(outputs).unwrap();
+            assert_eq!(first.dims(), [8, 2]);
+            assert_eq!(first.dtype(), dtype);
+            assert_eq!(first.into_data(), second.into_data());
+        }
+    }
+
+    #[test]
+    fn invalid_shapes_and_empty_batch_entropy_are_handled() {
+        let device = Device::flex();
+        let distribution = GaussianDistribution::<3, 4>::new([2, 3]).unwrap();
         assert!(matches!(
-            distribution.sample(&outputs),
+            distribution.mode(Tensor::zeros([1, 10], &device)),
             Err(GaussianDistributionError::TensorError(
-                candle_core::Error::UnexpectedShape { .. }
+                DistributionTensorError::ShapeMismatch { .. }
             ))
         ));
         assert!(matches!(
-            GaussianDistribution::new(vec![2, 0, 3]),
+            GaussianDistribution::<4, 5>::new([2, 0, 3]),
             Err(GaussianDistributionError::ZeroActionDimension)
         ));
-        let odd_outputs = Tensor::zeros((1, 3), candle_core::DType::F32, &Device::Cpu).unwrap();
         assert!(matches!(
-            GaussianDistribution::default().sample(&odd_outputs),
+            GaussianDistribution::<3, 4>::new([usize::MAX, 2]),
+            Err(GaussianDistributionError::ActionShapeTooLarge)
+        ));
+        let flat = GaussianDistribution::default();
+        assert!(matches!(
+            flat.sample(Tensor::zeros([1, 3], &device)),
             Err(GaussianDistributionError::InvalidOutputWidth { output_width: 3 })
         ));
+        assert!(matches!(
+            flat.dist_eval(
+                Tensor::zeros([2, 4], &device),
+                Tensor::zeros([1, 2], &device)
+            ),
+            Err(GaussianDistributionError::TensorError(
+                DistributionTensorError::ShapeMismatch { .. }
+            ))
+        ));
+        assert_eq!(
+            flat.default_target_entropy(&Tensor::zeros([0, 4], &device))
+                .unwrap(),
+            -2.0
+        );
     }
 }
