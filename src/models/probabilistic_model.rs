@@ -231,6 +231,13 @@ where
             ..self
         }
     }
+
+    fn materialize(self) -> Self {
+        Self {
+            module: self.module.materialize(),
+            ..self
+        }
+    }
 }
 
 /// Preserves the model and distribution error causes.
@@ -714,7 +721,7 @@ mod tests {
                 .abs()
                 < 1e-12
         );
-        let inference = policy.valid();
+        let inference = policy.valid().materialize();
         assert!(
             !inference
                 .mode(observations.clone().without_autodiff())
