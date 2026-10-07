@@ -2,33 +2,19 @@ use bon::bon;
 use burn::{
     module::{Module, ModuleMapper, Param},
     nn::{Initializer, Linear, LinearConfig, Relu, Tanh, activation::Activation},
-    tensor::{DType, Tensor, TensorCreationOptions, TensorData},
+    tensor::{DType, Float, Tensor, TensorCreationOptions, TensorData, kind::Basic},
 };
 
 pub mod probabilistic_model;
 
-/// Executes a tensor-to-tensor computation with explicit input and output ranks.
-/// Parameter-owning models also implement Burn's `Module`; functions do not need to own parameters.
-/// This contract does not register parameters captured by a closure with Burn.
-pub trait Forward<const I: usize, const O: usize> {
+/// Executes a tensor-to-tensor computation with explicit ranks and observation kind.
+/// Parameter-owning models also implement Burn's `Module` so optimizers can visit their parameters.
+pub trait Forward<const I: usize, const O: usize, K: Basic = Float> {
     type Error;
 
-    /// Maps a rank-`I` float tensor to a rank-`O` float tensor.
-    /// Implementations define input and output shapes, axis meanings, dtype, device, and gradient behavior.
-    fn forward(&self, input: Tensor<I>) -> Result<Tensor<O>, Self::Error>;
-}
-
-impl<F, E, const I: usize, const O: usize> Forward<I, O> for F
-where
-    F: Fn(Tensor<I>) -> Result<Tensor<O>, E>,
-{
-    type Error = E;
-
-    /// Calls the function with rank-`I` input and returns its rank-`O` output or error.
-    /// The function defines input and output shapes, dtype, device, and gradient requirements; this call adds no conversions.
-    fn forward(&self, input: Tensor<I>) -> Result<Tensor<O>, E> {
-        self(input)
-    }
+    /// Maps a rank-`I` tensor of kind `K` to a rank-`O` float tensor.
+    /// Implementations define layouts, dtype, device, gradient behavior, and any explicit observation conversions.
+    fn forward(&self, input: Tensor<I, K>) -> Result<Tensor<O>, Self::Error>;
 }
 
 impl<const D: usize> Forward<D, D> for Relu {
@@ -533,63 +519,6 @@ mod tests {
         optim::{GradientsParams, SgdConfig},
         tensor::Device,
     };
-
-    /// Doubles `[batch_size, features]` without changing dtype, device, axes, or gradient paths.
-    fn double(input: Tensor<2>) -> Result<Tensor<2>, std::convert::Infallible> {
-        Ok(input * 2.0)
-    }
-
-    #[test]
-    fn function_items_and_capturing_closures_implement_forward() {
-        let device = Device::flex().autodiff();
-        let input = Tensor::ones([2, 3], (&device, DType::F64)).require_grad();
-        let scale = 3.0;
-        let scale_input = |input: Tensor<2>| -> Result<Tensor<2>, ModelError> { Ok(input * scale) };
-        let output = Forward::forward(
-            &scale_input,
-            Forward::forward(&double, input.clone()).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(output.dims(), [2, 3]);
-        assert_eq!(output.dtype(), DType::F64);
-        let gradients = output.sum().backward();
-        assert_eq!(
-            input
-                .grad(&gradients)
-                .unwrap()
-                .into_data()
-                .try_to_vec::<f64>()
-                .unwrap(),
-            vec![6.0; 6]
-        );
-        let reject =
-            |_input: Tensor<2>| -> Result<Tensor<2>, ModelError> { Err(ModelError::InputDevice) };
-        assert!(matches!(
-            Forward::forward(&reject, input),
-            Err(ModelError::InputDevice)
-        ));
-    }
-
-    #[test]
-    fn model_forward_method_can_be_bound_without_a_custom_trait_impl() {
-        let device = Device::flex();
-        let network = MLP::builder()
-            .input_size(2)
-            .output_size(1)
-            .options(&device)
-            .bias_initializer(Initializer::Zeros)
-            .hidden_layer_sizes(vec![])
-            .output_initializer(Initializer::Ones)
-            .build()
-            .unwrap();
-        let execute = |input| MLP::forward(&network, input);
-        let output = Forward::forward(&execute, Tensor::ones([3, 2], &device)).unwrap();
-        assert_eq!(output.dims(), [3, 1]);
-        assert_eq!(
-            output.into_data().try_to_vec::<f32>().unwrap(),
-            vec![2.0; 3]
-        );
-    }
 
     #[test]
     fn mlp_preserves_dtype_shape_and_gradients() {

@@ -47,7 +47,8 @@ pub use crate::gym::{
 pub use crate::gym::{MultithreadedStackedMultiGym, MultithreadedVectorizedGymWrapper};
 pub use crate::models::{
     DuelingMLP, Forward, MLP, ModelError, probabilistic_model::ExpectationPolicy,
-    probabilistic_model::ProbabilisticPolicy, probabilistic_model::ProbabilisticPolicyModel,
+    probabilistic_model::PolicyTypes, probabilistic_model::ProbabilisticPolicy,
+    probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
 pub use crate::objectives::{bellman_targets, clipped_value_loss};

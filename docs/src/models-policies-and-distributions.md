@@ -38,29 +38,65 @@ distribution.
 
 ## Probabilistic Policies Use a Distribution
 
-`ProbabilisticPolicyModel<D>` owns the wrapped module and implements
-`ProbabilisticPolicy`. Its `sample` and `mode` operations pass the module output
-to `D::from_outputs`, then call the corresponding distribution operation. Its
-`log_prob_and_entropy` operation calls `D::dist_eval` when an algorithm needs
-those values.
+`ProbabilisticPolicyModel<T>` owns the native model and distribution directly.
+`T: PolicyTypes` groups their types and the native tensor signature. The trait contains associated types and no methods.
+The tuple implementation groups the types as:
+
+```text
+(Model, Distribution, (ObservationTensor, ParameterTensor, ActionTensor))
+```
+
+The tensor types contain their ranks and kinds. The group describes types; it does not store tensors or provide tensor operations.
+Policy implementations use native `Tensor<O, K>`, `Tensor<P>`, and `Tensor<A>` signatures.
+
+Policy models implement Burn's `Module` and ModuRL's `Forward<O, P, K>`.
+The observation kind `K` defaults to `Float`. Custom models can use integer or boolean observations and perform explicit conversions.
+Construct a policy without specifying the type group:
+
+```rust,ignore
+let policy = ProbabilisticPolicyModel::with_distribution(
+    actor,
+    CategoricalDistribution,
+);
+```
+
+`Forward::forward` takes `Tensor<O, K>` and returns `Result<Tensor<P>, Self::Error>`.
+Both tensors start with a batch axis, and the model must preserve batch size.
+The model performs any observation dtype or device conversion explicitly.
+All execution uses the same owned model that Burn visits for optimizer updates, records, and device transfers.
+`policy.module()` returns that native model directly.
+
+A component that only owns the policy needs one type parameter:
+
+```rust,ignore
+struct PolicyOwner<T: PolicyTypes> {
+    policy: ProbabilisticPolicyModel<T>,
+}
+```
+
+Code that performs tensor calculations still constrains the required native tensor types or policy ranks.
+The group does not remove the underlying type information. Fully explicit policy types contain the tuple shown above.
+
+The policy implements `ProbabilisticPolicy<O, A>`. Its `sample` and `mode`
+operations pass model outputs directly to the distribution. Its
+`log_prob_and_entropy` operation calls `D::dist_eval` and returns two `[batch_size]` tensors.
 
 `Distribution` is a public trait. ModuRL currently supplies
 `CategoricalDistribution` and `GaussianDistribution`, but applications can add
 their own implementations:
 
 ```rust,ignore
-let policy =
-    ProbabilisticPolicyModel::<MyDistribution>::new(actor);
+let policy = ProbabilisticPolicyModel::<(_, MyDistribution, _)>::new(actor);
 ```
 
-A custom implementation provides `from_outputs`, `sample`, `mode`, `dist_eval`,
-and an associated `Error` type. It must document its model-output layout and
-returned tensor shapes. Its action representation must also match the chosen
-`Space`. The Rust type system does not check these tensor shapes.
+A custom `Distribution<P, A>` implementation provides `sample`, `mode`,
+`dist_eval`, and an associated `Error` type. It documents its parameter and action layouts.
+Ranks are checked at compile time. Dynamic dimensions, dtypes, and devices need runtime validation.
+Its action representation must match the chosen `ActionMap` input.
 
 ## Spaces Produce Environment Actions
 
-`Space::tensor_from_neurons` converts an action representation into the tensor
+`ActionMap::tensor_from_neurons` converts an action representation into the tensor
 passed to the environment.
 
 `Discrete` selects the index of the largest component. `BoxSpace` clamps each

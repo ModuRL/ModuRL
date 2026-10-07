@@ -1,175 +1,411 @@
-use std::num::NonZeroUsize;
+use std::{fmt, num::NonZeroUsize};
 
-use candle_core::Tensor;
-use candle_nn::Module;
+use burn::{
+    module::{Module, ModuleMapper, ModuleVisitor},
+    tensor::{Device, Tensor, kind::Basic},
+};
 
-use crate::distributions::{DifferentiableExpectation, Distribution, ExpectationTerms};
+use crate::{
+    distributions::{
+        DifferentiableExpectation, Distribution, DistributionTensorError, ExpectationTerms,
+    },
+    models::Forward,
+};
 
-pub trait ProbabilisticPolicy {
+/// Samples and evaluates policy actions from batched observations.
+/// Rank `O` counts observation axes, including the batch axis. Rank `A` counts sampled action axes.
+/// Implementations define the observation kind and the dtype and device requirements of their model.
+/// Actions use the `Float` kind; an action map converts policy actions to environment actions when needed.
+pub trait ProbabilisticPolicy<const O: usize = 2, const A: usize = 2> {
     type Error;
-    /// Samples actions shaped `[batch_size, ...action_shape]` from states
-    /// shaped `[batch_size, ...state_shape]`.
-    fn sample(&self, state: &Tensor) -> Result<Tensor, Self::Error>;
-    /// Returns modal actions shaped `[batch_size, ...action_shape]` for states
-    /// shaped `[batch_size, ...state_shape]`.
-    fn mode(&self, state: &Tensor) -> Result<Tensor, Self::Error>;
-    /// Evaluates `action` shaped `[batch_size, ...action_shape]` for `state`
-    /// shaped `[batch_size, ...state_shape]`.
-    ///
-    /// Returns log probability and entropy tensors shaped `[batch_size]`.
+    type ObservationKind: Basic;
+
+    /// Samples `[batch_size, ...action_shape]` from observations `[batch_size, ...observation_shape]`.
+    /// Keeps the batch axis. The model defines observation conversions; the distribution defines the action dtype and device.
+    fn sample(
+        &self,
+        observations: Tensor<O, Self::ObservationKind>,
+    ) -> Result<Tensor<A>, Self::Error>;
+
+    /// Returns the distribution's modal actions `[batch_size, ...action_shape]` for observations `[batch_size, ...observation_shape]`.
+    /// Keeps the batch axis. The model defines observation conversions; the distribution defines the action dtype and device.
+    fn mode(
+        &self,
+        observations: Tensor<O, Self::ObservationKind>,
+    ) -> Result<Tensor<A>, Self::Error>;
+
+    /// Evaluates actions `[batch_size, ...action_shape]` for observations `[batch_size, ...observation_shape]`.
+    /// Both returned float tensors have shape `[batch_size]`, with one log probability and entropy statistic per item.
+    /// Action batch size, dtype, and device must match the model's distribution parameters. The calculation retains gradient paths.
     fn log_prob_and_entropy(
         &self,
-        state: &Tensor,
-        action: &Tensor,
-    ) -> Result<(Tensor, Tensor), Self::Error>;
+        observations: Tensor<O, Self::ObservationKind>,
+        actions: Tensor<A>,
+    ) -> Result<(Tensor<1>, Tensor<1>), Self::Error>;
 }
 
-/// Policy extension used by algorithms that optimize an exact or
-/// reparameterized action expectation (notably SAC).
-pub trait ExpectationPolicy: ProbabilisticPolicy {
-    /// Builds expectation terms for `state` shaped
-    /// `[batch_size, ...state_shape]`.
+/// Supplies candidate actions for an exact or sampled policy expectation, such as the objective used by SAC.
+/// Rank `C` includes batch and candidate axes. Candidate kind is independent of observation and sampled action kinds.
+pub trait ExpectationPolicy<const O: usize = 2, const A: usize = 2, const C: usize = 3>:
+    ProbabilisticPolicy<O, A>
+{
+    type CandidateKind: Basic;
+
+    /// Builds rank-`C` candidates `[batch_size, candidate_count, ...action_shape]` from rank-`O` batched observations.
+    /// Log probabilities and weights have shape `[batch_size, candidate_count]`.
+    /// The distribution determines candidate count and kind. The calculation preserves available gradient paths.
     fn expectation(
         &self,
-        state: &Tensor,
+        observations: Tensor<O, Self::ObservationKind>,
         samples: NonZeroUsize,
-    ) -> Result<ExpectationTerms, Self::Error>;
+    ) -> Result<ExpectationTerms<C, Self::CandidateKind>, Self::Error>;
 
-    /// Returns the default target entropy for `state` shaped
-    /// `[batch_size, ...state_shape]`.
-    fn default_target_entropy(&self, state: &Tensor) -> Result<f64, Self::Error>;
+    /// Returns scalar target entropy from observations `[batch_size, ...observation_shape]`.
+    /// Detaches model outputs before computing the target. The target has no batch or action axes.
+    fn default_target_entropy(
+        &self,
+        observations: Tensor<O, Self::ObservationKind>,
+    ) -> Result<f64, Self::Error>;
 }
 
-pub struct ProbabilisticPolicyModel<D>
-where
-    D: Distribution,
-{
-    module: Box<dyn Module>,
-    distribution: D,
+/// Groups component and native tensor types without supplying execution behavior.
+/// Observation and parameter types describe `[batch_size, ...observation_shape]` and `[batch_size, ...parameter_shape]`.
+/// Action types describe `[batch_size, ...action_shape]`. Policy implementations constrain these types to native Burn tensors.
+pub trait PolicyTypes: fmt::Debug {
+    type Model: fmt::Debug;
+    type Distribution: fmt::Debug;
+    type Observation;
+    type Parameters;
+    type Action;
 }
 
-impl<D> ProbabilisticPolicyModel<D>
-where
-    D: Distribution + Default,
-    <D as Distribution>::Error: std::fmt::Debug,
+impl<M: fmt::Debug, D: fmt::Debug, const O: usize, const P: usize, const A: usize, K: Basic>
+    PolicyTypes for (M, D, (Tensor<O, K>, Tensor<P>, Tensor<A>))
 {
-    pub fn new(module: impl Module + 'static) -> Self {
+    type Model = M;
+    type Distribution = D;
+    type Observation = Tensor<O, K>;
+    type Parameters = Tensor<P>;
+    type Action = Tensor<A>;
+}
+
+/// Owns a native Burn model and a fixed distribution.
+/// `T` groups their types and the native observation, parameter, and action tensor types.
+/// Stores both components directly. The tensor signature describes types without storing tensor values.
+/// Every model implements both Burn's `Module` and the tensor execution contract `Forward`.
+/// Burn parameter traversal, optimizer updates, and records visit only the owned model.
+#[derive(Debug)]
+pub struct ProbabilisticPolicyModel<T: PolicyTypes> {
+    module: T::Model,
+    distribution: T::Distribution,
+}
+
+impl<T: PolicyTypes> Clone for ProbabilisticPolicyModel<T>
+where
+    T::Model: Clone,
+    T::Distribution: Clone,
+{
+    fn clone(&self) -> Self {
         Self {
-            module: Box::new(module),
-            distribution: D::default(),
+            module: self.module.clone(),
+            distribution: self.distribution.clone(),
         }
     }
 }
 
-impl<D> ProbabilisticPolicyModel<D>
+impl<T: PolicyTypes> ProbabilisticPolicyModel<T> {
+    /// Returns the native model whose parameters are executed, optimized, and saved.
+    pub fn module(&self) -> &T::Model {
+        &self.module
+    }
+
+    /// Returns the fixed distribution configuration used to interpret model outputs.
+    pub fn distribution(&self) -> &T::Distribution {
+        &self.distribution
+    }
+}
+
+impl<M, D, const O: usize, const P: usize, const A: usize, K: Basic>
+    ProbabilisticPolicyModel<(M, D, (Tensor<O, K>, Tensor<P>, Tensor<A>))>
 where
-    D: Distribution,
-    <D as Distribution>::Error: std::fmt::Debug,
+    M: Module + Forward<O, P, K>,
+    D: Distribution<P, A> + fmt::Debug,
 {
-    /// Creates a policy with an explicitly configured distribution operator.
-    pub fn with_distribution(module: impl Module + 'static, distribution: D) -> Self {
+    /// Creates a policy with a default distribution and an owned native model.
+    /// Maps rank-`O` observations to rank-`P` float parameters and samples rank-`A` actions.
+    /// Every rank includes a batch axis. Construction does not initialize or detach model parameters.
+    pub fn new(module: M) -> Self
+    where
+        D: Default,
+    {
+        Self::with_distribution(module, D::default())
+    }
+
+    /// Connects an owned native model to a distribution using `Forward<O, P, K>`.
+    /// Maps `[batch_size, ...observation_shape]` to float `[batch_size, ...parameter_shape]`, preserving batch size.
+    /// The model defines observation conversions and owns all parameters visited by Burn.
+    pub fn with_distribution(module: M, distribution: D) -> Self {
+        const {
+            assert!(O >= 1, "policy observations require a batch axis");
+            assert!(P >= 1, "policy parameters require a batch axis");
+            assert!(A >= 1, "policy actions require a batch axis");
+        }
         Self {
-            module: Box::new(module),
+            module,
             distribution,
         }
     }
+}
 
-    pub fn distribution(&self) -> &D {
-        &self.distribution
-    }
-
-    /// Maps `state` `[batch, ...state_shape]` to distribution parameters
-    /// `[batch, ...parameter_shape]`.
-    fn outputs(&self, state: &Tensor) -> candle_core::Result<Tensor> {
-        self.module.forward(state)
+impl<T, D, E, const O: usize, const P: usize, const A: usize, K: Basic> ProbabilisticPolicyModel<T>
+where
+    T: PolicyTypes<
+            Distribution = D,
+            Observation = Tensor<O, K>,
+            Parameters = Tensor<P>,
+            Action = Tensor<A>,
+        >,
+    T::Model: Module + Forward<O, P, K, Error = E>,
+    D: Distribution<P, A>,
+{
+    /// Maps rank-`O` observations `[batch_size, ...observation_shape]` to rank-`P` float parameters.
+    /// Checks that the model preserves batch size; dtype, device, and gradient behavior remain under its control.
+    fn outputs(
+        &self,
+        observations: Tensor<O, K>,
+    ) -> Result<Tensor<P>, ProbabilisticPolicyModelError<E, D::Error>> {
+        const {
+            assert!(O >= 1, "policy observations require a batch axis");
+            assert!(P >= 1, "policy parameters require a batch axis");
+            assert!(A >= 1, "policy actions require a batch axis");
+        }
+        let batch_size = observations.dims()[0];
+        let outputs = self
+            .module
+            .forward(observations)
+            .map_err(ProbabilisticPolicyModelError::ModuleError)?;
+        validate_batch("policy parameters", &outputs, batch_size)?;
+        Ok(outputs)
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ProbabilisticPolicyModelError<DE>
+impl<T: PolicyTypes> Module for ProbabilisticPolicyModel<T>
 where
-    DE: std::fmt::Debug,
+    T::Model: Module,
+    T::Distribution: Clone + fmt::Debug + Send,
 {
-    #[error("policy module failed: {0}")]
-    ModuleError(#[source] candle_core::Error),
+    fn collect_devices(&self, devices: Vec<Device>) -> Vec<Device> {
+        self.module.collect_devices(devices)
+    }
+
+    fn fork(self, device: &Device) -> Self {
+        Self {
+            module: self.module.fork(device),
+            ..self
+        }
+    }
+
+    fn to_device(self, device: &Device) -> Self {
+        Self {
+            module: self.module.to_device(device),
+            ..self
+        }
+    }
+
+    fn train(self) -> Self {
+        Self {
+            module: self.module.train(),
+            ..self
+        }
+    }
+
+    fn valid(&self) -> Self {
+        Self {
+            module: self.module.valid(),
+            distribution: self.distribution.clone(),
+        }
+    }
+
+    fn visit<V: ModuleVisitor>(&self, visitor: &mut V) {
+        self.module.visit(visitor);
+    }
+
+    fn map<M: ModuleMapper>(self, mapper: &mut M) -> Self {
+        Self {
+            module: self.module.map(mapper),
+            ..self
+        }
+    }
+}
+
+/// Preserves the model and distribution error causes and identifies policy tensor contract failures.
+#[derive(Debug, thiserror::Error)]
+pub enum ProbabilisticPolicyModelError<ME, DE> {
+    #[error("policy model execution failed: {0}")]
+    ModuleError(#[source] ME),
     #[error("policy distribution failed: {0}")]
     DistError(#[source] DE),
+    #[error("policy tensor validation failed: {0}")]
+    TensorError(#[from] DistributionTensorError),
 }
 
-impl<DE> From<candle_core::Error> for ProbabilisticPolicyModelError<DE>
-where
-    DE: std::fmt::Debug,
-{
-    fn from(error: candle_core::Error) -> Self {
-        ProbabilisticPolicyModelError::ModuleError(error)
+/// Checks the batch axis of rank-`R` values `[batch_size, ...remaining_axes]` without changing the tensor.
+/// Rank `R` must include a batch axis. Kind, dtype, device, and gradient paths remain unchanged.
+fn validate_batch<const R: usize, K: Basic>(
+    field: &'static str,
+    values: &Tensor<R, K>,
+    batch_size: usize,
+) -> Result<(), DistributionTensorError> {
+    const {
+        assert!(R >= 1, "policy tensors require a batch axis");
     }
+    let actual = values.dims();
+    if actual[0] != batch_size {
+        let mut expected = actual.to_vec();
+        expected[0] = batch_size;
+        return Err(DistributionTensorError::ShapeMismatch {
+            field,
+            expected,
+            actual: actual.to_vec(),
+        });
+    }
+    Ok(())
 }
 
-impl<D> ProbabilisticPolicy for ProbabilisticPolicyModel<D>
+/// Checks rank-`R` float values `[batch_size, ...remaining_axes]` against rank-`P` parameters `[batch_size, ...parameter_shape]`.
+/// Batch size, dtype, and device must match. Remaining axes follow the distribution's contract; no axes or gradients change.
+fn validate_policy_values<const R: usize, const P: usize>(
+    field: &'static str,
+    values: &Tensor<R>,
+    parameters: &Tensor<P>,
+) -> Result<(), DistributionTensorError> {
+    const {
+        assert!(P >= 1, "policy parameters require a batch axis");
+    }
+    validate_batch(field, values, parameters.dims()[0])?;
+    if values.dtype() != parameters.dtype() {
+        return Err(DistributionTensorError::DTypeMismatch {
+            field,
+            expected: parameters.dtype(),
+            actual: values.dtype(),
+        });
+    }
+    if values.device() != parameters.device() {
+        return Err(DistributionTensorError::DeviceMismatch { field });
+    }
+    Ok(())
+}
+
+impl<T, D, E, const O: usize, const P: usize, const A: usize, K: Basic> ProbabilisticPolicy<O, A>
+    for ProbabilisticPolicyModel<T>
 where
-    D: Distribution,
-    <D as Distribution>::Error: std::fmt::Debug,
+    T: PolicyTypes<
+            Distribution = D,
+            Observation = Tensor<O, K>,
+            Parameters = Tensor<P>,
+            Action = Tensor<A>,
+        >,
+    T::Model: Module + Forward<O, P, K, Error = E>,
+    D: Distribution<P, A>,
 {
-    type Error = ProbabilisticPolicyModelError<<D as Distribution>::Error>;
+    type Error = ProbabilisticPolicyModelError<E, D::Error>;
+    type ObservationKind = K;
 
-    /// Maps states `[batch, ...state_shape]` to sampled actions
-    /// `[batch, ...action_shape]`.
-    fn sample(&self, state: &Tensor) -> Result<Tensor, Self::Error> {
-        let outputs = self.outputs(state)?;
-        self.distribution
-            .sample(&outputs)
-            .map_err(ProbabilisticPolicyModelError::DistError)
+    /// Samples rank-`A` actions `[batch_size, ...action_shape]` from rank-`O` observations `[batch_size, ...observation_shape]`.
+    /// The model must preserve batch size. Returned actions share the parameter batch size, floating-point dtype, and device.
+    /// The calculation retains gradient paths supplied by the model and distribution.
+    fn sample(&self, observations: Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
+        let outputs = self.outputs(observations)?;
+        let actions = self
+            .distribution
+            .sample(outputs.clone())
+            .map_err(ProbabilisticPolicyModelError::DistError)?;
+        validate_policy_values("policy samples", &actions, &outputs)?;
+        Ok(actions)
     }
 
-    /// Maps states `[batch, ...state_shape]` to modal actions
-    /// `[batch, ...action_shape]`.
-    fn mode(&self, state: &Tensor) -> Result<Tensor, Self::Error> {
-        let outputs = self.outputs(state)?;
-        self.distribution
-            .mode(&outputs)
-            .map_err(ProbabilisticPolicyModelError::DistError)
+    /// Returns rank-`A` transformed modes `[batch_size, ...action_shape]` from rank-`O` observations `[batch_size, ...observation_shape]`.
+    /// The result preserves batch size and uses the distribution parameters' floating-point dtype and device.
+    fn mode(&self, observations: Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
+        let outputs = self.outputs(observations)?;
+        let actions = self
+            .distribution
+            .mode(outputs.clone())
+            .map_err(ProbabilisticPolicyModelError::DistError)?;
+        validate_policy_values("policy modes", &actions, &outputs)?;
+        Ok(actions)
     }
 
-    /// Evaluates actions `[batch, ...action_shape]` for states
-    /// `[batch, ...state_shape]`, returning two `[batch]` tensors.
+    /// Evaluates rank-`A` actions `[batch_size, ...action_shape]` under parameters produced from rank-`O` batched observations.
+    /// Actions must share parameter batch size, dtype, and device. Returns two `[batch_size]` float tensors with those properties.
+    /// Preserves model and distribution gradient paths; the distribution determines whether entropy is analytic or estimated.
     fn log_prob_and_entropy(
         &self,
-        state: &Tensor,
-        action: &Tensor,
-    ) -> Result<(Tensor, Tensor), Self::Error> {
-        let outputs = self.outputs(state)?;
-        let dist_eval = self
+        observations: Tensor<O, K>,
+        actions: Tensor<A>,
+    ) -> Result<(Tensor<1>, Tensor<1>), Self::Error> {
+        let outputs = self.outputs(observations)?;
+        validate_policy_values("policy actions", &actions, &outputs)?;
+        let evaluation = self
             .distribution
-            .dist_eval(&outputs, action)
+            .dist_eval(outputs.clone(), actions)
             .map_err(ProbabilisticPolicyModelError::DistError)?;
-
-        let log_prob = dist_eval.log_prob().clone();
-        let entropy = dist_eval.entropy().clone();
-        Ok((log_prob, entropy))
+        validate_policy_values("policy log probability", evaluation.log_prob(), &outputs)?;
+        validate_policy_values("policy entropy", evaluation.entropy(), &outputs)?;
+        Ok((evaluation.log_prob().clone(), evaluation.entropy().clone()))
     }
 }
 
-impl<D> ExpectationPolicy for ProbabilisticPolicyModel<D>
+impl<T, D, E, const O: usize, const P: usize, const A: usize, const C: usize, K: Basic>
+    ExpectationPolicy<O, A, C> for ProbabilisticPolicyModel<T>
 where
-    D: DifferentiableExpectation,
-    <D as Distribution>::Error: std::fmt::Debug,
+    T: PolicyTypes<
+            Distribution = D,
+            Observation = Tensor<O, K>,
+            Parameters = Tensor<P>,
+            Action = Tensor<A>,
+        >,
+    T::Model: Module + Forward<O, P, K, Error = E>,
+    D: DifferentiableExpectation<P, A, C>,
 {
-    /// Builds candidates `[batch, candidates, ...action_shape]` for states
-    /// `[batch, ...state_shape]`.
+    type CandidateKind = D::CandidateKind;
+
+    /// Produces rank-`C` candidates `[batch_size, candidate_count, ...action_shape]` from rank-`O` batched observations.
+    /// Log probabilities and weights are `[batch_size, candidate_count]` with the parameters' floating-point dtype and device.
+    /// Candidate kind comes from the distribution. Candidate device and batch size match the parameters; gradient paths remain available.
     fn expectation(
         &self,
-        state: &Tensor,
+        observations: Tensor<O, K>,
         samples: NonZeroUsize,
-    ) -> Result<ExpectationTerms, Self::Error> {
-        let outputs = self.outputs(state)?;
-        self.distribution
-            .expectation(&outputs, samples)
-            .map_err(ProbabilisticPolicyModelError::DistError)
+    ) -> Result<ExpectationTerms<C, Self::CandidateKind>, Self::Error> {
+        const {
+            assert!(C >= 2, "policy candidates require batch and candidate axes");
+        }
+        let outputs = self.outputs(observations)?;
+        let terms = self
+            .distribution
+            .expectation(outputs.clone(), samples)
+            .map_err(ProbabilisticPolicyModelError::DistError)?;
+        validate_batch("policy candidates", terms.actions(), outputs.dims()[0])?;
+        if terms.actions().device() != outputs.device() {
+            return Err(DistributionTensorError::DeviceMismatch {
+                field: "policy candidates",
+            }
+            .into());
+        }
+        validate_policy_values(
+            "candidate log probability",
+            terms.log_probabilities(),
+            &outputs,
+        )?;
+        validate_policy_values("candidate weights", terms.weights(), &outputs)?;
+        Ok(terms)
     }
 
-    /// Computes target entropy for states `[batch, ...state_shape]`.
-    fn default_target_entropy(&self, state: &Tensor) -> Result<f64, Self::Error> {
-        let outputs = self.outputs(state)?.detach();
+    /// Returns scalar target entropy for rank-`O` observations `[batch_size, ...observation_shape]`.
+    /// Detaches rank-`P` distribution parameters before calculating the fixed target; no tensor axes remain in the result.
+    fn default_target_entropy(&self, observations: Tensor<O, K>) -> Result<f64, Self::Error> {
+        let outputs = self.outputs(observations)?.detach();
         self.distribution
             .default_target_entropy(&outputs)
             .map_err(ProbabilisticPolicyModelError::DistError)
@@ -179,494 +415,559 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{distributions::GaussianDistribution, models::MLP};
-    use candle_core::{DType, Device, Tensor};
-    use candle_nn::{Activation, VarBuilder, VarMap};
+    use crate::{
+        distributions::{
+            CategoricalDistribution, GaussianDistribution, GaussianDistributionError,
+            TanhTransform, TransformedDistribution,
+        },
+        models::{MLP, ModelError},
+    };
+    use burn::{
+        nn::{Initializer, Linear},
+        optim::{GradientsParams, SgdConfig},
+        tensor::{DType, Float, Int},
+    };
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
-    fn create_test_policy(
-        input_size: usize,
-        action_size: usize,
-        hidden_sizes: Vec<usize>,
-    ) -> Result<ProbabilisticPolicyModel<GaussianDistribution>, candle_core::Error> {
-        let device = Device::Cpu;
-        let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, DType::F64, &device);
-
-        // Output size is double action_size for mean and std
-        let mlp = MLP::builder()
+    /// Builds a zero-output MLP mapping `[batch_size, input_size]` to `[batch_size, output_size]` on the requested device and dtype.
+    fn zero_model(input_size: usize, output_size: usize, device: &Device, dtype: DType) -> MLP {
+        MLP::builder()
             .input_size(input_size)
-            .output_size(action_size * 2)
-            .vb(vb)
-            .hidden_layer_sizes(hidden_sizes)
-            .activation(Activation::Relu)
-            .build()?;
+            .output_size(output_size)
+            .options((device, dtype))
+            .hidden_layer_sizes(vec![])
+            .output_initializer(Initializer::Zeros)
+            .bias_initializer(Initializer::Zeros)
+            .build()
+            .unwrap()
+    }
 
-        Ok(ProbabilisticPolicyModel::new(mlp))
+    #[derive(Module, Debug)]
+    struct ObservationModel {
+        layer: Linear,
+    }
+
+    impl Forward<4, 2> for ObservationModel {
+        type Error = ModelError;
+
+        /// Maps image observations `[batch_size, 1, 2, 2]` to float parameters `[batch_size, 2]`.
+        /// Combines image axes into four features, preserving dtype, device, and gradient paths.
+        fn forward(&self, observations: Tensor<4>) -> Result<Tensor<2>, ModelError> {
+            if observations.dims()[1..] != [1, 2, 2] {
+                return Err(ModelError::InputFeatures {
+                    expected: 4,
+                    actual: observations.dims()[1..].iter().product(),
+                });
+            }
+            Forward::forward(&self.layer, observations.flatten(1, 3))
+        }
+    }
+
+    impl Forward<2, 2, Int> for ObservationModel {
+        type Error = ModelError;
+
+        /// Casts integer observations `[batch_size, 2]` to the layer's float dtype and returns `[batch_size, 2]`.
+        fn forward(&self, observations: Tensor<2, Int>) -> Result<Tensor<2>, ModelError> {
+            let dtype = self.layer.weight.val().dtype();
+            Forward::forward(&self.layer, observations.float().cast(dtype))
+        }
+    }
+
+    impl Forward<2, 2, burn::tensor::Bool> for ObservationModel {
+        type Error = ModelError;
+
+        /// Casts boolean observations `[batch_size, 2]` to the layer's float dtype and returns `[batch_size, 2]`.
+        fn forward(
+            &self,
+            observations: Tensor<2, burn::tensor::Bool>,
+        ) -> Result<Tensor<2>, ModelError> {
+            let dtype = self.layer.weight.val().dtype();
+            Forward::forward(&self.layer, observations.float().cast(dtype))
+        }
+    }
+
+    #[derive(Module, Debug)]
+    struct OffsetModel {
+        layer: Linear,
+        offset: f64,
+    }
+
+    impl Forward<2, 2> for OffsetModel {
+        type Error = ModelError;
+
+        /// Maps `[batch_size, 2]` observations to `[batch_size, 2]` parameters and adds a fixed offset.
+        /// Preserves dtype, device, and gradients through the owned layer.
+        fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, ModelError> {
+            Ok(Forward::forward(&self.layer, observations)? + self.offset)
+        }
+    }
+
+    #[derive(Module, Debug)]
+    struct WrongBatchModel {
+        layer: Linear,
+    }
+
+    impl Forward<2, 2> for WrongBatchModel {
+        type Error = Infallible;
+
+        /// Returns `[1, 2]` parameters for `[batch_size, 2]` observations to test invalid batch handling.
+        fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, Infallible> {
+            Ok(Tensor::zeros(
+                [1, 2],
+                (&observations.device(), self.layer.weight.val().dtype()),
+            ))
+        }
+    }
+
+    fn observation_model(features: usize, device: &Device, dtype: DType) -> ObservationModel {
+        ObservationModel {
+            layer: Linear {
+                weight: Initializer::Zeros
+                    .init([features, 2], device)
+                    .init_mapper(move |tensor| tensor.cast(dtype)),
+                bias: Some(
+                    Initializer::Zeros
+                        .init([2], device)
+                        .init_mapper(move |tensor| tensor.cast(dtype)),
+                ),
+            },
+        }
     }
 
     #[test]
-    fn configured_distribution_is_stored_by_the_policy() {
-        use crate::distributions::{TanhTransform, TransformedDistribution};
+    fn automatic_constructors_preserve_shapes_dtypes_and_gaussian_statistics() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        for dtype in [DType::F32, DType::F64] {
+            for action_count in [1, 2, 4] {
+                let policy = ProbabilisticPolicyModel::<(_, GaussianDistribution, _)>::new(
+                    zero_model(4, action_count * 2, &device, dtype),
+                );
+                for batch_size in [1, 3, 10] {
+                    let observations = Tensor::zeros([batch_size, 4], (&device, dtype));
+                    let actions = policy.sample(observations.clone()).unwrap();
+                    assert_eq!(actions.dims(), [batch_size, action_count]);
+                    assert_eq!(actions.dtype(), dtype);
+                    let modes = policy.mode(observations.clone()).unwrap();
+                    assert_eq!(modes.abs().max().into_scalar::<f64>(), 0.0);
+                    let (log_prob, entropy) = policy
+                        .log_prob_and_entropy(
+                            observations,
+                            Tensor::zeros([batch_size, action_count], (&device, dtype)),
+                        )
+                        .unwrap();
+                    assert_eq!(log_prob.dims(), [batch_size]);
+                    assert_eq!(entropy.dims(), [batch_size]);
+                    assert_eq!(log_prob.dtype(), dtype);
+                    assert_eq!(entropy.dtype(), dtype);
+                    let expected_log_prob =
+                        -0.5 * action_count as f64 * (2.0 * std::f64::consts::PI).ln();
+                    let expected_entropy =
+                        action_count as f64 * (0.5 * (2.0 * std::f64::consts::PI).ln() + 0.5);
+                    for value in log_prob
+                        .into_data()
+                        .convert::<f64>()
+                        .try_to_vec::<f64>()
+                        .unwrap()
+                    {
+                        assert!((value - expected_log_prob).abs() < 1e-5);
+                    }
+                    for value in entropy
+                        .into_data()
+                        .convert::<f64>()
+                        .try_to_vec::<f64>()
+                        .unwrap()
+                    {
+                        assert!((value - expected_entropy).abs() < 1e-5);
+                    }
+                }
+            }
+        }
+    }
 
-        let device = Device::Cpu;
-        let varmap = VarMap::new();
-        let mlp = MLP::builder()
-            .input_size(2)
-            .output_size(2)
-            .vb(VarBuilder::from_varmap(&varmap, DType::F32, &device))
-            .hidden_layer_sizes(vec![4])
-            .build()
+    struct PolicyOwner<T: PolicyTypes> {
+        policy: ProbabilisticPolicyModel<T>,
+    }
+
+    #[test]
+    fn type_group_is_inferred_for_an_owning_consumer() {
+        let device = Device::flex();
+        let owner = PolicyOwner {
+            policy: ProbabilisticPolicyModel::with_distribution(
+                zero_model(2, 2, &device, DType::F64),
+                GaussianDistribution::default(),
+            ),
+        };
+        let modes = owner
+            .policy
+            .mode(Tensor::ones([3, 2], (&device, DType::F64)))
             .unwrap();
+        assert_eq!(modes.dims(), [3, 1]);
+        assert_eq!(modes.dtype(), DType::F64);
+        assert_eq!(
+            owner.policy.module().output_layer.weight.val().dims(),
+            [2, 2]
+        );
+        assert_eq!(owner.policy.clone().num_params(), owner.policy.num_params());
+    }
+
+    #[test]
+    fn configured_distribution_preserves_multidimensional_actions_and_candidates() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
         let policy = ProbabilisticPolicyModel::with_distribution(
-            mlp,
+            zero_model(4, 12, &device, DType::F64),
+            GaussianDistribution::<3, 4>::new([2, 3]).unwrap(),
+        );
+        let observations = Tensor::ones([3, 4], (&device, DType::F64)).require_grad();
+        let actions = policy.sample(observations.clone()).unwrap();
+        assert_eq!(actions.dims(), [3, 2, 3]);
+        let (log_prob, entropy) = policy
+            .log_prob_and_entropy(observations.clone(), actions.detach())
+            .unwrap();
+        assert_eq!(log_prob.dims(), [3]);
+        assert_eq!(entropy.dims(), [3]);
+        let terms = policy
+            .expectation(observations.clone(), NonZeroUsize::new(4).unwrap())
+            .unwrap();
+        assert_eq!(terms.actions().dims(), [3, 4, 2, 3]);
+        assert_eq!(terms.log_probabilities().dims(), [3, 4]);
+        assert_eq!(terms.weights().dims(), [3, 4]);
+        assert_eq!(terms.actions().dtype(), DType::F64);
+        let gradients = terms.actions().clone().sum().backward();
+        assert!(observations.grad(&gradients).is_some());
+        assert_eq!(policy.default_target_entropy(observations).unwrap(), -6.0);
+    }
+
+    #[test]
+    fn categorical_candidates_have_integer_kind_and_independent_rank() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let policy = ProbabilisticPolicyModel::with_distribution(
+            zero_model(2, 4, &device, DType::F64),
+            CategoricalDistribution,
+        );
+        let observations = Tensor::zeros([3, 2], (&device, DType::F64));
+        assert_eq!(policy.sample(observations.clone()).unwrap().dims(), [3, 4]);
+        let terms: ExpectationTerms<2, Int> = policy
+            .expectation(observations.clone(), NonZeroUsize::MIN)
+            .unwrap();
+        assert_eq!(terms.actions().dims(), [3, 4]);
+        assert_eq!(
+            terms
+                .actions()
+                .clone()
+                .into_data()
+                .convert::<i64>()
+                .try_to_vec::<i64>()
+                .unwrap(),
+            vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
+        );
+        assert_eq!(
+            terms
+                .weights()
+                .clone()
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap(),
+            vec![0.25; 12]
+        );
+        assert!(
+            (policy.default_target_entropy(observations).unwrap() - 0.98 * 4.0f64.ln()).abs()
+                < 1e-12
+        );
+    }
+
+    #[test]
+    fn transformed_policy_preserves_bounds_and_parameter_gradients() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let policy = ProbabilisticPolicyModel::with_distribution(
+            zero_model(2, 4, &device, DType::F64),
             TransformedDistribution::new(GaussianDistribution::default(), TanhTransform),
         );
-        let actions = policy
-            .sample(&Tensor::zeros((3, 2), DType::F32, &device).unwrap())
-            .unwrap();
-        assert_eq!(actions.dims(), &[3, 1]);
-        assert!(
-            actions
-                .abs()
-                .unwrap()
-                .max_all()
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap()
-                <= 1.0
-        );
-    }
-
-    fn create_test_state(
-        batch_size: usize,
-        state_dim: usize,
-    ) -> Result<Tensor, candle_core::Error> {
-        Tensor::randn(0.0, 1.0, (batch_size, state_dim), &Device::Cpu)
-    }
-
-    #[test]
-    fn test_policy_creation() {
-        let policy = create_test_policy(4, 2, vec![32, 32]);
-        assert!(policy.is_ok(), "Failed to create probabilistic policy");
-    }
-
-    #[test]
-    fn test_sample_action_shape() {
-        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
-        let state = create_test_state(1, 4).unwrap();
-
-        let action = policy.sample(&state).unwrap();
-
-        // Action should have shape [batch_size, action_dim]
-        assert_eq!(action.dims(), &[1, 2]);
-    }
-
-    #[test]
-    fn test_sample_batch_consistency() {
-        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
-        let batch_sizes = vec![1, 5, 10];
-
-        for batch_size in batch_sizes {
-            let state = create_test_state(batch_size, 4).unwrap();
-            let action = policy.sample(&state).unwrap();
-
-            assert_eq!(
-                action.dims(),
-                &[batch_size, 2],
-                "Action shape incorrect for batch size {}",
-                batch_size
-            );
-        }
-    }
-
-    #[test]
-    fn test_log_prob_and_entropy_shape() {
-        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
-        let batch_size = 5;
-        let state = create_test_state(batch_size, 4).unwrap();
-        let action = create_test_state(batch_size, 2).unwrap();
-
-        let (log_prob, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
-
-        // Both should have shape [batch_size]
-        assert_eq!(log_prob.dims(), &[batch_size]);
-        assert_eq!(entropy.dims(), &[batch_size]);
-    }
-
-    #[test]
-    fn test_entropy_is_positive() {
-        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
-        let state = create_test_state(1, 4).unwrap();
-        let action = create_test_state(1, 2).unwrap();
-
-        let (_, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
-        let entropy_val = entropy.to_vec1::<f64>().unwrap()[0];
-
-        // Entropy should generally be positive for continuous distributions
-        assert!(
-            entropy_val.is_finite(),
-            "Entropy is not finite: {}",
-            entropy_val
-        );
-        assert!(
-            entropy_val > -100.0,
-            "Entropy is not reasonable: {}",
-            entropy_val
-        );
-        assert!(entropy_val < 100.0, "Entropy is too large: {}", entropy_val);
-    }
-
-    #[test]
-    fn test_log_prob_is_finite() {
-        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
-        let state = create_test_state(3, 4).unwrap();
-        let action = create_test_state(3, 2).unwrap();
-
-        let (log_prob, _) = policy.log_prob_and_entropy(&state, &action).unwrap();
-        let log_prob_vals = log_prob.to_vec1::<f64>().unwrap();
-
-        for (i, val) in log_prob_vals.iter().enumerate() {
-            assert!(
-                val.is_finite(),
-                "Log probability {} is not finite: {}",
-                i,
-                val
-            );
-        }
-    }
-
-    #[test]
-    fn test_deterministic_with_same_state() {
-        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
-        let state = Tensor::zeros((1, 4), candle_core::DType::F64, &Device::Cpu).unwrap();
-        let action = Tensor::zeros((1, 2), candle_core::DType::F64, &Device::Cpu).unwrap();
-
-        // Multiple calls with same input should give same log_prob and entropy
-        let (log_prob1, entropy1) = policy.log_prob_and_entropy(&state, &action).unwrap();
-        let (log_prob2, entropy2) = policy.log_prob_and_entropy(&state, &action).unwrap();
-
-        let log_prob1_val = log_prob1.to_vec1::<f64>().unwrap()[0];
-        let log_prob2_val = log_prob2.to_vec1::<f64>().unwrap()[0];
-        let entropy1_val = entropy1.to_vec1::<f64>().unwrap()[0];
-        let entropy2_val = entropy2.to_vec1::<f64>().unwrap()[0];
-
-        assert!(
-            (log_prob1_val - log_prob2_val).abs() < 1e-6,
-            "Log probabilities should be deterministic"
-        );
-        assert!(
-            (entropy1_val - entropy2_val).abs() < 1e-6,
-            "Entropies should be deterministic"
-        );
-    }
-
-    #[test]
-    fn test_different_action_sizes() {
-        let action_sizes = vec![1, 2, 4, 8];
-
-        for action_size in action_sizes {
-            let policy = create_test_policy(4, action_size, vec![32, 32]).unwrap();
-            let state = create_test_state(1, 4).unwrap();
-            let action = policy.sample(&state).unwrap();
-
-            assert_eq!(
-                action.dims(),
-                &[1, action_size],
-                "Action size incorrect for action_size {}",
-                action_size
-            );
-        }
-    }
-
-    #[test]
-    fn configured_gaussian_policy_preserves_multidimensional_actions() {
-        let device = Device::Cpu;
-        let varmap = VarMap::new();
-        let actor = MLP::builder()
-            .input_size(4)
-            .output_size(12)
-            .vb(VarBuilder::from_varmap(&varmap, DType::F64, &device))
-            .hidden_layer_sizes(vec![8])
-            .build()
-            .unwrap();
-        let policy = ProbabilisticPolicyModel::with_distribution(
-            actor,
-            GaussianDistribution::new(vec![2, 3]).unwrap(),
-        );
-        let states = create_test_state(5, 4).unwrap();
-        let actions = policy.sample(&states).unwrap();
-        assert_eq!(actions.dims(), &[5, 2, 3]);
-
-        let (log_probabilities, entropies) =
-            policy.log_prob_and_entropy(&states, &actions).unwrap();
-        assert_eq!(log_probabilities.dims(), &[5]);
-        assert_eq!(entropies.dims(), &[5]);
-
+        let observations = Tensor::ones([3, 2], (&device, DType::F64));
         let terms = policy
-            .expectation(&states, NonZeroUsize::new(2).unwrap())
+            .expectation(observations, NonZeroUsize::new(4).unwrap())
             .unwrap();
-        assert_eq!(terms.actions().dims(), &[5, 2, 2, 3]);
-        assert_eq!(terms.log_probabilities().dims(), &[5, 2]);
+        assert!(terms.actions().clone().abs().max().into_scalar::<f64>() <= 1.0);
+        let gradients = terms.log_probabilities().clone().sum().backward();
+        let gradients = GradientsParams::from_grads(gradients, &policy);
+        let mut optimizer = SgdConfig::new().init();
+        let policy = optimizer.step(0.01, policy, gradients);
+        let gradients = policy
+            .mode(Tensor::ones([3, 2], (&device, DType::F64)))
+            .unwrap()
+            .sum()
+            .backward();
+        assert!(
+            policy
+                .module()
+                .output_layer
+                .weight
+                .val()
+                .grad(&gradients)
+                .is_some()
+        );
     }
 
     #[test]
-    fn test_log_prob_and_entropy_are_finite_for_default_network() {
-        let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
-        let state = create_test_state(1, 4).unwrap();
-        let action = create_test_state(1, 2).unwrap();
-
-        let (log_prob, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
-        assert!(log_prob.to_vec1::<f64>().unwrap()[0].is_finite());
-        assert!(entropy.to_vec1::<f64>().unwrap()[0].is_finite());
-    }
-
-    #[test]
-    fn test_gradient_flow() {
-        // Test that the policy can be used in a gradient computation context
-        let device = Device::Cpu;
-        let varmap = VarMap::new();
-        let vb = VarBuilder::from_varmap(&varmap, DType::F64, &device);
-
-        let mlp = MLP::builder()
-            .input_size(4)
-            .output_size(4)
-            .vb(vb)
-            .hidden_layer_sizes(vec![16])
-            .activation(Activation::Relu)
-            .build()
+    fn custom_models_accept_image_and_integer_observations() {
+        let device = Device::flex();
+        let image_policy = ProbabilisticPolicyModel::with_distribution(
+            observation_model(4, &device, DType::F64),
+            GaussianDistribution::default(),
+        );
+        assert_eq!(
+            image_policy
+                .mode(Tensor::<4>::zeros([3, 1, 2, 2], (&device, DType::F64)))
+                .unwrap()
+                .dims(),
+            [3, 1]
+        );
+        assert_eq!(image_policy.num_params(), 10);
+        let integer_policy = ProbabilisticPolicyModel::with_distribution(
+            observation_model(2, &device, DType::F64),
+            GaussianDistribution::default(),
+        );
+        let actions = integer_policy
+            .mode(Tensor::<2, Int>::zeros([3, 2], &device))
             .unwrap();
-
-        let policy: ProbabilisticPolicyModel<GaussianDistribution> =
-            ProbabilisticPolicyModel::new(mlp);
-        let state = create_test_state(2, 4).unwrap();
-
-        // Sample action
-        let action = policy.sample(&state).unwrap();
-
-        // Compute log probability
-        let (log_prob, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
-
-        // This should work without errors - just verify no panic occurs
-        let _ = (log_prob.mean(0).unwrap(), entropy.mean(0).unwrap());
+        assert_eq!(actions.dims(), [3, 1]);
+        assert_eq!(actions.dtype(), DType::F64);
     }
 
     #[test]
-    fn fuzz_log_prob_and_entropy() {
-        const FUZZ_ITERATIONS: usize = 30;
-
-        for i in 0..FUZZ_ITERATIONS {
-            let state_dim = 2 + (i % 8); // 2-9
-            let action_dim = 1 + (i % 5); // 1-5
-            let batch_size = 1 + (i % 15); // 1-15
-
-            let policy = create_test_policy(state_dim, action_dim, vec![32, 32]).unwrap();
-            let state = create_test_state(batch_size, state_dim).unwrap();
-            let action = create_test_state(batch_size, action_dim).unwrap();
-
-            let (log_prob, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
-
-            // Verify shapes
-            assert_eq!(
-                log_prob.dims(),
-                &[batch_size],
-                "Iteration {}: Log prob shape incorrect",
-                i
-            );
-            assert_eq!(
-                entropy.dims(),
-                &[batch_size],
-                "Iteration {}: Entropy shape incorrect",
-                i
-            );
-
-            // Verify values are finite and reasonable
-            let log_prob_vals = log_prob.to_vec1::<f64>().unwrap();
-            let entropy_vals = entropy.to_vec1::<f64>().unwrap();
-
-            for (j, val) in log_prob_vals.iter().enumerate() {
-                assert!(
-                    val.is_finite(),
-                    "Iteration {}, sample {}: Log prob is not finite: {}",
-                    i,
-                    j,
-                    val
-                );
-            }
-
-            for (j, val) in entropy_vals.iter().enumerate() {
-                assert!(
-                    val.is_finite(),
-                    "Iteration {}, sample {}: Entropy is not finite: {}",
-                    i,
-                    j,
-                    val
-                );
-                assert!(
-                    *val > -100.0,
-                    "Iteration {}, sample {}: Entropy too negative: {}",
-                    i,
-                    j,
-                    val
-                );
-            }
-        }
+    fn boolean_observation_model_converts_explicitly() {
+        let device = Device::flex();
+        let policy = ProbabilisticPolicyModel::with_distribution(
+            observation_model(2, &device, DType::F32),
+            GaussianDistribution::default(),
+        );
+        assert_eq!(
+            policy
+                .mode(Tensor::<2, burn::tensor::Bool>::from_data(
+                    [[true, false]],
+                    &device
+                ))
+                .unwrap()
+                .dims(),
+            [1, 1]
+        );
     }
 
     #[test]
-    fn fuzz_different_architectures() {
-        const FUZZ_ITERATIONS: usize = 25;
-
-        for i in 0..FUZZ_ITERATIONS {
-            let state_dim = 2 + (i % 6); // 2-7
-            let action_dim = 1 + (i % 4); // 1-4
-
-            // Vary architecture
-            let hidden_layers = match i % 4 {
-                0 => vec![16],
-                1 => vec![32, 16],
-                2 => vec![64, 32, 16],
-                _ => vec![128, 64],
-            };
-
-            let policy = create_test_policy(state_dim, action_dim, hidden_layers).unwrap();
-            let state = create_test_state(5, state_dim).unwrap();
-
-            // Test sampling
-            let action = policy.sample(&state).unwrap();
-            assert_eq!(
-                action.dims(),
-                &[5, action_dim],
-                "Iteration {}: Sampling failed",
-                i
-            );
-
-            // Test log prob computation
-            let result = policy.log_prob_and_entropy(&state, &action);
-            assert!(
-                result.is_ok(),
-                "Iteration {}: Log prob computation failed: {:?}",
-                i,
-                result.err()
-            );
-        }
+    fn custom_model_uses_updated_owned_parameters_and_native_records() {
+        let device = Device::flex().autodiff();
+        let offset = 0.75;
+        let policy = ProbabilisticPolicyModel::with_distribution(
+            OffsetModel {
+                layer: observation_model(2, &device, DType::F64).layer,
+                offset,
+            },
+            GaussianDistribution::default(),
+        );
+        assert!(format!("{policy:?}").contains("ProbabilisticPolicyModel"));
+        let observations = Tensor::ones([1, 2], (&device, DType::F64));
+        let before = policy.mode(observations.clone()).unwrap();
+        assert!((before.clone().into_scalar::<f64>() - offset).abs() < 1e-12);
+        let gradients = GradientsParams::from_grads(before.sum().backward(), &policy);
+        let mut optimizer = SgdConfig::new().init();
+        let policy = optimizer.step(0.1, policy, gradients);
+        let expected = offset - 0.3;
+        assert!(
+            (policy
+                .mode(observations.clone())
+                .unwrap()
+                .into_scalar::<f64>()
+                - expected)
+                .abs()
+                < 1e-12
+        );
+        let record = policy.clone().into_record();
+        let restored = ProbabilisticPolicyModel::with_distribution(
+            OffsetModel {
+                layer: observation_model(2, &device, DType::F64).layer,
+                offset,
+            },
+            GaussianDistribution::default(),
+        )
+        .try_load_record(record)
+        .unwrap();
+        assert!(
+            (restored
+                .mode(observations.clone())
+                .unwrap()
+                .into_scalar::<f64>()
+                - expected)
+                .abs()
+                < 1e-12
+        );
+        let inference = policy.valid();
+        assert!(
+            !inference
+                .mode(observations.clone().without_autodiff())
+                .unwrap()
+                .is_autodiff()
+        );
+        let trained = inference.train();
+        let gradients = trained.mode(observations).unwrap().sum().backward();
+        assert!(
+            trained
+                .module()
+                .layer
+                .weight
+                .val()
+                .grad(&gradients)
+                .is_some()
+        );
     }
 
     #[test]
-    fn fuzz_numerical_stability() {
-        const FUZZ_ITERATIONS: usize = 40;
-
-        for i in 0..FUZZ_ITERATIONS {
-            let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
-
-            // Create states with varying magnitudes to test numerical stability
-            let scale = match i % 4 {
-                0 => 0.01,
-                1 => 1.0,
-                2 => 5.0,
-                _ => 10.0,
-            };
-
-            let mut state = create_test_state(3, 4).unwrap();
-            state = (state * scale).unwrap();
-
-            let mut action = create_test_state(3, 2).unwrap();
-            action = (action * (scale * 0.1)).unwrap();
-
-            // This should not crash or produce NaN/Inf values
-            let result = policy.log_prob_and_entropy(&state, &action);
-            assert!(
-                result.is_ok(),
-                "Iteration {} (scale={}): Computation failed: {:?}",
-                i,
-                scale,
-                result.err()
-            );
-
-            if let Ok((log_prob, entropy)) = result {
-                let log_prob_vals = log_prob.to_vec1::<f64>().unwrap();
-                let entropy_vals = entropy.to_vec1::<f64>().unwrap();
-
-                for val in log_prob_vals {
-                    assert!(
-                        val.is_finite(),
-                        "Iteration {} (scale={}): Log prob not finite: {}",
-                        i,
-                        scale,
-                        val
-                    );
+    fn errors_distinguish_model_distribution_and_tensor_contract_failures() {
+        let device = Device::flex();
+        let policy = ProbabilisticPolicyModel::with_distribution(
+            zero_model(2, 2, &device, DType::F64),
+            GaussianDistribution::default(),
+        );
+        assert!(matches!(
+            policy.mode(Tensor::zeros([3, 1], (&device, DType::F64))),
+            Err(ProbabilisticPolicyModelError::ModuleError(
+                ModelError::InputFeatures { .. }
+            ))
+        ));
+        let observations = Tensor::zeros([3, 2], (&device, DType::F64));
+        assert!(matches!(
+            policy.log_prob_and_entropy(
+                observations.clone(),
+                Tensor::zeros([1, 1], (&device, DType::F64))
+            ),
+            Err(ProbabilisticPolicyModelError::TensorError(
+                DistributionTensorError::ShapeMismatch {
+                    field: "policy actions",
+                    ..
                 }
-
-                for val in entropy_vals {
-                    assert!(
-                        val.is_finite(),
-                        "Iteration {} (scale={}): Entropy not finite: {}",
-                        i,
-                        scale,
-                        val
-                    );
+            ))
+        ));
+        assert!(matches!(
+            policy.log_prob_and_entropy(observations, Tensor::zeros([3, 1], &device)),
+            Err(ProbabilisticPolicyModelError::TensorError(
+                DistributionTensorError::DTypeMismatch { .. }
+            ))
+        ));
+        let bad_distribution = ProbabilisticPolicyModel::with_distribution(
+            zero_model(2, 3, &device, DType::F32),
+            GaussianDistribution::default(),
+        );
+        assert!(matches!(
+            bad_distribution.mode(Tensor::zeros([3, 2], &device)),
+            Err(ProbabilisticPolicyModelError::DistError(
+                GaussianDistributionError::InvalidOutputWidth { output_width: 3 }
+            ))
+        ));
+        let wrong_batch = ProbabilisticPolicyModel::with_distribution(
+            WrongBatchModel {
+                layer: observation_model(2, &device, DType::F32).layer,
+            },
+            GaussianDistribution::default(),
+        );
+        assert!(matches!(
+            wrong_batch.mode(Tensor::zeros([3, 2], &device)),
+            Err(ProbabilisticPolicyModelError::TensorError(
+                DistributionTensorError::ShapeMismatch {
+                    field: "policy parameters",
+                    ..
                 }
-            }
+            ))
+        ));
+    }
+
+    #[derive(Clone, Debug)]
+    struct EntropyProbe {
+        detached: Arc<AtomicBool>,
+    }
+
+    impl Distribution for EntropyProbe {
+        type Error = Infallible;
+
+        /// Returns rank-2 parameters `[batch_size, features]` unchanged as the action fixture, preserving dtype and device.
+        fn sample(&self, outputs: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+            Ok(outputs)
+        }
+
+        /// Returns rank-2 parameters `[batch_size, features]` unchanged as the mode fixture, preserving dtype and device.
+        fn mode(&self, outputs: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+            Ok(outputs)
+        }
+
+        /// Evaluates fixture actions `[batch_size, features]` and returns sums `[batch_size]` with the parameters' dtype and device.
+        fn dist_eval(
+            &self,
+            outputs: Tensor<2>,
+            _actions: Tensor<2>,
+        ) -> Result<crate::distributions::DistEval, Self::Error> {
+            let sums = outputs.sum_dim(1).squeeze_dim(1);
+            Ok(crate::distributions::DistEval::new(sums.clone(), sums).unwrap())
+        }
+    }
+
+    impl DifferentiableExpectation for EntropyProbe {
+        type CandidateKind = Float;
+
+        /// Adds a size-one candidate axis to `[batch_size, features]`, returning `[batch_size, 1, features]` and statistics `[batch_size, 1]`.
+        fn expectation(
+            &self,
+            outputs: Tensor<2>,
+            _samples: NonZeroUsize,
+        ) -> Result<ExpectationTerms, Self::Error> {
+            let batch_size = outputs.dims()[0];
+            let options = (&outputs.device(), outputs.dtype());
+            Ok(ExpectationTerms::new(
+                outputs.clone().unsqueeze_dim(1),
+                Tensor::zeros([batch_size, 1], options),
+                Tensor::ones([batch_size, 1], options),
+            )
+            .unwrap())
+        }
+
+        /// Records whether `[batch_size, features]` outputs are detached, then returns a scalar target.
+        fn default_target_entropy(&self, outputs: &Tensor<2>) -> Result<f64, Self::Error> {
+            self.detached
+                .store(!outputs.is_tracked(), Ordering::Relaxed);
+            Ok(-1.0)
         }
     }
 
     #[test]
-    fn fuzz_batch_size_stress_test() {
-        const FUZZ_ITERATIONS: usize = 20;
-
-        for i in 0..FUZZ_ITERATIONS {
-            // Test with various batch sizes including edge cases
-            let batch_size = match i % 6 {
-                0 => 1,
-                1 => 2,
-                2 => 5,
-                3 => 10,
-                4 => 50,
-                _ => 100,
-            };
-
-            let policy = create_test_policy(4, 2, vec![32, 32]).unwrap();
-            let state = create_test_state(batch_size, 4).unwrap();
-
-            // Test sampling with large batches
-            let action = policy.sample(&state).unwrap();
-            assert_eq!(
-                action.dims(),
-                &[batch_size, 2],
-                "Iteration {}: Batch size {} failed",
-                i,
-                batch_size
-            );
-
-            // Test log prob computation
-            let (log_prob, entropy) = policy.log_prob_and_entropy(&state, &action).unwrap();
-
-            assert_eq!(
-                log_prob.dims(),
-                &[batch_size],
-                "Iteration {}: Log prob batch size incorrect",
-                i
-            );
-            assert_eq!(
-                entropy.dims(),
-                &[batch_size],
-                "Iteration {}: Entropy batch size incorrect",
-                i
-            );
-
-            // Verify all values are finite
-            let log_prob_vals = log_prob.to_vec1::<f64>().unwrap();
-            let entropy_vals = entropy.to_vec1::<f64>().unwrap();
-
-            assert!(
-                log_prob_vals.iter().all(|v| v.is_finite()),
-                "Iteration {}: Some log prob values not finite",
-                i
-            );
-            assert!(
-                entropy_vals.iter().all(|v| v.is_finite()),
-                "Iteration {}: Some entropy values not finite",
-                i
-            );
-        }
+    fn target_entropy_detaches_outputs_without_freezing_model_parameters() {
+        let device = Device::flex().autodiff();
+        let detached = Arc::new(AtomicBool::new(false));
+        let model = zero_model(2, 2, &device, DType::F32);
+        let parameter = model.output_layer.weight.val();
+        let policy = ProbabilisticPolicyModel::with_distribution(
+            model,
+            EntropyProbe {
+                detached: detached.clone(),
+            },
+        );
+        assert_eq!(
+            policy
+                .default_target_entropy(Tensor::ones([1, 2], &device))
+                .unwrap(),
+            -1.0
+        );
+        assert!(detached.load(Ordering::Relaxed));
+        let gradients = policy
+            .mode(Tensor::ones([1, 2], &device))
+            .unwrap()
+            .sum()
+            .backward();
+        assert!(parameter.grad(&gradients).is_some());
     }
 }
