@@ -117,13 +117,10 @@ fn validate_activation(activation: &Activation, widths: &[usize]) -> Result<(), 
 impl Forward<2, 2> for Activation {
     type Error = ModelError;
 
-    /// Applies an activation to `[batch_size, features]` and preserves both axes, dtype, device, and gradient paths.
-    /// Learned activation parameters must match the input dtype and device. PRelu accepts 1 or `features` parameters.
-    /// SwiGlu is not accepted because its projection can change the feature count.
+    /// Maps `[batch_size, input_features]` to `[batch_size, output_features]`, preserving batch size, dtype, device, and gradient paths.
+    /// Learned activation parameters must match the input dtype and device. PRelu accepts 1 or `input_features` parameters.
+    /// SwiGlu uses its configured input and output feature counts; other variants preserve the feature count.
     fn forward(&self, input: Tensor<2>) -> Result<Tensor<2>, ModelError> {
-        if matches!(self, Activation::SwiGlu(_)) {
-            return Err(ModelError::ProjectedActivation);
-        }
         if let Activation::PRelu(layer) = self {
             validate_activation(self, &[input.dims()[1]])?;
             let alpha = layer.alpha.val();
@@ -518,10 +515,31 @@ impl Forward<2, 2> for DuelingMLP {
 mod tests {
     use super::*;
     use burn::{
-        nn::{PReluConfig, Tanh},
+        nn::{PReluConfig, SwiGluConfig, Tanh},
         optim::{GradientsParams, SgdConfig},
         tensor::Device,
     };
+
+    #[test]
+    fn swiglu_forward_changes_feature_count_and_preserves_gradients() {
+        let device = Device::flex().autodiff();
+        let layer = SwiGluConfig::new(4, 3)
+            .with_initializer(Initializer::Constant { value: 0.5 })
+            .init(&device);
+        let activation = Activation::SwiGlu(layer);
+        let input = Tensor::<2>::ones([2, 4], &device).require_grad();
+        let output = Forward::forward(&activation, input.clone()).unwrap();
+        assert_eq!(output.dims(), [2, 3]);
+        let expected = 4.0 / (1.0 + (-2.0f64).exp());
+        assert!((output.clone().mean().into_scalar::<f64>() - expected).abs() < 1e-6);
+        let gradients = output.sum().backward();
+        assert!(input.grad(&gradients).is_some());
+        let Activation::SwiGlu(layer) = activation else {
+            unreachable!();
+        };
+        assert!(layer.linear_inner.weight.val().grad(&gradients).is_some());
+        assert!(layer.linear_outer.weight.val().grad(&gradients).is_some());
+    }
 
     #[test]
     fn mlp_preserves_dtype_shape_and_gradients() {
