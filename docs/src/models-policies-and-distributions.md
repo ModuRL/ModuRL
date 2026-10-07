@@ -80,6 +80,8 @@ The group does not remove the underlying type information. Fully explicit policy
 The policy implements `ProbabilisticPolicy<O, A>`. Its `sample` and `mode`
 operations pass model outputs directly to the distribution. Its
 `log_prob_and_entropy` operation calls `D::dist_eval` and returns two `[batch_size]` tensors.
+The policy trusts callers, models, and distributions to follow their documented tensor contracts.
+It does not check input compatibility or validate component outputs.
 
 `Distribution` is a public trait. ModuRL currently supplies
 `CategoricalDistribution` and `GaussianDistribution`, but applications can add
@@ -91,7 +93,7 @@ let policy = ProbabilisticPolicyModel::<(_, MyDistribution, _)>::new(actor);
 
 A custom `Distribution<P, A>` implementation provides `sample`, `mode`,
 `dist_eval`, and an associated `Error` type. It documents its parameter and action layouts.
-Ranks are checked at compile time. Dynamic dimensions, dtypes, and devices need runtime validation.
+Ranks are checked at compile time. Callers must supply the documented dimensions, dtypes, and devices.
 Its action representation must match the chosen `ActionMap` input.
 
 ## Spaces Produce Environment Actions

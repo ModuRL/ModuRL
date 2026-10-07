@@ -6,9 +6,7 @@ use burn::{
 };
 
 use crate::{
-    distributions::{
-        DifferentiableExpectation, Distribution, DistributionTensorError, ExpectationTerms,
-    },
+    distributions::{DifferentiableExpectation, Distribution, ExpectationTerms},
     models::Forward,
 };
 
@@ -94,6 +92,7 @@ impl<M: fmt::Debug, D: fmt::Debug, const O: usize, const P: usize, const A: usiz
 /// Stores both components directly. The tensor signature describes types without storing tensor values.
 /// Every model implements both Burn's `Module` and the tensor execution contract `Forward`.
 /// Burn parameter traversal, optimizer updates, and records visit only the owned model.
+/// Callers and components must follow the documented tensor contracts; the policy does not validate their tensors.
 #[derive(Debug)]
 pub struct ProbabilisticPolicyModel<T: PolicyTypes> {
     module: T::Model,
@@ -169,7 +168,7 @@ where
     D: Distribution<P, A>,
 {
     /// Maps rank-`O` observations `[batch_size, ...observation_shape]` to rank-`P` float parameters.
-    /// Checks that the model preserves batch size; dtype, device, and gradient behavior remain under its control.
+    /// The model must preserve batch size; dtype, device, and gradient behavior remain under its control.
     fn outputs(
         &self,
         observations: Tensor<O, K>,
@@ -179,13 +178,9 @@ where
             assert!(P >= 1, "policy parameters require a batch axis");
             assert!(A >= 1, "policy actions require a batch axis");
         }
-        let batch_size = observations.dims()[0];
-        let outputs = self
-            .module
+        self.module
             .forward(observations)
-            .map_err(ProbabilisticPolicyModelError::ModuleError)?;
-        validate_batch("policy parameters", &outputs, batch_size)?;
-        Ok(outputs)
+            .map_err(ProbabilisticPolicyModelError::ModuleError)
     }
 }
 
@@ -238,62 +233,13 @@ where
     }
 }
 
-/// Preserves the model and distribution error causes and identifies policy tensor contract failures.
+/// Preserves the model and distribution error causes.
 #[derive(Debug, thiserror::Error)]
 pub enum ProbabilisticPolicyModelError<ME, DE> {
     #[error("policy model execution failed: {0}")]
     ModuleError(#[source] ME),
     #[error("policy distribution failed: {0}")]
     DistError(#[source] DE),
-    #[error("policy tensor validation failed: {0}")]
-    TensorError(#[from] DistributionTensorError),
-}
-
-/// Checks the batch axis of rank-`R` values `[batch_size, ...remaining_axes]` without changing the tensor.
-/// Rank `R` must include a batch axis. Kind, dtype, device, and gradient paths remain unchanged.
-fn validate_batch<const R: usize, K: Basic>(
-    field: &'static str,
-    values: &Tensor<R, K>,
-    batch_size: usize,
-) -> Result<(), DistributionTensorError> {
-    const {
-        assert!(R >= 1, "policy tensors require a batch axis");
-    }
-    let actual = values.dims();
-    if actual[0] != batch_size {
-        let mut expected = actual.to_vec();
-        expected[0] = batch_size;
-        return Err(DistributionTensorError::ShapeMismatch {
-            field,
-            expected,
-            actual: actual.to_vec(),
-        });
-    }
-    Ok(())
-}
-
-/// Checks rank-`R` float values `[batch_size, ...remaining_axes]` against rank-`P` parameters `[batch_size, ...parameter_shape]`.
-/// Batch size, dtype, and device must match. Remaining axes follow the distribution's contract; no axes or gradients change.
-fn validate_policy_values<const R: usize, const P: usize>(
-    field: &'static str,
-    values: &Tensor<R>,
-    parameters: &Tensor<P>,
-) -> Result<(), DistributionTensorError> {
-    const {
-        assert!(P >= 1, "policy parameters require a batch axis");
-    }
-    validate_batch(field, values, parameters.dims()[0])?;
-    if values.dtype() != parameters.dtype() {
-        return Err(DistributionTensorError::DTypeMismatch {
-            field,
-            expected: parameters.dtype(),
-            actual: values.dtype(),
-        });
-    }
-    if values.device() != parameters.device() {
-        return Err(DistributionTensorError::DeviceMismatch { field });
-    }
-    Ok(())
 }
 
 impl<T, D, E, const O: usize, const P: usize, const A: usize, K: Basic> ProbabilisticPolicy<O, A>
@@ -316,24 +262,18 @@ where
     /// The calculation retains gradient paths supplied by the model and distribution.
     fn sample(&self, observations: Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
         let outputs = self.outputs(observations)?;
-        let actions = self
-            .distribution
-            .sample(outputs.clone())
-            .map_err(ProbabilisticPolicyModelError::DistError)?;
-        validate_policy_values("policy samples", &actions, &outputs)?;
-        Ok(actions)
+        self.distribution
+            .sample(outputs)
+            .map_err(ProbabilisticPolicyModelError::DistError)
     }
 
     /// Returns rank-`A` transformed modes `[batch_size, ...action_shape]` from rank-`O` observations `[batch_size, ...observation_shape]`.
     /// The result preserves batch size and uses the distribution parameters' floating-point dtype and device.
     fn mode(&self, observations: Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
         let outputs = self.outputs(observations)?;
-        let actions = self
-            .distribution
-            .mode(outputs.clone())
-            .map_err(ProbabilisticPolicyModelError::DistError)?;
-        validate_policy_values("policy modes", &actions, &outputs)?;
-        Ok(actions)
+        self.distribution
+            .mode(outputs)
+            .map_err(ProbabilisticPolicyModelError::DistError)
     }
 
     /// Evaluates rank-`A` actions `[batch_size, ...action_shape]` under parameters produced from rank-`O` batched observations.
@@ -345,13 +285,10 @@ where
         actions: Tensor<A>,
     ) -> Result<(Tensor<1>, Tensor<1>), Self::Error> {
         let outputs = self.outputs(observations)?;
-        validate_policy_values("policy actions", &actions, &outputs)?;
         let evaluation = self
             .distribution
-            .dist_eval(outputs.clone(), actions)
+            .dist_eval(outputs, actions)
             .map_err(ProbabilisticPolicyModelError::DistError)?;
-        validate_policy_values("policy log probability", evaluation.log_prob(), &outputs)?;
-        validate_policy_values("policy entropy", evaluation.entropy(), &outputs)?;
         Ok((evaluation.log_prob().clone(), evaluation.entropy().clone()))
     }
 }
@@ -382,24 +319,9 @@ where
             assert!(C >= 2, "policy candidates require batch and candidate axes");
         }
         let outputs = self.outputs(observations)?;
-        let terms = self
-            .distribution
-            .expectation(outputs.clone(), samples)
-            .map_err(ProbabilisticPolicyModelError::DistError)?;
-        validate_batch("policy candidates", terms.actions(), outputs.dims()[0])?;
-        if terms.actions().device() != outputs.device() {
-            return Err(DistributionTensorError::DeviceMismatch {
-                field: "policy candidates",
-            }
-            .into());
-        }
-        validate_policy_values(
-            "candidate log probability",
-            terms.log_probabilities(),
-            &outputs,
-        )?;
-        validate_policy_values("candidate weights", terms.weights(), &outputs)?;
-        Ok(terms)
+        self.distribution
+            .expectation(outputs, samples)
+            .map_err(ProbabilisticPolicyModelError::DistError)
     }
 
     /// Returns scalar target entropy for rank-`O` observations `[batch_size, ...observation_shape]`.
@@ -505,23 +427,6 @@ mod tests {
         /// Preserves dtype, device, and gradients through the owned layer.
         fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, ModelError> {
             Ok(Forward::forward(&self.layer, observations)? + self.offset)
-        }
-    }
-
-    #[derive(Module, Debug)]
-    struct WrongBatchModel {
-        layer: Linear,
-    }
-
-    impl Forward<2, 2> for WrongBatchModel {
-        type Error = Infallible;
-
-        /// Returns `[1, 2]` parameters for `[batch_size, 2]` observations to test invalid batch handling.
-        fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, Infallible> {
-            Ok(Tensor::zeros(
-                [1, 2],
-                (&observations.device(), self.layer.weight.val().dtype()),
-            ))
         }
     }
 
@@ -830,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn errors_distinguish_model_distribution_and_tensor_contract_failures() {
+    fn errors_preserve_model_and_distribution_causes() {
         let device = Device::flex();
         let policy = ProbabilisticPolicyModel::with_distribution(
             zero_model(2, 2, &device, DType::F64),
@@ -842,25 +747,6 @@ mod tests {
                 ModelError::InputFeatures { .. }
             ))
         ));
-        let observations = Tensor::zeros([3, 2], (&device, DType::F64));
-        assert!(matches!(
-            policy.log_prob_and_entropy(
-                observations.clone(),
-                Tensor::zeros([1, 1], (&device, DType::F64))
-            ),
-            Err(ProbabilisticPolicyModelError::TensorError(
-                DistributionTensorError::ShapeMismatch {
-                    field: "policy actions",
-                    ..
-                }
-            ))
-        ));
-        assert!(matches!(
-            policy.log_prob_and_entropy(observations, Tensor::zeros([3, 1], &device)),
-            Err(ProbabilisticPolicyModelError::TensorError(
-                DistributionTensorError::DTypeMismatch { .. }
-            ))
-        ));
         let bad_distribution = ProbabilisticPolicyModel::with_distribution(
             zero_model(2, 3, &device, DType::F32),
             GaussianDistribution::default(),
@@ -869,21 +755,6 @@ mod tests {
             bad_distribution.mode(Tensor::zeros([3, 2], &device)),
             Err(ProbabilisticPolicyModelError::DistError(
                 GaussianDistributionError::InvalidOutputWidth { output_width: 3 }
-            ))
-        ));
-        let wrong_batch = ProbabilisticPolicyModel::with_distribution(
-            WrongBatchModel {
-                layer: observation_model(2, &device, DType::F32).layer,
-            },
-            GaussianDistribution::default(),
-        );
-        assert!(matches!(
-            wrong_batch.mode(Tensor::zeros([3, 2], &device)),
-            Err(ProbabilisticPolicyModelError::TensorError(
-                DistributionTensorError::ShapeMismatch {
-                    field: "policy parameters",
-                    ..
-                }
             ))
         ));
     }

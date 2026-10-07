@@ -66,9 +66,8 @@ impl DistributionTransform for TanhTransform {
     fn log_abs_det_jacobian<const R: usize>(
         &self,
         input: Tensor<R>,
-        output: Tensor<R>,
+        _output: Tensor<R>,
     ) -> Result<Tensor<R>, Self::Error> {
-        validate_statistics("tanh transformed output", &input, &output)?;
         let correction = softplus(input.clone() * -2.0, 1.0);
         Ok((input.neg() + std::f64::consts::LN_2 - correction) * 2.0)
     }
@@ -230,9 +229,8 @@ impl<const E: usize> DistributionTransform for AffineTransform<E> {
     fn log_abs_det_jacobian<const R: usize>(
         &self,
         input: Tensor<R>,
-        output: Tensor<R>,
+        _output: Tensor<R>,
     ) -> Result<Tensor<R>, Self::Error> {
-        validate_statistics("affine transformed output", &input, &output)?;
         let (scale, _) = self.broadcast_parameters(&input)?;
         Ok(scale.abs().log().expand(input.dims()))
     }

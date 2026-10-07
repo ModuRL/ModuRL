@@ -121,8 +121,11 @@ impl Forward<2, 2> for Activation {
     /// Learned activation parameters must match the input dtype and device. PRelu accepts 1 or `features` parameters.
     /// SwiGlu is not accepted because its projection can change the feature count.
     fn forward(&self, input: Tensor<2>) -> Result<Tensor<2>, ModelError> {
-        validate_activation(self, &[input.dims()[1]])?;
+        if matches!(self, Activation::SwiGlu(_)) {
+            return Err(ModelError::ProjectedActivation);
+        }
         if let Activation::PRelu(layer) = self {
+            validate_activation(self, &[input.dims()[1]])?;
             let alpha = layer.alpha.val();
             if alpha.dtype() != input.dtype() {
                 return Err(ModelError::InputDType {
@@ -297,11 +300,11 @@ fn forward_hidden_layers(
     layers: &[Linear],
     activation: &Activation,
     mut input: Tensor<2>,
-) -> Result<Tensor<2>, ModelError> {
+) -> Tensor<2> {
     for layer in layers {
-        input = Forward::forward(activation, layer.forward(input))?;
+        input = activation.forward(layer.forward(input));
     }
-    Ok(input)
+    input
 }
 
 /// A multilayer perceptron with native Burn parameters and configurable activations.
@@ -378,10 +381,10 @@ impl Forward<2, 2> for MLP {
             &input,
             self.hidden_layers.first().unwrap_or(&self.output_layer),
         )?;
-        let features = forward_hidden_layers(&self.hidden_layers, &self.activation, input)?;
+        let features = forward_hidden_layers(&self.hidden_layers, &self.activation, input);
         let output = self.output_layer.forward(features);
         Ok(match &self.output_activation {
-            Some(activation) => Forward::forward(activation, output)?,
+            Some(activation) => activation.forward(output),
             None => output,
         })
     }
@@ -496,14 +499,14 @@ impl Forward<2, 2> for DuelingMLP {
             .or_else(|| self.value_hidden_layers.first())
             .unwrap_or(&self.value_output_layer);
         validate_input(&input, first)?;
-        let features = forward_hidden_layers(&self.shared_layers, &self.activation, input)?;
+        let features = forward_hidden_layers(&self.shared_layers, &self.activation, input);
         let value_features = forward_hidden_layers(
             &self.value_hidden_layers,
             &self.activation,
             features.clone(),
-        )?;
+        );
         let advantage_features =
-            forward_hidden_layers(&self.advantage_hidden_layers, &self.activation, features)?;
+            forward_hidden_layers(&self.advantage_hidden_layers, &self.activation, features);
         Ok(Self::combine_streams(
             self.value_output_layer.forward(value_features),
             self.advantage_output_layer.forward(advantage_features),
