@@ -11,7 +11,7 @@ let envs = (0..4)
     .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
     .collect::<Vec<_>>();
 let mut env = DeviceMultiGymWrapper::new(
-    VectorizedGymWrapper::from(envs), Device::Cpu, device.clone(),
+    VectorizedGymWrapper::new(envs)?, Device::Cpu, device.clone(),
 );
 ```
 
@@ -32,7 +32,7 @@ let env = MultithreadedVectorizedGymWrapper::new(
     constructors,
     observation_space,
     action_space,
-);
+)?;
 let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
 ```
 
@@ -48,40 +48,40 @@ inner environment. Pass that batch to `Agent::act`, then pass the returned batch
 of actions to `MultiGym::step`.
 
 ```rust,ignore
-let mut states = env.reset()?;
+let mut observations = env.reset()?;
 
 loop {
-    let actions = agent.act(&states)?;
+    let actions = agent.act(&observations)?;
     let step = env.step(actions)?;
-    states = step.states;
+    observations = step.observations;
 }
 ```
 
-`states` has one next observation for every inner environment, so it is ready
+`observations` has one next observation for every inner environment, so it is ready
 for the next call to `act`.
 
 ## Understand Auto-Reset
 
 When an inner environment returns `done` or `truncated`, ModuRL resets that one
-environment immediately. The `states` field then contains the first observation
+environment immediately. The `observations` field then contains the first observation
 of its next episode. This lets the next batched step continue without a special
 reset branch.
 
-The terminal observation is still available. `terminal_states` contains an
-entry for each inner environment: `Some(state)` when that environment ended and
+The terminal observation is still available. `terminal_observations` contains an
+entry for each inner environment: `Some(observation)` when that environment ended and
 `None` when it continued.
 
-If code needs the true next state for each transition, call
-`transition_next_states`:
+If code needs the observation before reset for each transition, call
+`transition_next_observations`:
 
 ```rust,ignore
 let step = env.step(actions)?;
-let transition_next_states = step.transition_next_states()?;
-let next_states_for_the_loop = step.states;
+let transition_observations = step.transition_next_observations();
+let observations_for_the_loop = step.observations;
 ```
 
-`transition_next_states` uses a terminal state where one exists and the normal
-next state otherwise. The second value, `step.states`, remains the right input
+`transition_next_observations` uses a terminal observation where one exists and the normal
+next observation otherwise. The second value, `step.observations`, remains the right input
 for the following action-selection step.
 
 `PPOAgent::learn` handles this distinction while it collects experience. You
@@ -99,8 +99,8 @@ dimension:
 
 ```rust,ignore
 let mut env = CoupledGame::new()?;
-let states = env.reset()?; // [players, ...observation_shape]
-let actions = agent.act(&states)?; // [players, ...action_shape]
+let observations = env.reset()?; // [players, ...observation_shape]
+let actions = agent.act(&observations)?; // [players, ...action_shape]
 let step = env.step(actions)?; // advances the shared game once
 ```
 
@@ -124,8 +124,8 @@ let games = (0..4)
     .collect::<Result<Vec<_>, GameError>>()?;
 let mut env = StackedMultiGym::new(games)?;
 
-let states = env.reset()?; // [8, ...observation_shape]
-let actions = agent.act(&states)?; // [8, ...action_shape]
+let observations = env.reset()?; // [8, ...observation_shape]
+let actions = agent.act(&observations)?; // [8, ...action_shape]
 let step = env.step(actions)?; // steps each shared game once
 ```
 
