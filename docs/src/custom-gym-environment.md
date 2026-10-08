@@ -12,8 +12,16 @@ either bound.
 The following code belongs in `src/counter_env.rs`:
 
 ```rust,ignore
-use candle_core::{Device, Tensor};
+use burn::tensor::{Device, Int, Tensor, TensorReadError};
 use modurl::prelude::*;
+
+#[derive(Debug, thiserror::Error)]
+pub enum CounterEnvError {
+    #[error("action {0} is outside the action space")]
+    InvalidAction(i32),
+    #[error("reading the action failed: {0}")]
+    Read(#[from] TensorReadError),
+}
 
 pub struct CounterEnv {
     state: i32,
@@ -25,33 +33,38 @@ impl CounterEnv {
         Self { state: 0, device }
     }
 
-    fn observation(&self) -> candle_core::Result<Tensor> {
-        Tensor::from_vec(vec![self.state as f32], (1,), &self.device)
+    /// Returns the position as an unbatched observation `[1]` with one feature.
+    fn observation(&self) -> Tensor<1> {
+        Tensor::from_data([self.state as f32], &self.device)
     }
 }
 
 impl Gym for CounterEnv {
-    type Error = candle_core::Error;
-    type SpaceError = candle_core::Error;
+    type Error = CounterEnvError;
+    type ObservationSpace = BoxSpace<2>;
+    type ActionSpace = Discrete;
 
+    /// Returns the initial position as unbatched `[1]` on the environment device.
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.state = 0;
         Ok(ResetInfo {
-            state: self.observation()?,
+            observation: self.observation(),
             info: (),
         })
     }
 
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        match action.to_vec0::<u32>()? {
+    /// Consumes one scalar integer action `[1]` and returns an unbatched position `[1]`.
+    /// Actions must be readable on the host; observations use the environment device.
+    fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
+        match action.try_into_scalar::<i32>()? {
             0 => self.state -= 1,
             1 => self.state += 1,
-            _ => panic!("action is outside the action space"),
+            action => return Err(CounterEnvError::InvalidAction(action)),
         }
 
         let done = self.state.abs() >= 4;
         Ok(StepInfo {
-            state: self.observation()?,
+            observation: self.observation(),
             reward: 1.0,
             done,
             truncated: false,
@@ -59,17 +72,17 @@ impl Gym for CounterEnv {
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(BoxSpace::new_with_universal_bounds(
-            vec![1],
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_with_universal_bounds(
+            [1, 1],
             -4.0,
             4.0,
             &self.device,
-        ))
+        )
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(Discrete::new(2))
+    fn action_space(&self) -> Self::ActionSpace {
+        Discrete::new(2)
     }
 }
 ```
@@ -79,6 +92,12 @@ returns the observation that follows it, its reward, and the episode flags.
 The default `Gym` information type is `()`, so ordinary environments use
 `ResetInfo` and `StepInfo` without an explicit type parameter. Environments
 with additional typed metadata can instead implement `Gym<MyInfo>`.
+The full signature is `Gym<I, O, A, BO, BA>`. Individual observation and action
+ranks `O` and `A` default to 1. Batched space ranks `BO` and `BA` default to
+2 and 1. Single-environment tensors omit the batch axis. Scalar values use
+`[1]` because Burn does not support rank-zero tensors. Space operations use
+batched tensors. The associated spaces determine the native tensor kinds:
+`BoxSpace<2>` uses `Float`, and `Discrete` uses `Int`.
 
 In `src/main.rs`, declare the module and bring the environment into scope:
 
@@ -88,21 +107,23 @@ mod counter_env;
 use counter_env::CounterEnv;
 ```
 
-The `Space` values are part of the contract. The observation space must match
+The observation and action spaces are part of the contract. The observation space must match
 the tensors returned by `reset` and `step`. The action space must accept the
 actions that `step` understands.
 
 ## Vectorize the Environment
 
-Build several instances, then wrap them exactly as in the CartPole example:
+Build several instances, then wrap them as a batch:
 
 ```rust,ignore
 let envs = (0..4)
     .map(|_| CounterEnv::new(device.clone()))
     .collect::<Vec<_>>();
-let env = VectorizedGymWrapper::from(envs);
+let env = VectorizedGymWrapper::new(envs)?;
 ```
 
 `VectorizedGymWrapper` handles the batched action split and auto-reset behavior.
 The individual environment only needs to implement the single-environment
 `Gym` contract.
+For four instances, observations have shape `[4, 1]` and actions have shape
+`[4]`. Construction fails when the environment list is empty.
