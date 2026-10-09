@@ -19,14 +19,14 @@ pub use vectorized::{VectorizedGymError, VectorizedGymWrapper};
 /// A single reinforcement-learning environment with unbatched tensors.
 /// Ranks `O` and `A` describe individual observations and actions; `BO` and `BA` describe their batches.
 /// Scalars use `[1]` because Burn does not support rank-zero tensors. Kinds come from the associated spaces.
-/// For nonscalar values, `BO = O + 1` and `BA = A + 1`; scalars have single and batch ranks of one.
+/// Every batch adds one axis: `BO = O + 1` and `BA = A + 1`, including scalars.
 /// `I` is reset and transition metadata; environments without metadata use `()`.
 pub trait Gym<
     I = (),
     const O: usize = 1,
     const A: usize = 1,
     const BO: usize = 2,
-    const BA: usize = 1,
+    const BA: usize = 2,
 >
 {
     type Error;
@@ -55,8 +55,8 @@ pub trait Gym<
 /// An ordered batch of environment slots with native tensors.
 /// Slots may be independent environments or coupled players in one world.
 /// Implementations keep batch order and size fixed. Auto-reset implementations retain terminal observations.
-/// `U` is the rank of each unbatched terminal observation; `O = U + 1`, except scalar observations use both ranks of one.
-pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 1, const U: usize = 1> {
+/// `U` is the rank of each unbatched terminal observation; `O = U + 1`, including scalar observations `[num_envs, 1]`.
+pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2, const U: usize = 1> {
     type Error;
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
@@ -107,7 +107,7 @@ pub struct StepInfo<I = (), const O: usize = 1, K: Basic = Float> {
 /// Batched transition results in environment-slot order.
 /// Observations are `[num_envs, ...observation_shape]` of rank `O` and kind `K`; rewards are Float `[num_envs]`.
 /// Each optional terminal observation is unbatched `observation_shape` of rank `U`, with the observation dtype and device.
-/// Requires `O = U + 1`, except scalar observations use `O = U = 1` and terminal shape `[1]`.
+/// Requires `O = U + 1`; scalar observations use `[num_envs, 1]` and terminal shape `[1]`.
 /// Host metadata and flags contain one entry per slot. Done and truncated remain separate.
 #[derive(Debug, Clone)]
 pub struct MultiGymStepInfo<I = (), const O: usize = 2, K: Basic = Float, const U: usize = 1> {
@@ -122,12 +122,12 @@ pub struct MultiGymStepInfo<I = (), const O: usize = 2, K: Basic = Float, const 
 impl<I, const O: usize, K: Basic, const U: usize> MultiGymStepInfo<I, O, K, U> {
     /// Returns `[num_envs, ...observation_shape]` of rank `O` for transition targets.
     /// Replaces reset observations with saved terminal observations, preserving kind, dtype, device, and gradient paths.
-    /// Adds the batch axis to unbatched terminal observations; scalar terminal values already have shape `[1]`.
+    /// Adds the batch axis to unbatched terminal observations; scalar terminals `[1]` become rows `[1, 1]`.
     pub fn transition_next_observations(&self) -> Tensor<O, K> {
         const {
             assert!(
-                O == U + 1 || (O == 1 && U == 1),
-                "batch observation rank must be single observation rank + 1, except scalar observations"
+                O == U + 1,
+                "batch observation rank must be single observation rank + 1"
             );
         }
         let mut observations = self.observations.clone();
@@ -158,11 +158,7 @@ impl<I, const O: usize, K: Basic, const U: usize> MultiGymStepInfo<I, O, K, U> {
                 observations = observations.select_assign(
                     0,
                     rows,
-                    if const { O == U + 1 } {
-                        Tensor::stack(terminals, 0)
-                    } else {
-                        Tensor::cat(terminals, 0).reshape([count; O])
-                    },
+                    Tensor::stack(terminals, 0),
                     IndexingUpdateOp::Assign,
                 );
             }
@@ -264,8 +260,8 @@ mod tests {
     #[test]
     fn scalar_terminal_observations_use_one_element_tensors() {
         let device = Device::flex();
-        let step = MultiGymStepInfo::<(), 1, Int> {
-            observations: Tensor::from_data([8u64, 9], (&device, DType::U64)),
+        let step = MultiGymStepInfo::<(), 2, Int> {
+            observations: Tensor::from_data([[8u64], [9]], (&device, DType::U64)),
             rewards: Tensor::zeros([2], &device),
             infos: vec![(); 2],
             dones: vec![true, false],
@@ -276,9 +272,28 @@ mod tests {
             ],
         };
         let targets = step.transition_next_observations();
-        assert_eq!(targets.dims(), [2]);
+        assert_eq!(targets.dims(), [2, 1]);
         assert_eq!(targets.dtype(), DType::U64);
         assert_eq!(targets.into_data().try_to_vec::<u64>().unwrap(), vec![3, 9]);
+    }
+
+    #[test]
+    fn boolean_scalar_terminals_replace_complete_batch_rows() {
+        let device = Device::flex();
+        let step = MultiGymStepInfo::<(), 2, Bool> {
+            observations: Tensor::from_data([[true], [true]], &device),
+            rewards: Tensor::zeros([2], &device),
+            infos: vec![(); 2],
+            dones: vec![true, false],
+            truncateds: vec![false; 2],
+            terminal_observations: vec![Some(Tensor::from_data([false], &device)), None],
+        };
+        let observations = step.transition_next_observations();
+        assert_eq!(observations.dims(), [2, 1]);
+        assert_eq!(
+            observations.into_data().try_to_vec::<bool>().unwrap(),
+            [false, true]
+        );
     }
 
     #[test]

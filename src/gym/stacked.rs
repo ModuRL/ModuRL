@@ -35,7 +35,7 @@ pub enum StackedMultiGymError<E> {
 /// Flattens homogeneous MultiGym batches while preserving the order within each group.
 /// Actions `[total_size, ...action_shape]` split into contiguous groups; observation batches concatenate on the same axis.
 /// Inner gyms retain their auto-reset behavior. Reset the stack after an error because earlier groups may have advanced.
-pub struct StackedMultiGym<G, I = (), const O: usize = 2, const A: usize = 1, const U: usize = 1>
+pub struct StackedMultiGym<G, I = (), const O: usize = 2, const A: usize = 2, const U: usize = 1>
 where
     G: MultiGym<I, O, A, U>,
 {
@@ -52,10 +52,10 @@ where
     pub fn new(gyms: Vec<G>) -> Result<Self, StackedMultiGymError<G::Error>> {
         const {
             assert!(
-                O == U + 1 || (O == 1 && U == 1),
-                "batch observation rank must be single observation rank + 1, except scalar observations"
+                O == U + 1,
+                "batch observation rank must be single observation rank + 1"
             );
-            assert!(A >= 1, "batched actions require a batch axis");
+            assert!(A >= 2, "batched actions require batch and item axes");
         }
         let Some(first) = gyms.first() else {
             return Err(StackedMultiGymError::Empty);

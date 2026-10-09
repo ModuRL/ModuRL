@@ -74,7 +74,7 @@ pub struct MultithreadedStackedMultiGym<
     G,
     I = (),
     const O: usize = 2,
-    const A: usize = 1,
+    const A: usize = 2,
     const U: usize = 1,
 > where
     G: MultiGym<I, O, A, U>,
@@ -105,10 +105,10 @@ where
     {
         const {
             assert!(
-                O == U + 1 || (O == 1 && U == 1),
-                "batch observation rank must be single observation rank + 1, except scalar observations"
+                O == U + 1,
+                "batch observation rank must be single observation rank + 1"
             );
-            assert!(A >= 1, "batched actions require a batch axis");
+            assert!(A >= 2, "batched actions require batch and item axes");
         }
         if gym_constructors.is_empty() {
             return Err(StackedMultiGymError::Empty);
@@ -255,7 +255,7 @@ pub struct MultithreadedVectorizedGymWrapper<
     const O: usize = 1,
     const A: usize = 1,
     const BO: usize = 2,
-    const BA: usize = 1,
+    const BA: usize = 2,
 > where
     G: Gym<I, O, A, BO, BA>,
 {
@@ -285,12 +285,12 @@ where
     {
         const {
             assert!(
-                BO == O + 1 || (BO == 1 && O == 1),
-                "batch observation rank must be single observation rank + 1, except scalar observations"
+                BO == O + 1,
+                "batch observation rank must be single observation rank + 1"
             );
             assert!(
-                BA == A + 1 || (BA == 1 && A == 1),
-                "batch action rank must be single action rank + 1, except scalar actions"
+                BA == A + 1,
+                "batch action rank must be single action rank + 1"
             );
         }
         if env_constructors.is_empty() {
@@ -422,6 +422,40 @@ mod tests {
     use burn::tensor::{Device, Int};
 
     #[test]
+    fn threaded_scalar_batches_preserve_item_axes_and_terminals() {
+        let device = Device::flex();
+        let mut env = MultithreadedVectorizedGymWrapper::new(
+            vec![|| ScalarEnv, || ScalarEnv],
+            BoxSpace::new_unbounded([1, 1], &device),
+            BoxSpace::new_unbounded([1, 1], &device),
+        )
+        .unwrap();
+        assert_eq!(env.reset().unwrap().dims(), [2, 1]);
+        let step = env
+            .step(Tensor::from_data(
+                [[2.0f64], [3.0]],
+                (&device, burn::tensor::DType::F64),
+            ))
+            .unwrap();
+        assert_eq!(step.observations.dims(), [2, 1]);
+        assert_eq!(step.rewards.dims(), [2]);
+        assert_eq!(step.dones, [true, true]);
+        assert!(
+            step.terminal_observations
+                .iter()
+                .flatten()
+                .all(|observation| observation.dims() == [1])
+        );
+        assert_eq!(
+            step.transition_next_observations()
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap(),
+            [2.0, 3.0]
+        );
+    }
+
+    #[test]
     fn threaded_vectorization_preserves_unbatched_continuous_actions_and_terminals() {
         let device = Device::flex();
         let mut env = MultithreadedVectorizedGymWrapper::new(
@@ -470,7 +504,7 @@ mod tests {
         )
         .unwrap();
         env.reset().unwrap();
-        let actions = Tensor::<1, Int>::from_data([3, 4], &Device::flex());
+        let actions = Tensor::<2, Int>::from_data([[3], [4]], &Device::flex());
         assert!(matches!(
             env.step(actions.clone()),
             Err(VectorizedGymError::Single(TestError::Forced))
@@ -635,7 +669,7 @@ mod tests {
         )
         .unwrap();
         env.reset().unwrap();
-        let actions = Tensor::<1, Int>::from_data([3, 4], &Device::flex());
+        let actions = Tensor::<2, Int>::from_data([[3], [4]], &Device::flex());
         env.step(actions.clone()).unwrap();
         assert!(matches!(
             env.step(actions.clone()),

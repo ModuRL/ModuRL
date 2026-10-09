@@ -214,6 +214,42 @@ pub(super) struct GateState {
 
 pub(super) struct ContinuousEnv;
 
+pub(super) struct ScalarEnv;
+
+impl Gym for ScalarEnv {
+    type Error = TestError;
+    type ObservationSpace = BoxSpace<2>;
+    type ActionSpace = BoxSpace<2>;
+
+    /// Returns an F64 scalar action `[1]` as the terminal observation `[1]`, preserving device and gradients.
+    fn step(&mut self, action: Tensor<1>) -> Result<StepInfo, Self::Error> {
+        assert_eq!(action.dims(), [1]);
+        Ok(StepInfo {
+            observation: action,
+            reward: 1.0,
+            done: true,
+            truncated: false,
+            info: (),
+        })
+    }
+
+    /// Returns an unbatched F64 scalar observation `[1]` on the fixture CPU device.
+    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+        Ok(ResetInfo {
+            observation: Tensor::zeros([1], (&Device::flex(), DType::F64)),
+            info: (),
+        })
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, 1], &Device::flex())
+    }
+
+    fn action_space(&self) -> Self::ActionSpace {
+        BoxSpace::new_unbounded([1, 1], &Device::flex())
+    }
+}
+
 impl Gym<(), 1, 1, 2, 2> for ContinuousEnv {
     type Error = TestError;
     type ObservationSpace = BoxSpace<2>;
