@@ -535,7 +535,7 @@ mod tests {
         let device = Device::flex().autodiff();
         let policy = ProbabilisticPolicyModel::with_distribution(
             zero_model(4, 12, &device, DType::F64),
-            GaussianDistribution::<3, 4>::new([2, 3]).unwrap(),
+            GaussianDistribution::<3>::new([2, 3]).unwrap(),
         );
         let observations = Tensor::ones([3, 4], (&device, DType::F64)).require_grad();
         let actions = policy.sample(observations.clone()).unwrap();

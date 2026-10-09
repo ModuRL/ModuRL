@@ -2,6 +2,7 @@
 
 use crate::gym::{Gym, ResetInfo, StepInfo};
 use crate::spaces::{ActionSpace, BoxSpace, ObservationSpace};
+use crate::tensor_rank::PrevRank;
 use burn::tensor::{Tensor, kind::Ordered};
 use std::collections::VecDeque;
 
@@ -12,17 +13,13 @@ pub enum FrameStackGymError<E> {
 }
 
 /// Stacks recent observations along a leading frame axis, preserving kind, dtype, and device.
-/// `O` and `BO` are inner single and batch ranks; `F` and `BF` are stacked single and batch ranks.
-/// Nonscalar observations require `BO = O + 1`, `F = O + 1`, and `BF = F + 1`.
-/// Scalar observations use `O = BO = F = 1` and `BF = 2`, producing `[stack_size]`.
-pub struct FrameStackGym<
-    G,
-    const O: usize = 1,
-    const BO: usize = 2,
-    const F: usize = 2,
-    const BF: usize = 3,
-    S = BoxSpace<BF>,
-> where
+/// `O` is the inner single rank; `BF` is the stacked batch rank.
+/// `PrevRank` determines rank `F`, shared by inner batches and stacked single observations, from `BF`.
+/// Nonscalar observations require `F = O + 1` and `BF = F + 1`.
+/// Scalar observations use `O = F = 1` and `BF = 2`, producing `[stack_size]`.
+/// Supported stacked batch ranks are 2 through 1025, as defined by `PrevRank`.
+pub struct FrameStackGym<G, const O: usize = 1, const BF: usize = 3, S = BoxSpace<BF>>
+where
     S: ObservationSpace<BF>,
 {
     gym: G,
@@ -31,26 +28,18 @@ pub struct FrameStackGym<
     observation_space: S,
 }
 
-impl<G, const O: usize, const BO: usize, const F: usize, const BF: usize, S>
-    FrameStackGym<G, O, BO, F, BF, S>
+impl<G, const O: usize, const F: usize, const BF: usize, S> FrameStackGym<G, O, BF, S>
 where
     S: ObservationSpace<BF>,
+    Tensor<BF>: PrevRank<Prev = Tensor<F>>,
 {
     /// Creates a frame stack with a declared space shaped `[stack_size, ...inner_observation_shape]` per item.
     /// Scalars use `[stack_size]`. `BoxSpace` bounds include a separate size-one batch axis.
     pub fn new(gym: G, stack_size: usize, observation_space: S) -> Self {
         const {
             assert!(
-                BO == O + 1 || (O == 1 && BO == 1),
+                F == O + 1 || (O == 1 && F == 1),
                 "inner batch rank must be single rank + 1, except scalar observations"
-            );
-            assert!(
-                if O == 1 && BO == 1 {
-                    F == 1
-                } else {
-                    F == O + 1
-                },
-                "frame rank must be observation rank + 1, except scalar observations"
             );
             assert!(BF == F + 1, "stacked batch rank must be frame rank + 1");
         }
@@ -72,7 +61,7 @@ where
     /// Scalar `[1]` frames concatenate to `[frame_count]`. Preserves kind, dtype, device, and gradients.
     fn stacked_observation(&self) -> Tensor<F, S::Kind> {
         let frames = self.frames.iter().cloned().collect::<Vec<_>>();
-        if const { O == 1 && BO == 1 } {
+        if const { O == 1 && F == 1 } {
             Tensor::cat(frames, 0).reshape([self.frames.len(); F])
         } else {
             Tensor::stack(frames, 0)
@@ -80,20 +69,12 @@ where
     }
 }
 
-impl<
-    G,
-    I,
-    const O: usize,
-    const A: usize,
-    const BO: usize,
-    const BA: usize,
-    const F: usize,
-    const BF: usize,
-    S,
-> Gym<I, F, A, BF, BA> for FrameStackGym<G, O, BO, F, BF, S>
+impl<G, I, const O: usize, const A: usize, const BA: usize, const F: usize, const BF: usize, S>
+    Gym<I, F, A, BF, BA> for FrameStackGym<G, O, BF, S>
 where
-    G: Gym<I, O, A, BO, BA>,
-    S: ObservationSpace<BF, Kind = <G::ObservationSpace as ObservationSpace<BO>>::Kind> + Clone,
+    G: Gym<I, O, A, F, BA>,
+    S: ObservationSpace<BF, Kind = <G::ObservationSpace as ObservationSpace<F>>::Kind> + Clone,
+    Tensor<BF>: PrevRank<Prev = Tensor<F>>,
 {
     type Error = FrameStackGymError<G::Error>;
     type ObservationSpace = S;
@@ -268,7 +249,7 @@ mod tests {
     #[test]
     fn frame_stack_preserves_integer_and_boolean_frames() {
         let device = Device::flex();
-        let mut integers = FrameStackGym::<_, 2, 3, 3, 4, _>::new(
+        let mut integers = FrameStackGym::<_, 2, 4, _>::new(
             (),
             2,
             TypedSpace::<4, Int> {
@@ -290,7 +271,7 @@ mod tests {
             stacked.into_data().try_to_vec::<i64>().unwrap(),
             vec![1, 2, 3, 4]
         );
-        let mut booleans = FrameStackGym::<_, 1, 1, 1, 2, _>::new(
+        let mut booleans = FrameStackGym::<_, 1, 2, _>::new(
             (),
             2,
             TypedSpace::<2, Bool> {
@@ -321,7 +302,7 @@ mod tests {
             100.0,
             &burn::tensor::Device::flex(),
         );
-        let mut wrapper = FrameStackGym::<_, 1, 1, 1, 2>::new(gym, 4, observation_space);
+        let mut wrapper = FrameStackGym::<_, 1, 2>::new(gym, 4, observation_space);
 
         let reset = wrapper.reset().unwrap();
         let step = wrapper.step(action()).unwrap();
