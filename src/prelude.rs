@@ -22,7 +22,8 @@ pub use crate::agents::{
         PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
     },
     q_learning::{
-        QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError, QLogEntry,
+        QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError,
+        QLearningReplayError, QLogEntry,
         ddqn::{DDQNAgent, DDQNLogger},
         dqn::{DQNAgent, DQNLogger},
     },
