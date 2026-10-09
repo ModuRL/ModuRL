@@ -154,7 +154,7 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
     /// The selected dtype must belong to kind `K`. Storage has no autodiff association.
     pub(crate) fn new(shape: [usize; R], options: impl Into<TensorCreationOptions>) -> Self {
         const {
-            assert!(R >= 1, "replay observations require a capacity axis");
+            assert!(R >= 2, "replay observations require capacity and item axes");
         }
         let mut options = options.into();
         options.device = options.device.without_autodiff();
@@ -715,7 +715,7 @@ mod tests {
                 actual: 1
             })
         ));
-        let mut overflow = AlignedObservationReplay::<1>::new([usize::MAX - 1], &device);
+        let mut overflow = AlignedObservationReplay::<2>::new([usize::MAX - 1, 1], &device);
         assert!(matches!(
             overflow.initialize_environment_count(2),
             Err(ReplayStorageError::CapacityOverflow { .. })
