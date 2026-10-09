@@ -1,8 +1,11 @@
 //! Running observation and reward normalization wrappers.
 
-use candle_core::{DType, Device, Tensor};
+use burn::tensor::{Tensor, TensorData, TensorReadError, kind::Basic};
 
-use crate::gym::{Gym, ResetInfo, StepInfo};
+use crate::{
+    gym::{Gym, ResetInfo, StepInfo},
+    spaces::{ActionSpace, ObservationSpace},
+};
 
 const RUNNING_STATS_EPSILON: f64 = 1e-4;
 const NORMALIZATION_EPSILON: f64 = 1e-8;
@@ -40,8 +43,8 @@ impl RunningMeanStd {
 pub enum NormalizeObservationGymError<E> {
     #[error("wrapped gym error: {0}")]
     GymError(#[source] E),
-    #[error("failed to normalize an observation: {0}")]
-    CandleError(#[source] candle_core::Error),
+    #[error("failed to read an observation: {0}")]
+    TensorRead(#[source] TensorReadError),
 }
 
 /// Normalizes each observation component using its running mean and variance.
@@ -67,17 +70,17 @@ impl<G> NormalizeObservationGym<G> {
         self
     }
 
-    /// Normalizes one observation of arbitrary `observation_shape` and returns
-    /// a tensor with that same shape.
-    fn normalize(&mut self, observation: &Tensor) -> candle_core::Result<Tensor> {
-        let shape = observation.shape().clone();
-        let device = observation.device().clone();
+    /// Normalizes an unbatched rank-`O` observation, preserving its shape, kind, dtype, and device.
+    /// Reads components as F32 for host statistics and casts normalized F32 values back to the input dtype.
+    fn normalize<const O: usize, K: Basic>(
+        &mut self,
+        observation: &Tensor<O, K>,
+    ) -> Result<Tensor<O, K>, TensorReadError> {
+        let shape = observation.dims();
+        let device = observation.device();
         let dtype = observation.dtype();
         let values = observation
-            .to_dtype(DType::F32)
-            .and_then(|tensor| tensor.to_device(&Device::Cpu))
-            .and_then(|tensor| tensor.flatten_all())
-            .and_then(|tensor| tensor.to_vec1::<f32>())?
+            .try_to_vec_as::<f32>()?
             .into_iter()
             .map(f64::from)
             .collect::<Vec<_>>();
@@ -95,47 +98,59 @@ impl<G> NormalizeObservationGym<G> {
                 self.clip.map_or(value, |limit| value.clamp(-limit, limit)) as f32
             })
             .collect::<Vec<_>>();
-        Tensor::from_vec(normalized, shape, &Device::Cpu)
-            .and_then(|tensor| tensor.to_dtype(dtype))
-            .and_then(|tensor| tensor.to_device(&device))
+        Ok(Tensor::from_data(
+            TensorData::new(normalized, shape),
+            (&device, dtype),
+        ))
     }
 }
 
-impl<G, I> Gym<I> for NormalizeObservationGym<G>
+impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> Gym<I, O, A, BO, BA>
+    for NormalizeObservationGym<G>
 where
-    G: Gym<I>,
+    G: Gym<I, O, A, BO, BA>,
 {
-    type Error = NormalizeObservationGymError<<G as Gym<I>>::Error>;
-    type SpaceError = <G as Gym<I>>::SpaceError;
+    type Error = NormalizeObservationGymError<G::Error>;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = G::ActionSpace;
 
-    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
+    /// Normalizes the reset observation without changing its unbatched rank-`O` shape, kind, dtype, or device.
+    fn reset(
+        &mut self,
+    ) -> Result<ResetInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
+    {
         let mut reset = self
             .gym
             .reset()
             .map_err(NormalizeObservationGymError::GymError)?;
-        reset.state = self
-            .normalize(&reset.state)
-            .map_err(NormalizeObservationGymError::CandleError)?;
+        reset.observation = self
+            .normalize(&reset.observation)
+            .map_err(NormalizeObservationGymError::TensorRead)?;
         Ok(reset)
     }
 
-    /// Forwards one unbatched environment action shaped `action_shape`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
+    /// Forwards an unbatched rank-`A` action and returns an unbatched rank-`O` observation; scalars use `[1]`.
+    /// Normalizes observation values while preserving tensor shapes, kinds, dtypes, and devices.
+    fn step(
+        &mut self,
+        action: Tensor<A, <Self::ActionSpace as ActionSpace<BA>>::Kind>,
+    ) -> Result<StepInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
+    {
         let mut step = self
             .gym
             .step(action)
             .map_err(NormalizeObservationGymError::GymError)?;
-        step.state = self
-            .normalize(&step.state)
-            .map_err(NormalizeObservationGymError::CandleError)?;
+        step.observation = self
+            .normalize(&step.observation)
+            .map_err(NormalizeObservationGymError::TensorRead)?;
         Ok(step)
     }
 
-    fn action_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
 }
@@ -169,19 +184,30 @@ impl<G> NormalizeRewardGym<G> {
     }
 }
 
-impl<G, I> Gym<I> for NormalizeRewardGym<G>
+impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> Gym<I, O, A, BO, BA>
+    for NormalizeRewardGym<G>
 where
-    G: Gym<I>,
+    G: Gym<I, O, A, BO, BA>,
 {
-    type Error = <G as Gym<I>>::Error;
-    type SpaceError = <G as Gym<I>>::SpaceError;
+    type Error = G::Error;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = G::ActionSpace;
 
-    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
+    /// Returns the inner gym's unbatched rank-`O` observation, preserving its kind, dtype, device, and item axes.
+    fn reset(
+        &mut self,
+    ) -> Result<ResetInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
+    {
         self.gym.reset()
     }
 
-    /// Forwards one unbatched environment action shaped `action_shape`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
+    /// Forwards an unbatched rank-`A` action and returns an unbatched rank-`O` observation; scalars use `[1]`.
+    /// Preserves tensor shapes, kinds, dtypes, and devices, subject to the inner gym's input requirements.
+    fn step(
+        &mut self,
+        action: Tensor<A, <Self::ActionSpace as ActionSpace<BA>>::Kind>,
+    ) -> Result<StepInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
+    {
         let mut step = self.gym.step(action)?;
         self.discounted_reward =
             self.discounted_reward * self.gamma * if step.done { 0.0 } else { 1.0 }
@@ -196,11 +222,11 @@ where
         Ok(step)
     }
 
-    fn action_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
 }
@@ -211,8 +237,29 @@ mod tests {
         gym::Gym,
         wrappers::test_support::{TestGym, action, scalar},
     };
+    use burn::tensor::{DType, Device, Tensor};
 
     use super::{NormalizeObservationGym, NormalizeRewardGym};
+
+    #[test]
+    fn observation_normalization_preserves_rank_dtype_and_device() {
+        let device = Device::flex();
+        let observations =
+            Tensor::<2>::from_data([[1.0f64, 2.0], [3.0, 4.0]], (&device, DType::F64));
+        let mut wrapper = NormalizeObservationGym::new(());
+        let normalized = wrapper.normalize(&observations).unwrap();
+        assert_eq!(normalized.dims(), [2, 2]);
+        assert_eq!(normalized.dtype(), DType::F64);
+        assert_eq!(normalized.device(), device);
+        assert!(
+            normalized
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap()
+                .iter()
+                .all(|value| value.abs() < 0.02)
+        );
+    }
 
     #[test]
     fn normalizes_observations_and_preserves_metadata() {
@@ -222,8 +269,8 @@ mod tests {
         let reset = wrapper.reset().unwrap();
         let step = wrapper.step(action()).unwrap();
 
-        assert!(scalar(&reset.state).abs() < 0.02);
-        assert!((scalar(&step.state) + 1.0).abs() < 0.01);
+        assert!(scalar(&reset.observation).abs() < 0.02);
+        assert!((scalar(&step.observation) + 1.0).abs() < 0.01);
         assert_eq!(step.info.sequence, 7);
     }
 
