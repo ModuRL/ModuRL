@@ -1,6 +1,7 @@
 use crate::spaces::{ActionSpace, ObservationSpace};
+use crate::tensor_rank::{NextRank, PrevRank};
 use burn::tensor::{
-    DType, Float, IndexingUpdateOp, Int, Slice, Tensor, TensorData,
+    DType, IndexingUpdateOp, Int, Slice, Tensor, TensorData,
     kind::{Basic, Kind},
 };
 
@@ -17,35 +18,43 @@ pub use threaded::{MultithreadedStackedMultiGym, MultithreadedVectorizedGymWrapp
 pub use vectorized::{VectorizedGymError, VectorizedGymWrapper};
 
 /// A single reinforcement-learning environment with unbatched tensors.
-/// Ranks `O` and `A` describe individual observations and actions; `BO` and `BA` describe their batches.
-/// Scalars use `[1]` because Burn does not support rank-zero tensors. Kinds come from the associated spaces.
-/// Every batch adds one axis: `BO = O + 1` and `BA = A + 1`, including scalars.
+/// Ranks `O` and `A` describe observation and action batches. `PrevRank` determines each single tensor type.
+/// Scalars use `[1]` individually and `[batch_size, 1]` in batches. Kinds come from the associated spaces.
 /// `I` is reset and transition metadata; environments without metadata use `()`.
-pub trait Gym<
-    I = (),
-    const O: usize = 1,
-    const A: usize = 1,
-    const BO: usize = 2,
-    const BA: usize = 2,
->
+pub trait Gym<I = (), const O: usize = 2, const A: usize = 2>
+where
+    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
+    Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>: PrevRank,
 {
     type Error;
-    type ObservationSpace: ObservationSpace<BO>;
-    type ActionSpace: ActionSpace<BA>;
+    type ObservationSpace: ObservationSpace<O>;
+    type ActionSpace: ActionSpace<A>;
 
-    /// Steps with unbatched `action_shape` of rank `A` in the action space's kind; scalar actions use `[1]`.
-    /// Returns unbatched `observation_shape` of rank `O`, a scalar reward, and host flags.
+    /// Steps with unbatched `action_shape`, one rank below `A`; scalar actions use `[1]`.
+    /// Returns unbatched `observation_shape`, one rank below `O`, a scalar reward, and host flags.
     /// The environment defines supported dtypes and devices; CPU environments require CPU actions.
     fn step(
         &mut self,
-        action: Tensor<A, <Self::ActionSpace as ActionSpace<BA>>::Kind>,
-    ) -> Result<StepInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>;
+        action: <Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind> as PrevRank>::Prev,
+    ) -> Result<
+        StepInfo<
+            I,
+            <Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind> as PrevRank>::Prev,
+        >,
+        Self::Error,
+    >;
 
-    /// Resets to unbatched `observation_shape` of rank `O` in the observation space's kind; scalar observations use `[1]`.
-    /// The environment defines observation dtype and device.
+    /// Resets to unbatched `observation_shape`, one rank below `O`; scalar observations use `[1]`.
+    /// The environment defines observation kind, dtype, and device.
     fn reset(
         &mut self,
-    ) -> Result<ResetInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>;
+    ) -> Result<
+        ResetInfo<
+            I,
+            <Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind> as PrevRank>::Prev,
+        >,
+        Self::Error,
+    >;
 
     fn observation_space(&self) -> Self::ObservationSpace;
 
@@ -55,8 +64,11 @@ pub trait Gym<
 /// An ordered batch of environment slots with native tensors.
 /// Slots may be independent environments or coupled players in one world.
 /// Implementations keep batch order and size fixed. Auto-reset implementations retain terminal observations.
-/// `U` is the rank of each unbatched terminal observation; `O = U + 1`, including scalar observations `[num_envs, 1]`.
-pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2, const U: usize = 1> {
+/// `O` and `A` are batch ranks; `PrevRank` determines the unbatched terminal observation type.
+pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2>
+where
+    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
+{
     type Error;
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
@@ -68,7 +80,10 @@ pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2, const U: usiz
         &mut self,
         action: Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>,
     ) -> Result<
-        MultiGymStepInfo<I, O, <Self::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+        MultiGymStepInfo<
+            I,
+            <Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind> as PrevRank>::Prev,
+        >,
         Self::Error,
     >;
 
@@ -85,19 +100,19 @@ pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2, const U: usiz
     ) -> Result<Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error>;
 }
 
-/// An unbatched `observation_shape` of rank `O` and environment metadata; scalar observations use `[1]`.
-/// Kind `K`, dtype, and device follow the environment's observation space.
+/// An unbatched observation tensor `T` and environment metadata; scalar observations use native `Tensor<1>` with shape `[1]`.
+/// Rank, kind, dtype, and device follow the environment's observation space.
 #[derive(Debug, Clone)]
-pub struct ResetInfo<I = (), const O: usize = 1, K: Basic = Float> {
-    pub observation: Tensor<O, K>,
+pub struct ResetInfo<I = (), T: NextRank = Tensor<1>> {
+    pub observation: T,
     pub info: I,
 }
 
-/// One transition with unbatched `observation_shape` of rank `O`; scalar observations use `[1]`.
-/// Reward and termination/truncation flags are host values. Kind `K`, dtype, and device follow the environment.
+/// One transition with an unbatched observation tensor `T`; scalar observations have shape `[1]`.
+/// Reward and termination/truncation flags are host values. Kind, dtype, and device follow the environment.
 #[derive(Debug, Clone)]
-pub struct StepInfo<I = (), const O: usize = 1, K: Basic = Float> {
-    pub observation: Tensor<O, K>,
+pub struct StepInfo<I = (), T: NextRank = Tensor<1>> {
+    pub observation: T,
     pub reward: f32,
     pub done: bool,
     pub truncated: bool,
@@ -105,31 +120,28 @@ pub struct StepInfo<I = (), const O: usize = 1, K: Basic = Float> {
 }
 
 /// Batched transition results in environment-slot order.
-/// Observations are `[num_envs, ...observation_shape]` of rank `O` and kind `K`; rewards are Float `[num_envs]`.
-/// Each optional terminal observation is unbatched `observation_shape` of rank `U`, with the observation dtype and device.
-/// Requires `O = U + 1`; scalar observations use `[num_envs, 1]` and terminal shape `[1]`.
-/// Host metadata and flags contain one entry per slot. Done and truncated remain separate.
+/// `T` is the native unbatched terminal observation type. `T::Next` stores `[num_envs, ...observation_shape]`.
+/// Scalar terminals `[1]` produce observation batches `[num_envs, 1]`. Rewards are Float `[num_envs]`.
+/// Terminal observations share the observation dtype and device. Host metadata and flags contain one entry per slot.
+/// Done and truncated remain separate.
 #[derive(Debug, Clone)]
-pub struct MultiGymStepInfo<I = (), const O: usize = 2, K: Basic = Float, const U: usize = 1> {
-    pub observations: Tensor<O, K>,
+pub struct MultiGymStepInfo<I = (), T: NextRank = Tensor<1>> {
+    pub observations: T::Next,
     pub rewards: Tensor<1>,
     pub infos: Vec<I>,
     pub dones: Vec<bool>,
     pub truncateds: Vec<bool>,
-    pub terminal_observations: Vec<Option<Tensor<U, K>>>,
+    pub terminal_observations: Vec<Option<T>>,
 }
 
-impl<I, const O: usize, K: Basic, const U: usize> MultiGymStepInfo<I, O, K, U> {
+impl<I, const O: usize, K: Basic, const U: usize> MultiGymStepInfo<I, Tensor<U, K>>
+where
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+{
     /// Returns `[num_envs, ...observation_shape]` of rank `O` for transition targets.
     /// Replaces reset observations with saved terminal observations, preserving kind, dtype, device, and gradient paths.
     /// Adds the batch axis to unbatched terminal observations; scalar terminals `[1]` become rows `[1, 1]`.
     pub fn transition_next_observations(&self) -> Tensor<O, K> {
-        const {
-            assert!(
-                O == U + 1,
-                "batch observation rank must be single observation rank + 1"
-            );
-        }
         let mut observations = self.observations.clone();
         let mut indices = Vec::new();
         let mut terminals = Vec::new();
@@ -174,9 +186,10 @@ struct GymBatchMetadata {
 }
 
 /// Collects slot count and item shapes so stacked gyms can check group compatibility and assign batch rows.
-fn batch_metadata<G, I, const O: usize, const A: usize, const U: usize>(gym: &G) -> GymBatchMetadata
+fn batch_metadata<G, I, const O: usize, const A: usize>(gym: &G) -> GymBatchMetadata
 where
-    G: MultiGym<I, O, A, U>,
+    G: MultiGym<I, O, A>,
+    Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
 {
     GymBatchMetadata {
         num_envs: gym.num_envs(),
@@ -225,8 +238,11 @@ fn batch_offsets<E>(
 /// Returns `[total_size, ...observation_shape]` of rank `O` and rewards `[total_size]`, preserving each tensor's kind, dtype, device, and gradients.
 /// Groups must share item dimensions, dtypes, and devices. Metadata, flags, and terminal observations retain group order.
 fn combine_steps<I, const O: usize, K: Basic, const U: usize>(
-    steps: Vec<MultiGymStepInfo<I, O, K, U>>,
-) -> MultiGymStepInfo<I, O, K, U> {
+    steps: Vec<MultiGymStepInfo<I, Tensor<U, K>>>,
+) -> MultiGymStepInfo<I, Tensor<U, K>>
+where
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+{
     let count = steps.iter().map(|step| step.infos.len()).sum();
     let mut observations = Vec::with_capacity(steps.len());
     let mut rewards = Vec::with_capacity(steps.len());
@@ -260,7 +276,7 @@ mod tests {
     #[test]
     fn scalar_terminal_observations_use_one_element_tensors() {
         let device = Device::flex();
-        let step = MultiGymStepInfo::<(), 2, Int> {
+        let step = MultiGymStepInfo::<(), Tensor<1, Int>> {
             observations: Tensor::from_data([[8u64], [9]], (&device, DType::U64)),
             rewards: Tensor::zeros([2], &device),
             infos: vec![(); 2],
@@ -280,7 +296,7 @@ mod tests {
     #[test]
     fn boolean_scalar_terminals_replace_complete_batch_rows() {
         let device = Device::flex();
-        let step = MultiGymStepInfo::<(), 2, Bool> {
+        let step = MultiGymStepInfo::<(), Tensor<1, Bool>> {
             observations: Tensor::from_data([[true], [true]], &device),
             rewards: Tensor::zeros([2], &device),
             infos: vec![(); 2],
@@ -298,7 +314,7 @@ mod tests {
 
     #[test]
     fn boolean_terminal_observations_replace_true_reset_values() {
-        let step = MultiGymStepInfo::<(), 2, Bool> {
+        let step = MultiGymStepInfo::<(), Tensor<1, Bool>> {
             observations: Tensor::from_data([[true, true], [true, false]], &Device::flex()),
             rewards: Tensor::zeros([2], &Device::flex()),
             infos: vec![(); 2],

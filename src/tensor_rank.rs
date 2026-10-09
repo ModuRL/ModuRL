@@ -11,15 +11,15 @@
 use burn::tensor::{Tensor, kind::Basic};
 
 /// Supplies the native tensor type with one additional axis and the same kind.
-pub trait NextRank {
+pub trait NextRank: Clone + std::fmt::Debug {
     /// The rank-D + 1 tensor type. Axis sizes, dtype, and device belong to tensor values.
-    type Next;
+    type Next: Clone + std::fmt::Debug;
 }
 
 /// Supplies the native tensor type with one fewer axis and the same kind.
-pub trait PrevRank {
+pub trait PrevRank: Clone + std::fmt::Debug {
     /// The rank-D - 1 tensor type. Removing an axis requires an appropriate Burn operation.
-    type Prev;
+    type Prev: NextRank<Next = Self>;
 }
 
 // Split the range in two at each step to keep macro recursion shallow.
