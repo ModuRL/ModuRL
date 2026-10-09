@@ -1,6 +1,7 @@
 use super::{Gym, MultiGym, MultiGymStepInfo};
 use crate::spaces::{ActionSpace, ObservationSpace};
-use burn::tensor::{DType, Slice, Tensor, TensorData};
+use crate::tensor_rank::{NextRank, PrevRank};
+use burn::tensor::{DType, Slice, Tensor, TensorData, kind::Basic};
 use std::marker::PhantomData;
 
 #[derive(Debug, thiserror::Error)]
@@ -18,36 +19,20 @@ pub enum VectorizedGymError<E> {
 /// Scalars use `[1]` individually and `[num_envs, 1]` when batched.
 /// Ended environments reset immediately. Saved terminal observations remain available for transition targets.
 /// Reset after an error because some environments may already have advanced.
-pub struct VectorizedGymWrapper<
-    G,
-    I = (),
-    const O: usize = 1,
-    const A: usize = 1,
-    const BO: usize = 2,
-    const BA: usize = 2,
-> where
-    G: Gym<I, O, A, BO, BA>,
-{
+pub struct VectorizedGymWrapper<G, I = (), const BO: usize = 2, const BA: usize = 2> {
     envs: Vec<G>,
     _info: PhantomData<fn() -> I>,
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize>
-    VectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> VectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank,
+    Tensor<BA, AK>: PrevRank,
 {
     pub fn new(envs: Vec<G>) -> Result<Self, VectorizedGymError<G::Error>> {
-        const {
-            assert!(
-                BO == O + 1,
-                "batch observation rank must be single observation rank + 1"
-            );
-            assert!(
-                BA == A + 1,
-                "batch action rank must be single action rank + 1"
-            );
-        }
         if envs.is_empty() {
             return Err(VectorizedGymError::Empty);
         }
@@ -66,22 +51,16 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> From<G>
-    for VectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> From<G>
+    for VectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank,
+    Tensor<BA, AK>: PrevRank,
 {
     fn from(env: G) -> Self {
-        const {
-            assert!(
-                BO == O + 1,
-                "batch observation rank must be single observation rank + 1"
-            );
-            assert!(
-                BA == A + 1,
-                "batch action rank must be single action rank + 1"
-            );
-        }
         Self {
             envs: vec![env],
             _info: PhantomData,
@@ -89,10 +68,14 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> TryFrom<Vec<G>>
-    for VectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> TryFrom<Vec<G>>
+    for VectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank,
+    Tensor<BA, AK>: PrevRank,
 {
     type Error = VectorizedGymError<G::Error>;
 
@@ -101,10 +84,16 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> MultiGym<I, BO, BA, O>
-    for VectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic>
+    MultiGym<I, BO, BA> for VectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+    Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,
+    Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
 {
     type Error = VectorizedGymError<G::Error>;
     type ObservationSpace = G::ObservationSpace;
@@ -116,11 +105,8 @@ where
     /// Inputs must meet each environment's dtype and device contract. Flags and metadata stay on the host.
     fn step(
         &mut self,
-        action: Tensor<BA, <G::ActionSpace as ActionSpace<BA>>::Kind>,
-    ) -> Result<
-        MultiGymStepInfo<I, BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind, O>,
-        Self::Error,
-    > {
+        action: Tensor<BA, AK>,
+    ) -> Result<MultiGymStepInfo<I, Tensor<O, K>>, Self::Error> {
         let count = self.envs.len();
         let mut observations = Vec::with_capacity(count);
         let mut rewards = Vec::with_capacity(count);
@@ -144,8 +130,7 @@ where
             dones.push(step.done);
             truncateds.push(step.truncated);
         }
-        let observations: Tensor<BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind> =
-            Tensor::stack(observations, 0);
+        let observations: Tensor<BO, K> = Tensor::stack(observations, 0);
         let rewards = Tensor::from_data(
             TensorData::new(rewards, [count]),
             (&observations.device(), DType::F32),
@@ -175,9 +160,7 @@ where
     /// Stacks unbatched rank-`O` reset observations into `[num_envs, ...observation_shape]` of rank `BO`.
     /// Requires `BO = O + 1`, including scalar observations `[num_envs, 1]`.
     /// Observation kind, dtype, device, and item dimensions must match across environments. Gradients are preserved.
-    fn reset(
-        &mut self,
-    ) -> Result<Tensor<BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error> {
+    fn reset(&mut self) -> Result<Tensor<BO, K>, Self::Error> {
         let mut observations = Vec::with_capacity(self.envs.len());
         for env in &mut self.envs {
             observations.push(env.reset().map_err(VectorizedGymError::Single)?.observation);
@@ -292,13 +275,16 @@ mod tests {
 
     struct IntegerEnv;
 
-    impl Gym<(), 1, 1, 2, 2> for IntegerEnv {
+    impl Gym<(), 2, 2> for IntegerEnv {
         type Error = TestError;
         type ObservationSpace = Discrete;
         type ActionSpace = Discrete;
 
         /// Returns U64 observations `[1]` from Int actions `[1]` on the fixture CPU device.
-        fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo<(), 1, Int>, Self::Error> {
+        fn step(
+            &mut self,
+            action: Tensor<1, Int>,
+        ) -> Result<StepInfo<(), Tensor<1, Int>>, Self::Error> {
             Ok(StepInfo {
                 observation: action.cast(DType::U64),
                 reward: 1.0,
@@ -309,7 +295,7 @@ mod tests {
         }
 
         /// Returns U64 reset observations `[1]`.
-        fn reset(&mut self) -> Result<ResetInfo<(), 1, Int>, Self::Error> {
+        fn reset(&mut self) -> Result<ResetInfo<(), Tensor<1, Int>>, Self::Error> {
             Ok(ResetInfo {
                 observation: Tensor::zeros([1], (&Device::flex(), DType::U64)),
                 info: (),
@@ -342,13 +328,16 @@ mod tests {
 
     struct ImageEnv;
 
-    impl Gym<(), 3, 1, 4, 2> for ImageEnv {
+    impl Gym<(), 4, 2> for ImageEnv {
         type Error = TestError;
         type ObservationSpace = BoxSpace<4>;
         type ActionSpace = Discrete;
 
         /// Accepts scalar Int actions `[1]` and returns unbatched F64 image observations `[1, 2, 2]`.
-        fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo<(), 3>, Self::Error> {
+        fn step(
+            &mut self,
+            _action: Tensor<1, Int>,
+        ) -> Result<StepInfo<(), Tensor<3>>, Self::Error> {
             Ok(StepInfo {
                 observation: Tensor::ones([1, 2, 2], (&Device::flex(), DType::F64)),
                 reward: 1.0,
@@ -359,7 +348,7 @@ mod tests {
         }
 
         /// Returns unbatched F64 image observations `[1, 2, 2]`.
-        fn reset(&mut self) -> Result<ResetInfo<(), 3>, Self::Error> {
+        fn reset(&mut self) -> Result<ResetInfo<(), Tensor<3>>, Self::Error> {
             Ok(ResetInfo {
                 observation: Tensor::zeros([1, 2, 2], (&Device::flex(), DType::F64)),
                 info: (),

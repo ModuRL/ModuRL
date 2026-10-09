@@ -2,6 +2,7 @@
 //!
 //! The modules group observation transformations, reward transformations, and episode controls.
 
+use crate::tensor_rank::{NextRank, PrevRank};
 use burn::tensor::{Device, Slice, Tensor, kind::Basic};
 use std::convert::Infallible;
 
@@ -28,9 +29,10 @@ pub struct InputMapMultiGymWrapper<G, F> {
 impl<G, F> InputMapMultiGymWrapper<G, F> {
     /// Creates a callback for rank-`A` actions `[num_envs, ...action_shape]` in the inner action kind.
     /// The callback must preserve the layout and meet the inner gym's dtype and device requirements.
-    pub fn new<I, E, const O: usize, const A: usize, const U: usize>(gym: G, map_input: F) -> Self
+    pub fn new<I, E, const O: usize, const A: usize>(gym: G, map_input: F) -> Self
     where
-        G: MultiGym<I, O, A, U>,
+        G: MultiGym<I, O, A>,
+        Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
         F: FnMut(
             Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
         ) -> Result<Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>, E>,
@@ -51,13 +53,15 @@ impl<G, F> InputMapMultiGymWrapper<G, F> {
     }
 }
 
-impl<G, F, I, E, const O: usize, const A: usize, const U: usize> MultiGym<I, O, A, U>
-    for InputMapMultiGymWrapper<G, F>
+impl<G, F, I, E, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic>
+    MultiGym<I, O, A> for InputMapMultiGymWrapper<G, F>
 where
-    G: MultiGym<I, O, A, U>,
-    F: FnMut(
-        Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
-    ) -> Result<Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>, E>,
+    G: MultiGym<I, O, A>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    F: FnMut(Tensor<A, AK>) -> Result<Tensor<A, AK>, E>,
 {
     type Error = TensorMapMultiGymError<G::Error, E>;
     type ObservationSpace = G::ObservationSpace;
@@ -67,19 +71,14 @@ where
     /// Terminal observations keep unbatched rank `U`; rewards keep `[num_envs]`. Output kinds, dtypes, and devices remain unchanged.
     fn step(
         &mut self,
-        action: Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>,
-    ) -> Result<
-        MultiGymStepInfo<I, O, <Self::ObservationSpace as ObservationSpace<O>>::Kind, U>,
-        Self::Error,
-    > {
+        action: Tensor<A, AK>,
+    ) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, Self::Error> {
         let action = (self.map_input)(action).map_err(TensorMapMultiGymError::Mapping)?;
         self.gym.step(action).map_err(TensorMapMultiGymError::Gym)
     }
 
     /// Returns unchanged rank-`O` observations `[num_envs, ...observation_shape]` in the inner kind, dtype, and device.
-    fn reset(
-        &mut self,
-    ) -> Result<Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
+    fn reset(&mut self) -> Result<Tensor<O, K>, Self::Error> {
         self.gym.reset().map_err(TensorMapMultiGymError::Gym)
     }
 
@@ -114,15 +113,19 @@ impl<G, FReset, FStep> OutputMapMultiGymWrapper<G, FReset, FStep> {
         map_step: FStep,
     ) -> Self
     where
-        G: MultiGym<I, O, A, U>,
+        G: MultiGym<I, O, A>,
+        Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
+            PrevRank<Prev = Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>>,
+        Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
+            NextRank<Next = Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>>,
         FReset: FnMut(
             Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>,
         )
             -> Result<Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>, E>,
         FStep: FnMut(
-            MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+            MultiGymStepInfo<I, Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>>,
         ) -> Result<
-            MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+            MultiGymStepInfo<I, Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>>,
             E,
         >,
     {
@@ -146,19 +149,16 @@ impl<G, FReset, FStep> OutputMapMultiGymWrapper<G, FReset, FStep> {
     }
 }
 
-impl<G, FReset, FStep, I, E, const O: usize, const A: usize, const U: usize> MultiGym<I, O, A, U>
-    for OutputMapMultiGymWrapper<G, FReset, FStep>
+impl<G, FReset, FStep, I, E, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic>
+    MultiGym<I, O, A> for OutputMapMultiGymWrapper<G, FReset, FStep>
 where
-    G: MultiGym<I, O, A, U>,
-    FReset: FnMut(
-        Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>,
-    ) -> Result<Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>, E>,
-    FStep: FnMut(
-        MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
-    ) -> Result<
-        MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
-        E,
-    >,
+    G: MultiGym<I, O, A>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    FReset: FnMut(Tensor<O, K>) -> Result<Tensor<O, K>, E>,
+    FStep: FnMut(MultiGymStepInfo<I, Tensor<U, K>>) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, E>,
 {
     type Error = TensorMapMultiGymError<G::Error, E>;
     type ObservationSpace = G::ObservationSpace;
@@ -168,19 +168,14 @@ where
     /// Observations retain rank `O`, rewards retain rank 1, and unbatched terminal observations retain rank `U`.
     fn step(
         &mut self,
-        action: Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>,
-    ) -> Result<
-        MultiGymStepInfo<I, O, <Self::ObservationSpace as ObservationSpace<O>>::Kind, U>,
-        Self::Error,
-    > {
+        action: Tensor<A, AK>,
+    ) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, Self::Error> {
         let step = self.gym.step(action).map_err(TensorMapMultiGymError::Gym)?;
         (self.map_step)(step).map_err(TensorMapMultiGymError::Mapping)
     }
 
     /// Maps rank-`O` reset observations `[num_envs, ...observation_shape]` without changing the layout or kind.
-    fn reset(
-        &mut self,
-    ) -> Result<Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
+    fn reset(&mut self) -> Result<Tensor<O, K>, Self::Error> {
         let observations = self.gym.reset().map_err(TensorMapMultiGymError::Gym)?;
         (self.map_reset)(observations).map_err(TensorMapMultiGymError::Mapping)
     }
@@ -201,15 +196,11 @@ where
 /// Transfers observations `[num_envs, ...observation_shape]` and unbatched rank-`U` terminal observations in one packed tensor.
 /// Adds and removes the terminal batch axis, preserving kind, dtype, item axes, and gradients; scalar values use `[1]`.
 fn transfer_batched_observations<I, const O: usize, K: Basic, const U: usize>(
-    step: &mut MultiGymStepInfo<I, O, K, U>,
+    step: &mut MultiGymStepInfo<I, Tensor<U, K>>,
     device: &Device,
-) {
-    const {
-        assert!(
-            O == U + 1,
-            "batch observation rank must be single observation rank + 1"
-        );
-    }
+) where
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+{
     let count = step.observations.dims()[0];
     let terminal_count = step.terminal_observations.iter().flatten().count();
     let mut parts = Vec::with_capacity(terminal_count + 1);
@@ -265,10 +256,14 @@ impl<G> DeviceMultiGymWrapper<G> {
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const U: usize> MultiGym<I, O, A, U>
+impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic> MultiGym<I, O, A>
     for DeviceMultiGymWrapper<G>
 where
-    G: MultiGym<I, O, A, U>,
+    G: MultiGym<I, O, A>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
 {
     type Error = TensorMapMultiGymError<G::Error>;
     type ObservationSpace = G::ObservationSpace;
@@ -279,11 +274,8 @@ where
     /// Preserves tensor kinds, dtypes, item axes, and gradients.
     fn step(
         &mut self,
-        action: Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>,
-    ) -> Result<
-        MultiGymStepInfo<I, O, <Self::ObservationSpace as ObservationSpace<O>>::Kind, U>,
-        Self::Error,
-    > {
+        action: Tensor<A, AK>,
+    ) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, Self::Error> {
         let action = action.to_device(&self.environment_device);
         let mut step = self.gym.step(action).map_err(TensorMapMultiGymError::Gym)?;
         if step.observations.device() != self.agent_device {
@@ -294,9 +286,7 @@ where
     }
 
     /// Transfers rank-`O` reset observations `[num_envs, ...observation_shape]` to the agent device, preserving kind and dtype.
-    fn reset(
-        &mut self,
-    ) -> Result<Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
+    fn reset(&mut self) -> Result<Tensor<O, K>, Self::Error> {
         Ok(self
             .gym
             .reset()
@@ -495,7 +485,7 @@ mod tests {
     #[test]
     fn packed_transfer_preserves_scalar_integer_and_boolean_layouts() {
         let device = Device::flex();
-        let mut integers = MultiGymStepInfo {
+        let mut integers = MultiGymStepInfo::<(), Tensor<1, Int>> {
             observations: Tensor::<2, Int>::from_data([[4i32], [5]], &device),
             rewards: Tensor::zeros([2], &device),
             infos: vec![(), ()],
@@ -517,7 +507,7 @@ mod tests {
                 .unwrap(),
             vec![4, 8]
         );
-        let mut booleans = MultiGymStepInfo {
+        let mut booleans = MultiGymStepInfo::<(), Tensor<1, Bool>> {
             observations: Tensor::<2, Bool>::from_data([[true, false], [false, true]], &device),
             rewards: Tensor::zeros([2], &device),
             infos: vec![(), ()],

@@ -1,5 +1,6 @@
 //! Running observation and reward normalization wrappers.
 
+use crate::tensor_rank::{NextRank, PrevRank};
 use burn::tensor::{Tensor, TensorData, TensorReadError, kind::Basic};
 
 use crate::{
@@ -105,20 +106,22 @@ impl<G> NormalizeObservationGym<G> {
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> Gym<I, O, A, BO, BA>
+impl<G, I, const O: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic> Gym<I, BO, BA>
     for NormalizeObservationGym<G>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+    Tensor<BA, AK>: PrevRank,
 {
     type Error = NormalizeObservationGymError<G::Error>;
     type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
 
     /// Normalizes the reset observation without changing its unbatched rank-`O` shape, kind, dtype, or device.
-    fn reset(
-        &mut self,
-    ) -> Result<ResetInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
-    {
+    fn reset(&mut self) -> Result<ResetInfo<I, Tensor<O, K>>, Self::Error> {
         let mut reset = self
             .gym
             .reset()
@@ -129,13 +132,12 @@ where
         Ok(reset)
     }
 
-    /// Forwards an unbatched rank-`A` action and returns an unbatched rank-`O` observation; scalars use `[1]`.
+    /// Forwards an unbatched rank-`BA - 1` action and returns an unbatched rank-`O` observation; scalars use `[1]`.
     /// Normalizes observation values while preserving tensor shapes, kinds, dtypes, and devices.
     fn step(
         &mut self,
-        action: Tensor<A, <Self::ActionSpace as ActionSpace<BA>>::Kind>,
-    ) -> Result<StepInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
-    {
+        action: <Tensor<BA, AK> as PrevRank>::Prev,
+    ) -> Result<StepInfo<I, Tensor<O, K>>, Self::Error> {
         let mut step = self
             .gym
             .step(action)
@@ -184,30 +186,30 @@ impl<G> NormalizeRewardGym<G> {
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> Gym<I, O, A, BO, BA>
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> Gym<I, BO, BA>
     for NormalizeRewardGym<G>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank,
+    Tensor<BA, AK>: PrevRank,
 {
     type Error = G::Error;
     type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
 
-    /// Returns the inner gym's unbatched rank-`O` observation, preserving its kind, dtype, device, and item axes.
-    fn reset(
-        &mut self,
-    ) -> Result<ResetInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
-    {
+    /// Returns the inner gym's unbatched rank-`BO - 1` observation, preserving its kind, dtype, device, and item axes.
+    fn reset(&mut self) -> Result<ResetInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
         self.gym.reset()
     }
 
-    /// Forwards an unbatched rank-`A` action and returns an unbatched rank-`O` observation; scalars use `[1]`.
+    /// Forwards an unbatched rank-`BA - 1` action and returns an unbatched rank-`BO - 1` observation; scalars use `[1]`.
     /// Preserves tensor shapes, kinds, dtypes, and devices, subject to the inner gym's input requirements.
     fn step(
         &mut self,
-        action: Tensor<A, <Self::ActionSpace as ActionSpace<BA>>::Kind>,
-    ) -> Result<StepInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
-    {
+        action: <Tensor<BA, AK> as PrevRank>::Prev,
+    ) -> Result<StepInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
         let mut step = self.gym.step(action)?;
         self.discounted_reward =
             self.discounted_reward * self.gamma * if step.done { 0.0 } else { 1.0 }
