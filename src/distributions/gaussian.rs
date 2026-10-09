@@ -16,7 +16,8 @@ use crate::tensor_rank::NextRank;
 ///
 /// The default uses vector actions `[batch, features]`. Other action shapes use
 /// `[batch, ...action_shape]`; statistics always reduce to `[batch]`.
-/// Multiple-sample expectations support action ranks 1 through 1024, as defined by `NextRank`.
+/// Scalar actions use event shape `[1]`, producing `[batch, 1]` and `[batch, samples, 1]`.
+/// Multiple-sample expectations support action ranks 2 through 1024, as defined by `NextRank`.
 /// Samples are not squashed or clipped. A separate action map prepares them
 /// for the environment; probability calculations use the original samples.
 #[derive(Clone, Debug)]
@@ -50,6 +51,7 @@ impl<const A: usize> GaussianDistribution<A> {
         action_shape: [usize; E],
     ) -> Result<Self, GaussianDistributionError> {
         const {
+            assert!(E >= 1, "scalar Gaussian actions require event shape [1]");
             assert!(A == E + 1, "Gaussian action rank must be event rank + 1");
         }
         let event_size = action_shape.iter().try_fold(1usize, |size, dimension| {
@@ -83,7 +85,7 @@ impl<const A: usize> GaussianDistribution<A> {
         outputs: Tensor<2>,
     ) -> Result<(Tensor<A>, Tensor<A>), GaussianDistributionError> {
         const {
-            assert!(A >= 1, "Gaussian actions require a batch axis");
+            assert!(A >= 2, "Gaussian actions require batch and item axes");
         }
         let [batch_size, output_width] = outputs.dims();
         if output_width == 0 || output_width % 2 != 0 {
@@ -117,7 +119,7 @@ impl<const A: usize> GaussianDistribution<A> {
 }
 
 /// Sums the action dimensions of rank-`A` values `[batch, ...action_shape]`,
-/// returning `[batch]` in the same batch order. Scalar actions have no trailing axes.
+/// returning `[batch]` in the same batch order. Scalar actions have a trailing axis of size one.
 fn sum_event_dimensions<const A: usize>(values: Tensor<A>) -> Tensor<1> {
     const {
         assert!(A >= 1, "event reduction requires a batch axis");
@@ -254,13 +256,13 @@ mod tests {
                 .unwrap(),
             vec![0.25, -0.5, 0.75]
         );
-        let scalar = GaussianDistribution::<1>::new([]).unwrap();
+        let scalar = GaussianDistribution::<2>::new([1]).unwrap();
         assert_eq!(
             scalar
                 .mode(Tensor::from_floats([[2.0, 0.0], [3.0, 0.0]], &device))
                 .unwrap()
                 .dims(),
-            [2]
+            [2, 1]
         );
     }
 
@@ -268,15 +270,15 @@ mod tests {
     fn scalar_expectation_infers_native_candidate_rank() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let distribution = GaussianDistribution::<1>::new([]).unwrap();
-        let terms: ExpectationTerms<2> = distribution
+        let distribution = GaussianDistribution::<2>::new([1]).unwrap();
+        let terms: ExpectationTerms<3> = distribution
             .expectation(
                 Tensor::zeros([2, 2], &device),
                 NonZeroUsize::new(3).unwrap(),
             )
             .unwrap();
-        let actions: Tensor<2> = terms.actions().clone();
-        assert_eq!(actions.dims(), [2, 3]);
+        let actions: Tensor<3> = terms.actions().clone();
+        assert_eq!(actions.dims(), [2, 3, 1]);
         assert_eq!(terms.log_probabilities().dims(), [2, 3]);
         assert_eq!(terms.weights().dims(), [2, 3]);
     }

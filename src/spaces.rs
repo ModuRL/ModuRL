@@ -59,26 +59,27 @@ pub struct Discrete {
 }
 
 impl Discrete {
-    /// Checks that every index in `[batch]` is in `0..possible_values`.
-    pub fn contains(&self, values: &Tensor<1, Int>) -> bool {
-        values
-            .clone()
-            .greater_equal_scalar(0)
-            .bool_and(values.clone().lower_elem(self.possible_values as i64))
-            .all()
-            .into_scalar::<bool>()
+    /// Checks that indices have shape `[batch, 1]` and are in `0..possible_values`.
+    pub fn contains(&self, values: &Tensor<2, Int>) -> bool {
+        values.dims()[1] == 1
+            && values
+                .clone()
+                .greater_equal_scalar(0)
+                .bool_and(values.clone().lower_elem(self.possible_values as i64))
+                .all()
+                .into_scalar::<bool>()
     }
 
-    /// Discrete environment values are scalar indices.
+    /// Returns the scalar item shape `[1]`, excluding the batch axis.
     pub fn shape(&self) -> Vec<usize> {
-        vec![]
+        vec![1]
     }
 }
 
-impl ObservationSpace<1> for Discrete {
+impl ObservationSpace<2> for Discrete {
     type Kind = Int;
 
-    fn contains(&self, values: &Tensor<1, Int>) -> bool {
+    fn contains(&self, values: &Tensor<2, Int>) -> bool {
         self.contains(values)
     }
     fn shape(&self) -> Vec<usize> {
@@ -86,42 +87,42 @@ impl ObservationSpace<1> for Discrete {
     }
 }
 
-impl ActionSpace<1> for Discrete {
+impl ActionSpace<2> for Discrete {
     type Kind = Int;
     type Error = SpaceError;
 
-    fn contains(&self, values: &Tensor<1, Int>) -> bool {
+    fn contains(&self, values: &Tensor<2, Int>) -> bool {
         self.contains(values)
     }
     fn shape(&self) -> Vec<usize> {
         self.shape()
     }
 
-    /// Samples integer action indices shaped `[batch_size]`.
+    /// Samples integer action indices shaped `[batch_size, 1]`.
     fn sample_batch(
         &self,
         batch_size: usize,
         device: &Device,
-    ) -> Result<Tensor<1, Int>, Self::Error> {
+    ) -> Result<Tensor<2, Int>, Self::Error> {
         if self.possible_values == 0 || self.possible_values > (1 << 24) {
             return Err(SpaceError::InvalidCategoryCount(self.possible_values));
         }
         Ok(Tensor::random(
-            [batch_size],
+            [batch_size, 1],
             Distribution::Uniform(0.0, self.possible_values as f64),
             (device, DType::I32),
         ))
     }
 }
 
-impl ActionMap<2, 1> for Discrete {
+impl ActionMap<2, 2> for Discrete {
     /// Returns `[action_count]`, including `[1]` for a one-action space.
     fn policy_shape(&self) -> Vec<usize> {
         vec![self.possible_values]
     }
 
-    /// Converts `[batch_size, action_count]` logits to `[batch_size]` indices.
-    fn tensor_from_neurons(&self, neurons: Tensor<2>) -> Result<Tensor<1, Int>, Self::Error> {
+    /// Converts `[batch_size, action_count]` logits to `[batch_size, 1]` indices.
+    fn tensor_from_neurons(&self, neurons: Tensor<2>) -> Result<Tensor<2, Int>, Self::Error> {
         let [batch_size, categories] = neurons.dims();
         if categories != self.possible_values || categories == 0 {
             return Err(SpaceError::InvalidPolicyShape {
@@ -129,7 +130,7 @@ impl ActionMap<2, 1> for Discrete {
                 actual: neurons.dims().to_vec(),
             });
         }
-        Ok(neurons.argmax(1).squeeze_dim(1))
+        Ok(neurons.argmax(1))
     }
 }
 
@@ -254,7 +255,9 @@ impl<const R: usize> BoxSpace<R> {
     /// Creates bounds `low` and `high`, both rank `R` and shaped
     /// `[1, ...action_shape]`, with matching dtypes and devices.
     pub fn new(low: Tensor<R>, high: Tensor<R>) -> Self {
-        assert!(R > 0, "box bounds require a batch axis");
+        const {
+            assert!(R >= 2, "box bounds require batch and item axes");
+        }
         assert_eq!(
             low.dims()[0],
             1,
@@ -308,10 +311,7 @@ fn finite_limit(dtype: DType) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Flex shares its RNG across devices; seeded checks require exclusive access.
-    static RNG_LOCK: Mutex<()> = Mutex::new(());
+    use crate::sampling::tests::RNG_LOCK;
 
     #[test]
     fn discrete_samples_indices_and_decodes_logits() {
@@ -319,7 +319,7 @@ mod tests {
         let device = Device::flex();
         let space = Discrete::new(3);
         let actions = space.sample_batch(128, &device).unwrap();
-        assert_eq!(actions.dims(), [128]);
+        assert_eq!(actions.dims(), [128, 1]);
         assert_eq!(actions.dtype(), DType::I32);
         assert!(
             actions
@@ -339,11 +339,12 @@ mod tests {
                 .unwrap(),
             vec![1, 0]
         );
-        assert!(space.contains(&Tensor::from_data([2i32], &device)));
-        assert!(!space.contains(&Tensor::from_data([-1i32], &device)));
-        assert!(!space.contains(&Tensor::from_data([3i32], &device)));
-        assert!(space.contains(&Tensor::from_data([0i32, 1], &device)));
-        assert!(!space.contains(&Tensor::from_data([0i32, 3], &device)));
+        assert!(space.contains(&Tensor::from_data([[2i32]], &device)));
+        assert!(!space.contains(&Tensor::from_data([[-1i32]], &device)));
+        assert!(!space.contains(&Tensor::from_data([[3i32]], &device)));
+        assert!(space.contains(&Tensor::from_data([[0i32], [1]], &device)));
+        assert!(!space.contains(&Tensor::from_data([[0i32], [3]], &device)));
+        assert!(!space.contains(&Tensor::from_data([[0i32, 1]], &device)));
         assert!(Discrete::new(0).sample_batch(1, &device).is_err());
         assert!(
             Discrete::new((1 << 24) + 1)
@@ -356,7 +357,7 @@ mod tests {
                 .is_err()
         );
         let single = Discrete::new(1);
-        assert!(single.shape().is_empty());
+        assert_eq!(single.shape(), vec![1]);
         assert_eq!(single.policy_shape(), vec![1]);
         assert_eq!(
             single
@@ -487,7 +488,7 @@ mod tests {
         let device = Device::flex();
         assert_eq!(
             Discrete::new(3).sample_batch(0, &device).unwrap().dims(),
-            [0]
+            [0, 1]
         );
         let space = BoxSpace::<2>::new_with_universal_bounds([1, 3], -1.0, 1.0, &device);
         assert_eq!(space.sample_batch(0, &device).unwrap().dims(), [0, 3]);
@@ -500,13 +501,13 @@ mod tests {
         let observations: Box<dyn ObservationSpace<4, Kind = Float>> = Box::new(
             BoxSpace::<4>::new_with_universal_bounds([1, 2, 3, 4], 0.0, 255.0, &device),
         );
-        let actions: Box<dyn ActionSpace<1, Kind = Int, Error = SpaceError>> =
+        let actions: Box<dyn ActionSpace<2, Kind = Int, Error = SpaceError>> =
             Box::new(Discrete::new(3));
         assert_eq!(observations.shape(), vec![2, 3, 4]);
         assert!(observations.contains(&Tensor::zeros([5, 2, 3, 4], &device)));
         assert!(!observations.contains(&Tensor::zeros([5, 2, 4, 3], &device)));
         assert!(!observations.contains(&Tensor::full([5, 2, 3, 4], 256.0, &device)));
-        assert_eq!(actions.sample_batch(5, &device).unwrap().dims(), [5]);
-        assert!(actions.contains(&Tensor::from_data([0i32, 1, 2], &device)));
+        assert_eq!(actions.sample_batch(5, &device).unwrap().dims(), [5, 1]);
+        assert!(actions.contains(&Tensor::from_data([[0i32], [1], [2]], &device)));
     }
 }

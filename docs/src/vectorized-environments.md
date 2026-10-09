@@ -47,6 +47,10 @@ Before a manual loop, call `reset` once to receive one initial observation per
 inner environment. Pass that batch to `Agent::act`, then pass the returned batch
 of actions to `MultiGym::step`.
 
+Scalar observations and actions have shape `[1]` in a single `Gym` and
+`[num_envs, 1]` in a `MultiGym`. Batching always adds one leading axis.
+Rewards retain shape `[num_envs]`; terminal observations retain their unbatched shape.
+
 ```rust,ignore
 let mut observations = env.reset()?;
 

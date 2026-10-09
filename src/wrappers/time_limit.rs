@@ -178,6 +178,6 @@ mod tests {
         assert_eq!(step.reward, 3.0);
         assert_eq!(step.info, 2);
         assert_eq!(wrapper.observation_space().shape(), vec![2]);
-        assert!(wrapper.action_space().shape().is_empty());
+        assert_eq!(wrapper.action_space().shape(), vec![1]);
     }
 }

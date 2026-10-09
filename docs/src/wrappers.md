@@ -28,7 +28,7 @@ while the agent receives clipped rewards.
 observation's single rank. `BF` is the stacked batch rank; `PrevRank` determines
 the rank shared by inner batches and stacked single observations. The defaults
 stack vectors `[features]` into `[stack_size, features]`. Scalar observations use
-`FrameStackGym::<_, 1, 2>::new(...)` and produce `[stack_size]`.
+`FrameStackGym::<_, 1, 3>::new(...)` and produce `[stack_size, 1]`.
 The supplied space `S` must use the inner observation kind. For `BoxSpace`,
 bounds include a size-one batch axis. Invalid rank relationships fail during compilation.
 

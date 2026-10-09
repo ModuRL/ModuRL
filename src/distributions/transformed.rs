@@ -742,12 +742,12 @@ mod tests {
                 .all(|value| value.is_finite())
         );
         let scalar = TransformedDistribution::new(
-            GaussianDistribution::<1>::new([]).unwrap(),
+            GaussianDistribution::<2>::new([1]).unwrap(),
             TanhTransform,
         );
         assert_eq!(
             scalar.mode(Tensor::zeros([2, 2], &device)).unwrap().dims(),
-            [2]
+            [2, 1]
         );
     }
 }

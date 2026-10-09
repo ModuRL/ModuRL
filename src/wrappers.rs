@@ -206,8 +206,8 @@ fn transfer_batched_observations<I, const O: usize, K: Basic, const U: usize>(
 ) {
     const {
         assert!(
-            O == U + 1 || (O == 1 && U == 1),
-            "batch observation rank must be single observation rank + 1, except scalar observations"
+            O == U + 1,
+            "batch observation rank must be single observation rank + 1"
         );
     }
     let count = step.observations.dims()[0];
@@ -216,9 +216,7 @@ fn transfer_batched_observations<I, const O: usize, K: Basic, const U: usize>(
     parts.push(step.observations.clone());
     for observation in step.terminal_observations.iter().flatten() {
         let mut shape = [1; O];
-        if const { !(O == 1 && U == 1) } {
-            shape[1..].copy_from_slice(&observation.dims());
-        }
+        shape[1..].copy_from_slice(&observation.dims());
         parts.push(observation.clone().reshape(shape));
     }
     // Pack terminal rows with current observations so one transfer supplies both next-observation layouts.
@@ -345,10 +343,10 @@ mod tests {
     impl MultiGym for TensorMapTestGym {
         type Error = Infallible;
         type ObservationSpace = BoxSpace<2>;
-        type ActionSpace = BoxSpace<1>;
+        type ActionSpace = BoxSpace<2>;
 
-        /// Returns Float observations `[2, 3]`, rewards `[2]`, and one terminal observation `[3]` from scalar actions `[2]`.
-        fn step(&mut self, action: Tensor<1>) -> Result<MultiGymStepInfo, Self::Error> {
+        /// Returns Float observations `[2, 3]`, rewards `[2]`, and one terminal observation `[3]` from scalar actions `[2, 1]`.
+        fn step(&mut self, action: Tensor<2>) -> Result<MultiGymStepInfo, Self::Error> {
             let actions = action.into_data().try_to_vec::<f32>().unwrap();
             let observations = Tensor::from_data(
                 [[2.0, 0.0, actions[0]], [2.0, 1.0, actions[1]]],
@@ -372,7 +370,7 @@ mod tests {
         }
 
         fn action_space(&self) -> Self::ActionSpace {
-            BoxSpace::new_unbounded([1], &Device::flex())
+            BoxSpace::new_unbounded([1, 1], &Device::flex())
         }
 
         fn num_envs(&self) -> usize {
@@ -395,7 +393,7 @@ mod tests {
     #[test]
     fn output_mapping_receives_one_complete_output_per_operation() {
         let calls = std::cell::RefCell::new(Vec::new());
-        let input = InputMapMultiGymWrapper::new(TensorMapTestGym, |action: Tensor<1>| {
+        let input = InputMapMultiGymWrapper::new(TensorMapTestGym, |action: Tensor<2>| {
             Ok::<_, Infallible>(action * 2.0)
         });
         let mut gym = OutputMapMultiGymWrapper::new(
@@ -422,7 +420,7 @@ mod tests {
             vec![12.0, 10.0, 9.0, 12.0, 11.0, 9.0]
         );
         let step = gym
-            .step(Tensor::from_data([1.0f32, 2.0], &Device::flex()))
+            .step(Tensor::from_data([[1.0f32], [2.0]], &Device::flex()))
             .unwrap();
         assert_eq!(
             step.observations.into_data().try_to_vec::<f32>().unwrap(),
@@ -460,13 +458,13 @@ mod tests {
             Err(TensorMapMultiGymError::Mapping(MappingError("reset")))
         ));
         assert!(matches!(
-            gym.step(Tensor::from_data([1.0f32, 2.0], &Device::flex())),
+            gym.step(Tensor::from_data([[1.0f32], [2.0]], &Device::flex())),
             Err(TensorMapMultiGymError::Mapping(MappingError("step")))
         ));
         let mut gym =
             InputMapMultiGymWrapper::new(TensorMapTestGym, |_| Err(MappingError("input")));
         assert!(matches!(
-            gym.step(Tensor::from_data([1.0f32, 2.0], &Device::flex())),
+            gym.step(Tensor::from_data([[1.0f32], [2.0]], &Device::flex())),
             Err(TensorMapMultiGymError::Mapping(MappingError("input")))
         ));
     }
@@ -476,7 +474,9 @@ mod tests {
         let device = Device::flex();
         let mut gym = DeviceMultiGymWrapper::new(TensorMapTestGym, device.clone(), device.clone());
         assert_eq!(gym.reset().unwrap().device(), device);
-        let step = gym.step(Tensor::from_data([1.0f32, 2.0], &device)).unwrap();
+        let step = gym
+            .step(Tensor::from_data([[1.0f32], [2.0]], &device))
+            .unwrap();
         assert_eq!(step.observations.device(), device);
         assert_eq!(step.rewards.device(), device);
         assert_eq!(
@@ -496,7 +496,7 @@ mod tests {
     fn packed_transfer_preserves_scalar_integer_and_boolean_layouts() {
         let device = Device::flex();
         let mut integers = MultiGymStepInfo {
-            observations: Tensor::<1, Int>::from_data([4i32, 5], &device),
+            observations: Tensor::<2, Int>::from_data([[4i32], [5]], &device),
             rewards: Tensor::zeros([2], &device),
             infos: vec![(), ()],
             dones: vec![false, true],
@@ -504,7 +504,7 @@ mod tests {
             terminal_observations: vec![None, Some(Tensor::from_data([8i32], &device))],
         };
         transfer_batched_observations(&mut integers, &device);
-        assert_eq!(integers.observations.dims(), [2]);
+        assert_eq!(integers.observations.dims(), [2, 1]);
         assert_eq!(
             integers.terminal_observations[1].as_ref().unwrap().dims(),
             [1]
@@ -544,7 +544,9 @@ mod tests {
     #[test]
     fn packed_transfer_preserves_f64_and_handles_no_terminal_observations() {
         let device = Device::flex();
-        let mut step = TensorMapTestGym.step(Tensor::zeros([2], &device)).unwrap();
+        let mut step = TensorMapTestGym
+            .step(Tensor::zeros([2, 1], &device))
+            .unwrap();
         step.observations = step.observations.cast(DType::F64);
         for observation in step.terminal_observations.iter_mut().flatten() {
             *observation = observation.clone().cast(DType::F64);
@@ -611,9 +613,9 @@ mod test_support {
         }
     }
 
-    impl Gym<TestInfo, 1, 1, 1, 1> for TestGym {
+    impl Gym<TestInfo> for TestGym {
         type Error = Infallible;
-        type ObservationSpace = BoxSpace<1>;
+        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
 
         /// Accepts one scalar Int action `[1]` and returns a scalar Float observation `[1]` on the fixture device.
@@ -632,8 +634,8 @@ mod test_support {
 
         fn observation_space(&self) -> Self::ObservationSpace {
             BoxSpace::new(
-                Tensor::from_data([-10_000.0f32], &self.device),
-                Tensor::from_data([10_000.0f32], &self.device),
+                Tensor::from_data([[-10_000.0f32]], &self.device),
+                Tensor::from_data([[10_000.0f32]], &self.device),
             )
         }
 

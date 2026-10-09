@@ -117,7 +117,7 @@ one logit for each choice:
 | --- | --- |
 | Model output | `[B, C]` |
 | Sampled representation | `[B, C]` |
-| Action after `Discrete` conversion | `[B]` |
+| Action after `Discrete` conversion | `[B, 1]` |
 | Log probability | `[B]` |
 | Entropy | `[B]` |
 

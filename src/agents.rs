@@ -15,9 +15,9 @@ pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
 
 /// Selects native environment actions and trains through batched environment interaction.
 /// Ranks `O` and `A` include the batch axis; `U` is the rank of each unbatched terminal observation.
-/// Requires `O = U + 1`, except scalar observations use `O = U = 1`.
+/// Requires `O = U + 1`, including scalar observations `[batch_size, 1]`.
 /// Associated spaces determine the native observation and action kinds.
-pub trait Agent<I = (), const O: usize = 2, const A: usize = 1, const U: usize = 1> {
+pub trait Agent<I = (), const O: usize = 2, const A: usize = 2, const U: usize = 1> {
     type Error;
     type GymError;
     type SpaceError;
@@ -208,15 +208,15 @@ mod tests {
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
 
-        /// Returns zero Int actions `[batch_size]` for Float observations `[batch_size, features]` on the observation device.
-        fn act(&mut self, observations: &Tensor<2>) -> Result<Tensor<1, Int>, Self::Error> {
+        /// Returns zero Int actions `[batch_size, 1]` for Float observations `[batch_size, features]` on the observation device.
+        fn act(&mut self, observations: &Tensor<2>) -> Result<Tensor<2, Int>, Self::Error> {
             Ok(Tensor::zeros(
-                [observations.dims()[0]],
+                [observations.dims()[0], 1],
                 &observations.device(),
             ))
         }
 
-        /// Steps observation batches `[num_envs, 4]` with scalar action batches `[num_envs]`.
+        /// Steps observation batches `[num_envs, 4]` with scalar action batches `[num_envs, 1]`.
         fn learn(
             &mut self,
             env: &mut dyn MultiGym<
@@ -253,7 +253,7 @@ mod tests {
         .unwrap();
         let observations = multiple.reset().unwrap();
         let actions = agent.act(&observations).unwrap();
-        assert_eq!(actions.dims(), [2]);
+        assert_eq!(actions.dims(), [2, 1]);
         assert_eq!(actions.device(), device);
         assert_eq!(actions.into_data().try_to_vec::<i32>().unwrap(), vec![0, 0]);
         agent.learn(&mut single, 1).unwrap();
@@ -282,11 +282,11 @@ mod tests {
         let mut discrete = FixedEnv::new(device.clone());
         assert_eq!(discrete.reset().unwrap().observation.dims(), [4]);
         assert_eq!(discrete.observation_space().shape(), vec![4]);
-        assert!(discrete.action_space().shape().is_empty());
+        assert_eq!(discrete.action_space().shape(), vec![1]);
         let mut discrete = VectorizedGymWrapper::from(discrete);
         assert_eq!(discrete.reset().unwrap().dims(), [1, 4]);
         let step = discrete
-            .step(Tensor::<1, Int>::from_data([0i32], &device))
+            .step(Tensor::<2, Int>::from_data([[0i32]], &device))
             .unwrap();
         assert_eq!(step.observations.dims(), [1, 4]);
         assert_eq!(step.observations.dtype(), DType::F32);

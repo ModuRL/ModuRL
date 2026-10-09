@@ -15,9 +15,9 @@ pub enum FrameStackGymError<E> {
 /// Stacks recent observations along a leading frame axis, preserving kind, dtype, and device.
 /// `O` is the inner single rank; `BF` is the stacked batch rank.
 /// `PrevRank` determines rank `F`, shared by inner batches and stacked single observations, from `BF`.
-/// Nonscalar observations require `F = O + 1` and `BF = F + 1`.
-/// Scalar observations use `O = F = 1` and `BF = 2`, producing `[stack_size]`.
-/// Supported stacked batch ranks are 2 through 1025, as defined by `PrevRank`.
+/// All observations require `F = O + 1` and `BF = F + 1`.
+/// Scalar observations use `O = 1`, `F = 2`, and `BF = 3`, producing `[stack_size, 1]`.
+/// Supported stacked batch ranks are 3 through 1025, as defined by `PrevRank`.
 pub struct FrameStackGym<G, const O: usize = 1, const BF: usize = 3, S = BoxSpace<BF>>
 where
     S: ObservationSpace<BF>,
@@ -34,13 +34,10 @@ where
     Tensor<BF>: PrevRank<Prev = Tensor<F>>,
 {
     /// Creates a frame stack with a declared space shaped `[stack_size, ...inner_observation_shape]` per item.
-    /// Scalars use `[stack_size]`. `BoxSpace` bounds include a separate size-one batch axis.
+    /// Scalars use `[stack_size, 1]`. `BoxSpace` bounds include a separate size-one batch axis.
     pub fn new(gym: G, stack_size: usize, observation_space: S) -> Self {
         const {
-            assert!(
-                F == O + 1 || (O == 1 && F == 1),
-                "inner batch rank must be single rank + 1, except scalar observations"
-            );
+            assert!(F == O + 1, "inner batch rank must be single rank + 1");
             assert!(BF == F + 1, "stacked batch rank must be frame rank + 1");
         }
         assert!(stack_size > 0, "stack_size must be at least 1");
@@ -58,14 +55,10 @@ where
     }
 
     /// Adds a frame axis to rank-`O` observations, returning rank `F` with `[frame_count, ...observation_shape]`.
-    /// Scalar `[1]` frames concatenate to `[frame_count]`. Preserves kind, dtype, device, and gradients.
+    /// Scalar `[1]` frames stack into `[frame_count, 1]`. Preserves kind, dtype, device, and gradients.
     fn stacked_observation(&self) -> Tensor<F, S::Kind> {
         let frames = self.frames.iter().cloned().collect::<Vec<_>>();
-        if const { O == 1 && F == 1 } {
-            Tensor::cat(frames, 0).reshape([self.frames.len(); F])
-        } else {
-            Tensor::stack(frames, 0)
-        }
+        Tensor::stack(frames, 0)
     }
 }
 
@@ -81,7 +74,7 @@ where
     type ActionSpace = G::ActionSpace;
 
     /// Repeats the unbatched rank-`O` reset observation to fill `[stack_size, ...observation_shape]` of rank `F`.
-    /// Scalar inputs `[1]` produce `[stack_size]`; all outputs preserve kind, dtype, and device.
+    /// Scalar inputs `[1]` produce `[stack_size, 1]`; all outputs preserve kind, dtype, and device.
     fn reset(&mut self) -> Result<ResetInfo<I, F, S::Kind>, Self::Error> {
         let reset = self.gym.reset().map_err(FrameStackGymError::GymError)?;
         self.frames.clear();
@@ -94,7 +87,7 @@ where
     }
 
     /// Forwards an unbatched rank-`A` action and appends the rank-`O` observation after dropping the oldest full-stack frame.
-    /// Returns rank `F` with `[frame_count, ...observation_shape]`, or `[frame_count]` for scalars, preserving kind, dtype, and device.
+    /// Returns rank `F` with `[frame_count, ...observation_shape]`, or `[frame_count, 1]` for scalars, preserving kind, dtype, and device.
     fn step(
         &mut self,
         action: Tensor<A, <Self::ActionSpace as ActionSpace<BA>>::Kind>,
@@ -271,11 +264,11 @@ mod tests {
             stacked.into_data().try_to_vec::<i64>().unwrap(),
             vec![1, 2, 3, 4]
         );
-        let mut booleans = FrameStackGym::<_, 1, 2, _>::new(
+        let mut booleans = FrameStackGym::<_, 1, 3, _>::new(
             (),
             2,
-            TypedSpace::<2, Bool> {
-                shape: [1, 2],
+            TypedSpace::<3, Bool> {
+                shape: [1, 2, 1],
                 kind: PhantomData,
             },
         );
@@ -286,7 +279,7 @@ mod tests {
             .frames
             .push_back(Tensor::from_data([false], &device));
         let stacked = booleans.stacked_observation();
-        assert_eq!(stacked.dims(), [2]);
+        assert_eq!(stacked.dims(), [2, 1]);
         assert_eq!(
             stacked.into_data().try_to_vec::<bool>().unwrap(),
             vec![true, false]
@@ -297,19 +290,19 @@ mod tests {
     fn frame_stack_duplicates_reset_observation_and_rolls_on_step() {
         let gym = TestGym::new([TestGym::step(2.0, 0.0, false, false, 1)]);
         let observation_space = BoxSpace::new_with_universal_bounds(
-            [1, 4],
+            [1, 4, 1],
             -100.0,
             100.0,
             &burn::tensor::Device::flex(),
         );
-        let mut wrapper = FrameStackGym::<_, 1, 2>::new(gym, 4, observation_space);
+        let mut wrapper = FrameStackGym::<_, 1, 3>::new(gym, 4, observation_space);
 
         let reset = wrapper.reset().unwrap();
         let step = wrapper.step(action()).unwrap();
 
         let observation_space = wrapper.observation_space();
-        assert_eq!(observation_space.shape(), vec![4]);
-        assert!(observation_space.contains(&reset.observation.clone().unsqueeze::<2>()));
+        assert_eq!(observation_space.shape(), vec![4, 1]);
+        assert!(observation_space.contains(&reset.observation.clone().unsqueeze::<3>()));
         assert_eq!(
             reset.observation.into_data().try_to_vec::<f32>().unwrap(),
             vec![100.0; 4]
