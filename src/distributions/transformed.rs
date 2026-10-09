@@ -720,7 +720,7 @@ mod tests {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
         let distribution = TransformedDistribution::new(
-            GaussianDistribution::<6, 7>::new([2, 1, 2, 1, 2]).unwrap(),
+            GaussianDistribution::<6>::new([2, 1, 2, 1, 2]).unwrap(),
             TanhTransform,
         );
         let terms = distribution
@@ -742,7 +742,7 @@ mod tests {
                 .all(|value| value.is_finite())
         );
         let scalar = TransformedDistribution::new(
-            GaussianDistribution::<1, 2>::new([]).unwrap(),
+            GaussianDistribution::<1>::new([]).unwrap(),
             TanhTransform,
         );
         assert_eq!(

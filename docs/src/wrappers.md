@@ -24,11 +24,11 @@ Wrapper order determines which values a wrapper sees. For example, placing
 `RecordEpisodeStatisticsGym` inside `ClipRewardGym` records the underlying return
 while the agent receives clipped rewards.
 
-`FrameStackGym<G, O, BO, F, BF, S>` uses native Burn tensors. `O` and `BO`
-are the inner observation's single and batch ranks. `F` and `BF` are the
-stacked observation's single and batch ranks. The defaults stack vectors
-`[features]` into `[stack_size, features]`. Scalar observations use
-`FrameStackGym::<_, 1, 1, 1, 2>::new(...)` and produce `[stack_size]`.
+`FrameStackGym<G, O, BF, S>` uses native Burn tensors. `O` is the inner
+observation's single rank. `BF` is the stacked batch rank; `PrevRank` determines
+the rank shared by inner batches and stacked single observations. The defaults
+stack vectors `[features]` into `[stack_size, features]`. Scalar observations use
+`FrameStackGym::<_, 1, 2>::new(...)` and produce `[stack_size]`.
 The supplied space `S` must use the inner observation kind. For `BoxSpace`,
 bounds include a size-one batch axis. Invalid rank relationships fail during compilation.
 
