@@ -1,6 +1,7 @@
 use super::{MultiGym, MultiGymStepInfo, batch_metadata, batch_offsets, combine_steps};
 use crate::spaces::{ActionSpace, ObservationSpace};
-use burn::tensor::{Slice, Tensor};
+use crate::tensor_rank::{NextRank, PrevRank};
+use burn::tensor::{Slice, Tensor, kind::Basic};
 use std::marker::PhantomData;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,26 +36,22 @@ pub enum StackedMultiGymError<E> {
 /// Flattens homogeneous MultiGym batches while preserving the order within each group.
 /// Actions `[total_size, ...action_shape]` split into contiguous groups; observation batches concatenate on the same axis.
 /// Inner gyms retain their auto-reset behavior. Reset the stack after an error because earlier groups may have advanced.
-pub struct StackedMultiGym<G, I = (), const O: usize = 2, const A: usize = 2, const U: usize = 1>
-where
-    G: MultiGym<I, O, A, U>,
-{
+pub struct StackedMultiGym<G, I = (), const O: usize = 2, const A: usize = 2> {
     gyms: Vec<G>,
     group_offsets: Vec<usize>,
     _info: PhantomData<fn() -> I>,
 }
 
-impl<G, I, const O: usize, const A: usize, const U: usize> StackedMultiGym<G, I, O, A, U>
+impl<G, I, const O: usize, const A: usize, K: Basic, AK: Basic> StackedMultiGym<G, I, O, A>
 where
-    G: MultiGym<I, O, A, U>,
+    G: MultiGym<I, O, A>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank,
 {
     /// Connects nonempty groups with matching observation and action item shapes.
     pub fn new(gyms: Vec<G>) -> Result<Self, StackedMultiGymError<G::Error>> {
         const {
-            assert!(
-                O == U + 1,
-                "batch observation rank must be single observation rank + 1"
-            );
             assert!(A >= 2, "batched actions require batch and item axes");
         }
         let Some(first) = gyms.first() else {
@@ -87,10 +84,13 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const U: usize> TryFrom<Vec<G>>
-    for StackedMultiGym<G, I, O, A, U>
+impl<G, I, const O: usize, const A: usize, K: Basic, AK: Basic> TryFrom<Vec<G>>
+    for StackedMultiGym<G, I, O, A>
 where
-    G: MultiGym<I, O, A, U>,
+    G: MultiGym<I, O, A>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank,
 {
     type Error = StackedMultiGymError<G::Error>;
 
@@ -99,10 +99,14 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const U: usize> MultiGym<I, O, A, U>
-    for StackedMultiGym<G, I, O, A, U>
+impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic> MultiGym<I, O, A>
+    for StackedMultiGym<G, I, O, A>
 where
-    G: MultiGym<I, O, A, U>,
+    G: MultiGym<I, O, A>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
 {
     type Error = StackedMultiGymError<G::Error>;
     type ObservationSpace = G::ObservationSpace;
@@ -113,11 +117,8 @@ where
     /// Input dimensions, dtype, and device must satisfy the inner gyms' contracts.
     fn step(
         &mut self,
-        action: Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
-    ) -> Result<
-        MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
-        Self::Error,
-    > {
+        action: Tensor<A, AK>,
+    ) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, Self::Error> {
         let mut steps = Vec::with_capacity(self.gyms.len());
         for (gym_index, gym) in self.gyms.iter_mut().enumerate() {
             let range = self.group_offsets[gym_index]..self.group_offsets[gym_index + 1];
@@ -144,9 +145,7 @@ where
 
     /// Concatenates reset observations `[group_size, ...observation_shape]` to `[total_size, ...observation_shape]` of rank `O`.
     /// All groups must share observation kind, dtype, device, and item dimensions. Gradient paths are preserved.
-    fn reset(
-        &mut self,
-    ) -> Result<Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
+    fn reset(&mut self) -> Result<Tensor<O, K>, Self::Error> {
         let mut observations = Vec::with_capacity(self.gyms.len());
         for (gym_index, gym) in self.gyms.iter_mut().enumerate() {
             observations.push(

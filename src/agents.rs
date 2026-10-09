@@ -14,10 +14,13 @@ pub mod sac;
 pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
 
 /// Selects native environment actions and trains through batched environment interaction.
-/// Ranks `O` and `A` include the batch axis; `U` is the rank of each unbatched terminal observation.
-/// Requires `O = U + 1`, including scalar observations `[batch_size, 1]`.
+/// Ranks `O` and `A` include the batch axis; `PrevRank` determines each unbatched terminal observation type.
+/// Scalar observations use `[batch_size, 1]` and terminal observations use `[1]`.
 /// Associated spaces determine the native observation and action kinds.
-pub trait Agent<I = (), const O: usize = 2, const A: usize = 2, const U: usize = 1> {
+pub trait Agent<I = (), const O: usize = 2, const A: usize = 2>
+where
+    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>: crate::tensor_rank::PrevRank,
+{
     type Error;
     type GymError;
     type SpaceError;
@@ -32,7 +35,7 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2, const U: usize =
     ) -> Result<Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>, Self::Error>;
 
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
-    /// Terminal observations have unbatched rank `U`; scalar terminal observations use `[1]`.
+    /// Terminal observations have rank `O - 1`; scalar terminal observations use `[1]`.
     /// The environment must use the associated space types and meet the agent's dtype and device requirements.
     fn learn(
         &mut self,
@@ -40,7 +43,6 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2, const U: usize =
             I,
             O,
             A,
-            U,
             Error = Self::GymError,
             ObservationSpace = Self::ObservationSpace,
             ActionSpace = Self::ActionSpace,
@@ -154,7 +156,7 @@ pub(crate) mod test_support {
         }
     }
 
-    impl Gym<(), 1, 1, 2, 2> for FixedContinuousEnv {
+    impl Gym<(), 2, 2> for FixedContinuousEnv {
         type Error = Infallible;
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = BoxSpace<2>;

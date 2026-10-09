@@ -1,6 +1,7 @@
 //! Episode time-limit wrapper.
 
-use burn::tensor::Tensor;
+use crate::tensor_rank::PrevRank;
+use burn::tensor::{Tensor, kind::Basic};
 
 use crate::{
     gym::{Gym, ResetInfo, StepInfo},
@@ -28,33 +29,32 @@ impl<G> TimeLimitGym<G> {
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> Gym<I, O, A, BO, BA>
-    for TimeLimitGym<G>
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> Gym<I, BO, BA> for TimeLimitGym<G>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank,
+    Tensor<BA, AK>: PrevRank,
 {
     type Error = G::Error;
     type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
 
-    /// Resets the step count and returns the inner gym's unbatched rank-`O` observation and metadata.
+    /// Resets the step count and returns the inner gym's unbatched rank-`BO - 1` observation and metadata.
     /// Preserves the observation kind, dtype, device, and item axes; scalar observations use `[1]`.
-    fn reset(
-        &mut self,
-    ) -> Result<ResetInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
-    {
+    fn reset(&mut self) -> Result<ResetInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
         self.elapsed_steps = 0;
         self.gym.reset()
     }
 
-    /// Forwards an unbatched rank-`A` action and returns an unbatched rank-`O` observation; scalars use `[1]`.
+    /// Forwards an unbatched rank-`BA - 1` action and returns an unbatched rank-`BO - 1` observation; scalars use `[1]`.
     /// Preserves tensor shapes, kinds, dtypes, and devices. The inner gym's input requirements still apply.
     /// Marks truncation at the step limit unless the inner gym reports termination.
     fn step(
         &mut self,
-        action: Tensor<A, <Self::ActionSpace as ActionSpace<BA>>::Kind>,
-    ) -> Result<StepInfo<I, O, <Self::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error>
-    {
+        action: <Tensor<BA, AK> as PrevRank>::Prev,
+    ) -> Result<StepInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
         let mut info = self.gym.step(action)?;
         self.elapsed_steps += 1;
         if self.elapsed_steps >= self.max_episode_steps && !info.done {

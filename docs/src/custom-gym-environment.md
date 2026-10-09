@@ -92,12 +92,14 @@ returns the observation that follows it, its reward, and the episode flags.
 The default `Gym` information type is `()`, so ordinary environments use
 `ResetInfo` and `StepInfo` without an explicit type parameter. Environments
 with additional typed metadata can instead implement `Gym<MyInfo>`.
-The full signature is `Gym<I, O, A, BO, BA>`. Individual observation and action
-ranks `O` and `A` default to 1. Batched space ranks `BO` and `BA` default to
-2 and 2. Single-environment tensors omit the batch axis. Scalar values use
+The full signature is `Gym<I, O, A>`. Observation and action batch ranks
+`O` and `A` default to 2. `PrevRank` determines each single tensor type.
+Single-environment tensors omit the batch axis. Scalar values use
 `[1]` individually and `[batch_size, 1]` in batches. Space operations use
 batched tensors. The associated spaces determine the native tensor kinds:
 `BoxSpace<2>` uses `Float`, and `Discrete` uses `Int`.
+For explicit observation types, use `StepInfo<MyInfo, Tensor<1, Int>>` and
+`ResetInfo<MyInfo, Tensor<1, Int>>`. Both store native unbatched tensors.
 
 In `src/main.rs`, declare the module and bring the environment into scope:
 

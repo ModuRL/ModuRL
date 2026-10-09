@@ -250,7 +250,7 @@ impl Gym for ScalarEnv {
     }
 }
 
-impl Gym<(), 1, 1, 2, 2> for ContinuousEnv {
+impl Gym<(), 2, 2> for ContinuousEnv {
     type Error = TestError;
     type ObservationSpace = BoxSpace<2>;
     type ActionSpace = BoxSpace<2>;

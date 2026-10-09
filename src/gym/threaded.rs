@@ -3,45 +3,51 @@ use super::{
     VectorizedGymWrapper, batch_metadata, batch_offsets, combine_steps,
 };
 use crate::spaces::{ActionSpace, ObservationSpace};
+use crate::tensor_rank::{NextRank, PrevRank};
 use burn::tensor::{Slice, Tensor, kind::Basic};
 use std::{sync::mpsc, thread};
 
-struct WorkerCommand<G, I, const O: usize, const A: usize, const U: usize>
-where
-    G: MultiGym<I, O, A, U>,
-{
-    action: Option<Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>>,
+struct WorkerCommand<const A: usize, K: Basic> {
+    action: Option<Tensor<A, K>>,
 }
 
-enum WorkerResponse<I, const O: usize, K: Basic, E, const U: usize> {
+enum WorkerResponse<I, T: NextRank, E> {
     Metadata(GymBatchMetadata),
-    Step(Box<Result<MultiGymStepInfo<I, O, K, U>, E>>),
-    Reset(Box<Result<Tensor<O, K>, E>>),
+    Step(Box<Result<MultiGymStepInfo<I, T>, E>>),
+    Reset(Box<Result<T::Next, E>>),
 }
 
-struct GymWorker<G, I, const O: usize, const A: usize, const U: usize>
-where
-    G: MultiGym<I, O, A, U>,
-{
-    commands: mpsc::Sender<WorkerCommand<G, I, O, A, U>>,
-    responses: mpsc::Receiver<
-        WorkerResponse<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, G::Error, U>,
-    >,
+struct GymWorker<I, T: NextRank, E, const A: usize, K: Basic> {
+    commands: mpsc::Sender<WorkerCommand<A, K>>,
+    responses: mpsc::Receiver<WorkerResponse<I, T, E>>,
 }
 
 /// Constructs and owns a MultiGym on a persistent worker thread.
 /// Step commands carry actions `[num_envs, ...action_shape]` of rank `A`; responses carry rank-`O` observations and rank-1 rewards.
 /// Native tensor kinds come from G's spaces. Commands preserve dtype, device, and axis order.
-fn start_worker<G, F, I, const O: usize, const A: usize, const U: usize>(
+fn start_worker<
+    G,
+    F,
+    I,
+    K: Basic + 'static,
+    AK: Basic + 'static,
+    const O: usize,
+    const A: usize,
+    const U: usize,
+>(
     make_gym: F,
-) -> GymWorker<G, I, O, A, U>
+) -> GymWorker<I, Tensor<U, K>, G::Error, A, AK>
 where
-    G: MultiGym<I, O, A, U> + 'static,
+    G: MultiGym<I, O, A> + 'static,
+    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     F: FnOnce() -> G + Send + 'static,
     G::Error: Send + 'static,
     I: Send + 'static,
 {
-    let (commands, command_rx) = mpsc::channel::<WorkerCommand<G, I, O, A, U>>();
+    let (commands, command_rx) = mpsc::channel::<WorkerCommand<A, AK>>();
     let (response_tx, responses) = mpsc::channel();
     thread::spawn(move || {
         let mut gym = make_gym();
@@ -70,25 +76,33 @@ where
 /// Flattens homogeneous MultiGym batches, with one persistent worker per group.
 /// Constructors run on their owning threads. Dispatches all groups before waiting and preserves group order.
 /// Reset after an error because other groups may have advanced.
-pub struct MultithreadedStackedMultiGym<
-    G,
-    I = (),
-    const O: usize = 2,
-    const A: usize = 2,
-    const U: usize = 1,
-> where
-    G: MultiGym<I, O, A, U>,
+pub struct MultithreadedStackedMultiGym<G, I = (), const O: usize = 2, const A: usize = 2>
+where
+    G: MultiGym<I, O, A>,
+    Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
 {
-    groups: Vec<GymWorker<G, I, O, A, U>>,
+    groups: Vec<
+        GymWorker<
+            I,
+            <Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind> as PrevRank>::Prev,
+            G::Error,
+            A,
+            <G::ActionSpace as ActionSpace<A>>::Kind,
+        >,
+    >,
     group_offsets: Vec<usize>,
     observation_space: G::ObservationSpace,
     action_space: G::ActionSpace,
 }
 
-impl<G, I, const O: usize, const A: usize, const U: usize>
-    MultithreadedStackedMultiGym<G, I, O, A, U>
+impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic + 'static, AK: Basic + 'static>
+    MultithreadedStackedMultiGym<G, I, O, A>
 where
-    G: MultiGym<I, O, A, U> + 'static,
+    G: MultiGym<I, O, A> + 'static,
+    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     G::Error: Send + 'static,
     G::ObservationSpace: Clone,
     G::ActionSpace: Clone,
@@ -104,10 +118,6 @@ where
         F: FnOnce() -> G + Send + 'static,
     {
         const {
-            assert!(
-                O == U + 1,
-                "batch observation rank must be single observation rank + 1"
-            );
             assert!(A >= 2, "batched actions require batch and item axes");
         }
         if gym_constructors.is_empty() {
@@ -140,10 +150,14 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const U: usize> MultiGym<I, O, A, U>
-    for MultithreadedStackedMultiGym<G, I, O, A, U>
+impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic + 'static, AK: Basic + 'static>
+    MultiGym<I, O, A> for MultithreadedStackedMultiGym<G, I, O, A>
 where
-    G: MultiGym<I, O, A, U> + 'static,
+    G: MultiGym<I, O, A> + 'static,
+    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     G::Error: Send + 'static,
     G::ObservationSpace: Clone,
     G::ActionSpace: Clone,
@@ -158,11 +172,8 @@ where
     /// Inputs must meet the inner gyms' dtype, device, and item-shape contracts.
     fn step(
         &mut self,
-        action: Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
-    ) -> Result<
-        MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
-        Self::Error,
-    > {
+        action: Tensor<A, AK>,
+    ) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, Self::Error> {
         // Prepare every action group before dispatch so a slicing failure cannot advance only part of the stack.
         let actions: Vec<_> = self
             .group_offsets
@@ -217,9 +228,7 @@ where
 
     /// Resets groups concurrently, concatenating rank-`O` observations into `[total_size, ...observation_shape]`.
     /// Groups must share observation kind, dtype, device, and item dimensions. Gradient paths are preserved.
-    fn reset(
-        &mut self,
-    ) -> Result<Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
+    fn reset(&mut self) -> Result<Tensor<O, K>, Self::Error> {
         let sent: Vec<_> = self
             .groups
             .iter()
@@ -249,25 +258,43 @@ where
 /// Steps independent environments concurrently while preserving environment order.
 /// Each worker owns a one-environment vectorizer, which saves terminal observations before auto-reset.
 /// Reset after an error because some environments may already have advanced.
-pub struct MultithreadedVectorizedGymWrapper<
-    G,
-    I = (),
-    const O: usize = 1,
-    const A: usize = 1,
-    const BO: usize = 2,
-    const BA: usize = 2,
-> where
-    G: Gym<I, O, A, BO, BA>,
+pub struct MultithreadedVectorizedGymWrapper<G, I = (), const BO: usize = 2, const BA: usize = 2>
+where
+    G: Gym<I, BO, BA>,
+    Tensor<BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind>: PrevRank,
+    Tensor<BA, <G::ActionSpace as ActionSpace<BA>>::Kind>: PrevRank,
 {
-    envs: Vec<GymWorker<VectorizedGymWrapper<G, I, O, A, BO, BA>, I, BO, BA, O>>,
+    envs: Vec<
+        GymWorker<
+            I,
+            <Tensor<BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind> as PrevRank>::Prev,
+            VectorizedGymError<G::Error>,
+            BA,
+            <G::ActionSpace as ActionSpace<BA>>::Kind,
+        >,
+    >,
     observation_space: G::ObservationSpace,
     action_space: G::ActionSpace,
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize>
-    MultithreadedVectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<
+    G,
+    I,
+    const O: usize,
+    const A: usize,
+    const BO: usize,
+    const BA: usize,
+    K: Basic + 'static,
+    AK: Basic + 'static,
+> MultithreadedVectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA> + 'static,
+    G: Gym<I, BO, BA> + 'static,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+    Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,
+    Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
     G::Error: Send + 'static,
     G::ObservationSpace: Clone,
     G::ActionSpace: Clone,
@@ -283,16 +310,6 @@ where
     where
         F: FnOnce() -> G + Send + 'static,
     {
-        const {
-            assert!(
-                BO == O + 1,
-                "batch observation rank must be single observation rank + 1"
-            );
-            assert!(
-                BA == A + 1,
-                "batch action rank must be single action rank + 1"
-            );
-        }
         if env_constructors.is_empty() {
             return Err(VectorizedGymError::Empty);
         }
@@ -313,10 +330,24 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> MultiGym<I, BO, BA, O>
-    for MultithreadedVectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<
+    G,
+    I,
+    const O: usize,
+    const A: usize,
+    const BO: usize,
+    const BA: usize,
+    K: Basic + 'static,
+    AK: Basic + 'static,
+> MultiGym<I, BO, BA> for MultithreadedVectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA> + 'static,
+    G: Gym<I, BO, BA> + 'static,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+    Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,
+    Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
     G::Error: Send + 'static,
     G::ObservationSpace: Clone,
     G::ActionSpace: Clone,
@@ -332,11 +363,8 @@ where
     /// Inputs must match the environments' dtype and device contracts; the batch axis is preserved.
     fn step(
         &mut self,
-        action: Tensor<BA, <G::ActionSpace as ActionSpace<BA>>::Kind>,
-    ) -> Result<
-        MultiGymStepInfo<I, BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind, O>,
-        Self::Error,
-    > {
+        action: Tensor<BA, AK>,
+    ) -> Result<MultiGymStepInfo<I, Tensor<O, K>>, Self::Error> {
         let actions: Vec<_> = (0..self.envs.len())
             .map(|index| action.clone().slice([Slice::from(index..index + 1)]))
             .collect();
@@ -386,9 +414,7 @@ where
 
     /// Resets workers concurrently and concatenates rank-`BO` observations into `[num_envs, ...observation_shape]`.
     /// Observation kind, dtype, device, and item dimensions must match across environments. Gradients are preserved.
-    fn reset(
-        &mut self,
-    ) -> Result<Tensor<BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error> {
+    fn reset(&mut self) -> Result<Tensor<BO, K>, Self::Error> {
         let sent: Vec<_> = self
             .envs
             .iter()
