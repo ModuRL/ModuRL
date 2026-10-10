@@ -113,7 +113,7 @@ where
     type ActionSpace = G::ActionSpace;
 
     /// Splits rank-`A` actions `[total_size, ...action_shape]` across groups without removing the batch axis.
-    /// Concatenates rank-`O` observations `[group_size, ...observation_shape]` and rewards `[group_size]` in group order.
+    /// Concatenates rank-`O` observations `[group_size, ...observation_shape]` and rewards `[group_size, 1]` in group order.
     /// Input dimensions, dtype, and device must satisfy the inner gyms' contracts.
     fn step(
         &mut self,

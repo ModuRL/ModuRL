@@ -124,15 +124,15 @@ pub struct QLogEntry {
     pub learning_rate: f32,
     /// Selected Float Q values `[batch_size, 1]` in the compute dtype.
     pub q_values: Tensor<2>,
-    /// Sampled Float rewards `[batch_size]` in the compute dtype.
-    pub replay_rewards: Tensor<1>,
+    /// Sampled Float rewards `[batch_size, 1]` in the compute dtype.
+    pub replay_rewards: Tensor<2>,
     pub update_index: usize,
     pub collection_timestep: usize,
 }
 
 pub struct QCollectionLogEntry<I = ()> {
-    /// Fresh Float rewards `[num_envs]` with the environment's dtype and device.
-    pub collection_rewards: Tensor<1>,
+    /// Fresh Float rewards `[num_envs, 1]` with the environment's dtype and device.
+    pub collection_rewards: Tensor<2>,
     pub infos: Vec<I>,
     pub epsilon: f64,
     pub collection_timestep: usize,
@@ -198,40 +198,40 @@ pub(crate) trait QLearningLogger<I = ()> {
 pub(crate) trait QLearningTarget {
     fn requires_online_next_q_values() -> bool;
 
-    /// Computes Float targets `[batch_size]` from Float rewards and Bool termination flags `[batch_size]`.
+    /// Computes Float targets `[batch_size, 1]` from Float rewards and Bool termination flags `[batch_size, 1]`.
     /// Q tensors use `[batch_size, action_count]` on the reward device and in the reward dtype.
     /// Truncation alone must not set the termination flags. The caller detaches returned targets.
     fn target_q_values(
-        rewards: &Tensor<1>,
-        next_dones: &Tensor<1, Bool>,
+        rewards: &Tensor<2>,
+        next_dones: &Tensor<2, Bool>,
         online_next_q_values: Option<&Tensor<2>>,
         target_next_q_values: &Tensor<2>,
         gamma: f32,
-    ) -> Tensor<1>;
+    ) -> Tensor<2>;
 }
 
 struct QLearningBatch<const R: usize, K: Autodiff> {
     observations: Tensor<R, K>,
     next_observations: Tensor<R, K>,
     actions: Tensor<2, Int>,
-    rewards: Tensor<1>,
-    next_dones: Tensor<1, Bool>,
+    rewards: Tensor<2>,
+    next_dones: Tensor<2, Bool>,
 }
 
 struct QLearningInsert<const R: usize, K: Autodiff> {
     observations: Tensor<R, K>,
     next_observations: Tensor<R, K>,
     actions: Tensor<2, Int>,
-    rewards: Tensor<1>,
-    next_dones: Tensor<1, Bool>,
+    rewards: Tensor<2>,
+    next_dones: Tensor<2, Bool>,
     truncateds: Vec<bool>,
 }
 
 struct QLearningReplayStorage<const R: usize, K: Autodiff> {
     observations: Option<AlignedObservationReplay<R, K>>,
     actions: TensorReplayColumn<2, Int>,
-    rewards: TensorReplayColumn<1>,
-    next_dones: TensorReplayColumn<1, Bool>,
+    rewards: TensorReplayColumn<2>,
+    next_dones: TensorReplayColumn<2, Bool>,
     shape: [usize; R],
     device: Device,
     observation_dtype: Option<DType>,
@@ -239,7 +239,7 @@ struct QLearningReplayStorage<const R: usize, K: Autodiff> {
 }
 
 impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
-    /// Configures observation storage [capacity, ...observation_shape], Int actions [capacity, 1], and scalar statistics [capacity].
+    /// Configures observation storage [capacity, ...observation_shape], Int actions [capacity, 1], and scalar statistics [capacity, 1].
     /// The first observation batch selects the observation dtype. All stored experience has no autodiff graph.
     fn new(shape: [usize; R], device: Device) -> Self {
         const {
@@ -248,8 +248,8 @@ impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
         Self {
             observations: None,
             actions: TensorReplayColumn::new([shape[0], 1], (&device, DType::U32)),
-            rewards: TensorReplayColumn::new([shape[0]], (&device, DType::F32)),
-            next_dones: TensorReplayColumn::new([shape[0]], &device),
+            rewards: TensorReplayColumn::new([shape[0], 1], (&device, DType::F32)),
+            next_dones: TensorReplayColumn::new([shape[0], 1], &device),
             shape,
             device,
             observation_dtype: None,
@@ -295,7 +295,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
         self.shape[0]
     }
 
-    /// Inserts native rank-R observations [num_envs, ...observation_shape], Int actions [num_envs, 1], and statistics [num_envs].
+    /// Inserts native rank-R observations [num_envs, ...observation_shape], Int actions [num_envs, 1], and statistics [num_envs, 1].
     /// Observations retain their kind and first-batch dtype. Transfers to storage device and detaches every column.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = transitions.observations.dims()[0];
@@ -351,7 +351,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
         Ok(count)
     }
 
-    /// Samples detached native rank-R observations [sample_count, ...observation_shape], actions [sample_count, 1], and statistics [sample_count].
+    /// Samples detached native rank-R observations [sample_count, ...observation_shape], actions [sample_count, 1], and statistics [sample_count, 1].
     /// Observation kind, dtype, and item axes remain unchanged on the storage device.
     fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
         let observations = self
@@ -386,7 +386,7 @@ struct QCollectedTransitions<'a, const R: usize, K: Autodiff> {
     observations: &'a Tensor<R, K>,
     next_observations: &'a Tensor<R, K>,
     actions: &'a Tensor<2, Int>,
-    rewards: &'a Tensor<1>,
+    rewards: &'a Tensor<2>,
     dones: &'a [bool],
     truncateds: &'a [bool],
     first_timestep: usize,
@@ -563,7 +563,7 @@ where
         .map_err(QAgentError::ModelError)
     }
 
-    /// Samples detached rank-R observations, Int actions [batch_size, 1], and statistics [batch_size].
+    /// Samples detached rank-R observations, Int actions [batch_size, 1], and statistics [batch_size, 1].
     /// Computes a Float loss [1] in compute dtype on the optimization device and updates only the online model.
     #[cfg_attr(
         feature = "tracing",
@@ -607,7 +607,6 @@ where
             &target_next_q_values,
             self.gamma,
         )
-        .reshape([rewards.dims()[0], 1])
         .detach();
         let q_values = self
             .online_q_network
@@ -639,7 +638,7 @@ where
     }
 
     /// Stores native rank-R observations and next observations [num_envs, ...observation_shape] with actions [num_envs, 1].
-    /// Rewards [num_envs] feed episode metrics. Only termination blocks bootstrapping; truncation retains terminal observations.
+    /// Rewards [num_envs, 1] feed episode metrics. Only termination blocks bootstrapping; truncation retains terminal observations.
     fn store_vectorized_transitions(
         &mut self,
         transitions: QCollectedTransitions<'_, R, K>,
@@ -667,8 +666,8 @@ where
                 completed_episodes.push(entry);
             }
         }
-        let next_dones = Tensor::<1, Bool>::from_data(
-            TensorData::new(transitions.dones.to_vec(), [environment_count]),
+        let next_dones = Tensor::<2, Bool>::from_data(
+            TensorData::new(transitions.dones.to_vec(), [environment_count, 1]),
             &self.replay_storage_config.storage_device(),
         );
         self.experience_replay.add(QLearningInsert {
@@ -904,18 +903,18 @@ mod tests {
             false
         }
 
-        /// Builds Float targets [batch_size] from rewards and Bool termination flags [batch_size] and Q values [batch_size, action_count].
+        /// Builds Float targets [batch_size, 1] from rewards and Bool termination flags [batch_size, 1] and Q values [batch_size, action_count].
         fn target_q_values(
-            rewards: &Tensor<1>,
-            next_dones: &Tensor<1, Bool>,
+            rewards: &Tensor<2>,
+            next_dones: &Tensor<2, Bool>,
             _online: Option<&Tensor<2>>,
             target: &Tensor<2>,
             gamma: f32,
-        ) -> Tensor<1> {
+        ) -> Tensor<2> {
             bellman_targets(
                 rewards.clone(),
                 next_dones.clone(),
-                target.clone().max_dim(1).squeeze_dim(1),
+                target.clone().max_dim(1),
                 f64::from(gamma),
             )
         }
@@ -993,7 +992,7 @@ mod tests {
         fn log_update(&mut self, entry: &QLogEntry) {
             assert_eq!(entry.loss.dims(), [1]);
             assert_eq!(entry.q_values.dims()[1], 1);
-            assert_eq!(entry.q_values.dims()[0], entry.replay_rewards.dims()[0]);
+            assert_eq!(entry.q_values.dims(), entry.replay_rewards.dims());
             assert_eq!(entry.loss.dtype(), entry.q_values.dtype());
             assert_eq!(entry.update_index, self.updates.len());
             self.updates.push(entry.collection_timestep);
@@ -1144,7 +1143,7 @@ mod tests {
         );
     }
 
-    /// Creates Float replay rows [batch_size, 1] with scalar rewards and Bool flags [batch_size].
+    /// Creates Float replay rows [batch_size, 1] with scalar rewards and Bool flags [batch_size, 1].
     fn replay_insert(values: &[f64], device: &Device) -> QLearningInsert<2, Float> {
         let count = values.len();
         QLearningInsert {
@@ -1160,8 +1159,8 @@ mod tests {
                 (device, DType::F64),
             ),
             actions: Tensor::zeros([count, 1], (device, DType::U32)),
-            rewards: Tensor::ones([count], device),
-            next_dones: Tensor::from_data(TensorData::new(vec![false; count], [count]), device),
+            rewards: Tensor::ones([count, 1], device),
+            next_dones: Tensor::from_data(TensorData::new(vec![false; count], [count, 1]), device),
             truncateds: vec![false; count],
         }
     }
@@ -1191,7 +1190,8 @@ mod tests {
             [5.0, 6.0, 15.0, 16.0]
         );
         assert_eq!(batch.actions.dims(), [4, 1]);
-        assert_eq!(batch.next_dones.dims(), [4]);
+        assert_eq!(batch.next_dones.dims(), [4, 1]);
+        assert_eq!(batch.rewards.dims(), [4, 1]);
     }
 
     #[test]
@@ -1212,8 +1212,8 @@ mod tests {
                         (&device, DType::U64),
                     ),
                     actions: Tensor::zeros([2, 1], (&device, DType::U32)),
-                    rewards: Tensor::zeros([2], &device),
-                    next_dones: Tensor::from_data([false, true], &device),
+                    rewards: Tensor::zeros([2, 1], &device),
+                    next_dones: Tensor::from_data([[false], [true]], &device),
                     truncateds: vec![false; 2],
                 },
             )
@@ -1232,8 +1232,8 @@ mod tests {
                     observations: Tensor::from_data([[false], [true]], &device),
                     next_observations: Tensor::from_data([[true], [false]], &device),
                     actions: Tensor::zeros([2, 1], (&device, DType::U32)),
-                    rewards: Tensor::zeros([2], &device),
-                    next_dones: Tensor::from_data([false, false], &device),
+                    rewards: Tensor::zeros([2, 1], &device),
+                    next_dones: Tensor::from_data([[false], [false]], &device),
                     truncateds: vec![true, false],
                 },
             )
@@ -1307,8 +1307,8 @@ mod tests {
                 observations: observations.clone(),
                 next_observations: observations,
                 actions: Tensor::ones([2, 1], (&device, DType::U32)),
-                rewards: Tensor::full([2], 2.0, (&device, DType::F64)),
-                next_dones: Tensor::from_data([false, false], &device),
+                rewards: Tensor::full([2, 1], 2.0, (&device, DType::F64)),
+                next_dones: Tensor::from_data([[false], [false]], &device),
                 truncateds: vec![false; 2],
             })
             .unwrap();
