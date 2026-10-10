@@ -74,7 +74,7 @@ where
     type ActionSpace: ActionSpace<A>;
 
     /// Steps with `[num_envs, ...action_shape]` of rank `A` in the action space's kind.
-    /// Returns observations `[num_envs, ...observation_shape]` of rank `O` and rewards `[num_envs]`.
+    /// Returns observations `[num_envs, ...observation_shape]` of rank `O` and rewards `[num_envs, 1]`.
     /// Callers must follow the environment's dtype and device requirements.
     fn step(
         &mut self,
@@ -121,13 +121,13 @@ pub struct StepInfo<I = (), T: NextRank = Tensor<1>> {
 
 /// Batched transition results in environment-slot order.
 /// `T` is the native unbatched terminal observation type. `T::Next` stores `[num_envs, ...observation_shape]`.
-/// Scalar terminals `[1]` produce observation batches `[num_envs, 1]`. Rewards are Float `[num_envs]`.
+/// Scalar terminals `[1]` produce observation batches `[num_envs, 1]`. Rewards are Float `[num_envs, 1]`.
 /// Terminal observations share the observation dtype and device. Host metadata and flags contain one entry per slot.
 /// Done and truncated remain separate.
 #[derive(Debug, Clone)]
 pub struct MultiGymStepInfo<I = (), T: NextRank = Tensor<1>> {
     pub observations: T::Next,
-    pub rewards: Tensor<1>,
+    pub rewards: Tensor<2>,
     pub infos: Vec<I>,
     pub dones: Vec<bool>,
     pub truncateds: Vec<bool>,
@@ -234,8 +234,8 @@ fn batch_offsets<E>(
     Ok(offsets)
 }
 
-/// Concatenates observations `[group_size, ...observation_shape]` and rewards `[group_size]` along the batch axis.
-/// Returns `[total_size, ...observation_shape]` of rank `O` and rewards `[total_size]`, preserving each tensor's kind, dtype, device, and gradients.
+/// Concatenates observations `[group_size, ...observation_shape]` and rewards `[group_size, 1]` along the batch axis.
+/// Returns `[total_size, ...observation_shape]` of rank `O` and rewards `[total_size, 1]`, preserving each tensor's kind, dtype, device, and gradients.
 /// Groups must share item dimensions, dtypes, and devices. Metadata, flags, and terminal observations retain group order.
 fn combine_steps<I, const O: usize, K: Basic, const U: usize>(
     steps: Vec<MultiGymStepInfo<I, Tensor<U, K>>>,
@@ -278,7 +278,7 @@ mod tests {
         let device = Device::flex();
         let step = MultiGymStepInfo::<(), Tensor<1, Int>> {
             observations: Tensor::from_data([[8u64], [9]], (&device, DType::U64)),
-            rewards: Tensor::zeros([2], &device),
+            rewards: Tensor::zeros([2, 1], &device),
             infos: vec![(); 2],
             dones: vec![true, false],
             truncateds: vec![false; 2],
@@ -298,7 +298,7 @@ mod tests {
         let device = Device::flex();
         let step = MultiGymStepInfo::<(), Tensor<1, Bool>> {
             observations: Tensor::from_data([[true], [true]], &device),
-            rewards: Tensor::zeros([2], &device),
+            rewards: Tensor::zeros([2, 1], &device),
             infos: vec![(); 2],
             dones: vec![true, false],
             truncateds: vec![false; 2],
@@ -316,7 +316,7 @@ mod tests {
     fn boolean_terminal_observations_replace_true_reset_values() {
         let step = MultiGymStepInfo::<(), Tensor<1, Bool>> {
             observations: Tensor::from_data([[true, true], [true, false]], &Device::flex()),
-            rewards: Tensor::zeros([2], &Device::flex()),
+            rewards: Tensor::zeros([2, 1], &Device::flex()),
             infos: vec![(); 2],
             dones: vec![true, false],
             truncateds: vec![false; 2],

@@ -68,7 +68,7 @@ where
     type ActionSpace = G::ActionSpace;
 
     /// Maps rank-`A` actions `[num_envs, ...action_shape]` and returns rank-`O` observations `[num_envs, ...observation_shape]`.
-    /// Terminal observations keep unbatched rank `U`; rewards keep `[num_envs]`. Output kinds, dtypes, and devices remain unchanged.
+    /// Terminal observations keep unbatched rank `U`; rewards keep `[num_envs, 1]`. Output kinds, dtypes, and devices remain unchanged.
     fn step(
         &mut self,
         action: Tensor<A, AK>,
@@ -105,7 +105,7 @@ pub struct OutputMapMultiGymWrapper<G, FReset, FStep> {
 
 impl<G, FReset, FStep> OutputMapMultiGymWrapper<G, FReset, FStep> {
     /// Creates callbacks for rank-`O` observations `[num_envs, ...observation_shape]` and complete step results.
-    /// Step callbacks also receive rewards `[num_envs]` and unbatched rank-`U` terminal observations.
+    /// Step callbacks also receive rewards `[num_envs, 1]` and unbatched rank-`U` terminal observations.
     /// Callbacks must preserve layouts and native kinds; they control output dtypes and devices.
     pub fn new<I, E, const O: usize, const A: usize, const U: usize>(
         gym: G,
@@ -270,7 +270,7 @@ where
     type ActionSpace = G::ActionSpace;
 
     /// Transfers rank-`A` actions `[num_envs, ...action_shape]` to the environment device.
-    /// Returns rank-`O` observations, rewards `[num_envs]`, and unbatched rank-`U` terminal observations on the agent device.
+    /// Returns rank-`O` observations, rewards `[num_envs, 1]`, and unbatched rank-`U` terminal observations on the agent device.
     /// Preserves tensor kinds, dtypes, item axes, and gradients.
     fn step(
         &mut self,
@@ -326,7 +326,7 @@ pub use time_limit::TimeLimitGym;
 mod tests {
     use super::*;
     use crate::spaces::BoxSpace;
-    use burn::tensor::{Bool, DType, Int};
+    use burn::tensor::{Bool, DType, Int, TensorData};
 
     struct TensorMapTestGym;
 
@@ -335,7 +335,7 @@ mod tests {
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = BoxSpace<2>;
 
-        /// Returns Float observations `[2, 3]`, rewards `[2]`, and one terminal observation `[3]` from scalar actions `[2, 1]`.
+        /// Returns Float observations `[2, 3]`, rewards `[2, 1]`, and one terminal observation `[3]` from scalar actions `[2, 1]`.
         fn step(&mut self, action: Tensor<2>) -> Result<MultiGymStepInfo, Self::Error> {
             let actions = action.into_data().try_to_vec::<f32>().unwrap();
             let observations = Tensor::from_data(
@@ -343,7 +343,7 @@ mod tests {
                 &Device::flex(),
             );
             Ok(MultiGymStepInfo {
-                rewards: Tensor::from_data(actions.as_slice(), &Device::flex()),
+                rewards: Tensor::from_data(TensorData::new(actions, [2, 1]), &Device::flex()),
                 terminal_observations: vec![
                     None,
                     Some(observations.clone().slice([Slice::from(1..2)]).reshape([3])),
@@ -487,7 +487,7 @@ mod tests {
         let device = Device::flex();
         let mut integers = MultiGymStepInfo::<(), Tensor<1, Int>> {
             observations: Tensor::<2, Int>::from_data([[4i32], [5]], &device),
-            rewards: Tensor::zeros([2], &device),
+            rewards: Tensor::zeros([2, 1], &device),
             infos: vec![(), ()],
             dones: vec![false, true],
             truncateds: vec![false, false],
@@ -509,7 +509,7 @@ mod tests {
         );
         let mut booleans = MultiGymStepInfo::<(), Tensor<1, Bool>> {
             observations: Tensor::<2, Bool>::from_data([[true, false], [false, true]], &device),
-            rewards: Tensor::zeros([2], &device),
+            rewards: Tensor::zeros([2, 1], &device),
             infos: vec![(), ()],
             dones: vec![false, true],
             truncateds: vec![false, false],

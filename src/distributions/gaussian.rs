@@ -15,7 +15,7 @@ use crate::tensor_rank::NextRank;
 /// with rank `A + 1`, inferred through [`NextRank`]. Vector actions use ranks 2 and 3, respectively.
 ///
 /// The default uses vector actions `[batch, features]`. Other action shapes use
-/// `[batch, ...action_shape]`; statistics always reduce to `[batch]`.
+/// `[batch, ...action_shape]`; statistics always reduce to `[batch, 1]`.
 /// Scalar actions use event shape `[1]`, producing `[batch, 1]` and `[batch, samples, 1]`.
 /// Multiple-sample expectations support action ranks 2 through 1024, as defined by `NextRank`.
 /// Samples are not squashed or clipped. A separate action map prepares them
@@ -119,17 +119,14 @@ impl<const A: usize> GaussianDistribution<A> {
 }
 
 /// Sums the action dimensions of rank-`A` values `[batch, ...action_shape]`,
-/// returning `[batch]` in the same batch order. Scalar actions have a trailing axis of size one.
-fn sum_event_dimensions<const A: usize>(values: Tensor<A>) -> Tensor<1> {
+/// returning `[batch, 1]` in the same batch order. Scalar actions have a trailing axis of size one.
+fn sum_event_dimensions<const A: usize>(values: Tensor<A>) -> Tensor<2> {
     const {
-        assert!(A >= 1, "event reduction requires a batch axis");
+        assert!(A >= 2, "event reduction requires batch and item axes");
     }
     let batch_size = values.dims()[0];
     let event_size = values.dims()[1..].iter().product::<usize>();
-    values
-        .reshape([batch_size, event_size])
-        .sum_dim(1)
-        .squeeze_dim(1)
+    values.reshape([batch_size, event_size]).sum_dim(1)
 }
 
 impl<const A: usize> Distribution<2, A> for GaussianDistribution<A> {
@@ -150,7 +147,7 @@ impl<const A: usize> Distribution<2, A> for GaussianDistribution<A> {
     }
 
     /// Evaluates rank-`A` actions `[batch, ...action_shape]` under rank-2
-    /// parameters `[batch, 2 * event_size]`, summing action dimensions to `[batch]`
+    /// parameters `[batch, 2 * event_size]`, summing action dimensions to `[batch, 1]`
     /// log probability and entropy. Actions share parameter dtype and device.
     fn dist_eval(&self, outputs: Tensor<2>, actions: Tensor<A>) -> Result<DistEval, Self::Error> {
         let (mean, log_std) = self.parameters(outputs)?;
@@ -173,7 +170,7 @@ where
 
     /// Draws multiple actions `[batch, samples, ...action_shape]` of rank `C` from
     /// `[batch, 2 * event_size]` parameters. Log probabilities and uniform
-    /// weights are `[batch, samples]`; `C = A + 1` inserts the sample axis.
+    /// weights are `[batch, samples, 1]`; `C = A + 1` inserts the sample axis.
     fn expectation(
         &self,
         outputs: Tensor<2>,
@@ -195,8 +192,8 @@ where
             actions.push(sample);
         }
         let actions = Tensor::<A>::stack::<C>(actions, 1);
-        let log_probabilities = Tensor::<1>::stack::<2>(log_probabilities, 1);
-        let weights = Tensor::<2>::full(
+        let log_probabilities = Tensor::<2>::stack::<3>(log_probabilities, 1);
+        let weights = Tensor::<3>::full(
             log_probabilities.dims(),
             1.0 / sample_count as f64,
             (&log_probabilities.device(), log_probabilities.dtype()),
@@ -279,8 +276,8 @@ mod tests {
             .unwrap();
         let actions: Tensor<3> = terms.actions().clone();
         assert_eq!(actions.dims(), [2, 3, 1]);
-        assert_eq!(terms.log_probabilities().dims(), [2, 3]);
-        assert_eq!(terms.weights().dims(), [2, 3]);
+        assert_eq!(terms.log_probabilities().dims(), [2, 3, 1]);
+        assert_eq!(terms.weights().dims(), [2, 3, 1]);
     }
 
     #[test]
@@ -349,13 +346,13 @@ mod tests {
                 .unwrap()
                 .entropy()
                 .dims(),
-            [3]
+            [3, 1]
         );
         let terms: ExpectationTerms<7> = distribution
             .expectation(outputs.clone(), NonZeroUsize::new(4).unwrap())
             .unwrap();
         assert_eq!(terms.actions().dims(), [3, 4, 2, 1, 2, 1, 2]);
-        assert_eq!(terms.log_probabilities().dims(), [3, 4]);
+        assert_eq!(terms.log_probabilities().dims(), [3, 4, 1]);
         assert_eq!(
             terms
                 .weights()

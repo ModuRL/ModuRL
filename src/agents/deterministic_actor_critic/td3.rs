@@ -77,12 +77,12 @@ impl DeterministicActorCriticStrategy for TD3Strategy {
         self.target_noise_clip
     }
 
-    /// Takes the elementwise minimum of two target tensors shaped `[batch]`.
+    /// Takes the elementwise minimum of two target tensors shaped `[batch, 1]`.
     fn aggregate_target_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError> {
         aggregate_critic_values(&values, self.target_aggregation_mode)
     }
 
-    /// Combines actor-objective Q tensors shaped `[batch_size]` using the
+    /// Combines actor-objective Q tensors shaped `[batch_size, 1]` using the
     /// configured mode, or selects the first tensor for canonical TD3.
     fn aggregate_actor_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError> {
         match self.actor_aggregation_mode {
@@ -345,9 +345,9 @@ mod tests {
                 entry
                     .critic_q_values
                     .iter()
-                    .all(|values| values.dims() == [1])
+                    .all(|values| values.dims() == [1, 1])
             );
-            assert_eq!(entry.bellman_targets.dims(), &[1]);
+            assert_eq!(entry.bellman_targets.dims(), &[1, 1]);
             assert_eq!(entry.replay_actions.dims(), &[1, 1]);
             assert_eq!(entry.critic_learning_rates, vec![1e-3, 1e-3, 1e-3]);
             assert_eq!(entry.actor_loss.is_some(), entry.actor_updated);

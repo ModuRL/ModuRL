@@ -181,7 +181,7 @@ impl PPOExperience {
     ///
     /// `states` and `next_states` are `[env_count, ...observation_shape]`,
     /// `actions` is `[env_count, ...action_shape]`; `rewards`,
-    /// `training_rewards`, and `log_probs` are `[env_count]`. `rewards`
+    /// `training_rewards`, and `log_probs` are `[env_count, 1]`. `rewards`
     /// preserves the environment values for logging, while `training_rewards`
     /// may contain bootstrap corrections for nonterminal truncations. Prepared
     /// PPO training data is added internally after rollout collection.
@@ -365,7 +365,7 @@ fn population_variance(values: &Tensor) -> candle_core::Result<Tensor> {
 }
 
 /// Returns scalar explained variance for `returns` and `rollout_values` with
-/// identical shape `[sample_count]`.
+/// identical scalar layouts, such as `[sample_count, 1]` or `[time, env_count, 1]`.
 fn compute_explained_variance(
     returns: &Tensor,
     rollout_values: &Tensor,
@@ -760,7 +760,7 @@ where
         let values_tensor = self.critic_network_forward(&latent_states)?.detach();
 
         // Unflatten back to [batch_size, env_count, ...].
-        let values_tensor = values_tensor.reshape((batch_size, env_count, ()))?;
+        let values_tensor = values_tensor.reshape((batch_size, env_count, 1))?;
 
         let next_states_tensor = batch.next_states;
         let bootstrapped_states = next_states_tensor.i(next_states_tensor.shape().dims()[0] - 1)?; // shape [env_count, ...]
@@ -773,8 +773,7 @@ where
 
         let bootstrapped_values = self
             .critic_network_forward(&latent_bootstrapped_states)?
-            .flatten_all()?
-            .detach(); // shape [env_count]
+            .detach(); // shape [env_count, 1]
 
         let advantages = self
             .compute_gae(
@@ -785,8 +784,6 @@ where
                 &bootstrapped_values,
             )?
             .detach();
-
-        let values_tensor = values_tensor.squeeze(D::Minus1)?;
 
         let returns = (&values_tensor + &advantages)?;
         let rollout_explained_variance = compute_explained_variance(&returns, &values_tensor)?;
@@ -811,9 +808,9 @@ where
         Ok(rollout_explained_variance)
     }
 
-    /// Computes advantages `[time, env_count]` from rewards, values, done
+    /// Computes advantages `[time, env_count, 1]` from rewards, values, done
     /// masks, and truncation masks with that same shape; `bootstrapped_values`
-    /// is `[env_count]`.
+    /// is `[env_count, 1]`.
     fn compute_gae(
         &self,
         rewards: &candle_core::Tensor,
@@ -827,7 +824,7 @@ where
         let next_dones = next_dones.to_dtype(self.dtype)?;
         let next_truncateds = next_truncateds.to_dtype(self.dtype)?;
         let bootstrapped_values = bootstrapped_values.to_dtype(self.dtype)?;
-        let values = values.squeeze(D::Minus1)?.detach();
+        let values = values.detach();
         let masks = ((1.0 - next_dones)? * (1.0 - next_truncateds)?)?;
         let mut next_value = bootstrapped_values.detach();
         let mut gae = Tensor::zeros(next_value.shape(), self.dtype, device)?;
@@ -867,7 +864,7 @@ where
     /// Adds the bootstrap value for each truncated transition to its reward.
     /// GAE still stops at the truncation boundary, so the terminal value is
     /// included exactly once.
-    /// `rewards` is `[environment_count]`, `transition_next_states` is
+    /// `rewards` is `[environment_count, 1]`, `transition_next_states` is
     /// `[environment_count, ...state_shape]`, and both boolean slices have
     /// `environment_count` entries. A true termination always suppresses
     /// bootstrapping, even if the transition is also truncated.
@@ -908,10 +905,7 @@ where
             }
             PPONetworkInfo::Separate(_) => truncated_next_states,
         };
-        let terminal_values = self
-            .critic_network_forward(&latent_states)?
-            .flatten_all()?
-            .detach();
+        let terminal_values = self.critic_network_forward(&latent_states)?.detach();
         let terminal_bootstrap = (terminal_values.to_dtype(self.dtype)? * self.gamma as f64)?;
         Ok(rewards
             .to_dtype(self.dtype)?
@@ -919,7 +913,7 @@ where
     }
 
     /// Evaluates `actions` `[batch, ...action_shape]` for latent or raw
-    /// `states` `[batch, ...state_shape]`, returning two `[batch]` tensors.
+    /// `states` `[batch, ...state_shape]`, returning two `[batch, 1]` tensors.
     fn actor_network_log_prob_and_entropy(
         &mut self,
         states: &candle_core::Tensor,
@@ -954,8 +948,8 @@ where
     )]
     #[builder]
     /// Computes losses from `states` `[batch, ...state_shape]`, `actions`
-    /// `[batch, ...action_shape]`, and vector statistics (`old_log_probs`,
-    /// `advantages`, `returns`, and `rewards`) shaped `[batch]`. `old_values`
+    /// `[batch, ...action_shape]`, and scalar statistics (`old_log_probs`,
+    /// `advantages`, `returns`, and `rewards`) shaped `[batch, 1]`. `old_values`
     /// is present only when value-loss clipping is enabled.
     /// `explained_variance` is scalar `[]`.
     fn compute_loss(
@@ -1010,7 +1004,6 @@ where
         };
 
         let values = self.critic_network_forward(&latent_state)?;
-        let values = values.squeeze(D::Minus1)?;
 
         let entropy_loss = entropy.mean_all()?;
 
@@ -1179,7 +1172,7 @@ where
         }
     }
 
-    /// Logs vectorized `rewards` shaped `[env_count]` alongside one metadata
+    /// Logs vectorized `rewards` shaped `[env_count, 1]` alongside one metadata
     /// and termination entry per environment.
     fn log_collection(
         &mut self,
@@ -1193,7 +1186,7 @@ where
             return Ok(());
         };
 
-        let rewards_vec = rewards.to_vec1::<f32>()?;
+        let rewards_vec = rewards.flatten_all()?.to_vec1::<f32>()?;
         let mut completed_episodes = Vec::new();
         for (environment_index, reward) in rewards_vec.iter().copied().enumerate() {
             let collection_timestep =
@@ -1554,8 +1547,8 @@ mod schedule_tests {
     #[test]
     fn explained_variance_uses_population_variance() {
         let device = Device::Cpu;
-        let returns = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], 3, &device).unwrap();
-        let rollout_values = Tensor::from_vec(vec![1.0f32, 2.0, 2.0], 3, &device).unwrap();
+        let returns = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3, 1), &device).unwrap();
+        let rollout_values = Tensor::from_vec(vec![1.0f32, 2.0, 2.0], (3, 1), &device).unwrap();
 
         let actual = compute_explained_variance(&returns, &rollout_values)
             .unwrap()
@@ -1568,8 +1561,8 @@ mod schedule_tests {
     #[test]
     fn explained_variance_is_nan_for_constant_returns() {
         let device = Device::Cpu;
-        let returns = Tensor::from_vec(vec![1.0f32, 1.0, 1.0], 3, &device).unwrap();
-        let rollout_values = Tensor::from_vec(vec![0.0f32, 1.0, 2.0], 3, &device).unwrap();
+        let returns = Tensor::from_vec(vec![1.0f32, 1.0, 1.0], (3, 1), &device).unwrap();
+        let rollout_values = Tensor::from_vec(vec![0.0f32, 1.0, 2.0], (3, 1), &device).unwrap();
 
         let actual = compute_explained_variance(&returns, &rollout_values)
             .unwrap()
@@ -1624,11 +1617,13 @@ mod schedule_tests {
             .device(device.clone())
             .build()
             .unwrap();
-        let rewards = Tensor::from_vec(vec![1.0_f32, 2.0], 2, &device).unwrap();
+        let rewards = Tensor::from_vec(vec![1.0_f32, 2.0], (2, 1), &device).unwrap();
         let next_states = Tensor::zeros((2, 4), DType::F32, &device).unwrap();
 
         let actual = agent
             .bootstrap_truncated_rewards(&rewards, &next_states, &[true, false], &[true, true])
+            .unwrap()
+            .flatten_all()
             .unwrap()
             .to_vec1::<f32>()
             .unwrap();
@@ -1680,13 +1675,25 @@ mod schedule_tests {
 
         impl PPOLogger<usize> for CollectionLogger {
             fn log(&mut self, entry: &PPOLogEntry) {
-                self.optimization_rewards
-                    .push(entry.rewards.to_vec1::<f32>().unwrap());
+                self.optimization_rewards.push(
+                    entry
+                        .rewards
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap(),
+                );
             }
 
             fn log_collection(&mut self, entry: &PPOCollectionLogEntry<usize>) {
-                self.collection_rewards
-                    .push(entry.collection_rewards.to_vec1::<f32>().unwrap());
+                self.collection_rewards.push(
+                    entry
+                        .collection_rewards
+                        .flatten_all()
+                        .unwrap()
+                        .to_vec1::<f32>()
+                        .unwrap(),
+                );
                 self.infos.push(entry.infos.clone());
                 self.completed_episodes
                     .extend(entry.completed_episodes.iter().map(|episode| {
@@ -1794,8 +1801,11 @@ mod schedule_tests {
 
         agent.learn(&mut env, 2).unwrap();
         let observations = agent.current_states.as_ref().unwrap().clone();
-        assert_eq!(agent.act(&observations).unwrap().dims(), &[2]);
-        assert_eq!(agent.act_deterministic(&observations).unwrap().dims(), &[2]);
+        assert_eq!(agent.act(&observations).unwrap().dims(), &[2, 1]);
+        assert_eq!(
+            agent.act_deterministic(&observations).unwrap().dims(),
+            &[2, 1]
+        );
         assert_eq!(agent.episode_tracker.environment_count(), 2);
         let PPONetworkInfo::Shared(network) = &agent.network_info else {
             panic!("expected shared PPO network");
@@ -2032,8 +2042,11 @@ mod schedule_tests {
         assert_eq!(network.critic_optimizer.steps, 2);
 
         let observations = Tensor::zeros((2, 4), DType::F32, &device).unwrap();
-        assert_eq!(agent.act(&observations).unwrap().dims(), &[2]);
-        assert_eq!(agent.act_deterministic(&observations).unwrap().dims(), &[2]);
+        assert_eq!(agent.act(&observations).unwrap().dims(), &[2, 1]);
+        assert_eq!(
+            agent.act_deterministic(&observations).unwrap().dims(),
+            &[2, 1]
+        );
         agent.set_learning_rate(0.25);
         let PPONetworkInfo::Separate(network) = &agent.network_info else {
             panic!("expected separate PPO network");
@@ -2094,11 +2107,11 @@ mod schedule_tests {
         let truncateds = [[0.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let bootstrap = [1.1_f32, 1.2, 1.3];
         let flat = |rows: [[f32; 3]; 3]| rows.into_iter().flatten().collect::<Vec<_>>();
-        let reward_tensor = Tensor::from_vec(flat(rewards), (3, 3), &device).unwrap();
+        let reward_tensor = Tensor::from_vec(flat(rewards), (3, 3, 1), &device).unwrap();
         let value_tensor = Tensor::from_vec(flat(values), (3, 3, 1), &device).unwrap();
-        let done_tensor = Tensor::from_vec(flat(dones), (3, 3), &device).unwrap();
-        let truncated_tensor = Tensor::from_vec(flat(truncateds), (3, 3), &device).unwrap();
-        let bootstrap_tensor = Tensor::from_vec(bootstrap.to_vec(), 3, &device).unwrap();
+        let done_tensor = Tensor::from_vec(flat(dones), (3, 3, 1), &device).unwrap();
+        let truncated_tensor = Tensor::from_vec(flat(truncateds), (3, 3, 1), &device).unwrap();
+        let bootstrap_tensor = Tensor::from_vec(bootstrap.to_vec(), (3, 1), &device).unwrap();
 
         let actual = agent
             .compute_gae(
@@ -2109,7 +2122,7 @@ mod schedule_tests {
                 &bootstrap_tensor,
             )
             .unwrap()
-            .to_vec2::<f32>()
+            .to_vec3::<f32>()
             .unwrap();
         for env_idx in 0..3 {
             let mut next_value = bootstrap[env_idx];
@@ -2120,9 +2133,9 @@ mod schedule_tests {
                 let delta = rewards[time][env_idx] + 0.9 * next_value * mask - value;
                 gae = delta + 0.9 * 0.8 * gae * mask;
                 assert!(
-                    (actual[time][env_idx] - gae).abs() < 1e-5,
+                    (actual[time][env_idx][0] - gae).abs() < 1e-5,
                     "time {time}, env {env_idx}: expected {gae}, got {}",
-                    actual[time][env_idx]
+                    actual[time][env_idx][0]
                 );
                 next_value = value;
             }

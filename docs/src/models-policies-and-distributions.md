@@ -79,7 +79,7 @@ The group does not remove the underlying type information. Fully explicit policy
 
 The policy implements `ProbabilisticPolicy<O, A>`. Its `sample` and `mode`
 operations pass model outputs directly to the distribution. Its
-`log_prob_and_entropy` operation calls `D::dist_eval` and returns two `[batch_size]` tensors.
+`log_prob_and_entropy` operation calls `D::dist_eval` and returns two `[batch_size, 1]` tensors.
 The policy trusts callers, models, and distributions to follow their documented tensor contracts.
 It does not check input compatibility or validate component outputs.
 
@@ -118,8 +118,8 @@ one logit for each choice:
 | Model output | `[B, C]` |
 | Sampled representation | `[B, C]` |
 | Action after `Discrete` conversion | `[B, 1]` |
-| Log probability | `[B]` |
-| Entropy | `[B]` |
+| Log probability | `[B, 1]` |
+| Entropy | `[B, 1]` |
 
 The logits are unnormalized scores. Sampling adds an independent random
 perturbation called *Gumbel noise* to each score. Taking the largest perturbed
@@ -147,8 +147,8 @@ standard deviations:
 | Log standard deviations | `[B, A]` |
 | Sampled representation | `[B, A]` |
 | Action after `BoxSpace` conversion | `[B, A]` |
-| Log probability | `[B]` |
-| Entropy | `[B]` |
+| Log probability | `[B, 1]` |
+| Entropy | `[B, 1]` |
 
 `GaussianDistribution` applies `exp` to the log standard deviations before
 sampling. Neither half of the model output contains log probabilities. Each

@@ -44,7 +44,7 @@ impl QLearningTarget for DQNTarget {
         false
     }
 
-    /// Computes `[batch]` targets from reward/done vectors `[batch]` and
+    /// Computes `[batch, 1]` targets from reward/done tensors `[batch, 1]` and
     /// target Q values `[batch, action_count]`.
     fn target_q_values(
         rewards: &Tensor,
@@ -56,7 +56,7 @@ impl QLearningTarget for DQNTarget {
         bellman_targets(
             rewards,
             next_dones,
-            &target_next_q_values.max(1)?.detach(),
+            &target_next_q_values.max_keepdim(1)?.detach(),
             f64::from(gamma),
         )
     }
@@ -151,7 +151,7 @@ where
     type GymError = GE;
     type SpaceError = SE;
 
-    /// Selects scalar discrete actions `[batch]` for observations
+    /// Selects scalar discrete actions `[batch, 1]` for observations
     /// `[batch, ...observation_shape]`.
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
         self.inner.act(observation)
@@ -253,7 +253,7 @@ mod tests {
         let actions = agent
             .act(&Tensor::zeros((2, 4), DType::F32, &device).unwrap())
             .unwrap();
-        assert_eq!(actions.dims(), &[2]);
+        assert_eq!(actions.dims(), &[2, 1]);
 
         agent.learn(&mut env, 2).unwrap();
         assert_eq!(agent.inner.optimizer.steps, 2);
@@ -265,11 +265,13 @@ mod tests {
     #[test]
     fn targets_use_target_max_and_mask_terminal_transitions() {
         let device = Device::Cpu;
-        let rewards = Tensor::from_vec(vec![1.0f32, 2.0], 2, &device).unwrap();
-        let dones = Tensor::from_vec(vec![0.0f32, 1.0], 2, &device).unwrap();
+        let rewards = Tensor::from_vec(vec![1.0f32, 2.0], (2, 1), &device).unwrap();
+        let dones = Tensor::from_vec(vec![0.0f32, 1.0], (2, 1), &device).unwrap();
         let target =
             Tensor::from_vec(vec![10.0f32, 1.0, 3.0, 2.0, 4.0, 0.0], (2, 3), &device).unwrap();
         let values = DQNTarget::target_q_values(&rewards, &dones, None, &target, 0.9)
+            .unwrap()
+            .flatten_all()
             .unwrap()
             .to_vec1::<f32>()
             .unwrap();
@@ -281,17 +283,14 @@ mod tests {
         let device = Device::Cpu;
         let q_values =
             Tensor::from_vec(vec![1.0f32, 5.0, 2.0, 7.0, 3.0, 4.0], (2, 3), &device).unwrap();
-        let actions = Tensor::from_vec(vec![1u32, 2], 2, &device).unwrap();
-        let rewards = Tensor::from_vec(vec![1.0f32, 2.0], 2, &device).unwrap();
-        let dones = Tensor::from_vec(vec![0.0f32, 1.0], 2, &device).unwrap();
+        let actions = Tensor::from_vec(vec![1u32, 2], (2, 1), &device).unwrap();
+        let rewards = Tensor::from_vec(vec![1.0f32, 2.0], (2, 1), &device).unwrap();
+        let dones = Tensor::from_vec(vec![0.0f32, 1.0], (2, 1), &device).unwrap();
         let target =
             Tensor::from_vec(vec![10.0f32, 1.0, 3.0, 2.0, 4.0, 0.0], (2, 3), &device).unwrap();
 
         let selected = selected_action_q_values(&q_values, &actions).unwrap();
-        let targets = DQNTarget::target_q_values(&rewards, &dones, None, &target, 0.9)
-            .unwrap()
-            .unsqueeze(1)
-            .unwrap();
+        let targets = DQNTarget::target_q_values(&rewards, &dones, None, &target, 0.9).unwrap();
         let loss = candle_nn::loss::mse(&selected, &targets).unwrap();
         assert!((loss.to_vec0::<f32>().unwrap() - 14.5).abs() < 1e-6);
     }

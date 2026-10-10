@@ -45,7 +45,7 @@ impl QLearningTarget for DDQNTarget {
         true
     }
 
-    /// Computes `[batch]` targets from reward/done vectors `[batch]` and online
+    /// Computes `[batch, 1]` targets from reward/done tensors `[batch, 1]` and online
     /// and target Q values `[batch, action_count]`.
     fn target_q_values(
         rewards: &Tensor,
@@ -56,10 +56,8 @@ impl QLearningTarget for DDQNTarget {
     ) -> Result<Tensor, Error> {
         let next_actions = online_next_q_values
             .expect("DDQN target calculation requires online next-state Q-values")
-            .argmax(1)?;
-        let next_q_values = selected_action_q_values(target_next_q_values, &next_actions)?
-            .squeeze(1)?
-            .detach();
+            .argmax_keepdim(1)?;
+        let next_q_values = selected_action_q_values(target_next_q_values, &next_actions)?.detach();
         bellman_targets(rewards, next_dones, &next_q_values, f64::from(gamma))
     }
 }
@@ -153,7 +151,7 @@ where
     type GymError = GE;
     type SpaceError = SE;
 
-    /// Selects scalar discrete actions `[batch]` for observations
+    /// Selects scalar discrete actions `[batch, 1]` for observations
     /// `[batch, ...observation_shape]`.
     fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
         self.inner.act(observation)
@@ -255,7 +253,7 @@ mod tests {
         let actions = agent
             .act(&Tensor::zeros((2, 4), DType::F32, &device).unwrap())
             .unwrap();
-        assert_eq!(actions.dims(), &[2]);
+        assert_eq!(actions.dims(), &[2, 1]);
 
         agent.learn(&mut env, 2).unwrap();
         assert_eq!(agent.inner.optimizer.steps, 2);
@@ -267,13 +265,15 @@ mod tests {
     #[test]
     fn targets_select_online_actions_and_evaluate_with_target_values() {
         let device = Device::Cpu;
-        let rewards = Tensor::from_vec(vec![1.0f32, 2.0], 2, &device).unwrap();
-        let dones = Tensor::from_vec(vec![0.0f32, 1.0], 2, &device).unwrap();
+        let rewards = Tensor::from_vec(vec![1.0f32, 2.0], (2, 1), &device).unwrap();
+        let dones = Tensor::from_vec(vec![0.0f32, 1.0], (2, 1), &device).unwrap();
         let online =
             Tensor::from_vec(vec![3.0f32, 100.0, 0.0, 10.0, 2.0, 1.0], (2, 3), &device).unwrap();
         let target =
             Tensor::from_vec(vec![5.0f32, 7.0, 9.0, 4.0, 8.0, 6.0], (2, 3), &device).unwrap();
         let values = DDQNTarget::target_q_values(&rewards, &dones, Some(&online), &target, 0.9)
+            .unwrap()
+            .flatten_all()
             .unwrap()
             .to_vec1::<f32>()
             .unwrap();

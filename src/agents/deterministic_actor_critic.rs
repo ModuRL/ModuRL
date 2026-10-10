@@ -145,13 +145,13 @@ pub struct DeterministicActorCriticLogEntry {
     /// One scalar optimization loss per critic.
     pub critic_losses: Vec<Tensor>,
     /// Each critic's Q predictions for the sampled replay state-action pairs.
-    /// Every tensor is shaped `[batch_size]`.
+    /// Every tensor is shaped `[batch_size, 1]`.
     pub critic_q_values: Vec<Tensor>,
     /// Scalar negative mean policy Q loss.
     ///
     /// This is `None` on updates where TD3 delays the actor.
     pub actor_loss: Option<Tensor>,
-    /// Q values used by the actor objective, shaped `[batch_size]`.
+    /// Q values used by the actor objective, shaped `[batch_size, 1]`.
     ///
     /// DDPG uses its sole critic. Canonical TD3 uses its first critic for the
     /// actor objective. A configured TD3 actor aggregation mode combines the
@@ -164,9 +164,9 @@ pub struct DeterministicActorCriticLogEntry {
     /// Replay actions shaped `[batch_size, ...action_shape]`.
     pub replay_actions: Tensor,
     /// Detached expected Q targets shared by all critics, shaped
-    /// `[batch_size]`.
+    /// `[batch_size, 1]`.
     pub bellman_targets: Tensor,
-    /// Rewards from the sampled replay batch, shaped `[batch_size]`.
+    /// Rewards from the sampled replay batch, shaped `[batch_size, 1]`.
     pub replay_rewards: Tensor,
     /// Current actor optimizer learning rate.
     pub actor_learning_rate: f32,
@@ -184,7 +184,7 @@ pub struct DeterministicActorCriticLogEntry {
 
 /// Metrics from one vectorized environment step.
 pub struct DeterministicActorCriticCollectionLogEntry<I = ()> {
-    /// Newest reward from each inner environment, shaped `[environment_count]`.
+    /// Newest reward from each inner environment, shaped `[environment_count, 1]`.
     pub collection_rewards: Tensor,
     /// Typed metadata returned by the inner environments.
     pub infos: Vec<I>,
@@ -266,11 +266,11 @@ pub(crate) trait DeterministicActorCriticStrategy {
     /// Combines the target critics' next-state Q estimates into one value per
     /// replay transition. DDPG uses its sole critic; TD3 applies its configured
     /// ensemble aggregation. Each input and the output are shaped
-    /// `[batch_size]`.
+    /// `[batch_size, 1]`.
     fn aggregate_target_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError>;
 
     /// Combines the critics' current-policy Q estimates into the
-    /// `[batch_size]` values used by the actor objective.
+    /// `[batch_size, 1]` values used by the actor objective.
     fn aggregate_actor_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError>;
 }
 
@@ -325,20 +325,14 @@ impl DeterministicReplayStorage {
         capacity: usize,
         state_shape: &[usize],
         action_shape: &[usize],
-        observation_dtype: DType,
         dtype: DType,
         device: candle_core::Device,
     ) -> Result<Self, ReplayStorageError> {
         Ok(Self {
-            observations: AlignedObservationReplay::new(
-                capacity,
-                state_shape,
-                observation_dtype,
-                &device,
-            ),
+            observations: AlignedObservationReplay::new(capacity, state_shape, DType::F32, &device),
             actions: TensorReplayColumn::new(capacity, action_shape, dtype, &device)?,
-            rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
-            terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            rewards: TensorReplayColumn::new(capacity, &[1], dtype, &device)?,
+            terminated: TensorReplayColumn::new(capacity, &[1], dtype, &device)?,
             capacity,
             device,
         })
@@ -534,7 +528,6 @@ where
             replay_capacity,
             observation_sample.dims(),
             action_sample.dims(),
-            replay_storage_config.observation_dtype(),
             dtype,
             storage_device.clone(),
         )?;
@@ -800,8 +793,8 @@ where
             skip_all
         )
     )]
-    /// Optimizes critics from a replay batch and targets shaped `[batch]`,
-    /// returning one scalar loss and one `[batch]` Q tensor per critic.
+    /// Optimizes critics from a replay batch and targets shaped `[batch, 1]`,
+    /// returning one scalar loss and one `[batch, 1]` Q tensor per critic.
     fn optimize_critics(
         &mut self,
         batch: &DeterministicBatch,
@@ -829,7 +822,7 @@ where
         )
     )]
     /// Optimizes the actor from states `[batch, ...observation_shape]`,
-    /// returning its scalar loss, `[batch]` Q values, and
+    /// returning its scalar loss, `[batch, 1]` Q values, and
     /// `[batch, ...action_shape]` actions.
     fn optimize_actor(
         &mut self,
@@ -939,6 +932,7 @@ where
         let reward_values = rewards
             .to_dtype(DType::F32)?
             .to_device(&candle_core::Device::Cpu)?
+            .flatten_all()?
             .to_vec1::<f32>()?;
         let mut completed_episodes = Vec::new();
         for environment_index in 0..environment_count {
@@ -962,7 +956,7 @@ where
             rewards: rewards.clone(),
             terminated: Tensor::from_vec(
                 dones.iter().map(|&done| u8::from(done)).collect::<Vec<_>>(),
-                environment_count,
+                (environment_count, 1),
                 &storage_device,
             )?
             .to_dtype(self.dtype)?,

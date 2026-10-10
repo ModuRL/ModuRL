@@ -68,7 +68,7 @@ impl DeterministicActorCriticStrategy for DDPGStrategy {
         0.0
     }
 
-    /// Returns the sole critic target tensor shaped `[batch]`.
+    /// Returns the sole critic target tensor shaped `[batch, 1]`.
     fn aggregate_target_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError> {
         values
             .into_iter()
@@ -76,7 +76,7 @@ impl DeterministicActorCriticStrategy for DDPGStrategy {
             .ok_or(SACCriticError::NoCriticValues)
     }
 
-    /// Returns the sole actor-objective Q tensor shaped `[batch_size]`.
+    /// Returns the sole actor-objective Q tensor shaped `[batch_size, 1]`.
     fn aggregate_actor_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError> {
         values
             .into_iter()
@@ -269,11 +269,11 @@ mod tests {
             self.updates += 1;
             assert_eq!(entry.critic_losses.len(), 1);
             assert_eq!(entry.critic_q_values.len(), 1);
-            assert_eq!(entry.critic_q_values[0].dims(), &[1]);
-            assert_eq!(entry.bellman_targets.dims(), &[1]);
-            assert_eq!(entry.replay_rewards.dims(), &[1]);
+            assert_eq!(entry.critic_q_values[0].dims(), &[1, 1]);
+            assert_eq!(entry.bellman_targets.dims(), &[1, 1]);
+            assert_eq!(entry.replay_rewards.dims(), &[1, 1]);
             assert_eq!(entry.replay_actions.dims(), &[1, 1]);
-            assert_eq!(entry.policy_q_values.as_ref().unwrap().dims(), &[1]);
+            assert_eq!(entry.policy_q_values.as_ref().unwrap().dims(), &[1, 1]);
             assert_eq!(entry.policy_actions.as_ref().unwrap().dims(), &[1, 1]);
             assert_eq!(entry.actor_learning_rate, 1e-3);
             assert_eq!(entry.critic_learning_rates, vec![1e-3]);

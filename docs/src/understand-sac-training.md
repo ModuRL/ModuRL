@@ -118,11 +118,11 @@ categorical policy, `K` is the action count. For a sampled continuous policy,
 | `entropy_change_loss` | Optional scalar | Discrete stabilization penalty |
 | `target_entropy` | Optional `f64` | Current automatic target entropy |
 | `alpha` | Scalar | Current entropy coefficient |
-| `bellman_targets` | `[B]` | Detached soft targets shared by all critics |
-| `policy_log_probabilities` | `[B, K]` | Candidate log probabilities |
-| `policy_weights` | `[B, K]` | Candidate expectation weights |
-| `policy_q_values` | `[B, K]` | Aggregated Q-values used by the actor |
-| `replay_rewards` | `[B]` | Rewards from the sampled replay entries |
+| `bellman_targets` | `[B, 1]` | Detached soft targets shared by all critics |
+| `policy_log_probabilities` | `[B, K, 1]` | Candidate log probabilities |
+| `policy_weights` | `[B, K, 1]` | Candidate expectation weights |
+| `policy_q_values` | `[B, K, 1]` | Aggregated Q-values used by the actor |
+| `replay_rewards` | `[B, 1]` | Rewards from the sampled replay entries |
 
 Losses do not have a universal target value. Reward scale, model architecture,
 and entropy configuration all change their magnitude. Compare them with episode
