@@ -23,7 +23,7 @@ struct GymWorker<I, T: NextRank, E, const A: usize, K: Basic> {
 }
 
 /// Constructs and owns a MultiGym on a persistent worker thread.
-/// Step commands carry actions `[num_envs, ...action_shape]` of rank `A`; responses carry rank-`O` observations and rank-1 rewards.
+/// Step commands carry actions `[num_envs, ...action_shape]` of rank `A`; responses carry rank-`O` observations and rank-2 rewards.
 /// Native tensor kinds come from G's spaces. Commands preserve dtype, device, and axis order.
 fn start_worker<
     G,
@@ -168,7 +168,7 @@ where
     type ActionSpace = G::ActionSpace;
 
     /// Splits rank-`A` actions `[total_size, ...action_shape]` into rank-`A` group batches and steps them concurrently.
-    /// Returns concatenated rank-`O` observations `[total_size, ...observation_shape]` and rewards `[total_size]`.
+    /// Returns concatenated rank-`O` observations `[total_size, ...observation_shape]` and rewards `[total_size, 1]`.
     /// Inputs must meet the inner gyms' dtype, device, and item-shape contracts.
     fn step(
         &mut self,
@@ -464,7 +464,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(step.observations.dims(), [2, 1]);
-        assert_eq!(step.rewards.dims(), [2]);
+        assert_eq!(step.rewards.dims(), [2, 1]);
         assert_eq!(step.dones, [true, true]);
         assert!(
             step.terminal_observations

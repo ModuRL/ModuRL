@@ -743,8 +743,8 @@ mod tests {
                     loss: Tensor::new(2.0f32, &device).unwrap(),
                     epsilon: 0.1,
                     learning_rate: 1e-4,
-                    q_values: Tensor::new(&[1.0f32, 3.0], &device).unwrap(),
-                    replay_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                    q_values: Tensor::new(&[[1.0f32], [3.0]], &device).unwrap(),
+                    replay_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
                     update_index,
                     collection_timestep: update_index + 1,
                 },
@@ -776,8 +776,8 @@ mod tests {
                 loss: Tensor::new(1.0f32, &device).unwrap(),
                 epsilon: 0.1,
                 learning_rate: 1e-4,
-                q_values: Tensor::new(&[1.0f32], &device).unwrap(),
-                replay_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                q_values: Tensor::new(&[[1.0f32]], &device).unwrap(),
+                replay_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
                 update_index: 0,
                 collection_timestep: 80_000,
             },
@@ -785,7 +785,7 @@ mod tests {
         DQNLogger::<()>::log_collection(
             &mut grapher,
             &QCollectionLogEntry {
-                collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                collection_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
                 infos: vec![()],
                 epsilon: 0.1,
                 collection_timestep: 80_000,
@@ -807,7 +807,7 @@ mod tests {
         let device = Device::Cpu;
         let mut grapher = DQNGrapher::atari();
         let life_boundary = QCollectionLogEntry {
-            collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+            collection_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
             infos: vec![RawRewardInfo {
                 inner: EpisodeStatisticsInfo {
                     inner: (),
@@ -830,7 +830,7 @@ mod tests {
         assert!(grapher.terminal.series(EPISODE_RETURN_METRIC).is_none());
 
         let game_boundary = QCollectionLogEntry {
-            collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+            collection_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
             infos: vec![RawRewardInfo {
                 inner: EpisodeStatisticsInfo {
                     inner: (),
@@ -923,7 +923,8 @@ mod tests {
             .unwrap();
 
         grapher.log_collection_metrics(&DeterministicActorCriticCollectionLogEntry {
-            collection_rewards: Tensor::zeros(2, candle_core::DType::F32, &Device::Cpu).unwrap(),
+            collection_rewards: Tensor::zeros((2, 1), candle_core::DType::F32, &Device::Cpu)
+                .unwrap(),
             infos: vec![(), ()],
             collection_timestep: 6_000,
             completed_episodes: vec![

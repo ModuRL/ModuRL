@@ -73,13 +73,13 @@ pub(crate) fn stack_tensor_field<T, const D: usize, const B: usize, K: Basic>(
 }
 
 /// Converts one `[item_count]` boolean field from each experience into an
-/// `Bool` tensor shaped `[batch, item_count]`. Every field must have the same
+/// `Bool` tensor shaped `[batch, item_count, 1]`. Every field must have the same
 /// length. Numeric mask conversion belongs to the algorithm consuming the batch.
 pub(crate) fn stack_bool_field<T>(
     experiences: &[T],
     select: fn(&T) -> &[bool],
     device: &Device,
-) -> Result<Tensor<2, Bool>, ExperienceBatchError> {
+) -> Result<Tensor<3, Bool>, ExperienceBatchError> {
     let first = experiences
         .first()
         .ok_or(ExperienceBatchError::EmptyBatch)?;
@@ -97,7 +97,7 @@ pub(crate) fn stack_bool_field<T>(
         values.extend_from_slice(field);
     }
     Ok(Tensor::from_data(
-        TensorData::new(values, [experiences.len(), item_count]),
+        TensorData::new(values, [experiences.len(), item_count, 1]),
         device,
     ))
 }
@@ -190,7 +190,7 @@ mod tests {
         let device = Device::flex();
         let fields = [vec![true, false], vec![false, true]];
         let batch = stack_bool_field(&fields, |field| field, &device).unwrap();
-        assert_eq!(batch.dims(), [2, 2]);
+        assert_eq!(batch.dims(), [2, 2, 1]);
         assert!(batch.dtype().is_bool());
         assert_eq!(
             batch.into_data().try_to_vec::<bool>().unwrap(),

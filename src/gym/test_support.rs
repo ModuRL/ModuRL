@@ -173,7 +173,7 @@ impl MultiGym<SlotInfo, 2, 2> for GroupEnv {
                 TensorData::new(observations, [self.count, 3]),
                 &Device::flex(),
             ),
-            rewards: Tensor::from_data(TensorData::new(actions, [self.count]), &Device::flex()),
+            rewards: Tensor::from_data(TensorData::new(actions, [self.count, 1]), &Device::flex()),
             infos,
             dones: (0..self.count).map(|slot| slot + 1 == self.count).collect(),
             truncateds: vec![false; self.count],

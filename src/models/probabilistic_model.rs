@@ -33,13 +33,13 @@ pub trait ProbabilisticPolicy<const O: usize = 2, const A: usize = 2> {
     ) -> Result<Tensor<A>, Self::Error>;
 
     /// Evaluates actions `[batch_size, ...action_shape]` for observations `[batch_size, ...observation_shape]`.
-    /// Both returned float tensors have shape `[batch_size]`, with one log probability and entropy statistic per item.
+    /// Both returned float tensors have shape `[batch_size, 1]`, with one log probability and entropy statistic per item.
     /// Action batch size, dtype, and device must match the model's distribution parameters. The calculation retains gradient paths.
     fn log_prob_and_entropy(
         &self,
         observations: Tensor<O, Self::ObservationKind>,
         actions: Tensor<A>,
-    ) -> Result<(Tensor<1>, Tensor<1>), Self::Error>;
+    ) -> Result<(Tensor<2>, Tensor<2>), Self::Error>;
 }
 
 /// Supplies candidate actions for an exact or sampled policy expectation, such as the objective used by SAC.
@@ -50,7 +50,7 @@ pub trait ExpectationPolicy<const O: usize = 2, const A: usize = 2, const C: usi
     type CandidateKind: Basic;
 
     /// Builds rank-`C` candidates `[batch_size, candidate_count, ...action_shape]` from rank-`O` batched observations.
-    /// Log probabilities and weights have shape `[batch_size, candidate_count]`.
+    /// Log probabilities and weights have shape `[batch_size, candidate_count, 1]`.
     /// The distribution determines candidate count and kind. The calculation preserves available gradient paths.
     fn expectation(
         &self,
@@ -284,13 +284,13 @@ where
     }
 
     /// Evaluates rank-`A` actions `[batch_size, ...action_shape]` under parameters produced from rank-`O` batched observations.
-    /// Actions must share parameter batch size, dtype, and device. Returns two `[batch_size]` float tensors with those properties.
+    /// Actions must share parameter batch size, dtype, and device. Returns two `[batch_size, 1]` float tensors with those properties.
     /// Preserves model and distribution gradient paths; the distribution determines whether entropy is analytic or estimated.
     fn log_prob_and_entropy(
         &self,
         observations: Tensor<O, K>,
         actions: Tensor<A>,
-    ) -> Result<(Tensor<1>, Tensor<1>), Self::Error> {
+    ) -> Result<(Tensor<2>, Tensor<2>), Self::Error> {
         let outputs = self.outputs(observations)?;
         let evaluation = self
             .distribution
@@ -315,7 +315,7 @@ where
     type CandidateKind = D::CandidateKind;
 
     /// Produces rank-`C` candidates `[batch_size, candidate_count, ...action_shape]` from rank-`O` batched observations.
-    /// Log probabilities and weights are `[batch_size, candidate_count]` with the parameters' floating-point dtype and device.
+    /// Log probabilities and weights are `[batch_size, candidate_count, 1]` with the parameters' floating-point dtype and device.
     /// Candidate kind comes from the distribution. Candidate device and batch size match the parameters; gradient paths remain available.
     fn expectation(
         &self,
@@ -474,8 +474,8 @@ mod tests {
                             Tensor::zeros([batch_size, action_count], (&device, dtype)),
                         )
                         .unwrap();
-                    assert_eq!(log_prob.dims(), [batch_size]);
-                    assert_eq!(entropy.dims(), [batch_size]);
+                    assert_eq!(log_prob.dims(), [batch_size, 1]);
+                    assert_eq!(entropy.dims(), [batch_size, 1]);
                     assert_eq!(log_prob.dtype(), dtype);
                     assert_eq!(entropy.dtype(), dtype);
                     let expected_log_prob =
@@ -543,14 +543,14 @@ mod tests {
         let (log_prob, entropy) = policy
             .log_prob_and_entropy(observations.clone(), actions.detach())
             .unwrap();
-        assert_eq!(log_prob.dims(), [3]);
-        assert_eq!(entropy.dims(), [3]);
+        assert_eq!(log_prob.dims(), [3, 1]);
+        assert_eq!(entropy.dims(), [3, 1]);
         let terms = policy
             .expectation(observations.clone(), NonZeroUsize::new(4).unwrap())
             .unwrap();
         assert_eq!(terms.actions().dims(), [3, 4, 2, 3]);
-        assert_eq!(terms.log_probabilities().dims(), [3, 4]);
-        assert_eq!(terms.weights().dims(), [3, 4]);
+        assert_eq!(terms.log_probabilities().dims(), [3, 4, 1]);
+        assert_eq!(terms.weights().dims(), [3, 4, 1]);
         assert_eq!(terms.actions().dtype(), DType::F64);
         let gradients = terms.actions().clone().sum().backward();
         assert!(observations.grad(&gradients).is_some());
@@ -567,10 +567,10 @@ mod tests {
         );
         let observations = Tensor::zeros([3, 2], (&device, DType::F64));
         assert_eq!(policy.sample(observations.clone()).unwrap().dims(), [3, 4]);
-        let terms: ExpectationTerms<2, Int> = policy
+        let terms: ExpectationTerms<3, Int> = policy
             .expectation(observations.clone(), NonZeroUsize::MIN)
             .unwrap();
-        assert_eq!(terms.actions().dims(), [3, 4]);
+        assert_eq!(terms.actions().dims(), [3, 4, 1]);
         assert_eq!(
             terms
                 .actions()
@@ -784,13 +784,13 @@ mod tests {
             Ok(outputs)
         }
 
-        /// Evaluates fixture actions `[batch_size, features]` and returns sums `[batch_size]` with the parameters' dtype and device.
+        /// Evaluates fixture actions `[batch_size, features]` and returns sums `[batch_size, 1]` with the parameters' dtype and device.
         fn dist_eval(
             &self,
             outputs: Tensor<2>,
             _actions: Tensor<2>,
         ) -> Result<crate::distributions::DistEval, Self::Error> {
-            let sums = outputs.sum_dim(1).squeeze_dim(1);
+            let sums = outputs.sum_dim(1);
             Ok(crate::distributions::DistEval::new(sums.clone(), sums).unwrap())
         }
     }
@@ -808,8 +808,8 @@ mod tests {
             let options = (&outputs.device(), outputs.dtype());
             Ok(ExpectationTerms::new(
                 outputs.clone().unsqueeze_dim(1),
-                Tensor::zeros([batch_size, 1], options),
-                Tensor::ones([batch_size, 1], options),
+                Tensor::zeros([batch_size, 1, 1], options),
+                Tensor::ones([batch_size, 1, 1], options),
             )
             .unwrap())
         }

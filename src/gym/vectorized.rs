@@ -100,7 +100,7 @@ where
     type ActionSpace = G::ActionSpace;
 
     /// Removes the batch axis from rank-`BA` actions `[num_envs, ...action_shape]` before each Gym step, producing rank `A`.
-    /// Stacks unbatched rank-`O` observations into rank `BO` and produces F32 rewards `[num_envs]` on the observation device.
+    /// Stacks unbatched rank-`O` observations into rank `BO` and produces F32 rewards `[num_envs, 1]` on the observation device.
     /// Requires `BO = O + 1` and `BA = A + 1`, including scalar values.
     /// Inputs must meet each environment's dtype and device contract. Flags and metadata stay on the host.
     fn step(
@@ -132,7 +132,7 @@ where
         }
         let observations: Tensor<BO, K> = Tensor::stack(observations, 0);
         let rewards = Tensor::from_data(
-            TensorData::new(rewards, [count]),
+            TensorData::new(rewards, [count, 1]),
             (&observations.device(), DType::F32),
         );
         Ok(MultiGymStepInfo {
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(env.reset().unwrap().dims(), [2, 1]);
         let step = env.step(actions.clone()).unwrap();
         assert_eq!(step.observations.dims(), [2, 1]);
-        assert_eq!(step.rewards.dims(), [2]);
+        assert_eq!(step.rewards.dims(), [2, 1]);
         assert_eq!(step.dones, [true, true]);
         assert_eq!(step.truncateds, [false, false]);
         assert!(

@@ -33,8 +33,8 @@ pub enum DistributionTensorError {
 }
 
 /// Checks that two rank-`D` statistic tensors have the same shape, dtype, and
-/// device. Inputs are `[batch]` for entropy/log probability or
-/// `[batch, candidates]` for weights/log probabilities. No axes are changed;
+/// device. Inputs are `[batch, 1]` for entropy/log probability or
+/// `[batch, candidates, 1]` for weights/log probabilities. No axes are changed;
 /// `field` names the tensor in any returned error.
 fn validate_statistics<const D: usize>(
     field: &'static str,
@@ -62,26 +62,33 @@ fn validate_statistics<const D: usize>(
 }
 
 pub struct DistEval {
-    log_prob: Tensor<1>,
-    entropy: Tensor<1>,
+    log_prob: Tensor<2>,
+    entropy: Tensor<2>,
 }
 
 impl DistEval {
     /// Creates an evaluation with `log_prob` and `entropy` both shaped
-    /// `[batch_size]`.
+    /// `[batch_size, 1]`.
     /// Both statistics must share batch size, dtype, and device.
-    pub fn new(log_prob: Tensor<1>, entropy: Tensor<1>) -> Result<Self, DistributionTensorError> {
+    pub fn new(log_prob: Tensor<2>, entropy: Tensor<2>) -> Result<Self, DistributionTensorError> {
+        if log_prob.dims()[1] != 1 {
+            return Err(DistributionTensorError::ShapeMismatch {
+                field: "log probability",
+                expected: vec![log_prob.dims()[0], 1],
+                actual: log_prob.dims().to_vec(),
+            });
+        }
         validate_statistics("entropy", &log_prob, &entropy)?;
         Ok(Self { log_prob, entropy })
     }
 
-    /// Returns one log probability per batch item, shaped `[batch]`.
-    pub fn log_prob(&self) -> &Tensor<1> {
+    /// Returns one log probability per batch item, shaped `[batch, 1]`.
+    pub fn log_prob(&self) -> &Tensor<2> {
         &self.log_prob
     }
 
-    /// Returns one entropy value per batch item, shaped `[batch]`.
-    pub fn entropy(&self) -> &Tensor<1> {
+    /// Returns one entropy value per batch item, shaped `[batch, 1]`.
+    pub fn entropy(&self) -> &Tensor<2> {
         &self.entropy
     }
 }
@@ -104,7 +111,7 @@ pub trait Distribution<const P: usize = 2, const A: usize = 2> {
     /// Evaluates `actions` shaped `[batch_size, ...event_shape]` under `outputs`
     /// shaped `[batch_size, ...parameter_shape]`.
     ///
-    /// Both returned statistics are shaped `[batch_size]`.
+    /// Both returned statistics are shaped `[batch_size, 1]`.
     fn dist_eval(&self, outputs: Tensor<P>, actions: Tensor<A>) -> Result<DistEval, Self::Error>;
 }
 
@@ -115,10 +122,10 @@ pub trait Distribution<const P: usize = 2, const A: usize = 2> {
 pub struct ExpectationTerms<const D: usize = 3, K: Basic = Float> {
     /// Candidate actions shaped `[batch, candidates, ...event_shape]`.
     actions: Tensor<D, K>,
-    /// Candidate log probabilities shaped `[batch, candidates]`.
-    log_probabilities: Tensor<2>,
-    /// Normalized expectation weights shaped `[batch, candidates]`.
-    weights: Tensor<2>,
+    /// Candidate log probabilities shaped `[batch, candidates, 1]`.
+    log_probabilities: Tensor<3>,
+    /// Normalized expectation weights shaped `[batch, candidates, 1]`.
+    weights: Tensor<3>,
 }
 
 impl<const D: usize, K: Basic> ExpectationTerms<D, K> {
@@ -126,21 +133,28 @@ impl<const D: usize, K: Basic> ExpectationTerms<D, K> {
     /// `[batch, candidates, ...event_shape]` action layout.
     ///
     /// `log_probabilities` and `weights` must both be shaped
-    /// `[batch, candidates]`, sharing dtype and device. Candidate actions must
+    /// `[batch, candidates, 1]`, sharing dtype and device. Candidate actions must
     /// share the batch/candidate dimensions and device. Callers supply
     /// normalized weights; this constructor does not normalize or detach inputs.
     pub fn new(
         actions: Tensor<D, K>,
-        log_probabilities: Tensor<2>,
-        weights: Tensor<2>,
+        log_probabilities: Tensor<3>,
+        weights: Tensor<3>,
     ) -> Result<Self, DistributionTensorError> {
         const {
             assert!(
-                D >= 2,
-                "expectation actions require batch and candidate axes"
+                D >= 3,
+                "expectation actions require batch, candidate, and item axes"
             );
         }
-        let [batch_size, candidate_count] = log_probabilities.dims();
+        let [batch_size, candidate_count, scalar_size] = log_probabilities.dims();
+        if scalar_size != 1 {
+            return Err(DistributionTensorError::ShapeMismatch {
+                field: "candidate log probabilities",
+                expected: vec![batch_size, candidate_count, 1],
+                actual: log_probabilities.dims().to_vec(),
+            });
+        }
         if candidate_count == 0 {
             return Err(DistributionTensorError::NoCandidates);
         }
@@ -172,19 +186,19 @@ impl<const D: usize, K: Basic> ExpectationTerms<D, K> {
         &self.actions
     }
 
-    /// Returns log probabilities for the choices, shaped `[batch, candidates]`.
-    pub fn log_probabilities(&self) -> &Tensor<2> {
+    /// Returns log probabilities for the choices, shaped `[batch, candidates, 1]`.
+    pub fn log_probabilities(&self) -> &Tensor<3> {
         &self.log_probabilities
     }
 
-    /// Returns averaging weights `[batch, candidates]`.
-    pub fn weights(&self) -> &Tensor<2> {
+    /// Returns averaging weights `[batch, candidates, 1]`.
+    pub fn weights(&self) -> &Tensor<3> {
         &self.weights
     }
 
     /// Returns the rank-`D` actions `[batch, candidates, ...action_shape]` and
-    /// rank-2 log probabilities and weights `[batch, candidates]` without changing axes.
-    pub fn into_parts(self) -> (Tensor<D, K>, Tensor<2>, Tensor<2>) {
+    /// rank-3 log probabilities and weights `[batch, candidates, 1]` without changing axes.
+    pub fn into_parts(self) -> (Tensor<D, K>, Tensor<3>, Tensor<3>) {
         (self.actions, self.log_probabilities, self.weights)
     }
 }
@@ -225,7 +239,7 @@ mod tests {
     fn expectation_terms_enforce_common_batch_and_candidate_dimensions() {
         let device = Device::flex();
         let actions = Tensor::<4>::zeros([2, 3, 4, 5], &device);
-        let probabilities = Tensor::<2>::zeros([2, 3], &device);
+        let probabilities = Tensor::<3>::zeros([2, 3, 1], &device);
         assert!(
             ExpectationTerms::new(actions, probabilities.clone(), probabilities.clone()).is_ok()
         );
@@ -242,10 +256,10 @@ mod tests {
                 ..
             })
         ));
-        let wrong_weights = Tensor::<2>::zeros([2, 1], &device);
+        let wrong_weights = Tensor::<3>::zeros([2, 1, 1], &device);
         assert!(matches!(
             ExpectationTerms::new(
-                Tensor::<2, Int>::zeros([2, 3], &device),
+                Tensor::<3, Int>::zeros([2, 3, 1], &device),
                 probabilities,
                 wrong_weights
             ),
@@ -260,15 +274,15 @@ mod tests {
     fn expectation_terms_validate_candidate_count_and_statistic_dtype() {
         let device = Device::flex();
         let result = ExpectationTerms::new(
-            Tensor::<2, Int>::zeros([2, 0], &device),
-            Tensor::zeros([2, 0], &device),
-            Tensor::zeros([2, 0], &device),
+            Tensor::<3, Int>::zeros([2, 0, 1], &device),
+            Tensor::zeros([2, 0, 1], &device),
+            Tensor::zeros([2, 0, 1], &device),
         );
         assert!(matches!(result, Err(DistributionTensorError::NoCandidates)));
         let result = ExpectationTerms::new(
             Tensor::<3>::zeros([2, 3, 4], &device),
-            Tensor::zeros([2, 3], (&device, DType::F32)),
-            Tensor::zeros([2, 3], (&device, DType::F64)),
+            Tensor::zeros([2, 3, 1], (&device, DType::F32)),
+            Tensor::zeros([2, 3, 1], (&device, DType::F64)),
         );
         assert!(matches!(
             result,
@@ -282,12 +296,13 @@ mod tests {
     #[test]
     fn integer_candidates_preserve_float_statistic_gradients() {
         let device = Device::flex().autodiff();
-        let actions = Tensor::<2, Int>::from_data([[0i32, 1]], &device);
-        let log_probabilities = Tensor::<2>::from_floats([[-1.0, -2.0]], &device).require_grad();
-        let weights = Tensor::<2>::from_floats([[0.25, 0.75]], &device).require_grad();
+        let actions = Tensor::<3, Int>::from_data([[[0i32], [1]]], &device);
+        let log_probabilities =
+            Tensor::<3>::from_floats([[[-1.0], [-2.0]]], &device).require_grad();
+        let weights = Tensor::<3>::from_floats([[[0.25], [0.75]]], &device).require_grad();
         let terms =
             ExpectationTerms::new(actions, log_probabilities.clone(), weights.clone()).unwrap();
-        assert_eq!(terms.actions().dims(), [1, 2]);
+        assert_eq!(terms.actions().dims(), [1, 2, 1]);
         assert_eq!(
             terms
                 .actions()
@@ -318,8 +333,8 @@ mod tests {
         let actions = Tensor::<3>::from_floats([[[1.0, 2.0], [3.0, 4.0]]], &device).require_grad();
         let terms = ExpectationTerms::new(
             actions.clone(),
-            Tensor::zeros([1, 2], &device),
-            Tensor::from_floats([[0.5, 0.5]], &device),
+            Tensor::zeros([1, 2, 1], &device),
+            Tensor::from_floats([[[0.5], [0.5]]], &device),
         )
         .unwrap();
         let gradients = terms.actions().clone().sum().backward();
@@ -335,17 +350,46 @@ mod tests {
     }
 
     #[test]
+    fn scalar_statistics_reject_non_scalar_item_axes() {
+        let device = Device::flex();
+        assert!(matches!(
+            DistEval::new(
+                Tensor::zeros([2, 2], &device),
+                Tensor::zeros([2, 2], &device)
+            ),
+            Err(DistributionTensorError::ShapeMismatch {
+                field: "log probability",
+                ..
+            })
+        ));
+        assert!(matches!(
+            ExpectationTerms::new(
+                Tensor::<3>::zeros([2, 3, 1], &device),
+                Tensor::zeros([2, 3, 2], &device),
+                Tensor::zeros([2, 3, 2], &device),
+            ),
+            Err(DistributionTensorError::ShapeMismatch {
+                field: "candidate log probabilities",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn evaluation_statistics_share_batch_shape_and_precision() {
         let device = Device::flex();
         let evaluation = DistEval::new(
-            Tensor::from_data([1.0f64, 2.0], (&device, DType::F64)),
-            Tensor::from_data([3.0f64, 4.0], (&device, DType::F64)),
+            Tensor::from_data([[1.0f64], [2.0]], (&device, DType::F64)),
+            Tensor::from_data([[3.0f64], [4.0]], (&device, DType::F64)),
         )
         .unwrap();
         assert_eq!(evaluation.log_prob().dtype(), DType::F64);
-        assert_eq!(evaluation.entropy().dims(), [2]);
+        assert_eq!(evaluation.entropy().dims(), [2, 1]);
         assert!(matches!(
-            DistEval::new(Tensor::zeros([2], &device), Tensor::zeros([3], &device)),
+            DistEval::new(
+                Tensor::zeros([2, 1], &device),
+                Tensor::zeros([3, 1], &device)
+            ),
             Err(DistributionTensorError::ShapeMismatch {
                 field: "entropy",
                 ..
@@ -353,8 +397,8 @@ mod tests {
         ));
         assert!(matches!(
             DistEval::new(
-                Tensor::zeros([2], (&device, DType::F32)),
-                Tensor::zeros([2], (&device, DType::F64))
+                Tensor::zeros([2, 1], (&device, DType::F32)),
+                Tensor::zeros([2, 1], (&device, DType::F64))
             ),
             Err(DistributionTensorError::DTypeMismatch {
                 field: "entropy",

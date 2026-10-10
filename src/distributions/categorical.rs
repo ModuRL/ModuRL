@@ -10,7 +10,7 @@ use crate::distributions::{
 };
 
 /// Categorical operations over scores (logits) `[batch, categories]`.
-/// Samples and modes keep that shape; evaluation returns `[batch]` statistics.
+/// Samples and modes keep that shape; evaluation returns `[batch, 1]` statistics.
 /// Computing an average over all categories uses integer indices
 /// `[batch, categories]`, rather than the scores used for action selection.
 #[derive(Clone, Copy, Debug, Default)]
@@ -73,38 +73,36 @@ impl Distribution<2, 2> for CategoricalDistribution {
     }
 
     /// Evaluates sampled scores and model logits, both `[batch, categories]`, reducing
-    /// log probability and entropy to `[batch]`. Inputs share dtype and device.
+    /// log probability and entropy to `[batch, 1]`. Inputs share dtype and device.
     fn dist_eval(&self, outputs: Tensor<2>, actions: Tensor<2>) -> Result<DistEval, Self::Error> {
         Self::validate(&outputs)?;
         let log_probs = log_softmax(outputs.clone(), 1);
         let indices = actions.argmax(1);
-        let log_prob = log_probs.clone().gather(1, indices).squeeze_dim(1);
-        let entropy = (softmax(outputs, 1) * log_probs)
-            .sum_dim(1)
-            .neg()
-            .squeeze_dim(1);
+        let log_prob = log_probs.clone().gather(1, indices);
+        let entropy = (softmax(outputs, 1) * log_probs).sum_dim(1).neg();
         Ok(DistEval::new(log_prob, entropy)?)
     }
 }
 
-impl DifferentiableExpectation<2, 2, 2> for CategoricalDistribution {
+impl DifferentiableExpectation<2, 2, 3> for CategoricalDistribution {
     type CandidateKind = Int;
 
-    /// Lists all category indices `[batch, categories]` from logits with the
-    /// same shape. Log probabilities and normalized weights preserve both axes.
+    /// Lists category indices `[batch, categories, 1]` from logits `[batch, categories]`.
+    /// Log probabilities and normalized weights also have shape `[batch, categories, 1]`.
     fn expectation(
         &self,
         outputs: Tensor<2>,
         _samples: NonZeroUsize,
-    ) -> Result<ExpectationTerms<2, Int>, Self::Error> {
+    ) -> Result<ExpectationTerms<3, Int>, Self::Error> {
         let [batch_size, categories] = Self::validate(&outputs)?;
         let end = i64::try_from(categories)
             .map_err(|_| CategoricalDistributionError::TooManyCategories(categories))?;
         let actions = Tensor::<1, Int>::arange(0..end, &outputs.device())
             .unsqueeze::<2>()
-            .expand([batch_size, categories]);
-        let log_probabilities = log_softmax(outputs.clone(), 1);
-        let weights = softmax(outputs, 1);
+            .expand([batch_size, categories])
+            .unsqueeze_dim(2);
+        let log_probabilities = log_softmax(outputs.clone(), 1).unsqueeze_dim(2);
+        let weights = softmax(outputs, 1).unsqueeze_dim(2);
         Ok(ExpectationTerms::new(actions, log_probabilities, weights)?)
     }
 
@@ -147,7 +145,9 @@ mod tests {
         let terms = CategoricalDistribution
             .expectation(logits.clone(), NonZeroUsize::MIN)
             .unwrap();
-        assert_eq!(terms.actions().dims(), [2, 3]);
+        assert_eq!(terms.actions().dims(), [2, 3, 1]);
+        assert_eq!(terms.log_probabilities().dims(), [2, 3, 1]);
+        assert_eq!(terms.weights().dims(), [2, 3, 1]);
         assert_eq!(
             terms
                 .actions()
@@ -157,6 +157,10 @@ mod tests {
                 .unwrap(),
             vec![0, 1, 2, 0, 1, 2]
         );
+        let expectation = (terms.weights().clone() * terms.actions().clone().float())
+            .sum_dim(1)
+            .squeeze_dim::<2>(1);
+        assert_eq!(expectation.dims(), [2, 1]);
         let sums = terms
             .weights()
             .clone()

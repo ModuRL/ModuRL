@@ -26,12 +26,12 @@ use crate::{
 /// A Q network that can evaluate replay actions and policy candidates.
 pub trait SACCriticNetwork {
     /// Evaluates replay `states` shaped `[batch, ...state_shape]` and `actions`
-    /// shaped `[batch, ...action_shape]`, returning Q values shaped `[batch]`.
+    /// shaped `[batch, ...action_shape]`, returning Q values shaped `[batch, 1]`.
     fn replay_values(&self, states: &Tensor, actions: &Tensor) -> candle_core::Result<Tensor>;
 
     /// Evaluates `states` shaped `[batch, ...state_shape]` and candidates
     /// shaped `[batch, candidates, ...action_shape]`, returning
-    /// `[batch, candidates]`.
+    /// `[batch, candidates, 1]`.
     fn policy_values(
         &self,
         states: &Tensor,
@@ -44,7 +44,7 @@ pub trait SACCriticNetwork {
     /// preserving gradients with respect to candidate actions when those
     /// actions are differentiable. `states` is `[batch, ...state_shape]`,
     /// `candidate_actions` is `[batch, candidates, ...action_shape]`, and the
-    /// result is `[batch, candidates]`.
+    /// result is `[batch, candidates, 1]`.
     fn actor_values(
         &self,
         states: &Tensor,
@@ -100,7 +100,7 @@ impl ScalarStateActionCritic {
         candidate_actions: &Tensor,
     ) -> candle_core::Result<(Tensor, usize, usize)> {
         let batch_size = states.dim(0)?;
-        if candidate_actions.rank() < 2 {
+        if candidate_actions.rank() < 3 {
             return Err(candle_core::Error::DimOutOfRange {
                 shape: candidate_actions.shape().clone(),
                 dim: 1,
@@ -138,14 +138,14 @@ impl ScalarStateActionCritic {
 
 impl SACCriticNetwork for ScalarStateActionCritic {
     /// Evaluates states `[batch, ...state_shape]` and replay actions
-    /// `[batch, ...action_shape]`, returning `[batch]`.
+    /// `[batch, ...action_shape]`, returning `[batch, 1]`.
     fn replay_values(&self, states: &Tensor, actions: &Tensor) -> candle_core::Result<Tensor> {
         let candidate_actions = actions.unsqueeze(1)?;
         self.policy_values(states, &candidate_actions)?.squeeze(1)
     }
 
     /// Evaluates states `[batch, ...state_shape]` and candidates
-    /// `[batch, candidates, ...action_shape]`, returning `[batch, candidates]`.
+    /// `[batch, candidates, ...action_shape]`, returning `[batch, candidates, 1]`.
     fn policy_values(
         &self,
         states: &Tensor,
@@ -155,11 +155,11 @@ impl SACCriticNetwork for ScalarStateActionCritic {
             Self::flattened_policy_inputs(states, candidate_actions)?;
         self.module
             .forward(&inputs)?
-            .reshape((batch_size, candidate_count))
+            .reshape((batch_size, candidate_count, 1))
     }
 
     /// Evaluates states `[batch, ...state_shape]` and candidates
-    /// `[batch, candidates, ...action_shape]`, returning `[batch, candidates]`.
+    /// `[batch, candidates, ...action_shape]`, returning `[batch, candidates, 1]`.
     fn actor_values(
         &self,
         states: &Tensor,
@@ -169,15 +169,15 @@ impl SACCriticNetwork for ScalarStateActionCritic {
             Self::flattened_policy_inputs(states, candidate_actions)?;
         self.module
             .forward(&inputs)?
-            .reshape((batch_size, candidate_count))
+            .reshape((batch_size, candidate_count, 1))
     }
 }
 
 /// Adapts a discrete vector-head module returning `[batch, action_count]`.
 ///
 /// Replay actions contain one scalar index per batch item. Policy candidates
-/// are indices shaped `[batch, candidates]`; all candidate methods return
-/// `[batch, candidates]`.
+/// are indices shaped `[batch, candidates, 1]`; all candidate methods return
+/// `[batch, candidates, 1]`.
 pub struct DiscreteVectorHeadCritic {
     module: Box<dyn candle_core::Module>,
 }
@@ -196,46 +196,50 @@ impl DiscreteVectorHeadCritic {
     }
 
     /// Converts scalar replay actions containing one element per batch item to
-    /// indices shaped `[batch]`.
+    /// indices shaped `[batch, 1]`.
     fn replay_indices(actions: &Tensor, batch_size: usize) -> candle_core::Result<Tensor> {
-        if actions.elem_count() != batch_size {
-            return Err(candle_core::Error::ShapeMismatch {
-                buffer_size: actions.elem_count(),
-                shape: batch_size.into(),
+        if actions.dims() != [batch_size, 1] {
+            return Err(candle_core::Error::UnexpectedShape {
+                msg: "replay actions require one scalar index per row".into(),
+                expected: (batch_size, 1).into(),
+                got: actions.shape().clone(),
             });
         }
-        actions.reshape(batch_size)?.to_dtype(DType::U32)
+        actions.to_dtype(DType::U32)
     }
 
-    /// Gathers candidate indices `[batch, candidates]` from values
-    /// `[batch, action_count]`, returning `[batch, candidates]`.
+    /// Gathers candidate indices `[batch, candidates, 1]` from values
+    /// `[batch, action_count]`, returning `[batch, candidates, 1]`.
     fn candidate_values(values: &Tensor, actions: &Tensor) -> candle_core::Result<Tensor> {
         let (batch_size, _) = values.dims2()?;
-        let (action_batch_size, _) = actions.dims2()?;
-        if action_batch_size != batch_size {
+        let (action_batch_size, _, scalar_size) = actions.dims3()?;
+        if action_batch_size != batch_size || scalar_size != 1 {
             let mut expected = actions.dims().to_vec();
             expected[0] = batch_size;
+            expected[2] = 1;
             return Err(candle_core::Error::UnexpectedShape {
-                msg: "critic candidate-action batch size must match the state batch size".into(),
+                msg: "critic candidates require one scalar index per batch and candidate".into(),
                 expected: expected.into(),
                 got: actions.shape().clone(),
             });
         }
-        values.gather(&actions.to_dtype(DType::U32)?.contiguous()?, 1)
+        values
+            .gather(&actions.squeeze(2)?.to_dtype(DType::U32)?.contiguous()?, 1)?
+            .unsqueeze(2)
     }
 }
 
 impl SACCriticNetwork for DiscreteVectorHeadCritic {
-    /// Gathers replay action indices `[batch]` from state values
-    /// `[batch, action_count]`, returning `[batch]`.
+    /// Gathers replay action indices `[batch, 1]` from state values
+    /// `[batch, action_count]`, returning `[batch, 1]`.
     fn replay_values(&self, states: &Tensor, actions: &Tensor) -> candle_core::Result<Tensor> {
         let values = self.values(states)?;
-        let indices = Self::replay_indices(actions, values.dim(0)?)?.unsqueeze(1)?;
-        values.gather(&indices, 1)?.squeeze(1)
+        let indices = Self::replay_indices(actions, values.dim(0)?)?;
+        values.gather(&indices, 1)
     }
 
-    /// Gathers candidates `[batch, candidates]` from state values
-    /// `[batch, action_count]`, returning `[batch, candidates]`.
+    /// Gathers candidates `[batch, candidates, 1]` from state values
+    /// `[batch, action_count]`, returning `[batch, candidates, 1]`.
     fn policy_values(
         &self,
         states: &Tensor,
@@ -245,8 +249,8 @@ impl SACCriticNetwork for DiscreteVectorHeadCritic {
         Self::candidate_values(&values, candidate_actions)
     }
 
-    /// Gathers candidates `[batch, candidates]` from state values
-    /// `[batch, action_count]`, returning `[batch, candidates]`.
+    /// Gathers candidates `[batch, candidates, 1]` from state values
+    /// `[batch, action_count]`, returning `[batch, candidates, 1]`.
     fn actor_values(
         &self,
         states: &Tensor,
@@ -296,7 +300,7 @@ where
     }
 
     /// Evaluates online replay values for states `[batch, ...state_shape]` and
-    /// actions `[batch, ...action_shape]`, returning `[batch]`.
+    /// actions `[batch, ...action_shape]`, returning `[batch, 1]`.
     pub(crate) fn online_replay_values(
         &self,
         states: &Tensor,
@@ -307,7 +311,7 @@ where
 
     /// Evaluates actor-loss values for states `[batch, ...state_shape]` and
     /// candidates `[batch, candidates, ...action_shape]`, returning
-    /// `[batch, candidates]`.
+    /// `[batch, candidates, 1]`.
     pub(crate) fn online_actor_values(
         &self,
         states: &Tensor,
@@ -318,7 +322,7 @@ where
 
     /// Evaluates detached target values for states `[batch, ...state_shape]`
     /// and candidates `[batch, candidates, ...action_shape]`, returning
-    /// `[batch, candidates]`.
+    /// `[batch, candidates, 1]`.
     pub(crate) fn target_policy_values(
         &self,
         states: &Tensor,
@@ -329,7 +333,7 @@ where
 
     /// Evaluates detached target replay values for states
     /// `[batch, ...state_shape]` and actions `[batch, ...action_shape]`,
-    /// returning `[batch]`.
+    /// returning `[batch, 1]`.
     pub(crate) fn target_replay_values(
         &self,
         states: &Tensor,
@@ -475,7 +479,7 @@ pub(crate) fn aggregate_critic_values(
 }
 
 /// Returns a scalar temperature loss from scalar `log_alpha` shaped `[]` and
-/// `expected_log_probability` shaped `[batch]`.
+/// `expected_log_probability` shaped `[batch, 1]`.
 fn sac_alpha_loss(
     log_alpha: &Tensor,
     expected_log_probability: &Tensor,
@@ -486,7 +490,7 @@ fn sac_alpha_loss(
 }
 
 /// Returns a scalar entropy-drift loss from `current_entropy`,
-/// `collection_entropy`, and `weights`, all shaped `[batch]`.
+/// `collection_entropy`, and `weights`, all shaped `[batch, 1]`.
 fn sac_entropy_change_loss(
     current_entropy: &Tensor,
     collection_entropy: &Tensor,
@@ -681,22 +685,16 @@ impl SACReplayStorage {
         state_shape: &[usize],
         action_shape: &[usize],
         action_dtype: DType,
-        observation_dtype: DType,
         dtype: DType,
         device: candle_core::Device,
     ) -> Result<Self, ReplayStorageError> {
         Ok(Self {
-            observations: AlignedObservationReplay::new(
-                capacity,
-                state_shape,
-                observation_dtype,
-                &device,
-            ),
+            observations: AlignedObservationReplay::new(capacity, state_shape, DType::F32, &device),
             actions: TensorReplayColumn::new(capacity, action_shape, action_dtype, &device)?,
-            rewards: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
-            terminated: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
-            collection_policy_entropies: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
-            entropy_change_weights: TensorReplayColumn::new(capacity, &[], dtype, &device)?,
+            rewards: TensorReplayColumn::new(capacity, &[1], dtype, &device)?,
+            terminated: TensorReplayColumn::new(capacity, &[1], dtype, &device)?,
+            collection_policy_entropies: TensorReplayColumn::new(capacity, &[1], dtype, &device)?,
+            entropy_change_weights: TensorReplayColumn::new(capacity, &[1], dtype, &device)?,
             capacity,
             device,
         })
@@ -851,16 +849,16 @@ pub struct SACLogEntry {
     /// Current scalar entropy coefficient.
     pub alpha: Tensor,
     /// The detached soft Bellman targets shared by all critics for this update.
-    /// Shape: `[batch_size]`.
+    /// Shape: `[batch_size, 1]`.
     pub bellman_targets: Tensor,
-    /// Candidate log probabilities shaped `[batch_size, candidate_count]`.
+    /// Candidate log probabilities shaped `[batch_size, candidate_count, 1]`.
     pub policy_log_probabilities: Tensor,
-    /// Candidate expectation weights shaped `[batch_size, candidate_count]`.
+    /// Candidate expectation weights shaped `[batch_size, candidate_count, 1]`.
     pub policy_weights: Tensor,
     /// Raw soft-Q critic values before the actor's current entropy term.
-    /// Shape: `[batch_size, candidate_count]`.
+    /// Shape: `[batch_size, candidate_count, 1]`.
     pub policy_q_values: Tensor,
-    /// Rewards from the sampled replay batch, shaped `[batch_size]`.
+    /// Rewards from the sampled replay batch, shaped `[batch_size, 1]`.
     pub replay_rewards: Tensor,
     /// Zero-based number of the optimization step.
     pub update_index: usize,
@@ -869,7 +867,7 @@ pub struct SACLogEntry {
 }
 
 pub struct SACCollectionLogEntry<I = ()> {
-    /// Latest reward for each inner environment, shaped `[environment_count]`.
+    /// Latest reward for each inner environment, shaped `[environment_count, 1]`.
     pub collection_rewards: Tensor,
     /// Latest typed step metadata in inner-environment order.
     pub infos: Vec<I>,
@@ -1059,7 +1057,6 @@ where
             observation_sample.dims(),
             action_sample.dims(),
             action_sample.dtype(),
-            replay_storage_config.observation_dtype(),
             dtype,
             storage_device.clone(),
         )?;
@@ -1272,7 +1269,7 @@ where
         let entropy_cost = next_log_probabilities.broadcast_mul(&alpha)?;
         let soft_values = (&target_values - entropy_cost)?
             .mul(&next_weights)?
-            .sum(D::Minus1)?
+            .sum(1)?
             .detach();
         Ok(bellman_targets(
             &batch.rewards,
@@ -1291,7 +1288,7 @@ where
             skip_all
         )
     )]
-    /// Optimizes each critic against Bellman `targets` shaped `[batch]`.
+    /// Optimizes each critic against Bellman `targets` shaped `[batch, 1]`.
     ///
     /// Returns one scalar loss tensor per critic.
     fn optimize_critics(
@@ -1355,13 +1352,13 @@ where
             (policy_terms.log_probabilities().broadcast_mul(&alpha)? - &policy_values)?;
         let base_actor_loss = actor_objective
             .mul(policy_terms.weights())?
-            .sum(D::Minus1)?
+            .sum(1)?
             .mean_all()?;
         // H_pi(s) = -sum_j w_j * log pi(a_j|s).
         let policy_entropies = policy_terms
             .log_probabilities()
             .mul(policy_terms.weights())?
-            .sum(D::Minus1)?
+            .sum(1)?
             .neg()?;
         // Optional entropy-drift penalty:
         // L_H = coefficient * sum_b mask_b * (H_pi(s_b) - H_collection_b)^2
@@ -1412,8 +1409,7 @@ where
                 optimizer,
                 target_entropy_schedule,
             } => {
-                let expected_log_probability =
-                    log_probabilities.mul(weights)?.sum(D::Minus1)?.detach();
+                let expected_log_probability = log_probabilities.mul(weights)?.sum(1)?.detach();
                 let target_entropy = match target_entropy_schedule {
                     Some(schedule) => self.schedule_progress.parameter(schedule.as_ref()),
                     None => self
@@ -1456,7 +1452,7 @@ where
         Ok(())
     }
 
-    /// Logs Bellman `targets` shaped `[batch]` and one scalar loss tensor per
+    /// Logs Bellman `targets` shaped `[batch, 1]` and one scalar loss tensor per
     /// critic, along with the actor and temperature update tensors.
     fn log_optimization(
         &mut self,
@@ -1529,7 +1525,7 @@ where
         if self.entropy_change_penalty.is_none() || uses_random_actions {
             return Ok(SACCollectionEntropy {
                 values: Tensor::zeros(
-                    environment_count,
+                    (environment_count, 1),
                     self.dtype,
                     &self.replay_storage_config.storage_device(),
                 )?,
@@ -1547,7 +1543,7 @@ where
         let values = terms
             .log_probabilities()
             .mul(terms.weights())?
-            .sum(D::Minus1)?
+            .sum(1)?
             .neg()?
             .detach()
             .to_dtype(self.dtype)?;
@@ -1592,6 +1588,7 @@ where
         let reward_values = rewards
             .to_dtype(DType::F32)?
             .to_device(&candle_core::Device::Cpu)?
+            .flatten_all()?
             .to_vec1::<f32>()?;
         let mut completed_episodes = Vec::new();
 
@@ -1617,14 +1614,14 @@ where
             rewards: rewards.clone(),
             terminated: Tensor::from_vec(
                 dones.iter().map(|&done| u8::from(done)).collect::<Vec<_>>(),
-                environment_count,
+                (environment_count, 1),
                 &storage_device,
             )?
             .to_dtype(self.dtype)?,
             collection_policy_entropies: policy_entropies.clone(),
             entropy_change_weights: Tensor::from_vec(
                 vec![entropy_change_weight; environment_count],
-                environment_count,
+                (environment_count, 1),
                 &storage_device,
             )?
             .to_dtype(self.dtype)?,
@@ -2030,18 +2027,18 @@ mod tests {
             critic
                 .policy_values(&states, &actions)
                 .unwrap()
-                .to_vec2::<f32>()
+                .to_vec3::<f32>()
                 .unwrap(),
-            vec![vec![13.0, 23.0], vec![37.0, 47.0]]
+            vec![vec![vec![13.0], vec![23.0]], vec![vec![37.0], vec![47.0]]]
         );
         let replay_actions = tensor(&[10.0, 30.0], (2, 1));
         assert_eq!(
             critic
                 .replay_values(&states, &replay_actions)
                 .unwrap()
-                .to_vec1::<f32>()
+                .to_vec2::<f32>()
                 .unwrap(),
-            vec![13.0, 37.0]
+            vec![vec![13.0], vec![37.0]]
         );
     }
 
@@ -2054,9 +2051,9 @@ mod tests {
             critic
                 .policy_values(&states, &candidates)
                 .unwrap()
-                .to_vec2::<f32>()
+                .to_vec3::<f32>()
                 .unwrap(),
-            vec![vec![35.0, 35.0], vec![39.0, 39.0]]
+            vec![vec![vec![35.0], vec![35.0]], vec![vec![39.0], vec![39.0]]]
         );
 
         let replay_actions = Tensor::ones((2, 2, 2, 2, 2, 2), DType::F32, &Device::Cpu).unwrap();
@@ -2064,9 +2061,9 @@ mod tests {
             critic
                 .replay_values(&states, &replay_actions)
                 .unwrap()
-                .to_vec1::<f32>()
+                .to_vec2::<f32>()
                 .unwrap(),
-            vec![35.0, 39.0]
+            vec![vec![35.0], vec![39.0]]
         );
     }
 
@@ -2097,23 +2094,24 @@ mod tests {
     fn discrete_adapter_gathers_replay_and_exact_candidates() {
         let critic = DiscreteVectorHeadCritic::new(IdentityModule);
         let values = tensor(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3));
-        let replay_actions = Tensor::from_vec(vec![2u32, 0], 2, &Device::Cpu).unwrap();
+        let replay_actions = Tensor::from_vec(vec![2u32, 0], (2, 1), &Device::Cpu).unwrap();
         assert_eq!(
             critic
                 .replay_values(&values, &replay_actions)
                 .unwrap()
-                .to_vec1::<f32>()
+                .to_vec2::<f32>()
                 .unwrap(),
-            vec![3.0, 4.0]
+            vec![vec![3.0], vec![4.0]]
         );
-        let candidates = Tensor::from_vec(vec![0u32, 1, 2, 0, 1, 2], (2, 3), &Device::Cpu).unwrap();
+        let candidates =
+            Tensor::from_vec(vec![0u32, 1, 2, 0, 1, 2], (2, 3, 1), &Device::Cpu).unwrap();
         assert_eq!(
             critic
                 .policy_values(&values, &candidates)
                 .unwrap()
-                .to_vec2::<f32>()
+                .to_vec3::<f32>()
                 .unwrap(),
-            values.to_vec2::<f32>().unwrap()
+            values.unsqueeze(2).unwrap().to_vec3::<f32>().unwrap()
         );
     }
 
@@ -2345,9 +2343,22 @@ mod tests {
             replay.next_states.to_vec2::<f32>().unwrap(),
             vec![vec![5.0, 5.0, 5.0, 5.0]]
         );
-        assert_eq!(replay.terminated.to_vec1::<f32>().unwrap(), vec![0.0]);
         assert_eq!(
-            replay.entropy_change_weights.to_vec1::<f32>().unwrap(),
+            replay
+                .terminated
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
+            vec![0.0]
+        );
+        assert_eq!(
+            replay
+                .entropy_change_weights
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap(),
             vec![0.0]
         );
     }
@@ -2355,7 +2366,7 @@ mod tests {
     #[test]
     fn alpha_gradient_moves_temperature_in_the_constraint_direction() {
         let log_alpha = Var::from_vec(vec![0.0f32], (), &Device::Cpu).unwrap();
-        let too_random = Var::from_vec(vec![-2.0f32], 1, &Device::Cpu).unwrap();
+        let too_random = Var::from_vec(vec![-2.0f32], (1, 1), &Device::Cpu).unwrap();
         let loss = sac_alpha_loss(log_alpha.as_tensor(), too_random.as_tensor(), 1.0).unwrap();
         let gradients = loss.backward().unwrap();
         let gradient = gradients
@@ -2366,7 +2377,7 @@ mod tests {
         assert!(gradient > 0.0, "gradient descent should lower alpha");
         assert!(gradients.get(too_random.as_tensor()).is_none());
 
-        let too_deterministic = tensor(&[-0.25], 1);
+        let too_deterministic = tensor(&[-0.25], (1, 1));
         let loss = sac_alpha_loss(log_alpha.as_tensor(), &too_deterministic, 1.0).unwrap();
         let gradient = loss
             .backward()
@@ -2380,9 +2391,9 @@ mod tests {
 
     #[test]
     fn entropy_change_penalty_moves_toward_collection_entropy_and_honors_masks() {
-        let current = Var::from_vec(vec![0.2f32], 1, &Device::Cpu).unwrap();
-        let collection = tensor(&[0.8], 1);
-        let enabled = tensor(&[1.0], 1);
+        let current = Var::from_vec(vec![0.2f32], (1, 1), &Device::Cpu).unwrap();
+        let collection = tensor(&[0.8], (1, 1));
+        let enabled = tensor(&[1.0], (1, 1));
         let loss =
             sac_entropy_change_loss(current.as_tensor(), &collection, &enabled, 0.5).unwrap();
         let gradient = loss
@@ -2390,13 +2401,19 @@ mod tests {
             .unwrap()
             .get(current.as_tensor())
             .unwrap()
+            .flatten_all()
+            .unwrap()
             .to_vec1::<f32>()
             .unwrap()[0];
         assert!(gradient < 0.0, "gradient descent should raise entropy");
 
-        let masked =
-            sac_entropy_change_loss(current.as_tensor(), &collection, &tensor(&[0.0], 1), 0.5)
-                .unwrap();
+        let masked = sac_entropy_change_loss(
+            current.as_tensor(),
+            &collection,
+            &tensor(&[0.0], (1, 1)),
+            0.5,
+        )
+        .unwrap();
         assert_eq!(masked.to_scalar::<f32>().unwrap(), 0.0);
     }
 
@@ -2567,7 +2584,7 @@ mod tests {
         let deterministic = agent
             .act_deterministic(&Tensor::zeros((1, 4), DType::F32, &device).unwrap())
             .unwrap();
-        assert_eq!(deterministic.dims(), &[1]);
+        assert_eq!(deterministic.dims(), &[1, 1]);
         let mut env =
             VectorizedGymWrapper::from(vec![FixedEnv::new(device.clone()), FixedEnv::new(device)]);
         agent.learn(&mut env, 2).unwrap();

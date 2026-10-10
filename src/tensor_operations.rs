@@ -90,7 +90,7 @@ impl ModuleVisitor for GradientScale<'_> {
 }
 
 /// Normalizes all elements of a rank-`D` Float tensor, preserving every axis, dtype, device, and gradient path.
-/// PPO inputs such as `[batch_size]` or `[time, num_envs]` use one mean and standard deviation across all entries.
+/// PPO inputs such as `[batch_size, 1]` or `[time, num_envs, 1]` use one mean and standard deviation across all entries.
 /// Uses the sample standard deviation with denominator `max(element_count, 2) - 1` and adds `1e-8` after the square root.
 pub(crate) fn normalize_tensor<const D: usize>(t: &Tensor<D>) -> Tensor<D> {
     let mean = t.clone().mean().reshape([1; D]);
