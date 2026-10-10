@@ -206,9 +206,9 @@ fn transfer_batched_observations<I, const O: usize, K: Basic, const U: usize>(
     let mut parts = Vec::with_capacity(terminal_count + 1);
     parts.push(step.observations.clone());
     for observation in step.terminal_observations.iter().flatten() {
-        let mut shape = [1; O];
-        shape[1..].copy_from_slice(&observation.dims());
-        parts.push(observation.clone().reshape(shape));
+        let mut observation_batch_shape = [1; O];
+        observation_batch_shape[1..].copy_from_slice(&observation.dims());
+        parts.push(observation.clone().reshape(observation_batch_shape));
     }
     // Pack terminal rows with current observations so one transfer supplies both next-observation layouts.
     let packed = if terminal_count == 0 {
