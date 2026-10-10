@@ -232,7 +232,7 @@ struct QLearningReplayStorage<const R: usize, K: Autodiff> {
     actions: TensorReplayColumn<2, Int>,
     rewards: TensorReplayColumn<2>,
     next_dones: TensorReplayColumn<2, Bool>,
-    shape: [usize; R],
+    observation_storage_shape: [usize; R],
     device: Device,
     observation_dtype: Option<DType>,
     environment_count: Option<usize>,
@@ -241,16 +241,22 @@ struct QLearningReplayStorage<const R: usize, K: Autodiff> {
 impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
     /// Configures observation storage [capacity, ...observation_shape], Int actions [capacity, 1], and scalar statistics [capacity, 1].
     /// The first observation batch selects the observation dtype. All stored experience has no autodiff graph.
-    fn new(shape: [usize; R], device: Device) -> Self {
+    fn new(observation_storage_shape: [usize; R], device: Device) -> Self {
         const {
             assert!(R >= 2, "observations require batch and item axes");
         }
         Self {
             observations: None,
-            actions: TensorReplayColumn::new([shape[0], 1], (&device, DType::U32)),
-            rewards: TensorReplayColumn::new([shape[0], 1], (&device, DType::F32)),
-            next_dones: TensorReplayColumn::new([shape[0], 1], &device),
-            shape,
+            actions: TensorReplayColumn::new(
+                [observation_storage_shape[0], 1],
+                (&device, DType::U32),
+            ),
+            rewards: TensorReplayColumn::new(
+                [observation_storage_shape[0], 1],
+                (&device, DType::F32),
+            ),
+            next_dones: TensorReplayColumn::new([observation_storage_shape[0], 1], &device),
+            observation_storage_shape,
             device,
             observation_dtype: None,
             environment_count: None,
@@ -268,7 +274,7 @@ impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
                 })
             };
         }
-        let capacity = self.shape[0];
+        let capacity = self.observation_storage_shape[0];
         if count == 0 || capacity <= count || !capacity.is_multiple_of(count) {
             return Err(ReplayStorageError::InvalidReplayAlignment {
                 capacity,
@@ -292,7 +298,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
     type Error = QLearningReplayError;
 
     fn capacity(&self) -> usize {
-        self.shape[0]
+        self.observation_storage_shape[0]
     }
 
     /// Inserts native rank-R observations [num_envs, ...observation_shape], Int actions [num_envs, 1], and statistics [num_envs, 1].
@@ -323,7 +329,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
         }
         if self.observations.is_none() {
             self.observations = Some(AlignedObservationReplay::new(
-                self.shape,
+                self.observation_storage_shape,
                 (&self.device, dtype),
             ));
             self.observation_dtype = Some(dtype);
@@ -478,18 +484,20 @@ where
             .training_horizon(training_horizon)
             .call()?;
 
-        let mut shape = vec![replay_capacity];
-        shape.extend(observation_space.shape());
-        let actual = shape.len() - 1;
-        let shape: [usize; R] =
-            shape
-                .try_into()
-                .map_err(|_| QLearningConfigurationError::ObservationRank {
+        let mut observation_storage_shape = vec![replay_capacity];
+        observation_storage_shape.extend(observation_space.shape());
+        let actual = observation_storage_shape.len() - 1;
+        let observation_storage_shape: [usize; R] =
+            observation_storage_shape.try_into().map_err(|_| {
+                QLearningConfigurationError::ObservationRank {
                     expected: R - 1,
                     actual,
-                })?;
-        let replay_storage =
-            QLearningReplayStorage::<R, K>::new(shape, replay_storage_config.storage_device());
+                }
+            })?;
+        let replay_storage = QLearningReplayStorage::<R, K>::new(
+            observation_storage_shape,
+            replay_storage_config.storage_device(),
+        );
         let optimization_device = replay_storage_config.optimization_device();
         // Seed the owned exploration RNG once from the configured device RNG; action selection needs no later RNG host reads.
         let action_seed = Tensor::<1>::random(

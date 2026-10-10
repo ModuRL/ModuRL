@@ -1865,8 +1865,8 @@ mod tests {
         }
     }
 
-    fn tensor(values: &[f32], shape: impl Into<candle_core::Shape>) -> Tensor {
-        Tensor::from_vec(values.to_vec(), shape, &Device::Cpu).unwrap()
+    fn tensor(values: &[f32], tensor_shape: impl Into<candle_core::Shape>) -> Tensor {
+        Tensor::from_vec(values.to_vec(), tensor_shape, &Device::Cpu).unwrap()
     }
 
     #[test]
@@ -1875,24 +1875,24 @@ mod tests {
             let online = VarMap::new();
             let mut target = VarMap::new();
             let mut references = Vec::new();
-            for (name, shape, initial) in [
+            for (name, parameter_shape, initial) in [
                 ("bias", vec![3], 2.0),
                 ("weight", vec![2, 3], 4.0),
                 ("scalar", vec![], 6.0),
             ] {
                 VarBuilder::from_varmap(&online, DType::F32, &device)
-                    .get_with_hints(shape.clone(), name, Init::Const(initial))
+                    .get_with_hints(parameter_shape.clone(), name, Init::Const(initial))
                     .unwrap();
                 let value = VarBuilder::from_varmap(&target, DType::F32, &device)
-                    .get_with_hints(shape.clone(), name, Init::Const(-2.0))
+                    .get_with_hints(parameter_shape.clone(), name, Init::Const(-2.0))
                     .unwrap();
-                references.push((name, shape, initial, value));
+                references.push((name, parameter_shape, initial, value));
             }
             copy_var_map(&online, &mut target, 0.25).unwrap();
-            for (name, shape, initial, reference) in references {
+            for (name, parameter_shape, initial, reference) in references {
                 let updated = target.data().lock().unwrap()[name].as_tensor().clone();
                 assert_eq!(updated.id(), reference.id());
-                assert_eq!(updated.dims(), shape);
+                assert_eq!(updated.dims(), parameter_shape);
                 for value in reference.flatten_all().unwrap().to_vec1::<f32>().unwrap() {
                     assert_eq!(value, initial as f32 * 0.25 - 1.5);
                 }

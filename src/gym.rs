@@ -156,10 +156,12 @@ where
                 // Boolean indexed updates support OR, so replace terminal rows through native slice assignment.
                 for (index, terminal) in indices.into_iter().zip(terminals) {
                     let start = index as usize;
-                    let mut shape = observations.dims();
-                    shape[0] = 1;
-                    observations = observations
-                        .slice_assign([Slice::from(start..start + 1)], terminal.reshape(shape));
+                    let mut terminal_batch_shape = observations.dims();
+                    terminal_batch_shape[0] = 1;
+                    observations = observations.slice_assign(
+                        [Slice::from(start..start + 1)],
+                        terminal.reshape(terminal_batch_shape),
+                    );
                 }
             } else {
                 let count = indices.len();

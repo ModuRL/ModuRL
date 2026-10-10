@@ -292,11 +292,11 @@ fn sum_event_dimensions<const R: usize, const P: usize>(values: Tensor<R>) -> Te
         assert!(P >= 2, "event reduction requires batch and scalar axes");
         assert!(R >= P, "event reduction rank must cover prefix axes");
     }
-    let shape = values.dims();
+    let values_shape = values.dims();
     let mut prefix = [1; P];
-    prefix[..P - 1].copy_from_slice(&shape[..P - 1]);
+    prefix[..P - 1].copy_from_slice(&values_shape[..P - 1]);
     let prefix_size = prefix.iter().product::<usize>();
-    let event_size = shape[P - 1..].iter().product::<usize>();
+    let event_size = values_shape[P - 1..].iter().product::<usize>();
     values
         .reshape([prefix_size, event_size])
         .sum_dim(1)

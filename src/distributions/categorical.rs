@@ -31,11 +31,11 @@ pub enum CategoricalDistributionError {
 impl CategoricalDistribution {
     /// Validates logits `[batch, categories]` and returns the two axis lengths.
     fn validate(outputs: &Tensor<2>) -> Result<[usize; 2], CategoricalDistributionError> {
-        let shape = outputs.dims();
-        if shape[1] == 0 {
+        let logits_shape = outputs.dims();
+        if logits_shape[1] == 0 {
             return Err(CategoricalDistributionError::NoCategories);
         }
-        Ok(shape)
+        Ok(logits_shape)
     }
 
     /// Generates Gumbel noise `[batch, categories]` matching the logits' shape,
