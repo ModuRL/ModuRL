@@ -431,7 +431,7 @@ where
     /// The target starts from the online model and remains detached between hard updates.
     /// Observations retain native kind and dtype. Model Q outputs must use the configured compute dtype.
     /// Model parameters must use the optimization device. Replay matches the first observation dtype on its storage device.
-    /// Only the device strategy in replay_storage_config applies; its observation dtype does not override incoming observations.
+    /// Replay storage configuration selects the storage and optimization devices.
     #[builder]
     pub(crate) fn builder(
         action_space: Discrete,
