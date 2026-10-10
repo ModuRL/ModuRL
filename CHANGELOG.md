@@ -192,6 +192,22 @@ they do not imply that all workspace packages build together. See [Remaining mig
   space errors use concrete `SpaceError`, and tensor errors use `TensorReadError`.
   Added `QLearningReplayError` and configuration errors for compute dtype, learning rate, and observation rank.
 
+### DQN and DDQN
+
+- `DQNAgent<'a, M, S, GE, I = (), R = 2>` and `DDQNAgent` own a concrete Burn model `M`
+  and observation space `S`. `R` includes the batch axis; native observation kinds and dtypes are preserved.
+- Constructors use `Type::builder()`. Supply `.online_q_network(model)`, a Burn optimizer through `.optimizer(...)`,
+  and an explicit `.learning_rate(...)`. Removed `.target_q_network(...)`, `.online_vars(...)`, and `.target_vars(...)`.
+  The engine creates a detached target copy and replaces it at each hard-update interval.
+- `get_observation_space()` returns `&S`. Both agents implement the rank-aware `Agent<I, R, 2>` contract
+  with concrete `Discrete` actions and `QAgentError<GE, M::Error>`.
+  `act` accepts native observations `[batch_size, ...observation_shape]` and returns U32 Int actions `[batch_size, 1]`.
+- DQN still maximizes target-network values. DDQN still selects actions with the online network and evaluates them with the target network.
+  Rewards, termination masks, and targets remain `[batch_size, 1]`; only termination suppresses bootstrapping.
+- The CartPole executable and Q-learning documentation examples use Burn models, optimizers, and devices.
+  The Q grapher accumulates Burn scalars and converts averaged metrics to the existing logger representation.
+  CUDA and Metal features enable the corresponding Burn backends. CartPole requires the remaining environment migration.
+
 ### Custom MuJoCo environments
 
 - Added `CustomMujoco<T>`, `MujocoTask`, `MujocoState`, and `TaskStep` in `modurl_mujoco` and its prelude.
@@ -219,9 +235,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
 
 ### Remaining migration work
 
-- The shared Q-learning engine uses Burn, but the public DQN and DDQN wrappers still use Candle contracts.
-  Their final 0.2 constructor changes are not yet recorded as completed public APIs.
-- A2C, PPO, SAC, DDPG, TD3, concrete environment integrations, loggers, and runnable examples still contain Candle APIs.
+- A2C, PPO, SAC, DDPG, TD3, concrete environment integrations, loggers, and other runnable examples still contain Candle APIs.
   The updated core traits do not provide automatic Candle compatibility.
 - Atari output mapping to U8 and the forward wrapper for CNN input conversion are deferred.
   Removing the replay dtype setter does not complete that example's migration.

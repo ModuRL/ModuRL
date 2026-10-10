@@ -895,6 +895,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86fde5be8d8273c6a8ecb240c0c74de1c15a277ef69691b88b8289cbafe00768"
 dependencies = [
  "burn-core",
+ "burn-cubecl",
  "burn-fusion",
  "burn-std",
  "num-traits",
@@ -978,6 +979,7 @@ checksum = "ca3bf718b130d607b3d3495d09c19d2604de1d116793587ce23586a5a89af9d7"
 dependencies = [
  "burn-autodiff",
  "burn-core",
+ "burn-cubecl",
  "burn-flex",
  "burn-fusion",
  "burn-std",
@@ -1067,8 +1069,10 @@ dependencies = [
  "aligned-vec",
  "bon",
  "burn-core",
+ "burn-cubecl",
  "burn-std",
  "bytemuck",
+ "cubecl",
  "derive-new",
  "image",
  "macerator",
@@ -2159,6 +2163,8 @@ dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.15.0",
  "log",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
  "objc2-metal 0.3.2",
  "pliron",
  "sanitize-filename",
@@ -2187,6 +2193,7 @@ dependencies = [
  "cubecl",
  "cubek-attention",
  "cubek-convolution",
+ "cubek-fft",
  "cubek-interpolate",
  "cubek-matmul",
  "cubek-pool",
@@ -2226,6 +2233,15 @@ dependencies = [
  "cubek-tile",
  "half",
  "serde",
+]
+
+[[package]]
+name = "cubek-fft"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fbb3de472d1ff63e10db9cd94b2365d8b03d7e0f24fe2bb906e0c7158e0ec94"
+dependencies = [
+ "cubecl",
 ]
 
 [[package]]
@@ -2914,6 +2930,7 @@ dependencies = [
 name = "examples"
 version = "0.0.0"
 dependencies = [
+ "burn",
  "candle-core",
  "candle-nn",
  "modurl",

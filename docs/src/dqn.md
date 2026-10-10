@@ -1,7 +1,7 @@
 # DQN
 
 This page builds a DQN agent for CartPole. It uses one vectorized CartPole
-environment, two identically shaped Q-networks, an epsilon schedule, and an
+environment, an owned Q-network, an epsilon schedule, and an
 experience replay buffer. You need Rust, Cargo, and the dependencies from
 [Getting Started](./getting-started.md).
 
@@ -11,68 +11,47 @@ argument to `learn` together when you only want to check that the program runs.
 
 ## The Q-Networks
 
-Create a Q-network for the online parameters and an identically shaped one for
-the target parameters. CartPole has four observation values and two discrete
-actions, so the network reads the environment's observation shape and produces
+Create an online Q-network. The agent creates its detached target copy.
+CartPole has four observation values and two discrete actions, so the network reads the environment's observation shape and produces
 two Q-values.
 
-`DQNAgent` needs a `Discrete` action space. `CartPoleV1` exposes the action
-space through the general `Space` trait, so this example supplies the known
-CartPole action count with `Discrete::new(2)`.
+`DQNAgent` needs a `Discrete` action space. `CartPoleV1` supplies that concrete type through `env.action_space()`.
 
 ## Complete Program
 
-Place this program in `src/main.rs`:
+Enable Burn `0.22.0` features `std`, `optim`, `flex`, and `autodiff` in the application.
+The code below shows the Burn agent API. It requires the CartPole environment migration before it can run.
+The current CartPole executable still uses Candle.
 
 ```rust,ignore
-use candle_core::{DType, Device};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use burn::{optim::AdamWConfig, tensor::{DType, Device}};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn main() {
-    let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
-    let mut env = DeviceMultiGymWrapper::new(
-        VectorizedGymWrapper::from(envs), Device::Cpu, device.clone(),
-    );
-    let observation_space = env.observation_space();
+    let device = Device::flex().autodiff();
 
-    let online_var_map = VarMap::new();
+    let environment_device = Device::flex();
+    let envs = vec![CartPoleV1::builder().rng_device(&environment_device).build().unwrap()];
+    let env = VectorizedGymWrapper::from(envs);
+    let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
+    let observation_space = env.observation_space();
     let online_q_network = MLP::builder()
         .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(&online_var_map, DType::F32, &device))
+        .output_size(env.action_space().get_possible_values())
+        .options((&device, DType::F32))
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("failed to build the online Q-network");
-
-    let mut target_var_map = VarMap::new();
-    let target_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(&target_var_map, DType::F32, &device))
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("failed to build the target Q-network");
-
-    let optimizer = AdamW::new(
-        online_var_map.all_vars(),
-        ParamsAdamW {
-            lr: 2.5e-4,
-            ..Default::default()
-        },
-    )
-    .expect("failed to build the optimizer");
+    let optimizer = AdamWConfig::new().init();
 
     let mut agent = DQNAgent::builder()
-        .action_space(Discrete::new(2))
+        .dtype(DType::F32)
+        .action_space(env.action_space())
         .observation_space(observation_space)
         .online_q_network(online_q_network)
-        .target_q_network(target_q_network)
-        .online_vars(&online_var_map)
-        .target_vars(&mut target_var_map)
         .optimizer(optimizer)
+        .learning_rate(2.5e-4)
         .replay_capacity(10_000)
         .batch_size(128)
         .training_start(10_000)
@@ -83,9 +62,7 @@ fn main() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         })
-        .replay_storage_config(ReplayStorageConfig::new(
-            ReplayDeviceStrategy::OneDevice(device.clone()),
-        ))
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(device)))
         .build()
         .expect("DQN configuration should be valid");
 
@@ -94,9 +71,8 @@ fn main() {
 }
 ```
 
-The online network is the only network passed to `AdamW`; the target network is
-not optimized directly. At construction, the agent copies the online parameters
-to the target network. It repeats that copy every 500 transitions.
+The Burn optimizer updates the owned online model. The target model has no gradient graph.
+The agent copies the online model at construction and every 500 transitions.
 
 The epsilon schedule decreases exploration from `1.0` to `0.05` during the
 first half of the 500,000-transition horizon. The agent collects 10,000

@@ -452,57 +452,34 @@ fn ppo_cartpole_shared_multithreaded() {
 #[test]
 #[ignore = "slow solve test; run manually for review prep"]
 fn dqn_cartpole() {
+    let environment_device = burn::tensor::Device::flex();
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
-    let device = Device::Cpu;
+    let device = environment_device.clone().autodiff();
     #[cfg(feature = "cuda")]
-    let device = Device::new_cuda(0).unwrap();
-    #[cfg(feature = "metal")]
-    let device = Device::new_metal(0).unwrap();
-
-    #[cfg(any(feature = "cuda", feature = "metal"))]
-    device.set_seed(42).unwrap();
-
-    let envs = vec![DebugCartpoleV1::new(&device)];
-
-    let vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
-    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
-    let observation_space = vec_env.observation_space();
-    let online_var_map = VarMap::new();
-    let online_vb = VarBuilder::from_varmap(&online_var_map, candle_core::DType::F32, &device);
-
+    let device = burn::tensor::Device::cuda(0).autodiff();
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let device = burn::tensor::Device::metal(burn::tensor::DeviceKind::DefaultDevice).autodiff();
+    device.seed(42);
+    let env = VectorizedGymWrapper::from(
+        CartPoleV1::builder()
+            .rng_device(&environment_device)
+            .build()
+            .unwrap(),
+    );
+    let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let online_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
+        .input_size(4)
         .output_size(2)
-        .vb(online_vb)
+        .options(&device)
         .hidden_layer_sizes(vec![64, 64])
         .build()
-        .expect("Failed to create MLP");
-
-    let mut target_var_map = VarMap::new();
-    let target_vb = VarBuilder::from_varmap(&target_var_map, candle_core::DType::F32, &device);
-
-    let target_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(target_vb)
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("Failed to create MLP");
-
-    let config = ParamsAdamW {
-        lr: 2.5e-4,
-        ..Default::default()
-    };
-    let optimizer = AdamW::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
-
+        .unwrap();
     let mut agent = DQNAgent::builder()
-        .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
-        .observation_space(observation_space)
+        .action_space(env.action_space())
+        .observation_space(env.observation_space())
         .online_q_network(online_q_network)
-        .target_q_network(target_q_network)
-        .online_vars(&online_var_map)
-        .target_vars(&mut target_var_map)
-        .optimizer(optimizer)
+        .optimizer(burn::optim::AdamWConfig::new().init())
+        .learning_rate(2.5e-4)
         .replay_capacity(10_000)
         .batch_size(128)
         .training_start(10_000)
@@ -514,116 +491,90 @@ fn dqn_cartpole() {
             1.0 + (0.05 - 1.0) * exploration_progress
         })
         .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device.clone(),
+            device,
         )))
         .build()
-        .expect("DQN configuration should be valid");
-
-    // CleanRL's published CartPole-v1 DQN configuration uses 500k transitions,
-    // 10k replay warm-up transitions, and epsilon decay over the first half.
+        .unwrap();
     const TRAINING_TIMESTEPS: usize = 500_000;
-
-    agent.learn(&mut vec_env, TRAINING_TIMESTEPS).unwrap();
-
-    println!("Testing if DQN solved CartPole-v1...");
-
-    let avg_steps = get_average_steps(&mut agent, &device);
-    println!(
-        "DQN averaged {} steps over 100 episodes with {} timesteps",
-        avg_steps, TRAINING_TIMESTEPS
-    );
-
-    // Cartpole v1 should be using 475, which we can reach but no need for that here
-    if avg_steps >= 195.0 {
-        println!("DQN solved CartPole-v1 in {TRAINING_TIMESTEPS} timesteps!");
-        return;
+    agent.learn(&mut env, TRAINING_TIMESTEPS).unwrap();
+    let mut observations = env.reset().unwrap();
+    let mut episode_count = 0;
+    let mut total_steps = 0;
+    while episode_count < 100 {
+        let actions = agent.act(&observations).unwrap();
+        let step = env.step(actions).unwrap();
+        total_steps += 1;
+        episode_count += usize::from(step.dones[0] || step.truncateds[0]);
+        observations = step.observations;
     }
-    panic!("DQN failed to solve CartPole-v1 within {TRAINING_TIMESTEPS} timesteps.");
+    let average_steps = total_steps as f64 / 100.0;
+    assert!(
+        average_steps >= 195.0,
+        "DQN averaged {average_steps} steps after {TRAINING_TIMESTEPS} transitions"
+    );
 }
 
 #[test]
 #[ignore = "slow solve test; run manually for review prep"]
 fn ddqn_cartpole() {
+    let environment_device = burn::tensor::Device::flex();
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
-    let device = Device::Cpu;
+    let device = environment_device.clone().autodiff();
     #[cfg(feature = "cuda")]
-    let device = Device::new_cuda(0).unwrap();
-    #[cfg(feature = "metal")]
-    let device = Device::new_metal(0).unwrap();
-
-    #[cfg(any(feature = "cuda", feature = "metal"))]
-    device.set_seed(42).unwrap();
-
-    let envs = vec![DebugCartpoleV1::new(&device)];
-    let vec_env: VectorizedGymWrapper<DebugCartpoleV1> = envs.into();
-    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
-    let observation_space = vec_env.observation_space();
-
-    let online_var_map = VarMap::new();
-    let online_vb = VarBuilder::from_varmap(&online_var_map, candle_core::DType::F32, &device);
-    let online_mlp = MLP::builder()
-        .input_size(observation_space.shape()[0])
+    let device = burn::tensor::Device::cuda(0).autodiff();
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let device = burn::tensor::Device::metal(burn::tensor::DeviceKind::DefaultDevice).autodiff();
+    device.seed(42);
+    let env = VectorizedGymWrapper::from(
+        CartPoleV1::builder()
+            .rng_device(&environment_device)
+            .build()
+            .unwrap(),
+    );
+    let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
+    let online_q_network = MLP::builder()
+        .input_size(4)
         .output_size(2)
-        .vb(online_vb)
+        .options(&device)
         .hidden_layer_sizes(vec![64, 64])
         .build()
-        .expect("Failed to create MLP");
-
-    let mut target_var_map = VarMap::new();
-    let target_vb = VarBuilder::from_varmap(&target_var_map, candle_core::DType::F32, &device);
-    let target_mlp = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(target_vb)
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("Failed to create MLP");
-
-    let config = ParamsAdamW {
-        lr: 2.5e-4,
-        ..Default::default()
-    };
-    // Online is the only one being optimized
-    let optimizer = AdamW::new(online_var_map.all_vars(), config).expect("Failed to create AdamW");
-
+        .unwrap();
     let mut agent = DDQNAgent::builder()
-        .action_space(Discrete::new(2)) // had to hardcode this :(, I would prefer to get it from the env but I can't guarentee it's Discrete
-        .observation_space(observation_space)
-        .online_q_network(online_mlp)
-        .target_q_network(target_mlp)
-        .online_vars(&online_var_map)
-        .target_vars(&mut target_var_map)
-        .epsilon_schedule(|progress: f64| {
-            let exploration_progress = (progress / 0.5).min(1.0);
-            1.0 + (0.05 - 1.0) * exploration_progress
-        })
-        .optimizer(optimizer)
+        .action_space(env.action_space())
+        .observation_space(env.observation_space())
+        .online_q_network(online_q_network)
+        .optimizer(burn::optim::AdamWConfig::new().init())
+        .learning_rate(2.5e-4)
         .replay_capacity(10_000)
         .batch_size(128)
         .training_start(10_000)
         .update_frequency(10)
         .target_update_interval(500)
         .training_horizon(500_000)
+        .epsilon_schedule(|progress: f64| {
+            let exploration_progress = (progress / 0.5).min(1.0);
+            1.0 + (0.05 - 1.0) * exploration_progress
+        })
         .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device.clone(),
+            device,
         )))
         .build()
-        .expect("DDQN configuration should be valid");
-
+        .unwrap();
     const TRAINING_TIMESTEPS: usize = 500_000;
-    agent.learn(&mut vec_env, TRAINING_TIMESTEPS).unwrap();
-
-    println!("Testing if DDQN solved CartPole-v1...");
-    let avg_steps = get_average_steps(&mut agent, &device);
-    println!(
-        "DDQN averaged {} steps over 100 episodes with {} timesteps",
-        avg_steps, TRAINING_TIMESTEPS
-    );
-
-    // Cartpole v1 should be using 475, which we can reach but no need for that here
-    if avg_steps >= 195.0 {
-        println!("DDQN solved CartPole-v1 in {TRAINING_TIMESTEPS} timesteps!");
-        return;
+    agent.learn(&mut env, TRAINING_TIMESTEPS).unwrap();
+    let mut observations = env.reset().unwrap();
+    let mut episode_count = 0;
+    let mut total_steps = 0;
+    while episode_count < 100 {
+        let actions = agent.act(&observations).unwrap();
+        let step = env.step(actions).unwrap();
+        total_steps += 1;
+        episode_count += usize::from(step.dones[0] || step.truncateds[0]);
+        observations = step.observations;
     }
-    panic!("DDQN failed to solve CartPole-v1 within {TRAINING_TIMESTEPS} timesteps.");
+    let average_steps = total_steps as f64 / 100.0;
+    assert!(
+        average_steps >= 195.0,
+        "DDQN averaged {average_steps} steps after {TRAINING_TIMESTEPS} transitions"
+    );
 }

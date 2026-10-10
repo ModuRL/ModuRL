@@ -48,8 +48,8 @@ fn with_episode_smoothing(config: AggregationConfig) -> AggregationConfig {
 
 pub struct DQNGrapher<EpisodeSource = AgentEpisodeBoundaries> {
     terminal: TerminalLogger,
-    pending_loss: Option<Tensor>,
-    pending_q_value: Option<Tensor>,
+    pending_loss: Option<burn::tensor::Tensor<1>>,
+    pending_q_value: Option<burn::tensor::Tensor<1>>,
     pending_updates: usize,
     pending_timestep: usize,
     pending_epsilon: f32,
@@ -92,10 +92,10 @@ impl<EpisodeSource> DQNGrapher<EpisodeSource> {
         self.terminal.display();
     }
 
-    /// Adds a scalar `value` shaped `[]` to the detached scalar accumulator.
-    fn accumulate(total: &mut Option<Tensor>, value: Tensor) {
+    /// Adds a Burn scalar `value` shaped `[1]` to the detached scalar accumulator.
+    fn accumulate(total: &mut Option<burn::tensor::Tensor<1>>, value: burn::tensor::Tensor<1>) {
         *total = Some(match total.take() {
-            Some(total) => (&total + &value).unwrap().detach(),
+            Some(total) => (total + value).detach(),
             None => value.detach(),
         });
     }
@@ -106,8 +106,20 @@ impl<EpisodeSource> DQNGrapher<EpisodeSource> {
         }
 
         let count = self.pending_updates as f64;
-        let loss = (self.pending_loss.take().unwrap() / count).unwrap();
-        let mean_q_value = (self.pending_q_value.take().unwrap() / count).unwrap();
+        let loss = Tensor::new(
+            (self.pending_loss.take().unwrap() / count)
+                .try_into_scalar::<f32>()
+                .unwrap(),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let mean_q_value = Tensor::new(
+            (self.pending_q_value.take().unwrap() / count)
+                .try_into_scalar::<f32>()
+                .unwrap(),
+            &Device::Cpu,
+        )
+        .unwrap();
         let epsilon = Tensor::new(self.pending_epsilon, &Device::Cpu).unwrap();
         self.terminal
             .log(
@@ -137,8 +149,8 @@ impl<EpisodeSource> DQNGrapher<EpisodeSource> {
     }
 
     fn log_update(&mut self, entry: &QLogEntry) {
-        let loss = entry.loss.mean_all().unwrap();
-        let mean_q_value = entry.q_values.mean_all().unwrap();
+        let loss = entry.loss.clone().mean();
+        let mean_q_value = entry.q_values.clone().mean();
         Self::accumulate(&mut self.pending_loss, loss);
         Self::accumulate(&mut self.pending_q_value, mean_q_value);
         self.pending_updates += 1;
@@ -734,17 +746,17 @@ mod tests {
 
     #[test]
     fn dqn_metrics_are_reduced_before_periodic_host_logging() {
-        let device = Device::Cpu;
+        let device = burn::tensor::Device::flex();
         let mut grapher = DQNGrapher::new();
         for update_index in 0..DQN_LOG_INTERVAL {
             DQNLogger::<()>::log(
                 &mut grapher,
                 &QLogEntry {
-                    loss: Tensor::new(2.0f32, &device).unwrap(),
+                    loss: burn::tensor::Tensor::from_data([2.0f32], &device),
                     epsilon: 0.1,
                     learning_rate: 1e-4,
-                    q_values: Tensor::new(&[[1.0f32], [3.0]], &device).unwrap(),
-                    replay_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
+                    q_values: burn::tensor::Tensor::from_data([[1.0f32], [3.0]], &device),
+                    replay_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
                     update_index,
                     collection_timestep: update_index + 1,
                 },
@@ -768,16 +780,16 @@ mod tests {
 
     #[test]
     fn dqn_episode_metrics_do_not_go_backwards_after_a_batch_update() {
-        let device = Device::Cpu;
+        let device = burn::tensor::Device::flex();
         let mut grapher = DQNGrapher::new();
         DQNLogger::<()>::log(
             &mut grapher,
             &QLogEntry {
-                loss: Tensor::new(1.0f32, &device).unwrap(),
+                loss: burn::tensor::Tensor::from_data([1.0f32], &device),
                 epsilon: 0.1,
                 learning_rate: 1e-4,
-                q_values: Tensor::new(&[[1.0f32]], &device).unwrap(),
-                replay_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
+                q_values: burn::tensor::Tensor::from_data([[1.0f32]], &device),
+                replay_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
                 update_index: 0,
                 collection_timestep: 80_000,
             },
@@ -785,7 +797,7 @@ mod tests {
         DQNLogger::<()>::log_collection(
             &mut grapher,
             &QCollectionLogEntry {
-                collection_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
+                collection_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
                 infos: vec![()],
                 epsilon: 0.1,
                 collection_timestep: 80_000,
@@ -804,10 +816,10 @@ mod tests {
     #[cfg(feature = "atari-environment")]
     #[test]
     fn atari_dqn_logs_recorded_full_game_return_instead_of_life_return() {
-        let device = Device::Cpu;
+        let device = burn::tensor::Device::flex();
         let mut grapher = DQNGrapher::atari();
         let life_boundary = QCollectionLogEntry {
-            collection_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
+            collection_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
             infos: vec![RawRewardInfo {
                 inner: EpisodeStatisticsInfo {
                     inner: (),
@@ -830,7 +842,7 @@ mod tests {
         assert!(grapher.terminal.series(EPISODE_RETURN_METRIC).is_none());
 
         let game_boundary = QCollectionLogEntry {
-            collection_rewards: Tensor::new(&[[1.0f32]], &device).unwrap(),
+            collection_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
             infos: vec![RawRewardInfo {
                 inner: EpisodeStatisticsInfo {
                     inner: (),

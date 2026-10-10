@@ -1,12 +1,12 @@
 # Double DQN
 
 Double DQN, or DDQN, uses the same setup, builder fields, and training loop as
-DQN. Its difference is the next-state target: the online Q-network chooses the
+DQN. Its difference is the next-observation target: the online Q-network chooses the
 next action, and the target Q-network evaluates that selected action. This
 separation avoids using the same values for both decisions.
 
 Start with the complete [DQN CartPole program](./dqn.md). Keep its environment,
-two Q-networks, two `VarMaps`, optimizer, replay configuration, epsilon schedule,
+owned online Q-network, Burn optimizer, replay configuration, epsilon schedule,
 and `learn` call unchanged. Then replace the agent construction with this
 version:
 
@@ -15,10 +15,8 @@ let mut agent = DDQNAgent::builder()
     .action_space(Discrete::new(2))
     .observation_space(observation_space)
     .online_q_network(online_q_network)
-    .target_q_network(target_q_network)
-    .online_vars(&online_var_map)
-    .target_vars(&mut target_var_map)
     .optimizer(optimizer)
+    .learning_rate(2.5e-4)
     .replay_capacity(10_000)
     .batch_size(128)
     .training_start(10_000)
