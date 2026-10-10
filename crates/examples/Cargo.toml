@@ -67,6 +67,7 @@ path = "examples/ppo_atari_play.rs"
 required-features = ["atari-environment", "rendering"]
 
 [dependencies]
+burn = { version = "=0.22.0", default-features = false, features = ["std", "optim", "flex", "autodiff"] }
 modurl = { version = "0.1.0", path = "../.." }
 modurl_ale = { version = "0.1.0", path = "../modurl_ale", optional = true }
 modurl_gym = { version = "0.1.0", path = "../modurl_gym" }
@@ -83,8 +84,8 @@ half-cheetah = ["mujoco-environment"]
 hopper = ["mujoco-environment"]
 mujoco-environment = ["dep:modurl_mujoco"]
 walker2d = ["mujoco-environment"]
-cuda = ["candle-core/cuda"]
+cuda = ["candle-core/cuda", "burn/cuda"]
 cudnn = ["cuda", "candle-core/cudnn"]
-metal = ["candle-core/metal"]
+metal = ["candle-core/metal", "burn/metal"]
 multithreading = ["modurl/multithreading"]
 rendering = ["modurl_ale?/rendering", "modurl_gym/rendering", "modurl_mujoco?/rendering"]

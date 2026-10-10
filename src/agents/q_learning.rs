@@ -3,8 +3,7 @@ use burn::{
     module::Module,
     optim::{GradientsParams, ModuleOptimizer},
     tensor::{
-        Bool, DType, Device, Float, IndexingUpdateOp, Int, IntDType, Tensor, TensorData,
-        TensorReadError,
+        Bool, DType, Device, IndexingUpdateOp, Int, IntDType, Tensor, TensorData, TensorReadError,
         kind::{Autodiff, Basic},
     },
 };
@@ -901,7 +900,7 @@ mod tests {
         objectives::bellman_targets,
         spaces::BoxSpace,
     };
-    use burn::{module::Param, optim::SgdConfig};
+    use burn::{module::Param, optim::SgdConfig, tensor::Float};
     use std::convert::Infallible;
 
     struct TestTarget;
@@ -929,8 +928,8 @@ mod tests {
     }
 
     #[derive(Module, Debug)]
-    struct TestNetwork {
-        values: Param<Tensor<2>>,
+    pub(super) struct TestNetwork {
+        pub(super) values: Param<Tensor<2>>,
     }
 
     impl<const R: usize, K: Basic> Forward<R, 2, K> for TestNetwork {
@@ -942,7 +941,7 @@ mod tests {
         }
     }
 
-    fn network(device: &Device, dtype: DType) -> TestNetwork {
+    pub(super) fn network(device: &Device, dtype: DType) -> TestNetwork {
         TestNetwork {
             values: Param::from_tensor(Tensor::from_data([[0.0f64, 1.0]], (device, dtype))),
         }
@@ -1268,8 +1267,8 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct ObservationFixture<const R: usize, K> {
-        _kind: PhantomData<K>,
+    pub(super) struct ObservationFixture<const R: usize, K> {
+        pub(super) _kind: PhantomData<K>,
     }
 
     impl<const R: usize, K: Basic> ObservationSpace<R> for ObservationFixture<R, K> {

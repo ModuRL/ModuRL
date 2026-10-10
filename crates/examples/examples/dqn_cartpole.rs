@@ -1,5 +1,8 @@
-use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use burn::{
+    nn::activation::Activation,
+    optim::AdamWConfig,
+    tensor::{DType, Device},
+};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
@@ -10,58 +13,42 @@ use support::graphers::DQNGrapher;
 
 fn main() {
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
-    let device = Device::Cpu;
+    let device = Device::flex();
     #[cfg(feature = "cuda")]
-    let device = Device::new_cuda(0).unwrap();
-    #[cfg(feature = "metal")]
-    let device = Device::new_metal(0).unwrap();
-
+    let device = Device::cuda(0);
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
+    let device = device.autodiff();
     println!("Using device: {device:?}");
 
-    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
+    let environment_device = Device::flex();
+    let envs = vec![
+        CartPoleV1::builder()
+            .rng_device(&environment_device)
+            .build()
+            .unwrap(),
+    ];
     let env = VectorizedGymWrapper::from(envs);
-    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
+    let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let observation_space = env.observation_space();
-
-    let online_var_map = VarMap::new();
     let online_q_network = MLP::builder()
         .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(&online_var_map, DTYPE, &device))
-        .activation(Tensor::tanh)
+        .output_size(env.action_space().get_possible_values())
+        .options((&device, DTYPE))
+        .activation(Activation::Tanh)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("failed to build the online Q-network");
-
-    let mut target_var_map = VarMap::new();
-    let target_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(&target_var_map, DTYPE, &device))
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("failed to build the target Q-network");
-
-    let optimizer = AdamW::new(
-        online_var_map.all_vars(),
-        ParamsAdamW {
-            lr: 2.5e-4,
-            ..Default::default()
-        },
-    )
-    .expect("failed to build the optimizer");
+    let optimizer = AdamWConfig::new().init();
 
     let mut grapher = DQNGrapher::new();
     let mut agent = DQNAgent::builder()
         .dtype(DTYPE)
-        .action_space(Discrete::new(2))
+        .action_space(env.action_space())
         .observation_space(observation_space)
         .online_q_network(online_q_network)
-        .target_q_network(target_q_network)
-        .online_vars(&online_var_map)
-        .target_vars(&mut target_var_map)
         .optimizer(optimizer)
+        .learning_rate(2.5e-4)
         .replay_capacity(10_000)
         .batch_size(128)
         .training_start(10_000)

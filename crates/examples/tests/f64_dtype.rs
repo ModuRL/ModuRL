@@ -34,24 +34,47 @@ fn cartpole() -> VectorizedGymWrapper<CartPoleV1> {
     ])
 }
 
+#[derive(burn::module::Module, Debug)]
+struct Float64QNetwork {
+    model: MLP,
+}
+
+impl modurl::models::Forward<2, 2> for Float64QNetwork {
+    type Error = modurl::models::ModelError;
+
+    /// Converts observations [batch_size, 4] to F64 and returns F64 Q values [batch_size, 2].
+    fn forward(
+        &self,
+        observations: burn::tensor::Tensor<2>,
+    ) -> Result<burn::tensor::Tensor<2>, Self::Error> {
+        modurl::models::Forward::forward(&self.model, observations.cast(burn::tensor::DType::F64))
+    }
+}
+
 #[test]
 fn dqn_updates_f64_networks_from_native_f32_observations() {
-    let mut env = cartpole();
-    let observation_space = env.observation_space();
-    let online_vars = VarMap::new();
-    let mut target_vars = VarMap::new();
-    let online = mlp(&online_vars, 4, 2, "q").unwrap();
-    let target = mlp(&target_vars, 4, 2, "q").unwrap();
-    let optimizer = AdamW::new(online_vars.all_vars(), ParamsAdamW::default()).unwrap();
-
+    let environment_device = burn::tensor::Device::flex();
+    let device = environment_device.clone().autodiff();
+    let mut env = VectorizedGymWrapper::from(
+        CartPoleV1::builder()
+            .rng_device(&environment_device)
+            .build()
+            .unwrap(),
+    );
+    let model = MLP::builder()
+        .input_size(4)
+        .output_size(2)
+        .options((&device, burn::tensor::DType::F64))
+        .hidden_layer_sizes(vec![8])
+        .activation(burn::nn::activation::Activation::Tanh)
+        .build()
+        .unwrap();
     let mut agent = DQNAgent::builder()
-        .action_space(Discrete::new(2))
-        .observation_space(observation_space)
-        .online_q_network(online)
-        .target_q_network(target)
-        .online_vars(&online_vars)
-        .target_vars(&mut target_vars)
-        .optimizer(optimizer)
+        .action_space(env.action_space())
+        .observation_space(env.observation_space())
+        .online_q_network(Float64QNetwork { model })
+        .optimizer(burn::optim::AdamWConfig::new().init())
+        .learning_rate(1e-3)
         .epsilon_schedule(ConstantSchedule::new(0.0))
         .replay_capacity(8)
         .batch_size(2)
@@ -59,40 +82,43 @@ fn dqn_updates_f64_networks_from_native_f32_observations() {
         .update_frequency(1)
         .target_update_interval(2)
         .training_horizon(4)
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            Device::Cpu,
-        )))
-        .dtype(DTYPE)
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
+            optimization_device: device,
+            storage_device: environment_device,
+        }))
+        .dtype(burn::tensor::DType::F64)
         .build()
         .unwrap();
-
     agent.learn(&mut env, 4).unwrap();
-    assert!(
-        online_vars
-            .all_vars()
-            .iter()
-            .all(|variable| variable.dtype() == DTYPE)
-    );
+    let observations = env.reset().unwrap();
+    assert_eq!(observations.dtype(), burn::tensor::DType::F32);
+    assert_eq!(agent.act(&observations).unwrap().dims(), [1, 1]);
 }
 
 #[test]
 fn ddqn_updates_f64_networks_from_native_f32_observations() {
-    let mut env = cartpole();
-    let observation_space = env.observation_space();
-    let online_vars = VarMap::new();
-    let mut target_vars = VarMap::new();
-    let online = mlp(&online_vars, 4, 2, "q").unwrap();
-    let target = mlp(&target_vars, 4, 2, "q").unwrap();
-    let optimizer = AdamW::new(online_vars.all_vars(), ParamsAdamW::default()).unwrap();
-
+    let environment_device = burn::tensor::Device::flex();
+    let device = environment_device.clone().autodiff();
+    let mut env = VectorizedGymWrapper::from(
+        CartPoleV1::builder()
+            .rng_device(&environment_device)
+            .build()
+            .unwrap(),
+    );
+    let model = MLP::builder()
+        .input_size(4)
+        .output_size(2)
+        .options((&device, burn::tensor::DType::F64))
+        .hidden_layer_sizes(vec![8])
+        .activation(burn::nn::activation::Activation::Tanh)
+        .build()
+        .unwrap();
     let mut agent = DDQNAgent::builder()
-        .action_space(Discrete::new(2))
-        .observation_space(observation_space)
-        .online_q_network(online)
-        .target_q_network(target)
-        .online_vars(&online_vars)
-        .target_vars(&mut target_vars)
-        .optimizer(optimizer)
+        .action_space(env.action_space())
+        .observation_space(env.observation_space())
+        .online_q_network(Float64QNetwork { model })
+        .optimizer(burn::optim::AdamWConfig::new().init())
+        .learning_rate(1e-3)
         .epsilon_schedule(ConstantSchedule::new(0.0))
         .replay_capacity(8)
         .batch_size(2)
@@ -100,14 +126,17 @@ fn ddqn_updates_f64_networks_from_native_f32_observations() {
         .update_frequency(1)
         .target_update_interval(2)
         .training_horizon(4)
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            Device::Cpu,
-        )))
-        .dtype(DTYPE)
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
+            optimization_device: device,
+            storage_device: environment_device,
+        }))
+        .dtype(burn::tensor::DType::F64)
         .build()
         .unwrap();
-
     agent.learn(&mut env, 4).unwrap();
+    let observations = env.reset().unwrap();
+    assert_eq!(observations.dtype(), burn::tensor::DType::F32);
+    assert_eq!(agent.act(&observations).unwrap().dims(), [1, 1]);
 }
 
 #[test]

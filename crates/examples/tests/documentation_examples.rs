@@ -172,59 +172,34 @@ fn getting_started_program() {
 // This is the complete DQN program shown in docs/src/dqn.md. Keep this test
 // compile-only: running it would turn a documentation check into training.
 fn dqn_program() {
-    let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
-    let mut env = DeviceMultiGymWrapper::new(
-        VectorizedGymWrapper::from(envs),
-        Device::Cpu,
-        device.clone(),
-    );
-    let observation_space = env.observation_space();
+    let device = burn::tensor::Device::flex().autodiff();
 
-    let online_var_map = VarMap::new();
+    let environment_device = burn::tensor::Device::flex();
+    let envs = vec![
+        CartPoleV1::builder()
+            .rng_device(&environment_device)
+            .build()
+            .unwrap(),
+    ];
+    let env = VectorizedGymWrapper::from(envs);
+    let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
+    let observation_space = env.observation_space();
     let online_q_network = MLP::builder()
         .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &online_var_map,
-            DType::F32,
-            &device,
-        ))
+        .output_size(env.action_space().get_possible_values())
+        .options((&device, burn::tensor::DType::F32))
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("failed to build the online Q-network");
+    let optimizer = burn::optim::AdamWConfig::new().init();
 
-    let mut target_var_map = VarMap::new();
-    let target_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &target_var_map,
-            DType::F32,
-            &device,
-        ))
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("failed to build the target Q-network");
-
-    let optimizer = AdamW::new(
-        online_var_map.all_vars(),
-        ParamsAdamW {
-            lr: 2.5e-4,
-            ..Default::default()
-        },
-    )
-    .expect("failed to build the optimizer");
-
-    let mut logger = DocumentationDQNLogger;
     let mut agent = DQNAgent::builder()
-        .action_space(Discrete::new(2))
+        .dtype(DType::F32)
+        .action_space(env.action_space())
         .observation_space(observation_space)
         .online_q_network(online_q_network)
-        .target_q_network(target_q_network)
-        .online_vars(&online_var_map)
-        .target_vars(&mut target_var_map)
         .optimizer(optimizer)
+        .learning_rate(2.5e-4)
         .replay_capacity(10_000)
         .batch_size(128)
         .training_start(10_000)
@@ -236,9 +211,8 @@ fn dqn_program() {
             1.0 + (0.05 - 1.0) * exploration_progress
         })
         .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device.clone(),
+            device,
         )))
-        .logger(&mut logger)
         .build()
         .expect("DQN configuration should be valid");
 
@@ -246,62 +220,35 @@ fn dqn_program() {
     println!("Training complete.");
 }
 
-// This is the DQN program with the DDQN-specific construction shown in
-// docs/src/ddqn.md. Keep this test compile-only for the same reason.
 fn ddqn_program() {
-    let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
-    let mut env = DeviceMultiGymWrapper::new(
-        VectorizedGymWrapper::from(envs),
-        Device::Cpu,
-        device.clone(),
-    );
-    let observation_space = env.observation_space();
+    let device = burn::tensor::Device::flex().autodiff();
 
-    let online_var_map = VarMap::new();
+    let environment_device = burn::tensor::Device::flex();
+    let envs = vec![
+        CartPoleV1::builder()
+            .rng_device(&environment_device)
+            .build()
+            .unwrap(),
+    ];
+    let env = VectorizedGymWrapper::from(envs);
+    let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
+    let observation_space = env.observation_space();
     let online_q_network = MLP::builder()
         .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &online_var_map,
-            DType::F32,
-            &device,
-        ))
+        .output_size(env.action_space().get_possible_values())
+        .options((&device, burn::tensor::DType::F32))
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("failed to build the online Q-network");
+    let optimizer = burn::optim::AdamWConfig::new().init();
 
-    let mut target_var_map = VarMap::new();
-    let target_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &target_var_map,
-            DType::F32,
-            &device,
-        ))
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("failed to build the target Q-network");
-
-    let optimizer = AdamW::new(
-        online_var_map.all_vars(),
-        ParamsAdamW {
-            lr: 2.5e-4,
-            ..Default::default()
-        },
-    )
-    .expect("failed to build the optimizer");
-
-    let mut logger = DocumentationDDQNLogger;
     let mut agent = DDQNAgent::builder()
-        .action_space(Discrete::new(2))
+        .dtype(DType::F32)
+        .action_space(env.action_space())
         .observation_space(observation_space)
         .online_q_network(online_q_network)
-        .target_q_network(target_q_network)
-        .online_vars(&online_var_map)
-        .target_vars(&mut target_var_map)
         .optimizer(optimizer)
+        .learning_rate(2.5e-4)
         .replay_capacity(10_000)
         .batch_size(128)
         .training_start(10_000)
@@ -313,9 +260,8 @@ fn ddqn_program() {
             1.0 + (0.05 - 1.0) * exploration_progress
         })
         .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device.clone(),
+            device,
         )))
-        .logger(&mut logger)
         .build()
         .expect("DDQN configuration should be valid");
 
