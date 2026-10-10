@@ -65,16 +65,18 @@ impl<const A: usize> GaussianDistribution<A> {
             return Err(GaussianDistributionError::ActionShapeTooLarge);
         }
         // Reserve a batch axis of length one before the action dimensions.
-        let mut shape = [1; A];
-        shape[1..].copy_from_slice(&action_shape);
+        let mut batched_action_shape = [1; A];
+        batched_action_shape[1..].copy_from_slice(&action_shape);
         Ok(Self {
-            action_shape: Some(shape),
+            action_shape: Some(batched_action_shape),
         })
     }
 
     /// Returns the configured action shape without the batch axis.
     pub fn action_shape(&self) -> Option<&[usize]> {
-        self.action_shape.as_ref().map(|shape| &shape[1..])
+        self.action_shape
+            .as_ref()
+            .map(|batched_action_shape| &batched_action_shape[1..])
     }
 
     /// Splits `[batch, 2 * event_size]` into mean and log-standard-deviation
@@ -92,9 +94,9 @@ impl<const A: usize> GaussianDistribution<A> {
             return Err(GaussianDistributionError::InvalidOutputWidth { output_width });
         }
         let half = output_width / 2;
-        let mut shape = self.action_shape.unwrap_or([1; A]);
+        let mut batched_action_shape = self.action_shape.unwrap_or([1; A]);
         if self.action_shape.is_some() {
-            let event_size = shape[1..].iter().product::<usize>();
+            let event_size = batched_action_shape[1..].iter().product::<usize>();
             if event_size != half {
                 return Err(DistributionTensorError::ShapeMismatch {
                     field: "Gaussian parameters",
@@ -104,16 +106,16 @@ impl<const A: usize> GaussianDistribution<A> {
                 .into());
             }
         } else {
-            shape[A - 1] = half;
+            batched_action_shape[A - 1] = half;
         }
-        shape[0] = batch_size;
+        batched_action_shape[0] = batch_size;
         let mean = outputs
             .clone()
             .slice([0..batch_size, 0..half])
-            .reshape(shape);
+            .reshape(batched_action_shape);
         let log_std = outputs
             .slice([0..batch_size, half..output_width])
-            .reshape(shape);
+            .reshape(batched_action_shape);
         Ok((mean, log_std))
     }
 }
