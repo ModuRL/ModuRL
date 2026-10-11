@@ -1,11 +1,14 @@
 use bon::bon;
-use burn::{module::Module, optim::ModuleOptimizer};
-use candle_core::{D, DType, IndexOp, Tensor};
+use burn::{module::Module, optim::ModuleOptimizer, tensor::Tensor};
+use candle_core::{D, DType, IndexOp};
 use candle_nn::{Optimizer, loss};
 use std::marker::PhantomData;
 
 use crate::{
-    buffers::{experience, rollout_buffer::RolloutBuffer},
+    buffers::{
+        experience::{self, ExperienceBatchError},
+        rollout_buffer::RolloutBuffer,
+    },
     gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ProbabilisticPolicy,
     objectives::clipped_value_loss,
@@ -13,6 +16,7 @@ use crate::{
     sampling::shuffle_with_device_rng,
     spaces,
     tensor_operations::normalize_tensor,
+    tensor_rank::NextRank,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -96,51 +100,56 @@ use super::Agent;
 
 #[derive(Debug, Clone)]
 struct PPOPreparedExperience {
-    advantages: Tensor,
-    returns: Tensor,
+    advantages: Tensor<2>,
+    returns: Tensor<2>,
     /// V(s) under the rollout-collection network, for PPO2-style value-loss clipping.
-    old_values: Option<Tensor>,
+    old_values: Option<Tensor<2>>,
 }
 
 #[derive(Debug, Clone)]
-struct PPOExperience {
-    states: Tensor,
-    next_states: Tensor,
-    actions: Tensor,
-    rewards: Tensor,
-    training_rewards: Tensor,
+struct PPOExperience<O: NextRank = Tensor<2>, A: NextRank = Tensor<2>> {
+    observations: O,
+    next_observations: O,
+    actions: A,
+    rewards: Tensor<2>,
+    training_rewards: Tensor<2>,
     next_dones: Vec<bool>,
     truncateds: Vec<bool>,
-    log_probs: Tensor,
+    log_probs: Tensor<2>,
     prepared: Option<PPOPreparedExperience>,
 }
 
 struct PPOCollectionAction {
-    policy_actions: Tensor,
-    environment_actions: Tensor,
-    log_probs: Tensor,
+    policy_actions: candle_core::Tensor,
+    environment_actions: candle_core::Tensor,
+    log_probs: candle_core::Tensor,
 }
 
 struct PPOPreparedRolloutBatch {
-    advantages: Tensor,
-    returns: Tensor,
-    old_values: Option<Tensor>,
+    advantages: Tensor<3>,
+    returns: Tensor<3>,
+    old_values: Option<Tensor<3>>,
 }
 
-struct PPORolloutBatch {
-    states: Tensor,
-    next_states: Tensor,
-    actions: Tensor,
-    rewards: Tensor,
-    training_rewards: Tensor,
-    next_dones: Tensor,
-    truncateds: Tensor,
-    log_probs: Tensor,
+struct PPORolloutBatch<O: NextRank, A: NextRank> {
+    observations: O::Next,
+    next_observations: O::Next,
+    actions: A::Next,
+    rewards: Tensor<3>,
+    training_rewards: Tensor<3>,
+    next_dones: Tensor<3, burn::tensor::Bool>,
+    truncateds: Tensor<3, burn::tensor::Bool>,
+    log_probs: Tensor<3>,
     prepared: Option<PPOPreparedRolloutBatch>,
 }
 
 impl PPOPreparedRolloutBatch {
-    fn batch(experiences: &[PPOExperience]) -> Result<Option<Self>, candle_core::Error> {
+    /// Stacks prepared Float statistics `[environment_count, 1]` into `[time, environment_count, 1]`.
+    /// Each field must share shape, dtype, and device across time. Retains gradient connections.
+    /// Returns `None` if no transition has prepared statistics; mixed preparation violates an internal invariant.
+    fn batch<O: NextRank, A: NextRank>(
+        experiences: &[PPOExperience<O, A>],
+    ) -> Result<Option<Self>, ExperienceBatchError> {
         let prepared = experiences
             .iter()
             .map(|experience| experience.prepared.as_ref())
@@ -155,53 +164,50 @@ impl PPOPreparedRolloutBatch {
             return Ok(None);
         };
 
-        let advantages = prepared
-            .iter()
-            .map(|prepared| prepared.advantages.clone())
-            .collect::<Vec<_>>();
-        let returns = prepared
-            .iter()
-            .map(|prepared| prepared.returns.clone())
-            .collect::<Vec<_>>();
         let old_values = prepared
             .iter()
             .map(|prepared| prepared.old_values.clone())
             .collect::<Option<Vec<_>>>();
 
         Ok(Some(Self {
-            advantages: Tensor::stack(&advantages, 0)?,
-            returns: Tensor::stack(&returns, 0)?,
+            advantages: experience::stack_tensor_field(&prepared, |item| item.advantages.clone())?,
+            returns: experience::stack_tensor_field(&prepared, |item| item.returns.clone())?,
             old_values: old_values
-                .map(|old_values| Tensor::stack(&old_values, 0))
+                .map(|old_values| experience::stack_tensor_field(&old_values, Clone::clone))
                 .transpose()?,
         }))
     }
 }
 
 #[bon]
-impl PPOExperience {
+impl<const O: usize, const A: usize> PPOExperience<Tensor<O>, Tensor<A>>
+where
+    Tensor<O>: NextRank,
+    Tensor<A>: NextRank,
+{
     /// Creates one vectorized rollout transition.
     ///
-    /// `states` and `next_states` are `[env_count, ...observation_shape]`,
-    /// `actions` is `[env_count, ...action_shape]`; `rewards`,
+    /// Rank-O `observations` and `next_observations` are `[env_count, ...observation_shape]`.
+    /// Rank-A `actions` is `[env_count, ...action_shape]`; `rewards`,
     /// `training_rewards`, and `log_probs` are `[env_count, 1]`. `rewards`
     /// preserves the environment values for logging, while `training_rewards`
-    /// may contain bootstrap corrections for nonterminal truncations. Prepared
+    /// may contain bootstrap corrections for nonterminal truncations.
+    /// Fields preserve their Float dtype, device, and gradient connections; collection detaches stored experience.
     /// PPO training data is added internally after rollout collection.
     #[builder]
     pub fn new(
-        states: Tensor,
-        next_states: Tensor,
-        actions: Tensor,
-        rewards: Tensor,
-        training_rewards: Tensor,
+        observations: Tensor<O>,
+        next_observations: Tensor<O>,
+        actions: Tensor<A>,
+        rewards: Tensor<2>,
+        training_rewards: Tensor<2>,
         next_dones: Vec<bool>,
         truncateds: Vec<bool>,
-        log_probs: Tensor,
+        log_probs: Tensor<2>,
     ) -> Self {
         Self {
-            states,
-            next_states,
+            observations,
+            next_observations,
             actions,
             rewards,
             training_rewards,
@@ -213,19 +219,28 @@ impl PPOExperience {
     }
 }
 
-impl experience::Experience for PPOExperience {
-    type Batch = PPORolloutBatch;
-    type Error = candle_core::Error;
+impl<const O: usize, const A: usize, const BO: usize, const BA: usize> experience::Experience
+    for PPOExperience<Tensor<O>, Tensor<A>>
+where
+    Tensor<O>: NextRank<Next = Tensor<BO>>,
+    Tensor<A>: NextRank<Next = Tensor<BA>>,
+{
+    type Batch = PPORolloutBatch<Tensor<O>, Tensor<A>>;
+    type Error = ExperienceBatchError;
+
+    /// Adds a leading time axis to rank-O observations and rank-A actions, producing ranks BO = O + 1 and BA = A + 1.
+    /// Scalar statistics and Bool flags become `[time, environment_count, 1]` without changing environment order.
+    /// Each tensor field must share shape, dtype, and device across time. Preserves gradient connections.
     fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
         let first = experiences
             .first()
-            .expect("cannot batch an empty PPO rollout");
+            .ok_or(ExperienceBatchError::EmptyBatch)?;
         Ok(PPORolloutBatch {
-            states: experience::stack_tensor_field(experiences, |experience| {
-                experience.states.clone()
+            observations: experience::stack_tensor_field(experiences, |experience| {
+                experience.observations.clone()
             })?,
-            next_states: experience::stack_tensor_field(experiences, |experience| {
-                experience.next_states.clone()
+            next_observations: experience::stack_tensor_field(experiences, |experience| {
+                experience.next_observations.clone()
             })?,
             actions: experience::stack_tensor_field(experiences, |experience| {
                 experience.actions.clone()
@@ -239,12 +254,12 @@ impl experience::Experience for PPOExperience {
             next_dones: experience::stack_bool_field(
                 experiences,
                 |experience| &experience.next_dones,
-                first.states.device(),
+                &first.observations.device(),
             )?,
             truncateds: experience::stack_bool_field(
                 experiences,
                 |experience| &experience.truncateds,
-                first.states.device(),
+                &first.observations.device(),
             )?,
             log_probs: experience::stack_tensor_field(experiences, |experience| {
                 experience.log_probs.clone()
@@ -271,20 +286,20 @@ impl<'a, I> PPOLoggingInfo<'a, I> {
 }
 
 pub struct PPOLogEntry {
-    pub actor_loss: Tensor,
-    pub critic_loss: Tensor,
-    pub entropy: Tensor,
-    pub kl_divergence: Tensor,
-    pub explained_variance: Tensor,
-    pub rewards: Tensor,
+    pub actor_loss: candle_core::Tensor,
+    pub critic_loss: candle_core::Tensor,
+    pub entropy: candle_core::Tensor,
+    pub kl_divergence: candle_core::Tensor,
+    pub explained_variance: candle_core::Tensor,
+    pub rewards: candle_core::Tensor,
     pub epoch: usize,
     pub timestep: usize,
-    pub returns: Tensor,
-    pub advantages: Tensor,
+    pub returns: candle_core::Tensor,
+    pub advantages: candle_core::Tensor,
 }
 
 pub struct PPOCollectionLogEntry<I = ()> {
-    pub collection_rewards: Tensor,
+    pub collection_rewards: candle_core::Tensor,
     pub infos: Vec<I>,
     pub collection_timestep: usize,
     pub completed_episodes: Vec<PPOEpisodeLogEntry>,
@@ -357,15 +372,13 @@ pub trait PPOLogger<I = ()> {
 
 #[derive(Clone)]
 struct PPOLosses {
-    actor_loss: Tensor,
-    critic_loss: Tensor,
+    actor_loss: candle_core::Tensor,
+    critic_loss: candle_core::Tensor,
 }
 
 /// Averages every axis of rank-D Float `values` and returns population variance `[1]`.
 /// Preserves the floating-point dtype, device, and gradient connections.
-fn population_variance<const D: usize>(
-    values: &burn::tensor::Tensor<D>,
-) -> burn::tensor::Tensor<1> {
+fn population_variance<const D: usize>(values: &Tensor<D>) -> Tensor<1> {
     let mean = values.clone().mean().unsqueeze::<D>();
     (values.clone() - mean).square().mean()
 }
@@ -374,9 +387,9 @@ fn population_variance<const D: usize>(
 /// Inputs use `[sample_count, 1]` or `[time, env_count, 1]`, with matching dtype and device.
 /// Averages every axis and retains gradient connections. Constant returns produce NaN.
 fn compute_explained_variance<const D: usize>(
-    returns: &burn::tensor::Tensor<D>,
-    rollout_values: &burn::tensor::Tensor<D>,
-) -> burn::tensor::Tensor<1> {
+    returns: &Tensor<D>,
+    rollout_values: &Tensor<D>,
+) -> Tensor<1> {
     let return_variance = population_variance(returns);
     let residuals = returns.clone() - rollout_values.clone();
     let residual_variance = population_variance(&residuals);
@@ -509,7 +522,7 @@ where
     schedule_progress: ScheduleProgress,
     logging_info: Option<PPOLoggingInfo<'a, I>>,
     gradient_clip: f32,
-    current_states: Option<Tensor>,
+    current_states: Option<candle_core::Tensor>,
     episode_tracker: PPOEpisodeTracker,
     dtype: DType,
     _phantom: PhantomData<GE>,
@@ -629,7 +642,7 @@ where
 
         let batch =
             <PPOExperience as experience::Experience>::batch(self.rollout_buffer.get_raw())?;
-        let all_states = batch.states.flatten(0, 1)?;
+        let all_states = batch.observations.flatten(0, 1)?;
         let all_actions = batch.actions.flatten(0, 1)?;
         let all_log_probs = batch.log_probs.flatten(0, 1)?;
         let prepared = batch.prepared.ok_or(PPOError::MissingPreparedRollout)?;
@@ -652,7 +665,7 @@ where
 
             let mut indices: Vec<u32> = (0..total_samples as u32).collect();
             shuffle_with_device_rng(&mut indices, device)?;
-            let indices_tensor = Tensor::from_vec(indices, &[total_samples], device)?;
+            let indices_tensor = candle_core::Tensor::from_vec(indices, &[total_samples], device)?;
 
             for start in (0..total_samples).step_by(self.mini_batch_size) {
                 let end = (start + self.mini_batch_size).min(total_samples);
@@ -701,10 +714,10 @@ where
             skip_all
         )
     )]
-    fn add_advantages_and_returns(&mut self) -> Result<Tensor, PPOError<AE, GE, SE>> {
+    fn add_advantages_and_returns(&mut self) -> Result<candle_core::Tensor, PPOError<AE, GE, SE>> {
         let batch =
             <PPOExperience as experience::Experience>::batch(self.rollout_buffer.get_raw())?;
-        let states = batch.states;
+        let states = batch.observations;
         let (batch_size, env_count) = (states.dims()[0], states.dims()[1]);
         let states = states.flatten(0, 1)?;
 
@@ -720,7 +733,7 @@ where
         // Unflatten back to [batch_size, env_count, ...].
         let values_tensor = values_tensor.reshape((batch_size, env_count, 1))?;
 
-        let next_states_tensor = batch.next_states;
+        let next_states_tensor = batch.next_observations;
         let bootstrapped_states = next_states_tensor.i(next_states_tensor.shape().dims()[0] - 1)?; // shape [env_count, ...]
         let latent_bootstrapped_states = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
@@ -785,7 +798,7 @@ where
         let values = values.detach();
         let masks = ((1.0 - next_dones)? * (1.0 - next_truncateds)?)?;
         let mut next_value = bootstrapped_values.detach();
-        let mut gae = Tensor::zeros(next_value.shape(), self.dtype, device)?;
+        let mut gae = candle_core::Tensor::zeros(next_value.shape(), self.dtype, device)?;
         let mut advantages = Vec::with_capacity(rewards.dim(0)?);
         // Environments are independent; only time has a recurrence.
         for time in (0..rewards.dim(0)?).rev() {
@@ -798,7 +811,7 @@ where
             next_value = value;
         }
         advantages.reverse();
-        Tensor::stack(&advantages, 0)
+        candle_core::Tensor::stack(&advantages, 0)
     }
 
     /// Forwards latent or raw `states` shaped `[batch, ...state_shape]` and
@@ -828,11 +841,11 @@ where
     /// bootstrapping, even if the transition is also truncated.
     fn bootstrap_truncated_rewards(
         &mut self,
-        rewards: &Tensor,
-        transition_next_states: &Tensor,
+        rewards: &candle_core::Tensor,
+        transition_next_states: &candle_core::Tensor,
         dones: &[bool],
         truncateds: &[bool],
-    ) -> Result<Tensor, PPOError<AE, GE, SE>> {
+    ) -> Result<candle_core::Tensor, PPOError<AE, GE, SE>> {
         if dones.len() != truncateds.len() {
             return Err(PPOError::MismatchedTerminationBatch {
                 dones: dones.len(),
@@ -850,7 +863,7 @@ where
         }
 
         let truncation_count = truncated_indices.len();
-        let truncated_indices = Tensor::from_vec(
+        let truncated_indices = candle_core::Tensor::from_vec(
             truncated_indices,
             truncation_count,
             transition_next_states.device(),
@@ -1086,7 +1099,7 @@ where
     /// `[environment_count, ...observation_shape]`.
     fn sample_collection_action(
         &mut self,
-        states: &Tensor,
+        states: &candle_core::Tensor,
     ) -> Result<PPOCollectionAction, PPOError<AE, GE, SE>> {
         let latent_states = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
@@ -1134,7 +1147,7 @@ where
     /// and termination entry per environment.
     fn log_collection(
         &mut self,
-        rewards: &Tensor,
+        rewards: &candle_core::Tensor,
         infos: Vec<I>,
         dones: &[bool],
         truncateds: &[bool],
@@ -1189,8 +1202,8 @@ where
     /// `[batch, ...action_shape]`.
     pub fn act_deterministic(
         &mut self,
-        observation: &Tensor,
-    ) -> Result<Tensor, PPOError<AE, GE, SE>> {
+        observation: &candle_core::Tensor,
+    ) -> Result<candle_core::Tensor, PPOError<AE, GE, SE>> {
         let observation = observation.to_dtype(self.dtype)?;
         let latent_states = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
@@ -1221,7 +1234,7 @@ where
     fn prepare_rollout_collection(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
-    ) -> Result<Tensor, PPOError<AE, GE, SE>> {
+    ) -> Result<candle_core::Tensor, PPOError<AE, GE, SE>> {
         let states = if let Some(states) = self.current_states.take() {
             states
         } else {
@@ -1260,7 +1273,7 @@ where
     fn collect_rollout(
         &mut self,
         env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
-        next_states: &mut Tensor,
+        next_states: &mut candle_core::Tensor,
     ) -> Result<usize, PPOError<AE, GE, SE>> {
         let environment_count = env.num_envs();
         while self.rollout_buffer.len() * environment_count < self.batch_size {
@@ -1297,8 +1310,8 @@ where
             )?;
             self.rollout_buffer.add(
                 PPOExperience::builder()
-                    .states(states)
-                    .next_states(training_next_states)
+                    .observations(states)
+                    .next_observations(training_next_states)
                     .actions(collection_action.policy_actions.detach())
                     .rewards(collection_rewards)
                     .training_rewards(training_rewards)
@@ -1340,7 +1353,10 @@ where
 
     /// Selects environment actions `[batch, ...action_shape]` for observations
     /// `[batch, ...observation_shape]`.
-    fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
+    fn act(
+        &mut self,
+        observation: &candle_core::Tensor,
+    ) -> Result<candle_core::Tensor, Self::Error> {
         let observation = observation.to_dtype(self.dtype)?;
         let latent_states = match self.network_info {
             PPONetworkInfo::Shared(ref mut shared_info) => {
@@ -1380,6 +1396,142 @@ where
         }
         self.current_states = Some(next_states);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rollout_batch_tests {
+    use burn::tensor::{DType, Device, Tensor};
+
+    use super::{PPOExperience, PPOPreparedExperience};
+    use crate::buffers::experience::{Experience, ExperienceBatchError};
+
+    /// Creates Float rank-3 observations `[2, 1, 2]`, rank-2 actions `[2, 1]`, and scalar statistics `[2, 1]`.
+    /// Uses F64 on the supplied device; observations retain gradients, while training rewards include distinct bootstrap corrections.
+    fn transition(value: f64, device: &Device) -> PPOExperience<Tensor<3>, Tensor<2>> {
+        let observations = Tensor::from_data(
+            [[[value, value + 1.0]], [[value + 2.0, value + 3.0]]],
+            (device, DType::F64),
+        )
+        .require_grad();
+        let rewards = Tensor::from_data([[value + 2.0], [value + 3.0]], (device, DType::F64));
+        PPOExperience::builder()
+            .observations(observations.clone())
+            .next_observations(observations + 10.0)
+            .actions(Tensor::from_data(
+                [[value], [value + 1.0]],
+                (device, DType::F64),
+            ))
+            .rewards(rewards.clone())
+            .training_rewards(rewards + 100.0)
+            .next_dones(vec![true, false])
+            .truncateds(vec![false, true])
+            .log_probs(Tensor::zeros([2, 1], (device, DType::F64)))
+            .build()
+    }
+
+    #[test]
+    fn rollout_batch_preserves_axes_statistics_dtype_and_gradients() {
+        let device = Device::flex().autodiff();
+        let mut experiences = [transition(1.0, &device), transition(10.0, &device)];
+        for item in &mut experiences {
+            item.prepared = Some(PPOPreparedExperience {
+                advantages: item.rewards.clone(),
+                returns: item.training_rewards.clone(),
+                old_values: Some(item.log_probs.clone()),
+            });
+        }
+        let batch = PPOExperience::batch(&experiences).unwrap();
+        let observations: Tensor<4> = batch.observations;
+        let actions: Tensor<3> = batch.actions;
+        assert_eq!(observations.dims(), [2, 2, 1, 2]);
+        assert_eq!(batch.next_observations.dims(), [2, 2, 1, 2]);
+        assert_eq!(actions.dims(), [2, 2, 1]);
+        assert_eq!(observations.dtype(), DType::F64);
+        assert_eq!(observations.device(), device);
+        assert_eq!(batch.rewards.dims(), [2, 2, 1]);
+        assert_eq!(batch.rewards.dtype(), DType::F64);
+        assert_eq!(
+            batch.rewards.into_data().try_to_vec::<f64>().unwrap(),
+            [3.0, 4.0, 12.0, 13.0]
+        );
+        assert_eq!(
+            batch
+                .training_rewards
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap(),
+            [103.0, 104.0, 112.0, 113.0]
+        );
+        assert_eq!(batch.next_dones.dims(), [2, 2, 1]);
+        assert_eq!(
+            batch.next_dones.into_data().try_to_vec::<bool>().unwrap(),
+            [true, false, true, false]
+        );
+        assert_eq!(
+            batch.truncateds.into_data().try_to_vec::<bool>().unwrap(),
+            [false, true, false, true]
+        );
+        assert_eq!(batch.log_probs.dims(), [2, 2, 1]);
+        let prepared = batch.prepared.unwrap();
+        assert_eq!(prepared.advantages.dims(), [2, 2, 1]);
+        assert_eq!(prepared.returns.dims(), [2, 2, 1]);
+        assert_eq!(prepared.old_values.unwrap().dims(), [2, 2, 1]);
+
+        let gradients = observations.sum().backward();
+        for item in experiences {
+            assert_eq!(
+                item.observations
+                    .grad(&gradients)
+                    .unwrap()
+                    .into_data()
+                    .try_to_vec::<f64>()
+                    .unwrap(),
+                [1.0; 4]
+            );
+        }
+    }
+
+    #[test]
+    fn rollout_batch_reports_empty_and_mismatched_columns() {
+        assert!(matches!(
+            <PPOExperience as Experience>::batch(&[]),
+            Err(ExperienceBatchError::EmptyBatch)
+        ));
+        let device = Device::flex().autodiff();
+        let mut experiences = [transition(1.0, &device), transition(10.0, &device)];
+        experiences[1].rewards = experiences[1].rewards.clone().cast(DType::F32);
+        assert!(matches!(
+            PPOExperience::batch(&experiences),
+            Err(ExperienceBatchError::DTypeMismatch { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn rollout_batch_preserves_optional_prepared_values() {
+        let device = Device::flex().autodiff();
+        let mut experiences = [transition(1.0, &device), transition(10.0, &device)];
+        assert!(
+            PPOExperience::batch(&experiences)
+                .unwrap()
+                .prepared
+                .is_none()
+        );
+        for item in &mut experiences {
+            item.prepared = Some(PPOPreparedExperience {
+                advantages: item.rewards.clone(),
+                returns: item.training_rewards.clone(),
+                old_values: None,
+            });
+        }
+        assert!(
+            PPOExperience::batch(&experiences)
+                .unwrap()
+                .prepared
+                .unwrap()
+                .old_values
+                .is_none()
+        );
     }
 }
 
@@ -1540,7 +1692,7 @@ mod network_configuration_tests {
 mod schedule_tests {
     use std::collections::HashSet;
 
-    use candle_core::{DType, Device, TensorId, Var};
+    use candle_core::{DType, Device, Tensor, TensorId, Var};
     use candle_nn::{Optimizer, VarBuilder, VarMap};
 
     use super::*;
@@ -1657,10 +1809,11 @@ mod schedule_tests {
 
     #[test]
     fn explained_variance_uses_population_variance() {
+        use burn::tensor::Tensor;
+
         let device = burn::tensor::Device::flex();
-        let returns = burn::tensor::Tensor::<2>::from_data([[1.0f32], [2.0], [3.0]], &device);
-        let rollout_values =
-            burn::tensor::Tensor::<2>::from_data([[1.0f32], [2.0], [2.0]], &device);
+        let returns = Tensor::<2>::from_data([[1.0f32], [2.0], [3.0]], &device);
+        let rollout_values = Tensor::<2>::from_data([[1.0f32], [2.0], [2.0]], &device);
 
         let actual = compute_explained_variance(&returns, &rollout_values)
             .try_into_scalar::<f32>()
@@ -1671,10 +1824,11 @@ mod schedule_tests {
 
     #[test]
     fn explained_variance_is_nan_for_constant_returns() {
+        use burn::tensor::Tensor;
+
         let device = burn::tensor::Device::flex();
-        let returns = burn::tensor::Tensor::<2>::from_data([[1.0f32], [1.0], [1.0]], &device);
-        let rollout_values =
-            burn::tensor::Tensor::<2>::from_data([[0.0f32], [1.0], [2.0]], &device);
+        let returns = Tensor::<2>::from_data([[1.0f32], [1.0], [1.0]], &device);
+        let rollout_values = Tensor::<2>::from_data([[0.0f32], [1.0], [2.0]], &device);
 
         let actual = compute_explained_variance(&returns, &rollout_values)
             .try_into_scalar::<f32>()
@@ -1692,8 +1846,10 @@ mod schedule_tests {
 
     #[test]
     fn population_variance_preserves_f64_device_and_gradients() {
+        use burn::tensor::Tensor;
+
         let device = burn::tensor::Device::flex().autodiff();
-        let values = burn::tensor::Tensor::<3>::from_data(
+        let values = Tensor::<3>::from_data(
             [[[1.0f64], [2.0], [3.0]]],
             (&device, burn::tensor::DType::F64),
         )
