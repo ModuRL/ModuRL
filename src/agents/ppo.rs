@@ -1,4 +1,5 @@
 use bon::bon;
+use burn::{module::Module, optim::ModuleOptimizer};
 use candle_core::{D, DType, IndexOp, Tensor};
 use candle_nn::{Optimizer, loss};
 use std::marker::PhantomData;
@@ -34,6 +35,8 @@ pub enum PPOConfigurationError {
     InvalidEntropyCoefficient,
     #[error("gradient clip must be finite and positive")]
     InvalidGradientClip,
+    #[error("learning rate must be finite and positive")]
+    InvalidLearningRate,
     #[error("PPO requires a floating-point dtype")]
     InvalidDType,
     #[error("the environment count must be nonzero")]
@@ -381,146 +384,102 @@ fn compute_explained_variance<const D: usize>(
     explained_variance.mask_fill(return_variance.equal_elem(0.0), f64::NAN)
 }
 
-pub struct FakeOptimizer(());
-
-impl Optimizer for FakeOptimizer {
-    type Config = ();
-    fn new(_vars: Vec<candle_core::Var>, _config: Self::Config) -> candle_core::Result<Self> {
-        panic!("FakeOptimizer should never be used");
-    }
-
-    fn step(&mut self, _grads: &candle_core::backprop::GradStore) -> candle_core::Result<()> {
-        panic!("FakeOptimizer should never be used");
-    }
-
-    fn learning_rate(&self) -> f64 {
-        panic!("FakeOptimizer should never be used");
-    }
-
-    fn set_learning_rate(&mut self, _lr: f64) {
-        panic!("FakeOptimizer should never be used");
-    }
+/// Selects an owned shared or separate actor-critic configuration.
+/// `N` defaults to `S`, so `PPONetworkInfo::<_>::Shared(network)` fixes the unused variant's type.
+pub enum PPONetworkInfo<S, N = S> {
+    Shared(S),
+    Separate(N),
 }
 
-pub enum PPONetworkInfo<O1, E, O2 = FakeOptimizer> {
-    Shared(SharedPPONetwork<O1, E>),
-    Separate(SeparatePPONetwork<O1, O2, E>),
-}
-
-/// Shared network architecture for PPO
-/// The output of the shared network is fed into both the actor and critic heads
-pub struct SharedPPONetwork<O, E> {
-    optimizer: O,
-    shared_network: Box<dyn candle_core::Module>,
-    critic_head: Box<dyn candle_core::Module>,
-    actor_head: Box<dyn ProbabilisticPolicy<Error = E>>,
+/// Owns a shared model whose output feeds both actor and critic heads.
+/// One optimizer updates all three models using one learning rate and schedule.
+pub struct SharedPPONetwork<T: Module, A: Module, C: Module> {
+    optimizer: ModuleOptimizer,
+    learning_rate: f64,
+    shared_network: T,
+    critic_head: C,
+    actor_head: A,
     lr_scheduler: Option<Box<dyn ParameterSchedule>>,
 }
 
 #[bon]
-impl<O, E> SharedPPONetwork<O, E>
-where
-    O: Optimizer,
-    E: std::fmt::Debug,
-{
+impl<T: Module, A: Module, C: Module> SharedPPONetwork<T, A, C> {
+    /// Owns the models and optimizer, and enables training on the models.
+    /// Models must share PPO's compute dtype and device. Rejects a nonpositive or non-finite learning rate.
     #[builder]
     pub fn new(
-        optimizer: O,
-        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
-        shared_network: Box<dyn candle_core::Module>,
-        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
-        critic_head: Box<dyn candle_core::Module>,
-        #[builder(with = |policy: impl ProbabilisticPolicy<Error = E> + 'static| Box::new(policy))]
-        actor_head: Box<dyn ProbabilisticPolicy<Error = E>>,
+        #[builder(into)] optimizer: ModuleOptimizer,
+        learning_rate: f64,
+        shared_network: T,
+        critic_head: C,
+        actor_head: A,
         #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         lr_scheduler: Option<Box<dyn ParameterSchedule>>,
-    ) -> Self {
-        Self {
-            optimizer,
-            shared_network,
-            critic_head,
-            actor_head,
-            lr_scheduler,
+    ) -> Result<Self, PPOConfigurationError> {
+        if !learning_rate.is_finite() || learning_rate <= 0.0 {
+            return Err(PPOConfigurationError::InvalidLearningRate);
         }
-    }
-
-    pub(crate) fn from_boxed(
-        optimizer: O,
-        shared_network: Box<dyn candle_core::Module>,
-        critic_head: Box<dyn candle_core::Module>,
-        actor_head: Box<dyn ProbabilisticPolicy<Error = E>>,
-        lr_scheduler: Option<Box<dyn ParameterSchedule>>,
-    ) -> Self {
-        Self {
+        Ok(Self {
             optimizer,
-            shared_network,
-            critic_head,
-            actor_head,
+            learning_rate,
+            shared_network: shared_network.train(),
+            critic_head: critic_head.train(),
+            actor_head: actor_head.train(),
             lr_scheduler,
-        }
+        })
     }
 }
 
-pub struct SeparatePPONetwork<O1, O2, E> {
-    actor_optimizer: O1,
-    critic_optimizer: O2,
-    actor_network: Box<dyn ProbabilisticPolicy<Error = E>>,
-    critic_network: Box<dyn candle_core::Module>,
+/// Owns separate actor and critic models with independently configurable optimizers, rates, and schedules.
+/// `combined_loss` selects a shared gradient-clipping norm instead of independent actor and critic norms.
+pub struct SeparatePPONetwork<A: Module, C: Module> {
+    actor_optimizer: ModuleOptimizer,
+    critic_optimizer: ModuleOptimizer,
+    actor_learning_rate: f64,
+    critic_learning_rate: f64,
+    actor_network: A,
+    critic_network: C,
     actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
     critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
     combined_loss: bool,
 }
 
 #[bon]
-impl<O1, O2, E> SeparatePPONetwork<O1, O2, E>
-where
-    O1: Optimizer,
-    O2: Optimizer,
-    E: std::fmt::Debug,
-{
+impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
+    /// Owns the models and optimizers, and enables training on both models.
+    /// Models must share PPO's compute dtype and device. Rejects nonpositive or non-finite learning rates.
     #[builder]
     pub fn new(
-        actor_optimizer: O1,
-        critic_optimizer: O2,
-        #[builder(with = |policy: impl ProbabilisticPolicy<Error = E> + 'static| Box::new(policy))]
-        actor_network: Box<dyn ProbabilisticPolicy<Error = E>>,
-        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
-        critic_network: Box<dyn candle_core::Module>,
+        #[builder(into)] actor_optimizer: ModuleOptimizer,
+        #[builder(into)] critic_optimizer: ModuleOptimizer,
+        actor_learning_rate: f64,
+        critic_learning_rate: f64,
+        actor_network: A,
+        critic_network: C,
         #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
         #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
         #[builder(default = false)] combined_loss: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, PPOConfigurationError> {
+        if !actor_learning_rate.is_finite()
+            || actor_learning_rate <= 0.0
+            || !critic_learning_rate.is_finite()
+            || critic_learning_rate <= 0.0
+        {
+            return Err(PPOConfigurationError::InvalidLearningRate);
+        }
+        Ok(Self {
             actor_optimizer,
             critic_optimizer,
-            actor_network,
-            critic_network,
+            actor_learning_rate,
+            critic_learning_rate,
+            actor_network: actor_network.train(),
+            critic_network: critic_network.train(),
             actor_lr_scheduler,
             critic_lr_scheduler,
             combined_loss,
-        }
-    }
-
-    pub(crate) fn from_boxed(
-        actor_optimizer: O1,
-        critic_optimizer: O2,
-        actor_network: Box<dyn ProbabilisticPolicy<Error = E>>,
-        critic_network: Box<dyn candle_core::Module>,
-        actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
-        critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
-        combined_loss: bool,
-    ) -> Self {
-        Self {
-            actor_optimizer,
-            critic_optimizer,
-            actor_network,
-            critic_network,
-            actor_lr_scheduler,
-            critic_lr_scheduler,
-            combined_loss,
-        }
+        })
     }
 }
 
@@ -1421,6 +1380,159 @@ where
         }
         self.current_states = Some(next_states);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod network_configuration_tests {
+    use burn::{
+        module::Module,
+        nn::{Initializer, Linear, LinearConfig, Relu},
+        optim::{AdamConfig, GradientsParams, SgdConfig},
+        tensor::Device,
+    };
+
+    use super::{PPOConfigurationError, PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork};
+
+    fn layer(device: &Device) -> Linear {
+        LinearConfig::new(2, 2)
+            .with_initializer(Initializer::Constant { value: 0.5 })
+            .init(device)
+            .valid()
+    }
+
+    #[test]
+    fn shared_builder_owns_models_and_enables_parameter_gradients() {
+        let device = Device::flex().autodiff();
+        let network = SharedPPONetwork::builder()
+            .shared_network(layer(&device))
+            .actor_head(layer(&device))
+            .critic_head(layer(&device))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.001)
+            .lr_scheduler(|_| 0.0005)
+            .build()
+            .unwrap();
+        let network = PPONetworkInfo::<_>::Shared(network);
+        let PPONetworkInfo::Shared(mut network) = network else {
+            panic!("expected a shared network");
+        };
+
+        assert!(network.shared_network.weight.val().is_require_grad());
+        assert!(network.actor_head.weight.val().is_require_grad());
+        assert!(network.critic_head.weight.val().is_require_grad());
+        assert_eq!(network.learning_rate, 0.001);
+        assert_eq!(network.lr_scheduler.as_ref().unwrap().value(0.5), 0.0005);
+
+        let models = (
+            network.shared_network,
+            network.actor_head,
+            network.critic_head,
+        );
+        let loss =
+            models.0.weight.val().sum() + models.1.weight.val().sum() + models.2.weight.val().sum();
+        let gradients = GradientsParams::from_grads(loss.backward(), &models);
+        let models = network
+            .optimizer
+            .step(network.learning_rate, models, gradients);
+        for model in [models.0, models.1, models.2] {
+            assert!(
+                (model.weight.val().into_data().try_to_vec::<f32>().unwrap()[0] - 0.499).abs()
+                    < 1e-6
+            );
+        }
+    }
+
+    #[test]
+    fn separate_builder_preserves_independent_rates_and_combined_loss() {
+        let device = Device::flex().autodiff();
+        let network = SeparatePPONetwork::builder()
+            .actor_network(layer(&device))
+            .critic_network(layer(&device))
+            .actor_optimizer(AdamConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(0.001)
+            .critic_learning_rate(0.002)
+            .actor_lr_scheduler(|_| 0.0005)
+            .critic_lr_scheduler(|_| 0.0007)
+            .combined_loss(true)
+            .build()
+            .unwrap();
+        let network = PPONetworkInfo::<_>::Separate(network);
+        let PPONetworkInfo::Separate(mut network) = network else {
+            panic!("expected a separate network");
+        };
+
+        assert!(network.actor_network.weight.val().is_require_grad());
+        assert!(network.critic_network.weight.val().is_require_grad());
+        assert_eq!(network.actor_learning_rate, 0.001);
+        assert_eq!(network.critic_learning_rate, 0.002);
+        assert_eq!(
+            network.actor_lr_scheduler.as_ref().unwrap().value(0.5),
+            0.0005
+        );
+        assert_eq!(
+            network.critic_lr_scheduler.as_ref().unwrap().value(0.5),
+            0.0007
+        );
+        assert!(network.combined_loss);
+
+        let actor_gradients = GradientsParams::from_grads(
+            network.actor_network.weight.val().sum().backward(),
+            &network.actor_network,
+        );
+        let critic_gradients = GradientsParams::from_grads(
+            network.critic_network.weight.val().sum().backward(),
+            &network.critic_network,
+        );
+        let actor = network.actor_optimizer.step(
+            network.actor_learning_rate,
+            network.actor_network,
+            actor_gradients,
+        );
+        let critic = network.critic_optimizer.step(
+            network.critic_learning_rate,
+            network.critic_network,
+            critic_gradients,
+        );
+        assert!(
+            (actor.weight.val().into_data().try_to_vec::<f32>().unwrap()[0] - 0.499).abs() < 1e-6
+        );
+        assert!(
+            (critic.weight.val().into_data().try_to_vec::<f32>().unwrap()[0] - 0.498).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn network_builders_reject_invalid_learning_rates() {
+        for rate in [0.0, -0.001, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let shared = SharedPPONetwork::builder()
+                .shared_network(Relu)
+                .actor_head(Relu)
+                .critic_head(Relu)
+                .optimizer(SgdConfig::new().init())
+                .learning_rate(rate)
+                .build();
+            assert!(matches!(
+                shared,
+                Err(PPOConfigurationError::InvalidLearningRate)
+            ));
+
+            for (actor_rate, critic_rate) in [(rate, 0.001), (0.001, rate)] {
+                let separate = SeparatePPONetwork::builder()
+                    .actor_network(Relu)
+                    .critic_network(Relu)
+                    .actor_optimizer(SgdConfig::new().init())
+                    .critic_optimizer(SgdConfig::new().init())
+                    .actor_learning_rate(actor_rate)
+                    .critic_learning_rate(critic_rate)
+                    .build();
+                assert!(matches!(
+                    separate,
+                    Err(PPOConfigurationError::InvalidLearningRate)
+                ));
+            }
+        }
     }
 }
 
