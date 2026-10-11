@@ -358,28 +358,27 @@ struct PPOLosses {
     critic_loss: Tensor,
 }
 
-/// Returns scalar population variance for `values` of arbitrary shape `[...]`.
-fn population_variance(values: &Tensor) -> candle_core::Result<Tensor> {
-    let mean = values.mean_all()?.broadcast_as(values.shape())?;
-    (values - mean)?.sqr()?.mean_all()
+/// Averages every axis of rank-D Float `values` and returns population variance `[1]`.
+/// Preserves the floating-point dtype, device, and gradient connections.
+fn population_variance<const D: usize>(
+    values: &burn::tensor::Tensor<D>,
+) -> burn::tensor::Tensor<1> {
+    let mean = values.clone().mean().unsqueeze::<D>();
+    (values.clone() - mean).square().mean()
 }
 
-/// Returns scalar explained variance for `returns` and `rollout_values` with
-/// identical scalar layouts, such as `[sample_count, 1]` or `[time, env_count, 1]`.
-fn compute_explained_variance(
-    returns: &Tensor,
-    rollout_values: &Tensor,
-) -> candle_core::Result<Tensor> {
-    let return_variance = population_variance(returns)?;
-    let residuals = (returns - rollout_values)?;
-    let residual_variance = population_variance(&residuals)?;
-    let explained_variance = (1.0 - residual_variance.broadcast_div(&return_variance)?)?;
-
-    let zero = return_variance.zeros_like()?;
-    let nan = zero.affine(f64::NAN, f64::NAN)?;
-    return_variance
-        .eq(&zero)?
-        .where_cond(&nan, &explained_variance)
+/// Returns explained variance `[1]` for matching rank-D Float statistics.
+/// Inputs use `[sample_count, 1]` or `[time, env_count, 1]`, with matching dtype and device.
+/// Averages every axis and retains gradient connections. Constant returns produce NaN.
+fn compute_explained_variance<const D: usize>(
+    returns: &burn::tensor::Tensor<D>,
+    rollout_values: &burn::tensor::Tensor<D>,
+) -> burn::tensor::Tensor<1> {
+    let return_variance = population_variance(returns);
+    let residuals = returns.clone() - rollout_values.clone();
+    let residual_variance = population_variance(&residuals);
+    let explained_variance = 1.0f64 - residual_variance / return_variance.clone();
+    explained_variance.mask_fill(return_variance.equal_elem(0.0), f64::NAN)
 }
 
 pub struct FakeOptimizer(());
@@ -1546,13 +1545,13 @@ mod schedule_tests {
 
     #[test]
     fn explained_variance_uses_population_variance() {
-        let device = Device::Cpu;
-        let returns = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3, 1), &device).unwrap();
-        let rollout_values = Tensor::from_vec(vec![1.0f32, 2.0, 2.0], (3, 1), &device).unwrap();
+        let device = burn::tensor::Device::flex();
+        let returns = burn::tensor::Tensor::<2>::from_data([[1.0f32], [2.0], [3.0]], &device);
+        let rollout_values =
+            burn::tensor::Tensor::<2>::from_data([[1.0f32], [2.0], [2.0]], &device);
 
         let actual = compute_explained_variance(&returns, &rollout_values)
-            .unwrap()
-            .to_vec0::<f32>()
+            .try_into_scalar::<f32>()
             .unwrap();
 
         assert!((actual - 2.0 / 3.0).abs() < 1e-6);
@@ -1560,16 +1559,52 @@ mod schedule_tests {
 
     #[test]
     fn explained_variance_is_nan_for_constant_returns() {
-        let device = Device::Cpu;
-        let returns = Tensor::from_vec(vec![1.0f32, 1.0, 1.0], (3, 1), &device).unwrap();
-        let rollout_values = Tensor::from_vec(vec![0.0f32, 1.0, 2.0], (3, 1), &device).unwrap();
+        let device = burn::tensor::Device::flex();
+        let returns = burn::tensor::Tensor::<2>::from_data([[1.0f32], [1.0], [1.0]], &device);
+        let rollout_values =
+            burn::tensor::Tensor::<2>::from_data([[0.0f32], [1.0], [2.0]], &device);
 
         let actual = compute_explained_variance(&returns, &rollout_values)
-            .unwrap()
-            .to_vec0::<f32>()
+            .try_into_scalar::<f32>()
             .unwrap();
 
         assert!(actual.is_nan());
+
+        assert!(
+            compute_explained_variance(&returns, &returns)
+                .try_into_scalar::<f32>()
+                .unwrap()
+                .is_nan()
+        );
+    }
+
+    #[test]
+    fn population_variance_preserves_f64_device_and_gradients() {
+        let device = burn::tensor::Device::flex().autodiff();
+        let values = burn::tensor::Tensor::<3>::from_data(
+            [[[1.0f64], [2.0], [3.0]]],
+            (&device, burn::tensor::DType::F64),
+        )
+        .require_grad();
+        let variance = population_variance(&values);
+        assert_eq!(variance.dims(), [1]);
+        assert_eq!(variance.dtype(), burn::tensor::DType::F64);
+        assert_eq!(variance.device(), device);
+        assert_close(
+            variance.clone().try_into_scalar::<f64>().unwrap(),
+            2.0 / 3.0,
+        );
+
+        let gradients = variance.backward();
+        let gradient = values
+            .grad(&gradients)
+            .unwrap()
+            .into_data()
+            .try_to_vec::<f64>()
+            .unwrap();
+        for (actual, expected) in gradient.into_iter().zip([-2.0 / 3.0, 0.0, 2.0 / 3.0]) {
+            assert_close(actual, expected);
+        }
     }
 
     #[test]
