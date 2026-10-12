@@ -153,8 +153,9 @@ fn ppo_cartpole() {
 
     let ppo_network_info = modurl::agents::ppo::PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+            .actor_network(ProbabilisticPolicyModel::new(
                 actor_network,
+                CategoricalDistribution,
             ))
             .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
@@ -269,8 +270,9 @@ fn ppo_cartpole_shared() {
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
-            .actor_head(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+            .actor_head(ProbabilisticPolicyModel::new(
                 actor_head,
+                CategoricalDistribution,
             ))
             .critic_head(critic_head)
             .shared_network(shared_network)
@@ -400,8 +402,9 @@ fn ppo_cartpole_shared_multithreaded() {
         FakeOptimizer,
     > = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
-            .actor_head(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+            .actor_head(ProbabilisticPolicyModel::new(
                 actor_head,
+                CategoricalDistribution,
             ))
             .critic_head(critic_head)
             .shared_network(shared_network)

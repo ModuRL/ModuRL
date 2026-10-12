@@ -198,8 +198,9 @@ fn main() {
     let mut variables = VarMap::new();
     let vb = VarBuilder::from_varmap(&variables, DType::F32, &device);
     let cnn = NatureCnn::new(vb.pp("network")).expect("failed to build Nature CNN");
-    let actor = ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+    let actor = ProbabilisticPolicyModel::new(
         linear_ortho(512, action_count, 0.01, vb.pp("actor")).expect("failed to build actor head"),
+        CategoricalDistribution,
     );
     // Checkpoints also contain the critic, so instantiate it before loading to
     // ensure every saved variable has the same model layout as training.

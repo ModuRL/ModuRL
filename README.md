@@ -84,7 +84,7 @@ After creating the Candle modules and optimizers, a separate-network PPO agent i
 
 ```rust
 let policy =
-    ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor);
+    ProbabilisticPolicyModel::new(actor, CategoricalDistribution);
 
 let networks = PPONetworkInfo::Separate(
     SeparatePPONetwork::builder()

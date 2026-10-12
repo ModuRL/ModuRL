@@ -2111,11 +2111,7 @@ mod schedule_tests {
             device: device.clone(),
         }
         .into();
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(4, 2, &device));
+        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
         let networks = PPONetworkInfo::Shared(
             SharedPPONetwork::builder()
                 .shared_network(FlattenModel)
@@ -2171,11 +2167,7 @@ mod schedule_tests {
             }
         }
         let device = Device::flex().autodiff();
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(1, 2, &device));
+        let actor = ProbabilisticPolicyModel::new(mlp(1, 2, &device), CategoricalDistribution);
         let networks = PPONetworkInfo::<_, _>::Separate(
             SeparatePPONetwork::builder()
                 .actor_network(actor)
@@ -2203,11 +2195,7 @@ mod schedule_tests {
             [2, 1]
         );
 
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(1, 2, &device));
+        let actor = ProbabilisticPolicyModel::new(mlp(1, 2, &device), CategoricalDistribution);
         let networks = PPONetworkInfo::<_, _>::Separate(
             SeparatePPONetwork::builder()
                 .actor_network(actor)
@@ -2253,11 +2241,7 @@ mod schedule_tests {
                 .build()
                 .unwrap()
         };
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(model(2));
+        let actor = ProbabilisticPolicyModel::new(model(2), CategoricalDistribution);
         let networks = PPONetworkInfo::<_, _>::Separate(
             SeparatePPONetwork::builder()
                 .actor_network(actor)
@@ -2325,11 +2309,8 @@ mod schedule_tests {
         let device = Device::flex().autodiff();
         let mut updates = Vec::new();
         for combined in [false, true] {
-            let actor = ProbabilisticPolicyModel::<(
-                MLP,
-                GaussianDistribution,
-                (Tensor<2>, Tensor<2>, Tensor<2>),
-            )>::new(mlp(4, 6, &device));
+            let actor =
+                ProbabilisticPolicyModel::new(mlp(4, 6, &device), GaussianDistribution::default());
             let critic = mlp(4, 1, &device);
             let mut before_actor = Parameters(Vec::new());
             let mut before_critic = Parameters(Vec::new());
@@ -2397,11 +2378,7 @@ mod schedule_tests {
         for _ in 0..2 {
             let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> =
                 TwoStepTestGym::new(device.clone(), false).into();
-            let actor = ProbabilisticPolicyModel::<(
-                MLP,
-                CategoricalDistribution,
-                (Tensor<2>, Tensor<2>, Tensor<2>),
-            )>::new(mlp(4, 2, &device));
+            let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
             let networks = PPONetworkInfo::<_, _>::Separate(
                 SeparatePPONetwork::builder()
                     .actor_network(actor)
@@ -2506,11 +2483,7 @@ mod schedule_tests {
             device: device.clone(),
         }
         .into();
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(4, 2, &device));
+        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
         let critic = ObservationCritic {
             weight: Param::from_tensor(Tensor::ones([1], (&device, DType::F32))),
         };
@@ -2744,11 +2717,7 @@ mod schedule_tests {
             }
         }
         let device = Device::flex().autodiff();
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(4, 2, &device));
+        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
         let networks = PPONetworkInfo::<_, _>::Separate(
             SeparatePPONetwork::builder()
                 .actor_optimizer(SgdConfig::new().init())
@@ -2790,11 +2759,7 @@ mod schedule_tests {
         ]
         .try_into()
         .unwrap();
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(4, 2, &device));
+        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
         let networks = PPONetworkInfo::<_, _>::Separate(
             SeparatePPONetwork::builder()
                 .actor_optimizer(SgdConfig::new().init())
@@ -2888,11 +2853,7 @@ mod schedule_tests {
         ]
         .try_into()
         .unwrap();
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(4, 2, &device));
+        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
         let networks = PPONetworkInfo::Shared(
             SharedPPONetwork::builder()
                 .shared_network(mlp(4, 4, &device))
@@ -2964,11 +2925,8 @@ mod schedule_tests {
             }
         }
         let device = Device::flex().autodiff();
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            GaussianDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(4, 6, &device));
+        let actor =
+            ProbabilisticPolicyModel::new(mlp(4, 6, &device), GaussianDistribution::default());
         let critic = mlp(4, 1, &device);
         let mut actor_ids = ParameterIds(HashSet::new());
         let mut critic_ids = ParameterIds(HashSet::new());
@@ -3079,11 +3037,7 @@ mod schedule_tests {
         ]
         .try_into()
         .unwrap();
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(4, 2, &device));
+        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
         let networks = PPONetworkInfo::<_, _>::Separate(
             SeparatePPONetwork::builder()
                 .actor_optimizer(SgdConfig::new().init())
@@ -3143,11 +3097,7 @@ mod schedule_tests {
             .collect::<Vec<_>>()
             .try_into()
             .unwrap();
-        let actor = ProbabilisticPolicyModel::<(
-            MLP,
-            CategoricalDistribution,
-            (Tensor<2>, Tensor<2>, Tensor<2>),
-        )>::new(mlp(4, 2, &device));
+        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
         let networks = PPONetworkInfo::<_, _>::Separate(
             SeparatePPONetwork::builder()
                 .actor_network(actor)
