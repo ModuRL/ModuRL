@@ -1,8 +1,8 @@
 use bon::bon;
-use candle_core::Tensor;
+use burn::tensor::Tensor;
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::Space,
+    spaces::BoxSpace,
 };
 
 use crate::{
@@ -87,7 +87,8 @@ impl AntV5 {
     }
 
     /// Sets an exact MuJoCo state, useful for reproducible evaluation and parity tests.
-    pub fn set_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<Tensor, MujocoError> {
+    /// Accepts host positions `[nq]` and velocities `[nv]`; returns unbatched F32 observations `[observation_size]` on CPU Flex.
+    pub fn set_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<Tensor<1>, MujocoError> {
         self.core.set_state(qpos, qvel)?;
         self.core.render()?;
         self.observation()
@@ -126,7 +127,8 @@ impl AntV5 {
         positions + self.core.nv() + contacts
     }
 
-    fn observation(&self) -> Result<Tensor, MujocoError> {
+    /// Returns unbatched F32 observations `[observation_size]` on CPU Flex, preserving the configured observation component order.
+    fn observation(&self) -> Result<Tensor<1>, MujocoError> {
         let mut observation = Vec::with_capacity(self.observation_size());
         observation.extend_from_slice(&self.core.qpos()[if self.exclude_xy { 2 } else { 0 }..]);
         observation.extend_from_slice(self.core.qvel());
@@ -139,7 +141,7 @@ impl AntV5 {
                     .map(|force| force.clamp(minimum, maximum)),
             );
         }
-        self.core.tensor(&observation)
+        Ok(self.core.tensor(&observation))
     }
 
     fn info(&self) -> AntV5Info {
@@ -161,20 +163,23 @@ impl AntV5 {
 
 impl Gym<AntV5Info> for AntV5 {
     type Error = MujocoError;
-    type SpaceError = candle_core::Error;
+    type ObservationSpace = BoxSpace<2>;
+    type ActionSpace = BoxSpace<2>;
 
+    /// Returns unbatched F32 observations `[observation_size]` on CPU Flex with reset metadata.
     fn reset(&mut self) -> Result<ResetInfo<AntV5Info>, Self::Error> {
         self.core
             .reset_uniform_positions_normal_velocities(self.reset_noise_scale)?;
         self.core.render()?;
         Ok(ResetInfo {
-            state: self.observation()?,
+            observation: self.observation()?,
             info: self.info(),
         })
     }
 
     /// Steps with one continuous actuator vector shaped `[8]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo<AntV5Info>, Self::Error> {
+    /// Accepts Float actions on CPU Flex; returns unbatched F32 observations `[observation_size]` on CPU Flex and an F32 reward.
+    fn step(&mut self, action: Tensor<1>) -> Result<StepInfo<AntV5Info>, Self::Error> {
         let position_before = self.core.body_position(1);
         let action = self.core.step(&action)?;
         let position_after = self.core.body_position(1);
@@ -195,7 +200,7 @@ impl Gym<AntV5Info> for AntV5 {
         info.reward_contact = Some(-contact_cost as f32);
         info.reward_survive = Some(survive_reward as f32);
         Ok(StepInfo {
-            state: self.observation()?,
+            observation: self.observation()?,
             reward: reward as f32,
             done: !healthy && self.terminate_when_unhealthy,
             truncated: false,
@@ -203,12 +208,12 @@ impl Gym<AntV5Info> for AntV5 {
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> BoxSpace<2> {
         self.core
             .unbounded_observation_space(self.observation_size())
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> BoxSpace<2> {
         self.core.action_space()
     }
 }

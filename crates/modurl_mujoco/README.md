@@ -1,21 +1,18 @@
 # modurl_mujoco
 
-The MuJoCo adapters, integration tests, and package build script are currently disabled.
-This package exports no environment types. The usage below requires restoring the adapters with support for the current Burn APIs.
-
-Environments always produce CPU observations and space bounds. Builders have no
-device setting; the existing per-environment seeded CPU RNG is unchanged.
+Environments produce F32 observations and space bounds on CPU Flex. Builders have no
+device setting. Each environment owns a seeded host RNG for simulation resets.
 Use `DeviceMultiGymWrapper` around vectorized environments for accelerator transfers.
 
-Native Rust MuJoCo environments for [ModuRL](https://github.com/ModuRL/ModuRL), using Candle tensors and [`mujoco-rs`](https://github.com/davidhozic/mujoco-rs) physics.
+Native Rust MuJoCo environments for [ModuRL](https://github.com/ModuRL/ModuRL), using Burn tensors and [`mujoco-rs`](https://github.com/davidhozic/mujoco-rs) physics.
 
 Implemented Gymnasium v5 environments:
 
-- `AntV5` — observation `(105,)`, action `(8,)`
-- `HalfCheetahV5` — observation `(17,)`, action `(6,)`
-- `HopperV5` — observation `(11,)`, action `(3,)`
-- `HumanoidV5` — observation `(348,)`, action `(17,)`
-- `Walker2dV5` — observation `(17,)`, action `(6,)`
+- `AntV5` — observation `[105]`, action `[8]`
+- `HalfCheetahV5` — observation `[17]`, action `[6]`
+- `HopperV5` — observation `[11]`, action `[3]`
+- `HumanoidV5` — observation `[348]`, action `[17]`
+- `Walker2dV5` — observation `[17]`, action `[6]`
 
 ## Installation
 
@@ -33,14 +30,27 @@ That limitation comes from `mujoco-rs`, which requires an absolute `MUJOCO_DOWNL
 ## Usage
 
 ```rust
-use candle_core::Device;
+use burn::tensor::Device;
 use modurl_mujoco::prelude::*;
 
 let mut environment = HalfCheetahV5::builder().build()?;
-let observation = environment.reset()?.state;
-let action = environment.action_space().sample_batch(1, &Device::Cpu)?.squeeze(0)?;
+let observation = environment.reset()?.observation;
+let action = environment.action_space().sample_batch(1, &Device::flex())?.squeeze_dim::<1>(0);
 let transition = environment.step(action)?;
 # Ok::<(), MujocoError>(())
+```
+
+Single observations and actions use `Tensor<1>` with shapes `[observation_size]`
+and `[action_size]`. Vectorized environments add one leading batch axis.
+Observation and action spaces use `BoxSpace<2>`; `shape()` excludes the batch axis.
+Actions must use CPU Flex and a Float dtype. F32 and F64 actions are read in F64
+for physics; observations and rewards remain F32. Invalid actions are rejected before simulation advances.
+
+Run the PPO or A2C examples from the repository root:
+
+```console
+cargo run --release --locked -p examples --example ppo_mujoco --features half-cheetah
+cargo run --release --locked -p examples --example a2c_mujoco --features half-cheetah
 ```
 
 Every builder defaults to the corresponding Gymnasium v5 configuration. The
@@ -166,7 +176,7 @@ let mut environment = CustomMujoco::builder()
     .build()?;
 ```
 
-The device defaults to CPU and frame skip defaults to 1. With the `rendering`
+Observations use CPU Flex and frame skip defaults to 1. With the `rendering`
 feature enabled, `.render(true)` opens a viewer. Construction rejects zero
 observation size, zero frame skip, and invalid initial task observations.
 
@@ -185,6 +195,10 @@ sensors, contacts, and body/site state using MuJoCo indices. By default, policy
 actions use `[-1, 1]`: limited actuators map to their XML `ctrlrange`, and unlimited
 actuators receive the raw value. Tasks may override action dimensions and mapping,
 or opt into physical control targets and an unbounded policy action space.
+
+`MujocoTask::map_action` receives a Float `Tensor<1>` shaped `[action_dim]` and
+returns `Result<Tensor<1>, MujocoError>` with controls shaped `[nu]`.
+Both tensors must use CPU Flex. `transition` receives the original policy actions as host F64 values.
 
 Custom environments implement `modurl::gym::Gym` and can be collected with
 `MultithreadedVectorizedGymWrapper` when `modurl/multithreading` is enabled and
