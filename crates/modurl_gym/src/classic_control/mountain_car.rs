@@ -1,8 +1,8 @@
 use bon::bon;
-use candle_core::{Device, Tensor};
+use burn::tensor::{DType, Device, Distribution, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::{self, Space},
+    spaces,
 };
 
 use crate::EnvironmentError;
@@ -11,7 +11,7 @@ use crate::EnvironmentError;
 /// Converted from the OpenAI Gym Mountain Car environment.
 pub struct MountainCarV0 {
     rng_device: Device,
-    state: Tensor,
+    state: Tensor<1>,
     action_space: spaces::Discrete,
     observation_space: spaces::BoxSpace,
     min_position: f32,
@@ -30,8 +30,8 @@ impl MountainCarV0 {
     #[builder]
     pub fn new(
         /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = &Device::Cpu)]
-        rng_device: &Device,
+        #[builder(default = Device::flex(), with = |device: &Device| device.clone())]
+        rng_device: Device,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
@@ -46,15 +46,15 @@ impl MountainCarV0 {
 
         let low = vec![min_position, -max_speed];
         let high = vec![max_position, max_speed];
-        let low = Tensor::from_vec(low, vec![2], &Device::Cpu)?;
-        let high = Tensor::from_vec(high, vec![2], &Device::Cpu)?;
+        let low: Tensor<1> = Tensor::from_data(TensorData::new(low, [2]), &Device::flex());
+        let high: Tensor<1> = Tensor::from_data(TensorData::new(high, [2]), &Device::flex());
 
         let action_space = spaces::Discrete::new(3);
-        let observation_space = spaces::BoxSpace::new(low, high);
+        let observation_space = spaces::BoxSpace::new(low.unsqueeze::<2>(), high.unsqueeze::<2>());
 
         Ok(Self {
             rng_device: rng_device.clone(),
-            state: Tensor::zeros(vec![2], candle_core::DType::F32, &Device::Cpu)?,
+            state: Tensor::zeros([2], (&Device::flex(), DType::F32)),
             action_space,
             observation_space,
             min_position,
@@ -88,7 +88,9 @@ impl MountainCarV0 {
 
             let state_vec = self
                 .state
-                .to_vec1::<f32>()
+                .clone()
+                .try_into_data_as::<f32>()
+                .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
                 .expect("MountainCar state is always a rank-one f32 tensor");
             let pos = state_vec[0];
 
@@ -289,38 +291,47 @@ struct CarDrawParams {
 
 impl Gym for MountainCarV0 {
     type Error = EnvironmentError;
-    type SpaceError = candle_core::Error;
+    type ObservationSpace = spaces::BoxSpace;
+    type ActionSpace = spaces::Discrete;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         // Initialize position uniformly between -0.6 and -0.4
-        let position = Tensor::rand(-0.6, -0.4, vec![1], &self.rng_device)?
-            .to_device(&Device::Cpu)?
-            .to_dtype(candle_core::DType::F32)?;
-        let velocity = Tensor::zeros(vec![1], candle_core::DType::F32, &Device::Cpu)?;
+        let position = Tensor::<1>::random(
+            [1],
+            Distribution::Uniform(-0.6, -0.4),
+            (&self.rng_device, DType::F64),
+        )
+        .to_device(&Device::flex())
+        .cast(DType::F32);
+        let velocity = Tensor::zeros([1], (&Device::flex(), DType::F32));
 
-        self.state = Tensor::cat(&[position, velocity], 0)?;
+        self.state = Tensor::cat(vec![position, velocity], 0);
 
         #[cfg(feature = "rendering")]
         self.render()?;
 
         Ok(ResetInfo {
-            state: self.state.clone(),
+            observation: self.state.clone(),
             info: (),
         })
     }
 
-    /// Steps with one scalar discrete action shaped `[]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        if !self.action_space.contains(&action) {
+    /// Steps with one scalar Int action shaped `[1]`.
+    fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
+        if !self.action_space.contains(&action.clone().unsqueeze::<2>()) {
             return Err(EnvironmentError::InvalidAction(
-                "MountainCar actions must be scalar u32 values in 0..3",
+                "MountainCar actions must be Int tensors shaped [1] in 0..3",
             ));
         }
 
-        let state_vec = self.state.to_vec1::<f32>()?;
+        let state_vec = self
+            .state
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))?;
         let (mut position, mut velocity) = (state_vec[0], state_vec[1]);
 
-        let action_vec = action.to_vec0::<u32>()?;
+        let action_vec = action.clone().try_into_scalar::<i32>()?;
 
         velocity +=
             (action_vec as f32 - 1.0) * self.force + (3.0 * position).cos() * (-self.gravity);
@@ -336,7 +347,10 @@ impl Gym for MountainCarV0 {
             velocity = 0.0;
         }
 
-        self.state = Tensor::from_vec(vec![position, velocity], vec![2], &Device::Cpu)?;
+        self.state = Tensor::from_data(
+            TensorData::new(vec![position, velocity], [2]),
+            &Device::flex(),
+        );
 
         // Check if goal is reached
         let terminated = position >= self.goal_position && velocity >= self.goal_velocity;
@@ -346,7 +360,7 @@ impl Gym for MountainCarV0 {
         self.render()?;
 
         Ok(StepInfo {
-            state: self.state.clone(),
+            observation: self.state.clone(),
             reward,
             done: terminated,
             truncated: false,
@@ -354,12 +368,12 @@ impl Gym for MountainCarV0 {
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(self.observation_space.clone())
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(self.action_space.clone())
+    fn action_space(&self) -> Self::ActionSpace {
+        self.action_space.clone()
     }
 }
 
@@ -368,38 +382,27 @@ mod tests {
     use super::*;
     use crate::testing::check_discrete_parity;
     use Gym;
+    #[cfg(feature = "rendering")]
+    use modurl::spaces::ActionSpace;
 
     #[test]
     fn test_mountain_car() {
         let mut env = MountainCarV0::builder().build().unwrap();
         let state = env.reset().expect("Failed to reset environment.");
-        assert_eq!(
-            state
-                .state
-                .shape()
-                .dim(0)
-                .expect("Failed to get state dim."),
-            2
-        );
+        assert_eq!(state.observation.dims()[0], 2);
         let StepInfo {
-            state: next_state,
+            observation: next_state,
             reward,
             done,
             truncated: _truncated,
             ..
         } = env
-            .step(
-                Tensor::from_vec(vec![0_u32], vec![], &Device::Cpu)
-                    .expect("Failed to create tensor."),
-            )
+            .step(Tensor::from_data(
+                TensorData::new(vec![0_u32], [1]),
+                &Device::flex(),
+            ))
             .expect("Failed to step environment.");
-        assert_eq!(
-            next_state
-                .shape()
-                .dim(0)
-                .expect("Failed to get next state dim."),
-            2
-        );
+        assert_eq!(next_state.dims()[0], 2);
         assert!(reward == -1.0);
         assert!(!done);
     }
@@ -409,7 +412,10 @@ mod tests {
         let mut env = MountainCarV0::builder().build().unwrap();
         let _state = env.reset();
         let error = env
-            .step(Tensor::from_vec(vec![3_u32], vec![], &Device::Cpu).unwrap())
+            .step(Tensor::from_data(
+                TensorData::new(vec![3_u32], [1]),
+                &Device::flex(),
+            ))
             .unwrap_err();
         assert!(matches!(error, EnvironmentError::InvalidAction(_)));
     }
@@ -418,9 +424,9 @@ mod tests {
     fn reward_is_negative_one_when_not_terminated() {
         let mut env = MountainCarV0::builder().build().unwrap();
         env.reset().unwrap();
-        let action = Tensor::from_vec(vec![1u32], vec![], &Device::Cpu).unwrap();
+        let action = Tensor::from_data(TensorData::new(vec![1u32], [1]), &Device::flex());
         let StepInfo {
-            state: _state,
+            observation: _state,
             reward,
             done,
             truncated: _truncated,
@@ -431,15 +437,15 @@ mod tests {
     }
 
     impl MountainCarV0 {
-        fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error> {
+        fn reset_deterministic(&mut self) -> Result<Tensor<1>, TensorReadError> {
             // Set deterministic initial state for testing (matches Python test with options={"low": 0.0, "high": 0.0})
-            self.state = Tensor::from_vec(vec![0.0f32, 0.0], vec![2], &Device::Cpu)
-                .expect("Failed to create tensor.");
+            self.state =
+                Tensor::from_data(TensorData::new(vec![0.0f32, 0.0], [2]), &Device::flex());
             Ok(self.state.clone())
         }
 
         /// Restores one MountainCar state shaped `[2]`.
-        fn set_state(&mut self, state: Tensor, _: Option<serde_json::Value>) {
+        fn set_state(&mut self, state: Tensor<1>, _: Option<serde_json::Value>) {
             self.state = state;
         }
     }
@@ -463,12 +469,11 @@ mod tests {
         let action_space = env.action_space();
         for _ in 0..200 {
             let action = action_space
-                .sample_batch(1, &Device::Cpu)
+                .sample_batch(1, &Device::flex())
                 .unwrap()
-                .squeeze(0)
-                .unwrap();
+                .squeeze_dims::<1>(&[0]);
             let StepInfo {
-                state: _,
+                observation: _,
                 reward: _,
                 done,
                 truncated: _,

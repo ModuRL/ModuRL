@@ -19,6 +19,11 @@ The getting-started example uses `CartPoleV1` for individual environments and
 | `box_2d::bipedal_walker` | `BipedalWalkerV3` | Continuous `[4]` | `[24]` |
 | `box_2d::lunar_lander` | `LunarLanderV3` | Discrete, 4 actions | `[8]` |
 
+Discrete actions have shape `[1]` and kind `Int`;
+continuous actions retain the component shapes above. Vectorized batches add one leading axis.
+Reset and step results expose `observation`. Observations and space bounds stay on CPU.
+The `rng_device` builder option selects the device used for random draws.
+
 `BipedalWalkerV3` implements the standard environment with uneven grass terrain;
 the hardcore obstacle variant is not included.
 

@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-candle-core = "0.11.0"
+burn = { version = "=0.22.0", default-features = false, features = ["std", "flex"] }
 modurl = "0.1.0"
 modurl_gym = "0.1.0"
 ```
@@ -19,17 +19,16 @@ modurl_gym = "0.1.0"
 Create a CartPole environment, sample an action, and take one step:
 
 ```rust
-use candle_core::Device;
+use burn::tensor::Device;
 use modurl::prelude::*;
-use modurl_gym::EnvironmentError;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
-fn main() -> Result<(), EnvironmentError> {
-    let device = Device::Cpu;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let device = Device::flex();
     let mut env = CartPoleV1::builder().rng_device(&device).build()?;
 
-    let observation = env.reset()?.state;
-    let action = env.action_space().sample_batch(1, &device)?.squeeze(0)?;
+    let observation = env.reset()?.observation;
+    let action = env.action_space().sample_batch(1, &device)?.squeeze_dims::<1>(&[0]);
     let transition = env.step(action)?;
 
     println!("observation shape: {:?}", observation.dims());
@@ -39,6 +38,9 @@ fn main() -> Result<(), EnvironmentError> {
 ```
 
 ## Environments
+
+Discrete actions have shape `[1]` and kind `Int`; vectorized actions have shape `[batch_size, 1]`.
+Continuous actions retain their component shapes. Observation space bounds include a leading size-one batch axis.
 
 All environments produce observations and space bounds on CPU. The optional
 builder setting `rng_device` controls only random draws and defaults to CPU.
