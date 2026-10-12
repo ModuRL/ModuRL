@@ -5,6 +5,25 @@ use burn::{
 };
 use std::collections::HashSet;
 
+/// Clamps rank-D Float values to `[min, max]`, preserving shape, dtype, and device.
+/// Splits gradients equally with each bound at equality; coincident bounds therefore retain one quarter of the input gradient.
+pub(crate) fn clamp_with_boundary_gradients<const D: usize>(
+    values: Tensor<D>,
+    min: f64,
+    max: f64,
+) -> Tensor<D> {
+    let at_min = values.clone().equal_elem(min);
+    let lower = values
+        .clone()
+        .clamp_min(min)
+        .mask_where(at_min, values * 0.5 + min * 0.5);
+    let at_max = lower.clone().equal_elem(max);
+    lower
+        .clone()
+        .clamp_max(max)
+        .mask_where(at_max, lower * 0.5 + max * 0.5)
+}
+
 /// Clips one global norm across the model's parameter gradients, preserving every parameter shape, dtype, and device.
 /// Gradients must come from this model's backward pass. Missing gradients are skipped; shared parameters count once.
 /// A tuple of models shares one norm. Gradients outside those models remain unchanged.
@@ -104,6 +123,50 @@ pub(crate) fn normalize_tensor<const D: usize>(t: &Tensor<D>) -> Tensor<D> {
 mod tests {
     use super::*;
     use burn::tensor::{Device, TensorData};
+
+    #[test]
+    fn clamp_splits_boundary_gradients_and_preserves_precision() {
+        let device = Device::flex().autodiff();
+        for dtype in [DType::F32, DType::F64] {
+            for (min, max, expected, expected_gradients) in [
+                (
+                    -1.0,
+                    1.0,
+                    [-1.0, -1.0, 0.0, 1.0, 1.0],
+                    [0.0, 0.5, 1.0, 0.5, 0.0],
+                ),
+                (0.0, 0.0, [0.0; 5], [0.0, 0.0, 0.25, 0.0, 0.0]),
+            ] {
+                let input =
+                    Tensor::<1>::from_data([-2.0f64, -1.0, 0.0, 1.0, 2.0], (&device, dtype))
+                        .require_grad();
+                let output = clamp_with_boundary_gradients(input.clone(), min, max);
+                assert_eq!(output.dtype(), dtype);
+                assert_eq!(output.device(), device);
+                assert_eq!(output.dims(), [5]);
+                assert_eq!(
+                    output
+                        .clone()
+                        .into_data()
+                        .convert::<f64>()
+                        .try_to_vec::<f64>()
+                        .unwrap(),
+                    expected
+                );
+                let gradients = output.sum().backward();
+                assert_eq!(
+                    input
+                        .grad(&gradients)
+                        .unwrap()
+                        .into_data()
+                        .convert::<f64>()
+                        .try_to_vec::<f64>()
+                        .unwrap(),
+                    expected_gradients
+                );
+            }
+        }
+    }
 
     #[test]
     fn normalization_preserves_shape_precision_and_sample_variance() {

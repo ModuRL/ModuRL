@@ -269,7 +269,6 @@ mod tests {
             let updated_parameters = agent.inner.online_q_network.values.val().into_data();
             assert_ne!(initial_parameters, updated_parameters);
             assert_eq!(agent.inner.dtype, dtype);
-            drop(agent);
             assert_eq!(logger.collection_timesteps, [2]);
             assert_eq!(logger.update_timesteps, [1, 2]);
         }
