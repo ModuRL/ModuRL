@@ -5,18 +5,20 @@
 //! Candle and ModuRL Gym are intentionally left explicit.
 
 pub use crate::agents::{
-    Agent, ReplayDeviceStrategy, ReplayStorageConfig,
-    a2c::{
-        A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
-        A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
-    },
-    deterministic_actor_critic::{
-        DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
-        DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
-        DeterministicActorCriticLogEntry, DeterministicActorCriticResult, DeterministicCritic,
-        ddpg::{DDPGAgent, DDPGLogger},
-        td3::{TD3Agent, TD3Logger},
-    },
+    Agent,
+    ReplayDeviceStrategy,
+    ReplayStorageConfig,
+    // a2c::{
+    //     A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
+    //     A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
+    // },
+    // deterministic_actor_critic::{
+    //     DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
+    //     DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
+    //     DeterministicActorCriticLogEntry, DeterministicActorCriticResult, DeterministicCritic,
+    //     ddpg::{DDPGAgent, DDPGLogger},
+    //     td3::{TD3Agent, TD3Logger},
+    // },
     ppo::{
         PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
         PPOLogEntry, PPOLogger, PPOModelGroup, PPOModelTypes, PPONetwork, PPONetworkError,
@@ -28,12 +30,12 @@ pub use crate::agents::{
         ddqn::{DDQNAgent, DDQNLogger},
         dqn::{DQNAgent, DQNLogger},
     },
-    sac::{
-        DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
-        SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
-        SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
-        ScalarStateActionCritic,
-    },
+    // sac::{
+    //     DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
+    //     SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
+    //     SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
+    //     ScalarStateActionCritic,
+    // },
 };
 pub use crate::distributions::{
     AffineTransform, AffineTransformError, CategoricalDistribution, CategoricalDistributionError,

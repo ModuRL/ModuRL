@@ -79,9 +79,11 @@ impl Discrete {
 impl ObservationSpace<2> for Discrete {
     type Kind = Int;
 
+    /// Checks integer indices shaped `[batch_size, 1]` without changing the input.
     fn contains(&self, values: &Tensor<2, Int>) -> bool {
         self.contains(values)
     }
+
     fn shape(&self) -> Vec<usize> {
         self.shape()
     }
@@ -91,9 +93,11 @@ impl ActionSpace<2> for Discrete {
     type Kind = Int;
     type Error = SpaceError;
 
+    /// Checks integer indices shaped `[batch_size, 1]` without changing the input.
     fn contains(&self, values: &Tensor<2, Int>) -> bool {
         self.contains(values)
     }
+
     fn shape(&self) -> Vec<usize> {
         self.shape()
     }
@@ -185,9 +189,11 @@ impl<const R: usize> BoxSpace<R> {
 impl<const R: usize> ObservationSpace<R> for BoxSpace<R> {
     type Kind = Float;
 
+    /// Checks rank-R values `[batch_size, ...self.shape()]` without changing the input.
     fn contains(&self, values: &Tensor<R>) -> bool {
         self.contains(values)
     }
+
     fn shape(&self) -> Vec<usize> {
         self.shape()
     }
@@ -197,9 +203,11 @@ impl<const R: usize> ActionSpace<R> for BoxSpace<R> {
     type Kind = Float;
     type Error = SpaceError;
 
+    /// Checks rank-R values `[batch_size, ...self.shape()]` without changing the input.
     fn contains(&self, values: &Tensor<R>) -> bool {
         self.contains(values)
     }
+
     fn shape(&self) -> Vec<usize> {
         self.shape()
     }

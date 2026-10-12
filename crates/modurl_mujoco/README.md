@@ -1,5 +1,8 @@
 # modurl_mujoco
 
+The MuJoCo adapters, integration tests, and package build script are currently disabled.
+This package exports no environment types. The usage below requires restoring the adapters with support for the current Burn APIs.
+
 Environments always produce CPU observations and space bounds. Builders have no
 device setting; the existing per-environment seeded CPU RNG is unchanged.
 Use `DeviceMultiGymWrapper` around vectorized environments for accelerator transfers.

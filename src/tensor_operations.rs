@@ -97,7 +97,7 @@ struct GradientScale<'a> {
 }
 
 impl ModuleVisitor for GradientScale<'_> {
-    /// Scales a parameter gradient of rank `D`, preserving its axes, dtype, and device.
+    /// Scales a parameter gradient of rank `D`, preserving its shape, dtype, and device.
     fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
         if !self.visited.insert(param.id) {
             return;
