@@ -621,18 +621,21 @@ impl Gym for BipedalWalkerV3 {
         ))?;
         world.borrow_mut().step(1.0 / FPS, 6 * 30, 2 * 30);
 
-        let hull = self
-            .hull
-            .as_ref()
-            .ok_or(EnvironmentError::NotInitialized(
-                "call reset before stepping BipedalWalker",
-            ))?
-            .borrow();
-        let position = hull.get_position();
-        let velocity = hull.get_linear_velocity();
-        let angle = hull.get_angle();
-        let angular_velocity = hull.get_angular_velocity();
-        drop(hull);
+        let (position, velocity, angle, angular_velocity) = {
+            let hull = self
+                .hull
+                .as_ref()
+                .ok_or(EnvironmentError::NotInitialized(
+                    "call reset before stepping BipedalWalker",
+                ))?
+                .borrow();
+            (
+                hull.get_position(),
+                hull.get_linear_velocity(),
+                hull.get_angle(),
+                hull.get_angular_velocity(),
+            )
+        };
         let joint_states = self
             .joints
             .iter()

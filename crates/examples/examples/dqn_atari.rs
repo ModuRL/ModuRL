@@ -247,9 +247,10 @@ fn main() {
         .set_seed(SEED as u64)
         .expect("failed to seed accelerator device");
 
-    let probe_env = make_atari_env(rom_path.clone(), SEED);
-    let action_count = probe_env.action_space().shape()[0];
-    drop(probe_env);
+    let action_count = {
+        let probe_env = make_atari_env(rom_path.clone(), SEED);
+        probe_env.action_space().shape()[0]
+    };
     let action_space = Discrete::new(action_count);
 
     let envs = VectorizedGymWrapper::from(

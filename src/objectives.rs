@@ -1,3 +1,4 @@
+use crate::tensor_operations::clamp_with_boundary_gradients;
 use burn::tensor::{Bool, Tensor};
 
 /// Builds one-step Bellman targets from `rewards`, `terminated`, and
@@ -53,17 +54,77 @@ pub fn clipped_value_loss(
         prediction.dims(),
         "anchor shape must match prediction"
     );
-    let delta = (prediction.clone() - anchor.clone()).clamp(-epsilon, epsilon);
+    let delta =
+        clamp_with_boundary_gradients(prediction.clone() - anchor.clone(), -epsilon, epsilon);
     let clipped = anchor + delta;
     let loss = (prediction - target.clone()).square();
     let clipped_loss = (clipped - target).square();
-    loss.max_pair(clipped_loss).mean()
+    // Equal errors split their gradients between the clipped and unclipped predictions.
+    let ties = loss.clone().equal(clipped_loss.clone());
+    loss.clone()
+        .max_pair(clipped_loss.clone())
+        .mask_where(ties, (loss + clipped_loss) * 0.5)
+        .mean()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use burn::tensor::Device;
+
+    #[test]
+    fn clipped_value_loss_splits_gradients_at_the_clamp_boundary() {
+        let device = Device::flex().autodiff();
+        let prediction = Tensor::<2>::from_floats([[1.0]], &device).require_grad();
+        let anchor = Tensor::<2>::from_floats([[0.0]], &device).require_grad();
+        let target = Tensor::<2>::from_floats([[0.0]], &device).require_grad();
+        let gradients =
+            clipped_value_loss(prediction.clone(), target.clone(), anchor.clone(), 1.0).backward();
+        for (input, expected) in [(prediction, 1.5), (anchor, 0.5), (target, -2.0)] {
+            assert_eq!(
+                input.grad(&gradients).unwrap().into_scalar::<f32>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn clipped_value_loss_splits_tied_branch_gradients() {
+        let device = Device::flex().autodiff();
+        let prediction = Tensor::<2>::from_floats([[2.0]], &device).require_grad();
+        let anchor = Tensor::<2>::from_floats([[0.0]], &device).require_grad();
+        let target = Tensor::<2>::from_floats([[1.5]], &device).require_grad();
+        let loss = clipped_value_loss(prediction.clone(), target.clone(), anchor.clone(), 1.0);
+        assert_eq!(loss.clone().try_into_scalar::<f32>().unwrap(), 0.25);
+        let gradients = loss.backward();
+        assert_eq!(
+            prediction
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            [0.5]
+        );
+        assert_eq!(
+            anchor
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            [-0.5]
+        );
+        assert_eq!(
+            target
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            [0.0]
+        );
+    }
 
     #[test]
     fn bellman_targets_mask_termination_without_implicit_detachment() {
