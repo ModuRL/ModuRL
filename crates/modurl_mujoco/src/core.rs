@@ -1,5 +1,5 @@
-use candle_core::{DType, Device, Tensor};
-use modurl::spaces::{BoxSpace, Space};
+use burn::tensor::{DType, Device, Tensor, TensorData, TensorReadError};
+use modurl::spaces::BoxSpace;
 use mujoco_rs::prelude::{MjData, MjModel, MjtObj};
 #[cfg(feature = "rendering")]
 use mujoco_rs::viewer::MjViewer;
@@ -272,8 +272,8 @@ impl MujocoCore {
                 _ => continue,
             };
             let force = self.data.contact_force(index);
-            for axis in 0..3 {
-                forces[body][axis] += sign
+            for (axis, value) in forces[body].iter_mut().enumerate() {
+                *value += sign
                     * (0..3)
                         .map(|component| force[component] * contact.frame[component * 3 + axis])
                         .sum::<f64>();
@@ -454,32 +454,55 @@ impl MujocoCore {
         self.data.cfrc_ext()
     }
 
+    /// Reads Float actions `[action_size]` on CPU Flex into a host vector of the same length using F64 precision.
+    /// Preserves the input tensor and its shape. Rejects invalid shapes, devices, dtypes, and non-finite values.
+    pub(crate) fn action_values(
+        action: &Tensor<1>,
+        action_size: usize,
+    ) -> Result<Vec<f64>, MujocoError> {
+        if action.dims() != [action_size] {
+            return Err(MujocoError::InvalidInput(format!(
+                "action has shape {:?}, expected [{action_size}]",
+                action.dims()
+            )));
+        }
+        if action.device().without_autodiff() != Device::flex() {
+            return Err(MujocoError::InvalidInput(format!(
+                "action must use CPU Flex, got {:?}",
+                action.device()
+            )));
+        }
+        if !action.dtype().is_float() {
+            return Err(MujocoError::InvalidInput(format!(
+                "action must have a floating-point dtype, got {:?}",
+                action.dtype()
+            )));
+        }
+        let values = action
+            .clone()
+            .cast(DType::F64)
+            .try_into_data_as::<f64>()?
+            .try_to_vec::<f64>()
+            .map_err(TensorReadError::from)?;
+        if !values.iter().all(|value| value.is_finite()) {
+            return Err(MujocoError::InvalidInput("actions must be finite".into()));
+        }
+        Ok(values)
+    }
+
     /// Advances MuJoCo with one actuator vector `action` shaped `[nu]`.
-    pub(crate) fn step(&mut self, action: &Tensor) -> Result<Vec<f64>, MujocoError> {
+    pub(crate) fn step(&mut self, action: &Tensor<1>) -> Result<Vec<f64>, MujocoError> {
         self.step_bounded(action, -1.0, 1.0)
     }
 
     /// Advances MuJoCo with one bounded actuator vector `action` shaped `[nu]`.
     pub(crate) fn step_bounded(
         &mut self,
-        action: &Tensor,
+        action: &Tensor<1>,
         minimum: f64,
         maximum: f64,
     ) -> Result<Vec<f64>, MujocoError> {
-        if action.rank() != 1 || action.dims()[0] != self.nu() {
-            return Err(MujocoError::InvalidInput(format!(
-                "action shape mismatch: expected ({},), got {:?}",
-                self.nu(),
-                action.dims()
-            )));
-        }
-        if !action.dtype().is_float() {
-            return Err(MujocoError::InvalidInput(format!(
-                "action dtype mismatch: expected a floating-point dtype, got {:?}",
-                action.dtype()
-            )));
-        }
-        let values = action.to_dtype(DType::F64)?.to_vec1::<f64>()?;
+        let values = Self::action_values(action, self.nu())?;
         if !values
             .iter()
             .all(|value| value.is_finite() && (minimum..=maximum).contains(value))
@@ -507,21 +530,15 @@ impl MujocoCore {
 
     /// Sends physical actuator targets directly, as required by unbounded
     /// joint-position action tasks. The MJCF actuator defines the control units.
-    /// The action tensor has shape `[nu]`, with one target per actuator.
-    pub(crate) fn step_physical(&mut self, action: &Tensor) -> Result<(), MujocoError> {
-        if action.rank() != 1 || action.dims()[0] != self.nu() || !action.dtype().is_float() {
+    /// The host action vector has shape `[nu]`, with one target per actuator.
+    pub(crate) fn step_physical(&mut self, action: &[f64]) -> Result<(), MujocoError> {
+        if action.len() != self.nu() || !action.iter().all(|value| value.is_finite()) {
             return Err(MujocoError::InvalidInput(format!(
-                "physical action must be a floating tensor of shape ({},)",
+                "physical actions must contain {} finite values",
                 self.nu()
             )));
         }
-        let targets = action.to_dtype(DType::F64)?.to_vec1::<f64>()?;
-        if !targets.iter().all(|value| value.is_finite()) {
-            return Err(MujocoError::InvalidInput(
-                "physical actions must be finite".into(),
-            ));
-        }
-        self.data.ctrl_mut().copy_from_slice(&targets);
+        self.data.ctrl_mut().copy_from_slice(action);
         self.contact_substeps.clear();
         for _ in 0..self.frame_skip {
             self.data.step();
@@ -534,14 +551,16 @@ impl MujocoCore {
 
     /// Maps normalized policy actions `[-1, 1]` into each limited actuator's
     /// XML control range before stepping. Unbounded actuators receive the raw value.
-    pub(crate) fn step_normalized(&mut self, action: &Tensor) -> Result<Vec<f64>, MujocoError> {
-        if action.rank() != 1 || action.dims()[0] != self.nu() || !action.dtype().is_float() {
+    /// Input and returned host vectors have shape `[nu]`.
+    pub(crate) fn step_normalized(&mut self, action: &[f64]) -> Result<Vec<f64>, MujocoError> {
+        if action.len() != self.nu() {
             return Err(MujocoError::InvalidInput(format!(
-                "normalized action must be a floating tensor of shape ({},)",
+                "normalized actions has length {}, expected {}",
+                action.len(),
                 self.nu()
             )));
         }
-        let mut values = action.to_dtype(DType::F64)?.to_vec1::<f64>()?;
+        let mut values = action.to_vec();
         if !values
             .iter()
             .all(|value| value.is_finite() && (-1.0 - 1e-6..=1.0 + 1e-6).contains(value))
@@ -589,16 +608,17 @@ impl MujocoCore {
         observation
     }
 
-    pub(crate) fn tensor(&self, values: &[f64]) -> Result<Tensor, MujocoError> {
+    /// Creates unbatched F32 observations `[values.len()]` on CPU Flex from host F64 values.
+    pub(crate) fn tensor(&self, values: &[f64]) -> Tensor<1> {
         let values = values.iter().map(|value| *value as f32).collect::<Vec<_>>();
         let len = values.len();
-        Ok(Tensor::from_vec(values, len, &Device::Cpu)?)
+        Tensor::from_data(TensorData::new(values, [len]), &Device::flex())
     }
 
     pub(crate) fn viewer_running(&self) -> bool {
         #[cfg(feature = "rendering")]
         {
-            return self.viewer.as_ref().is_some_and(MjViewer::running);
+            self.viewer.as_ref().is_some_and(MjViewer::running)
         }
         #[cfg(not(feature = "rendering"))]
         {
@@ -617,57 +637,36 @@ impl MujocoCore {
         Ok(())
     }
 
-    pub(crate) fn action_space(&self) -> Box<dyn Space<Error = candle_core::Error>> {
+    pub(crate) fn action_space(&self) -> BoxSpace<2> {
         self.action_space_bounded(-1.0, 1.0)
     }
 
-    pub(crate) fn unbounded_action_space_for_dim(
-        &self,
-        dim: usize,
-    ) -> Box<dyn Space<Error = candle_core::Error>> {
-        Box::new(BoxSpace::new_unbounded(vec![dim], &Device::Cpu))
+    pub(crate) fn unbounded_action_space_for_dim(&self, dim: usize) -> BoxSpace<2> {
+        BoxSpace::new_unbounded([1, dim], &Device::flex())
     }
 
-    pub(crate) fn action_space_for_dim(
-        &self,
-        dim: usize,
-    ) -> Box<dyn Space<Error = candle_core::Error>> {
-        Box::new(BoxSpace::new_with_universal_bounds(
-            vec![dim],
-            -1.0,
-            1.0,
-            &Device::Cpu,
-        ))
+    pub(crate) fn action_space_for_dim(&self, dim: usize) -> BoxSpace<2> {
+        BoxSpace::new_with_universal_bounds([1, dim], -1.0, 1.0, &Device::flex())
     }
 
-    pub(crate) fn action_space_bounded(
-        &self,
-        minimum: f64,
-        maximum: f64,
-    ) -> Box<dyn Space<Error = candle_core::Error>> {
-        Box::new(BoxSpace::new_with_universal_bounds(
-            vec![self.nu()],
+    pub(crate) fn action_space_bounded(&self, minimum: f64, maximum: f64) -> BoxSpace<2> {
+        BoxSpace::new_with_universal_bounds(
+            [1, self.nu()],
             minimum as f32,
             maximum as f32,
-            &Device::Cpu,
-        ))
+            &Device::flex(),
+        )
     }
 
-    pub(crate) fn observation_space(
-        &self,
-        exclude_x: bool,
-    ) -> Box<dyn Space<Error = candle_core::Error>> {
-        Box::new(BoxSpace::new_unbounded(
-            vec![self.nq() + self.nv() - usize::from(exclude_x)],
-            &Device::Cpu,
-        ))
+    pub(crate) fn observation_space(&self, exclude_x: bool) -> BoxSpace<2> {
+        BoxSpace::new_unbounded(
+            [1, self.nq() + self.nv() - usize::from(exclude_x)],
+            &Device::flex(),
+        )
     }
 
-    pub(crate) fn unbounded_observation_space(
-        &self,
-        size: usize,
-    ) -> Box<dyn Space<Error = candle_core::Error>> {
-        Box::new(BoxSpace::new_unbounded(vec![size], &Device::Cpu))
+    pub(crate) fn unbounded_observation_space(&self, size: usize) -> BoxSpace<2> {
+        BoxSpace::new_unbounded([1, size], &Device::flex())
     }
 }
 

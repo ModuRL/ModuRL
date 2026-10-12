@@ -26,15 +26,15 @@ path = "examples/ppo_cartpole.rs"
 # name = "sac_cartpole"
 # path = "examples/sac_cartpole.rs"
 
-# [[example]]
-# name = "ppo_mujoco"
-# path = "examples/ppo_mujoco.rs"
-# required-features = ["mujoco-environment"]
+[[example]]
+name = "ppo_mujoco"
+path = "examples/ppo_mujoco.rs"
+required-features = ["mujoco-environment"]
 
-# [[example]]
-# name = "a2c_mujoco"
-# path = "examples/a2c_mujoco.rs"
-# required-features = ["mujoco-environment"]
+[[example]]
+name = "a2c_mujoco"
+path = "examples/a2c_mujoco.rs"
+required-features = ["mujoco-environment"]
 
 # [[example]]
 # name = "sac_mujoco"
