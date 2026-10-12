@@ -1,5 +1,3 @@
-#![cfg(any())]
-
 //! Gymnasium-compatible MuJoCo environments for [ModuRL](https://github.com/ModuRL/ModuRL).
 //!
 //! The environments use MuJoCo for physics through [`mujoco_rs`] and expose
@@ -31,6 +29,7 @@ pub mod prelude {
         MjModel, MjtObj, MujocoError, MujocoState, MujocoTask, TaskStep, Walker2dV5,
     };
     pub use modurl::gym::{Gym, MultiGym, MultiGymStepInfo, ResetInfo, StepInfo};
+    pub use modurl::spaces::{ActionSpace, ObservationSpace};
 }
 
 /// Errors returned while constructing or stepping an environment.
@@ -39,9 +38,9 @@ pub enum MujocoError {
     /// MuJoCo could not compile an embedded or user-supplied model.
     #[error("MuJoCo model compilation failed: {0}")]
     Model(#[source] mujoco_rs::error::MjModelError),
-    /// A Candle tensor operation failed.
+    /// Reading native Burn tensor data failed.
     #[error("MuJoCo tensor operation failed: {0}")]
-    Tensor(#[source] candle_core::Error),
+    Tensor(#[source] burn::tensor::TensorReadError),
     /// The optional interactive viewer could not initialize or draw a frame.
     #[cfg(feature = "rendering")]
     #[error("MuJoCo viewer failed: {0}")]
@@ -57,8 +56,8 @@ impl From<mujoco_rs::error::MjModelError> for MujocoError {
     }
 }
 
-impl From<candle_core::Error> for MujocoError {
-    fn from(value: candle_core::Error) -> Self {
+impl From<burn::tensor::TensorReadError> for MujocoError {
+    fn from(value: burn::tensor::TensorReadError) -> Self {
         Self::Tensor(value)
     }
 }

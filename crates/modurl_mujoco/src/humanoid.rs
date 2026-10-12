@@ -1,8 +1,8 @@
 use bon::bon;
-use candle_core::Tensor;
+use burn::tensor::Tensor;
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::Space,
+    spaces::BoxSpace,
 };
 
 use crate::{
@@ -100,7 +100,8 @@ impl HumanoidV5 {
     }
 
     /// Sets an exact MuJoCo state, useful for reproducible evaluation and parity tests.
-    pub fn set_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<Tensor, MujocoError> {
+    /// Accepts host positions `[nq]` and velocities `[nv]`; returns unbatched F32 observations `[observation_size]` on CPU Flex.
+    pub fn set_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<Tensor<1>, MujocoError> {
         self.core.set_state(qpos, qvel)?;
         self.core.render()?;
         self.observation()
@@ -133,7 +134,8 @@ impl HumanoidV5 {
             + usize::from(self.include_cfrc_ext) * (self.core.nbody() - 1) * 6
     }
 
-    fn observation(&self) -> Result<Tensor, MujocoError> {
+    /// Returns unbatched F32 observations `[observation_size]` on CPU Flex, preserving the configured observation component order.
+    fn observation(&self) -> Result<Tensor<1>, MujocoError> {
         let mut observation = Vec::with_capacity(self.observation_size());
         observation.extend_from_slice(&self.core.qpos()[if self.exclude_xy { 2 } else { 0 }..]);
         observation.extend_from_slice(self.core.qvel());
@@ -149,7 +151,7 @@ impl HumanoidV5 {
         if self.include_cfrc_ext {
             observation.extend(self.core.cfrc_ext()[1..].iter().flatten().copied());
         }
-        self.core.tensor(&observation)
+        Ok(self.core.tensor(&observation))
     }
 
     fn info(&self) -> HumanoidV5Info {
@@ -183,19 +185,22 @@ impl HumanoidV5 {
 
 impl Gym<HumanoidV5Info> for HumanoidV5 {
     type Error = MujocoError;
-    type SpaceError = candle_core::Error;
+    type ObservationSpace = BoxSpace<2>;
+    type ActionSpace = BoxSpace<2>;
 
+    /// Returns unbatched F32 observations `[observation_size]` on CPU Flex with reset metadata.
     fn reset(&mut self) -> Result<ResetInfo<HumanoidV5Info>, Self::Error> {
         self.core.reset_uniform(self.reset_noise_scale)?;
         self.core.render()?;
         Ok(ResetInfo {
-            state: self.observation()?,
+            observation: self.observation()?,
             info: self.info(),
         })
     }
 
     /// Steps with one continuous actuator vector shaped `[17]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo<HumanoidV5Info>, Self::Error> {
+    /// Accepts Float actions on CPU Flex; returns unbatched F32 observations `[observation_size]` on CPU Flex and an F32 reward.
+    fn step(&mut self, action: Tensor<1>) -> Result<StepInfo<HumanoidV5Info>, Self::Error> {
         let position_before = self.core.mass_center_xy();
         let action = self.core.step(&action)?;
         let position_after = self.core.mass_center_xy();
@@ -215,7 +220,7 @@ impl Gym<HumanoidV5Info> for HumanoidV5 {
         info.reward_contact = Some(-contact_cost as f32);
         info.reward_survive = Some(survive_reward as f32);
         Ok(StepInfo {
-            state: self.observation()?,
+            observation: self.observation()?,
             reward: reward as f32,
             done: !healthy && self.terminate_when_unhealthy,
             truncated: false,
@@ -223,12 +228,12 @@ impl Gym<HumanoidV5Info> for HumanoidV5 {
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> BoxSpace<2> {
         self.core
             .unbounded_observation_space(self.observation_size())
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> BoxSpace<2> {
         self.core
             .action_space_bounded(ACTION_MINIMUM, ACTION_MAXIMUM)
     }

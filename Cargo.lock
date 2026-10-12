@@ -4726,7 +4726,7 @@ name = "modurl_mujoco"
 version = "0.1.0"
 dependencies = [
  "bon",
- "candle-core",
+ "burn",
  "modurl",
  "mujoco-rs",
  "rand 0.10.3",
