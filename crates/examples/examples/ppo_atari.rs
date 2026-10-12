@@ -321,18 +321,16 @@ fn main() {
         LEARNING_RATE * fraction
     };
 
-    let networks: PPONetworkInfo<AdamW, _, FakeOptimizer> = PPONetworkInfo::Shared(
-        SharedPPONetwork::builder()
-            .shared_network(cnn)
-            .actor_head(ProbabilisticPolicyModel::new(
-                actor,
-                CategoricalDistribution,
-            ))
-            .critic_head(critic)
-            .optimizer(optimizer)
-            .lr_scheduler(learning_rate)
-            .build(),
-    );
+    let networks = SharedPPONetwork::builder()
+        .shared_network(cnn)
+        .actor_head(ProbabilisticPolicyModel::new(
+            actor,
+            CategoricalDistribution,
+        ))
+        .critic_head(critic)
+        .optimizer(optimizer)
+        .lr_scheduler(learning_rate)
+        .build();
 
     let game_name = rom_path
         .file_stem()

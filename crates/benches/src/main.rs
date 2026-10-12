@@ -193,21 +193,18 @@ fn ppo(
         .name("critic".to_owned())
         .build()?;
     assert_eq!(parameter_count([&actor_vars, &critic_vars]), PPO_PARAMETERS);
-    let networks = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::new(
-                actor,
-                CategoricalDistribution,
-            ))
-            .critic_network(critic)
-            .actor_optimizer(AdamW::new(actor_vars.all_vars(), adam(3e-4))?)
-            .critic_optimizer(AdamW::new(critic_vars.all_vars(), adam(3e-4))?)
-            .combined_loss(true)
-            .build(),
-    );
+    let networks = SeparatePPONetwork::builder()
+        .actor_network(ProbabilisticPolicyModel::new(
+            actor,
+            CategoricalDistribution,
+        ))
+        .critic_network(critic)
+        .actor_optimizer(AdamW::new(actor_vars.all_vars(), adam(3e-4))?)
+        .critic_optimizer(AdamW::new(critic_vars.all_vars(), adam(3e-4))?)
+        .combined_loss(true)
+        .build();
     let mut agent = debug_result(
         PPOAgent::builder()
-            .dtype(DType::F32)
             .action_space(action_space)
             .network_info(networks)
             .batch_size(PPO_ROLLOUT_SIZE)

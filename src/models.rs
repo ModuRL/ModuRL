@@ -7,17 +7,27 @@ use burn::{
 
 pub mod probabilistic_model;
 
-/// Executes a tensor-to-tensor computation with explicit ranks and observation kind.
+/// Executes a tensor-to-tensor computation with explicit ranks and model-defined input and output kinds.
 /// Parameter-owning models also implement Burn's `Module` so optimizers can visit their parameters.
-pub trait Forward<const I: usize, const O: usize, K: Basic = Float> {
+/// Each implementation defines one kind pair for the given input and output ranks.
+pub trait Forward<const I: usize, const O: usize> {
+    /// The native tensor kind accepted by the model.
+    type InputKind: Basic;
+    /// The native tensor kind produced by the model.
+    type OutputKind: Basic;
     type Error;
 
-    /// Maps a rank-`I` tensor of kind `K` to a rank-`O` float tensor.
+    /// Maps a rank-`I` tensor of `InputKind` to a rank-`O` tensor of `OutputKind`.
     /// Implementations define layouts, dtype, device, gradient behavior, and any explicit observation conversions.
-    fn forward(&self, input: Tensor<I, K>) -> Result<Tensor<O>, Self::Error>;
+    fn forward(
+        &self,
+        input: Tensor<I, Self::InputKind>,
+    ) -> Result<Tensor<O, Self::OutputKind>, Self::Error>;
 }
 
 impl<const D: usize> Forward<D, D> for Relu {
+    type InputKind = Float;
+    type OutputKind = Float;
     type Error = std::convert::Infallible;
 
     /// Applies ReLU to rank-`D` input, preserving its shape, floating-point dtype, device, and gradient paths.
@@ -27,6 +37,8 @@ impl<const D: usize> Forward<D, D> for Relu {
 }
 
 impl<const D: usize> Forward<D, D> for Tanh {
+    type InputKind = Float;
+    type OutputKind = Float;
     type Error = std::convert::Infallible;
 
     /// Applies tanh to rank-`D` input, preserving its shape, floating-point dtype, device, and gradient paths.
@@ -115,6 +127,8 @@ fn validate_activation(activation: &Activation, widths: &[usize]) -> Result<(), 
 }
 
 impl Forward<2, 2> for Activation {
+    type InputKind = Float;
+    type OutputKind = Float;
     type Error = ModelError;
 
     /// Maps `[batch_size, input_features]` to `[batch_size, output_features]`, preserving batch size, dtype, device, and gradient paths.
@@ -139,6 +153,8 @@ impl Forward<2, 2> for Activation {
 }
 
 impl Forward<2, 2> for Linear {
+    type InputKind = Float;
+    type OutputKind = Float;
     type Error = ModelError;
 
     /// Maps `[batch_size, input_features]` to `[batch_size, output_features]`, preserving dtype, device, and gradient paths.
@@ -369,6 +385,8 @@ impl MLP {
 }
 
 impl Forward<2, 2> for MLP {
+    type InputKind = Float;
+    type OutputKind = Float;
     type Error = ModelError;
 
     /// Maps `[batch_size, input_size]` to `[batch_size, output_size]`, preserving the batch axis and gradient paths.
@@ -485,6 +503,8 @@ impl DuelingMLP {
 }
 
 impl Forward<2, 2> for DuelingMLP {
+    type InputKind = Float;
+    type OutputKind = Float;
     type Error = ModelError;
 
     /// Maps `[batch_size, input_size]` to Q-values `[batch_size, output_size]`, preserving batch size and gradient paths.
@@ -519,6 +539,39 @@ mod tests {
         optim::{GradientsParams, SgdConfig},
         tensor::Device,
     };
+
+    #[test]
+    fn forward_uses_model_defined_native_kinds_without_precision_loss() {
+        struct Positive;
+
+        impl<const D: usize> Forward<D, D> for Positive {
+            type InputKind = burn::tensor::Int;
+            type OutputKind = burn::tensor::Bool;
+            type Error = std::convert::Infallible;
+
+            /// Returns a Bool tensor with the same rank-D shape and device as the Int input.
+            /// Compares integer values directly without converting their dtype.
+            fn forward(
+                &self,
+                input: Tensor<D, Self::InputKind>,
+            ) -> Result<Tensor<D, Self::OutputKind>, Self::Error> {
+                Ok(input.greater_elem(16_777_216))
+            }
+        }
+
+        let device = Device::flex();
+        let input = Tensor::<2, burn::tensor::Int>::from_data(
+            [[16_777_216i64, 16_777_217]],
+            (&device, DType::I64),
+        );
+        let output: Tensor<2, burn::tensor::Bool> = Positive.forward(input).unwrap();
+        assert_eq!(output.dims(), [1, 2]);
+        assert_eq!(output.device(), device);
+        assert_eq!(
+            output.into_data().try_to_vec::<bool>().unwrap(),
+            [false, true]
+        );
+    }
 
     #[test]
     fn swiglu_forward_changes_feature_count_and_preserves_gradients() {

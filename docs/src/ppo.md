@@ -6,7 +6,7 @@ policy and a value model from that experience.
 
 The separate-network PPO configuration owns the policy and value models, such
 as Burn `MLP` models. Each model has its own `ModuleOptimizer` and explicit
-learning rate. `PPONetworkInfo::Shared` is also
+learning rate. `SharedPPONetwork` is also
 available when a configuration needs one shared model followed by separate
 policy and value heads.
 
@@ -15,14 +15,15 @@ policy and value heads.
 Both builders return `Result`. PPO's builder also requires `observation_space`
 and returns `Result`. The constructor names remain `new`.
 
-Use `PPONetworkInfo::<_, _>::Separate(network)` for separate models. Its unused
-shared model defaults to `FakeModule`. A shared configuration infers the shared
-model type from `PPONetworkInfo::Shared(network)`.
+Pass a `SeparatePPONetwork` or `SharedPPONetwork` directly to `.network_info(network)`.
 
 The agent infers `PPOModelGroup` from its models and native tensor types.
-Observations keep `[batch_size, ...observation_shape]`; PPO casts float, integer,
-and boolean observations to its configured floating-point dtype before model
-execution. Values, log probabilities, and advantages use `[batch_size, 1]`.
+Observations keep `[batch_size, ...observation_shape]`, their native kind, and their dtype.
+Models perform any required conversions. Separate models accept observations directly;
+shared trunks produce Float features, and shared heads accept Float inputs. The compiler rejects incompatible kind connections.
+PPO has no `dtype` setting: critic outputs must match the environment reward dtype.
+Training rejects mismatches without casting rewards or critic outputs. Returns and advantages share the reward dtype.
+Values, log probabilities, and advantages use `[batch_size, 1]`.
 Losses use `[1]`. Raw reward logs preserve the environment's reward dtype.
 `reset_current_observations()` clears observations retained between training calls.
 

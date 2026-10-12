@@ -3,8 +3,8 @@ use burn::{
     module::{Module, ModuleVisitor, Param},
     optim::{GradientsParams, ModuleOptimizer},
     tensor::{
-        Bool, Cast, DType, Device, Float, FloatDType, Int, Tensor, TensorData, TensorReadError,
-        kind::Basic,
+        Bool, DType, Device, Float, Int, Tensor, TensorData, TensorReadError,
+        kind::{Autodiff, Basic},
     },
 };
 use std::marker::PhantomData;
@@ -46,19 +46,10 @@ pub enum PPOConfigurationError {
     InvalidGradientClip,
     #[error("learning rate must be finite and positive")]
     InvalidLearningRate,
-    #[error("PPO requires a floating-point dtype")]
-    InvalidDType,
     #[error("the environment count must be nonzero")]
     ZeroEnvironments,
     #[error("batch size must be divisible by the environment count")]
     BatchNotDivisibleByEnvironmentCount,
-    #[error(
-        "separate networks require observation rank {observation_rank} to match model input rank {model_rank}"
-    )]
-    SeparateObservationRank {
-        observation_rank: usize,
-        model_rank: usize,
-    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +59,8 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
+    #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
+    CriticRewardDTypeMismatch { critic: DType, reward: DType },
     #[error("network failed: {0}")]
     NetworkError(#[source] AE),
     #[error("gym failed: {0}")]
@@ -141,7 +134,6 @@ struct PPORolloutBatch<O: NextRank, A: NextRank> {
     next_observations: O::Next,
     actions: A::Next,
     rewards: Tensor<3>,
-    training_rewards: Tensor<3>,
     next_dones: Tensor<3, Bool>,
     truncateds: Tensor<3, Bool>,
     log_probs: Tensor<3>,
@@ -185,24 +177,23 @@ impl PPOPreparedRolloutBatch {
 }
 
 #[bon]
-impl<const O: usize, const A: usize> PPOExperience<Tensor<O>, Tensor<A>>
+impl<const O: usize, const A: usize, K: Basic> PPOExperience<Tensor<O, K>, Tensor<A>>
 where
-    Tensor<O>: NextRank,
+    Tensor<O, K>: NextRank,
     Tensor<A>: NextRank,
 {
     /// Creates one vectorized rollout transition.
     ///
     /// Rank-O `observations` and `next_observations` are `[env_count, ...observation_shape]`.
-    /// Rank-A `actions` is `[env_count, ...action_shape]`; `rewards`,
-    /// `training_rewards`, and `log_probs` are `[env_count, 1]`. `rewards`
-    /// preserves the environment values for logging, while `training_rewards`
-    /// may contain bootstrap corrections for nonterminal truncations.
-    /// Fields preserve their Float dtype, device, and gradient connections; collection detaches stored experience.
+    /// Rank-A `actions` is `[env_count, ...action_shape]`; `rewards`
+    /// and `log_probs` are `[env_count, 1]`. `rewards` preserves the environment values for logging.
+    /// Training rewards [env_count, 1] include terminal-value corrections for nonterminal truncations and retain the reward dtype.
+    /// Observations preserve their native kind and dtype. Other fields preserve their Float dtype and device; collection detaches stored experience.
     /// PPO training data is added internally after rollout collection.
     #[builder]
-    pub fn new(
-        observations: Tensor<O>,
-        next_observations: Tensor<O>,
+    fn new(
+        observations: Tensor<O, K>,
+        next_observations: Tensor<O, K>,
         actions: Tensor<A>,
         rewards: Tensor<2>,
         training_rewards: Tensor<2>,
@@ -224,13 +215,13 @@ where
     }
 }
 
-impl<const O: usize, const A: usize, const BO: usize, const BA: usize> experience::Experience
-    for PPOExperience<Tensor<O>, Tensor<A>>
+impl<const O: usize, const A: usize, const BO: usize, const BA: usize, K: Basic>
+    experience::Experience for PPOExperience<Tensor<O, K>, Tensor<A>>
 where
-    Tensor<O>: NextRank<Next = Tensor<BO>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
     Tensor<A>: NextRank<Next = Tensor<BA>>,
 {
-    type Batch = PPORolloutBatch<Tensor<O>, Tensor<A>>;
+    type Batch = PPORolloutBatch<Tensor<O, K>, Tensor<A>>;
     type Error = ExperienceBatchError;
 
     /// Adds a leading time axis to rank-O observations and rank-A actions, producing ranks BO = O + 1 and BA = A + 1.
@@ -252,9 +243,6 @@ where
             })?,
             rewards: experience::stack_tensor_field(experiences, |experience| {
                 experience.rewards.clone()
-            })?,
-            training_rewards: experience::stack_tensor_field(experiences, |experience| {
-                experience.training_rewards.clone()
             })?,
             next_dones: experience::stack_bool_field(
                 experiences,
@@ -292,7 +280,8 @@ impl<'a, I> PPOLoggingInfo<'a, I> {
 
 /// Losses, mean entropy, and explained variance use Float `[1]` tensors.
 /// Minibatch rewards, returns, advantages, and KL estimates use `[batch_size, 1]`.
-/// Rewards retain the environment dtype. Other tensors use PPO's compute dtype and model device.
+/// Rewards retain the environment dtype. Returns, advantages, and explained variance share the environment reward dtype.
+/// Policy statistics and actor loss use the policy's output dtype. All tensors use the model device.
 pub struct PPOLogEntry {
     pub actor_loss: Tensor<1>,
     pub critic_loss: Tensor<1>,
@@ -421,28 +410,6 @@ fn compute_explained_variance<const D: usize>(
     explained_variance.mask_fill(return_variance.equal_elem(0.0), f64::NAN)
 }
 
-/// Supplies the unused shared-model type for separate actor and critic configurations.
-/// Contains no parameters. Executing this placeholder violates the separate-network contract.
-#[derive(Module, Debug)]
-pub struct FakeModule;
-
-impl<const I: usize, const O: usize> Forward<I, O> for FakeModule {
-    type Error = std::convert::Infallible;
-
-    /// Rejects execution with any rank-I Float input instead of producing a rank-O output.
-    /// Separate configurations never execute the shared-model placeholder.
-    fn forward(&self, _input: Tensor<I>) -> Result<Tensor<O>, Self::Error> {
-        panic!("FakeModule must not execute a shared model");
-    }
-}
-
-/// Selects an owned shared or separate actor-critic configuration.
-/// `T` defaults to a parameter-free placeholder because separate networks have no shared model.
-pub enum PPONetworkInfo<A: Module, C: Module, T: Module = FakeModule> {
-    Shared(SharedPPONetwork<T, A, C>),
-    Separate(SeparatePPONetwork<A, C>),
-}
-
 /// Owns a shared model whose output feeds both actor and critic heads.
 /// One optimizer updates all three models using one learning rate and schedule.
 pub struct SharedPPONetwork<T: Module, A: Module, C: Module> {
@@ -457,7 +424,8 @@ pub struct SharedPPONetwork<T: Module, A: Module, C: Module> {
 #[bon]
 impl<T: Module, A: Module, C: Module> SharedPPONetwork<T, A, C> {
     /// Owns the models and optimizer, and enables training on the models.
-    /// Models must share PPO's compute dtype and device. Rejects a nonpositive or non-finite learning rate.
+    /// Model input and output contracts must agree. Models must share a device; Critic outputs and PPO statistics must use the environment reward dtype.
+    /// Rejects a nonpositive or non-finite learning rate.
     #[builder]
     pub fn new(
         #[builder(into)] optimizer: ModuleOptimizer,
@@ -499,7 +467,8 @@ pub struct SeparatePPONetwork<A: Module, C: Module> {
 #[bon]
 impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
     /// Owns the models and optimizers, and enables training on both models.
-    /// Models must share PPO's compute dtype and device. Rejects nonpositive or non-finite learning rates.
+    /// Models must accept the same native observation kind and share a device. Critic outputs and PPO statistics must use the environment reward dtype.
+    /// Rejects nonpositive or non-finite learning rates.
     #[builder]
     pub fn new(
         #[builder(into)] actor_optimizer: ModuleOptimizer,
@@ -535,6 +504,283 @@ impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
     }
 }
 
+/// Executes an owned PPO network configuration with native tensor kinds and explicit batch ranks.
+/// Rank O describes environment observations, H describes head inputs, and L describes policy actions.
+pub trait PPONetwork<const O: usize, const H: usize, const L: usize> {
+    type InputKind: Autodiff;
+    type LatentKind: Basic;
+    type Error: std::fmt::Debug;
+
+    /// Maps observations [batch_size, ...observation_shape] to head inputs [batch_size, ...model_input_shape].
+    /// Preserves the batch axis. Models own kind and dtype conversions; separate configurations return the input unchanged.
+    fn forward_observations(
+        &self,
+        observations: Tensor<O, Self::InputKind>,
+    ) -> Result<Tensor<H, Self::LatentKind>, Self::Error>;
+
+    /// Returns Float values [batch_size, 1] from head inputs [batch_size, ...model_input_shape].
+    /// The critic determines dtype and preserves model gradients. Inputs and model parameters must share a device.
+    fn forward_values(
+        &self,
+        observations: Tensor<H, Self::LatentKind>,
+    ) -> Result<Tensor<2>, Self::Error>;
+
+    /// Samples Float policy actions [batch_size, ...action_shape] from head inputs [batch_size, ...model_input_shape].
+    /// The policy determines action dtype; the batch axis and model gradient connections remain available.
+    fn sample(&self, observations: Tensor<H, Self::LatentKind>) -> Result<Tensor<L>, Self::Error>;
+
+    /// Returns modal Float policy actions [batch_size, ...action_shape] from head inputs [batch_size, ...model_input_shape].
+    /// Preserves the batch axis. The policy defines action dtype and device requirements.
+    fn mode(&self, observations: Tensor<H, Self::LatentKind>) -> Result<Tensor<L>, Self::Error>;
+
+    /// Evaluates Float policy actions [batch_size, ...action_shape] for head inputs [batch_size, ...model_input_shape].
+    /// Returns log probabilities and entropy [batch_size, 1], preserving policy gradients and dtype.
+    fn log_prob_and_entropy(
+        &self,
+        observations: Tensor<H, Self::LatentKind>,
+        actions: Tensor<L>,
+    ) -> Result<(Tensor<2>, Tensor<2>), Self::Error>;
+
+    /// Updates owned parameters from actor and critic losses [1], preserving the configuration's clipping and optimizer behavior.
+    /// Reading gradient norm contributions can fail. Losses must come from the owned models on their device.
+    fn backpropagate_loss(
+        &mut self,
+        actor_loss: Tensor<1>,
+        critic_loss: Tensor<1>,
+        gradient_clip: f32,
+    ) -> Result<(), TensorReadError>;
+
+    /// Updates configured learning rates from the current training progress and each optional schedule.
+    fn update_learning_rates(&mut self, progress: &ScheduleProgress);
+
+    /// Sets the shared rate or both separate rates. Scheduled rates are replaced at the next schedule update.
+    fn set_learning_rate(&mut self, learning_rate: f64);
+}
+
+impl<T, P, C, const O: usize, const H: usize, const L: usize> PPONetwork<O, H, L>
+    for SharedPPONetwork<T, P, C>
+where
+    T: Module + Forward<O, H, OutputKind = Float, Error: std::fmt::Debug>,
+    T::InputKind: Autodiff,
+    P: Module + ProbabilisticPolicy<H, L, ObservationKind = Float, Error: std::fmt::Debug>,
+    C: Module + Forward<H, 2, InputKind = Float, OutputKind = Float, Error: std::fmt::Debug>,
+{
+    type InputKind = T::InputKind;
+    type LatentKind = Float;
+    type Error = PPONetworkError<P::Error, C::Error, T::Error>;
+
+    /// Forwards native rank-O observations through the shared model into Float rank-H head inputs, preserving batch size.
+    /// The shared model defines dtype and device requirements and retains parameter gradients.
+    fn forward_observations(
+        &self,
+        observations: Tensor<O, Self::InputKind>,
+    ) -> Result<Tensor<H>, Self::Error> {
+        self.shared_network
+            .forward(observations)
+            .map_err(PPONetworkError::Shared)
+    }
+
+    /// Returns Float critic values [batch_size, 1] from Float rank-H head inputs, preserving critic dtype and gradients.
+    fn forward_values(&self, observations: Tensor<H>) -> Result<Tensor<2>, Self::Error> {
+        self.critic_head
+            .forward(observations)
+            .map_err(PPONetworkError::Critic)
+    }
+
+    /// Samples rank-L Float actions from rank-H Float head inputs, preserving the batch axis and policy dtype.
+    fn sample(&self, observations: Tensor<H>) -> Result<Tensor<L>, Self::Error> {
+        self.actor_head
+            .sample(observations)
+            .map_err(PPONetworkError::Policy)
+    }
+
+    /// Returns rank-L modal Float actions from rank-H Float head inputs, preserving the batch axis and policy dtype.
+    fn mode(&self, observations: Tensor<H>) -> Result<Tensor<L>, Self::Error> {
+        self.actor_head
+            .mode(observations)
+            .map_err(PPONetworkError::Policy)
+    }
+
+    /// Evaluates rank-L Float actions for rank-H Float head inputs, returning policy statistics [batch_size, 1].
+    /// Retains policy gradients and dtype; input and action batch sizes and devices must match.
+    fn log_prob_and_entropy(
+        &self,
+        observations: Tensor<H>,
+        actions: Tensor<L>,
+    ) -> Result<(Tensor<2>, Tensor<2>), Self::Error> {
+        self.actor_head
+            .log_prob_and_entropy(observations, actions)
+            .map_err(PPONetworkError::Policy)
+    }
+
+    /// Updates the shared model and both heads from losses [1], clipping one global norm before a single optimizer step.
+    fn backpropagate_loss(
+        &mut self,
+        actor_loss: Tensor<1>,
+        critic_loss: Tensor<1>,
+        gradient_clip: f32,
+    ) -> Result<(), TensorReadError> {
+        let total_loss = actor_loss + critic_loss;
+        let models = (
+            self.shared_network.clone(),
+            self.actor_head.clone(),
+            self.critic_head.clone(),
+        );
+        let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &models);
+        let _total_grad_norm =
+            crate::tensor_operations::clip_gradients(&models, &mut total_grad, gradient_clip)?;
+        let (trunk, actor, critic) = self.optimizer.step(self.learning_rate, models, total_grad);
+        self.shared_network = trunk;
+        self.actor_head = actor;
+        self.critic_head = critic;
+        Ok(())
+    }
+
+    fn update_learning_rates(&mut self, progress: &ScheduleProgress) {
+        if let Some(schedule) = &self.lr_scheduler {
+            self.learning_rate = progress.parameter(&**schedule);
+        }
+    }
+
+    fn set_learning_rate(&mut self, learning_rate: f64) {
+        self.learning_rate = learning_rate;
+    }
+}
+
+impl<P, C, const O: usize, const L: usize> PPONetwork<O, O, L> for SeparatePPONetwork<P, C>
+where
+    P: Module + ProbabilisticPolicy<O, L, Error: std::fmt::Debug>,
+    P::ObservationKind: Autodiff,
+    C: Module
+        + Forward<O, 2, InputKind = P::ObservationKind, OutputKind = Float, Error: std::fmt::Debug>,
+{
+    type InputKind = P::ObservationKind;
+    type LatentKind = P::ObservationKind;
+    type Error = PPONetworkError<P::Error, C::Error>;
+
+    /// Returns native rank-O observations unchanged, preserving every axis, kind, dtype, device, and gradient connection.
+    fn forward_observations(
+        &self,
+        observations: Tensor<O, Self::InputKind>,
+    ) -> Result<Tensor<O, Self::LatentKind>, Self::Error> {
+        Ok(observations)
+    }
+
+    /// Returns Float critic values [batch_size, 1] from native rank-O observations, preserving critic dtype and gradients.
+    fn forward_values(
+        &self,
+        observations: Tensor<O, Self::LatentKind>,
+    ) -> Result<Tensor<2>, Self::Error> {
+        self.critic_network
+            .forward(observations)
+            .map_err(PPONetworkError::Critic)
+    }
+
+    /// Samples rank-L Float actions from native rank-O observations, preserving the batch axis and policy dtype.
+    fn sample(&self, observations: Tensor<O, Self::LatentKind>) -> Result<Tensor<L>, Self::Error> {
+        self.actor_network
+            .sample(observations)
+            .map_err(PPONetworkError::Policy)
+    }
+
+    /// Returns rank-L modal Float actions from native rank-O observations, preserving the batch axis and policy dtype.
+    fn mode(&self, observations: Tensor<O, Self::LatentKind>) -> Result<Tensor<L>, Self::Error> {
+        self.actor_network
+            .mode(observations)
+            .map_err(PPONetworkError::Policy)
+    }
+
+    /// Evaluates rank-L Float actions for native rank-O observations, returning policy statistics [batch_size, 1].
+    /// Retains policy gradients and dtype; input and action batch sizes and devices must match.
+    fn log_prob_and_entropy(
+        &self,
+        observations: Tensor<O, Self::LatentKind>,
+        actions: Tensor<L>,
+    ) -> Result<(Tensor<2>, Tensor<2>), Self::Error> {
+        self.actor_network
+            .log_prob_and_entropy(observations, actions)
+            .map_err(PPONetworkError::Policy)
+    }
+
+    /// Updates separate models from losses [1], using the configured combined or independent clipping norms.
+    fn backpropagate_loss(
+        &mut self,
+        actor_loss: Tensor<1>,
+        critic_loss: Tensor<1>,
+        gradient_clip: f32,
+    ) -> Result<(), TensorReadError> {
+        match self.combined_loss {
+            true => {
+                let total_loss = actor_loss + critic_loss;
+                let models = (self.actor_network.clone(), self.critic_network.clone());
+                let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &models);
+                let _total_grad_norm = crate::tensor_operations::clip_gradients(
+                    &models,
+                    &mut total_grad,
+                    gradient_clip,
+                )?;
+                let mut actor_gradients = PPOGradientSelection {
+                    gradients: &total_grad,
+                    selected: GradientsParams::new(),
+                };
+                self.actor_network.visit(&mut actor_gradients);
+                self.actor_network = self.actor_optimizer.step(
+                    self.actor_learning_rate,
+                    self.actor_network.clone(),
+                    actor_gradients.selected,
+                );
+                self.critic_network = self.critic_optimizer.step(
+                    self.critic_learning_rate,
+                    self.critic_network.clone(),
+                    total_grad,
+                );
+            }
+            false => {
+                let mut actor_grad =
+                    GradientsParams::from_grads(actor_loss.backward(), &self.actor_network);
+                let _actor_grad_norm = crate::tensor_operations::clip_gradients(
+                    &self.actor_network,
+                    &mut actor_grad,
+                    gradient_clip,
+                )?;
+                self.actor_network = self.actor_optimizer.step(
+                    self.actor_learning_rate,
+                    self.actor_network.clone(),
+                    actor_grad,
+                );
+
+                let mut critic_grad =
+                    GradientsParams::from_grads(critic_loss.backward(), &self.critic_network);
+                let _critic_grad_norm = crate::tensor_operations::clip_gradients(
+                    &self.critic_network,
+                    &mut critic_grad,
+                    gradient_clip,
+                )?;
+                self.critic_network = self.critic_optimizer.step(
+                    self.critic_learning_rate,
+                    self.critic_network.clone(),
+                    critic_grad,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn update_learning_rates(&mut self, progress: &ScheduleProgress) {
+        if let Some(schedule) = &self.actor_lr_scheduler {
+            self.actor_learning_rate = progress.parameter(&**schedule);
+        }
+        if let Some(schedule) = &self.critic_lr_scheduler {
+            self.critic_learning_rate = progress.parameter(&**schedule);
+        }
+    }
+
+    fn set_learning_rate(&mut self, learning_rate: f64) {
+        self.actor_learning_rate = learning_rate;
+        self.critic_learning_rate = learning_rate;
+    }
+}
+
 /// Groups the owned network configuration and native execution tensor types without adding execution methods.
 pub trait PPOModelTypes {
     type Network;
@@ -543,14 +789,18 @@ pub trait PPOModelTypes {
     type Error: std::fmt::Debug;
 }
 
-/// A type-only group for the actor, critic, shared model, and native observation, latent, and policy-action tensors.
+/// A type-only group for the network configuration and native observation, latent, and policy-action tensors.
 /// PPO stores the actual models and tensors directly; this group contains no runtime values.
-pub struct PPOModelGroup<A, C, T = FakeModule, O = Tensor<2>, H = O, L = Tensor<2>> {
-    types: PhantomData<(A, C, T, O, H, L)>,
+pub struct PPOModelGroup<N, O = Tensor<2>, H = O, L = Tensor<2>> {
+    types: PhantomData<(N, O, H, L)>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum PPONetworkError<AE: std::fmt::Debug, CE: std::fmt::Debug, TE: std::fmt::Debug> {
+pub enum PPONetworkError<
+    AE: std::fmt::Debug,
+    CE: std::fmt::Debug,
+    TE: std::fmt::Debug = std::convert::Infallible,
+> {
     #[error("policy failed: {0}")]
     Policy(#[source] AE),
     #[error("critic failed: {0}")]
@@ -559,22 +809,17 @@ pub enum PPONetworkError<AE: std::fmt::Debug, CE: std::fmt::Debug, TE: std::fmt:
     Shared(#[source] TE),
 }
 
-impl<A, C, T, const O: usize, const H: usize, const L: usize> PPOModelTypes
-    for PPOModelGroup<A, C, T, Tensor<O>, Tensor<H>, Tensor<L>>
+impl<N, K: Autodiff, Q: Basic, const O: usize, const H: usize, const L: usize> PPOModelTypes
+    for PPOModelGroup<N, Tensor<O, K>, Tensor<H, Q>, Tensor<L>>
 where
-    A: Module + ProbabilisticPolicy<H, L, ObservationKind = Float>,
-    C: Module + Forward<H, 2>,
-    T: Module + Forward<O, H>,
-    A::Error: std::fmt::Debug,
-    C::Error: std::fmt::Debug,
-    T::Error: std::fmt::Debug,
-    Tensor<O>: NextRank + PrevRank,
+    N: PPONetwork<O, H, L, InputKind = K, LatentKind = Q>,
+    Tensor<O, K>: NextRank + PrevRank,
     Tensor<L>: NextRank,
 {
-    type Network = PPONetworkInfo<A, C, T>;
-    type Observation = Tensor<O>;
+    type Network = N;
+    type Observation = Tensor<O, K>;
     type Action = Tensor<L>;
-    type Error = PPONetworkError<A::Error, C::Error, T::Error>;
+    type Error = N::Error;
 }
 
 /// PPO with owned Burn models and explicit observation and action spaces.
@@ -601,16 +846,13 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     gradient_clip: f32,
     current_observations: Option<G::Observation>,
     episode_tracker: PPOEpisodeTracker,
-    dtype: DType,
     _phantom: PhantomData<GE>,
 }
 
 #[bon]
 impl<
     'a,
-    P,
-    C,
-    T,
+    N,
     OS,
     AS,
     GE,
@@ -622,39 +864,35 @@ impl<
     const A: usize,
     const BO: usize,
     const BL: usize,
-> PPOAgent<'a, PPOModelGroup<P, C, T, Tensor<O>, Tensor<H>, Tensor<L>>, OS, AS, GE, I, A>
+>
+    PPOAgent<
+        'a,
+        PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
 where
-    P: Module + ProbabilisticPolicy<H, L, ObservationKind = Float>,
-    C: Module + Forward<H, 2>,
-    T: Module + Forward<O, H>,
-    P::Error: std::fmt::Debug,
-    C::Error: std::fmt::Debug,
-    T::Error: std::fmt::Debug,
-    NE: From<PPONetworkError<P::Error, C::Error, T::Error>>,
-    PPOModelGroup<P, C, T, Tensor<O>, Tensor<H>, Tensor<L>>: PPOModelTypes<
-            Network = PPONetworkInfo<P, C, T>,
-            Observation = Tensor<O>,
-            Action = Tensor<L>,
-            Error = NE,
-        >,
+    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
     OS: ObservationSpace<O>,
     AS: ActionMap<L, A>,
     AS::Error: std::fmt::Debug,
-    FloatDType: Cast<O, OS::Kind, OutputKind = Float>,
-    Tensor<O, OS::Kind>: PrevRank,
-    Tensor<O>: PrevRank + NextRank<Next = Tensor<BO>>,
+    OS::Kind: Autodiff,
+    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
     GE: std::fmt::Debug,
 {
     /// Builds PPO for rank-O observation batches and rank-A environment-action batches.
-    /// Casts observations to the compute dtype. Policy inputs have rank H; original policy actions have rank L.
-    /// Shared models may change observation rank. Separate models receive observations directly and require H = O.
-    /// Models and their outputs must share the compute dtype and device. Construction rejects invalid configuration.
+    /// Preserves observation kind and dtype. Policy inputs have rank H; original policy actions have rank L.
+    /// Shared trunks produce Float features for Float-input heads. Separate models receive observations directly and require H = O.
+    /// Models own input conversions and must share a device. Critic outputs must match reward dtype; tensor kinds must agree at compile time.
     #[builder]
     pub fn new(
         observation_space: OS,
         action_space: AS,
-        network_info: PPONetworkInfo<P, C, T>,
+        network_info: N,
         #[builder(default = true)] clipped: bool,
         // PPO2/CleanRL-style value-loss clipping. Disabled by default because
         // its usefulness is task- and reward-scale-dependent.
@@ -678,19 +916,12 @@ where
         training_horizon: usize,
         logging_info: Option<&'a mut dyn PPOLogger<I>>,
         device: Device,
-        #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, PPOConfigurationError> {
         const {
             assert!(
                 O >= 2 && A >= 2,
                 "observation and environment-action ranks require batch and item axes"
             );
-        }
-        if const { O != H } && matches!(network_info, PPONetworkInfo::Separate(_)) {
-            return Err(PPOConfigurationError::SeparateObservationRank {
-                observation_rank: O,
-                model_rank: H,
-            });
         }
         if batch_size == 0 {
             return Err(PPOConfigurationError::ZeroBatchSize);
@@ -719,9 +950,6 @@ where
         if !gradient_clip.is_finite() || gradient_clip <= 0.0 {
             return Err(PPOConfigurationError::InvalidGradientClip);
         }
-        if !dtype.is_float() {
-            return Err(PPOConfigurationError::InvalidDType);
-        }
 
         Ok(Self {
             clipped,
@@ -745,7 +973,6 @@ where
             gradient_clip,
             current_observations: None,
             episode_tracker: PPOEpisodeTracker::new(0),
-            dtype,
             _phantom: PhantomData,
         })
     }
@@ -754,9 +981,7 @@ where
 #[bon]
 impl<
     'a,
-    P,
-    C,
-    T,
+    N,
     OS,
     AS,
     GE,
@@ -769,28 +994,25 @@ impl<
     const BO: usize,
     const BL: usize,
     const U: usize,
-> PPOAgent<'a, PPOModelGroup<P, C, T, Tensor<O>, Tensor<H>, Tensor<L>>, OS, AS, GE, I, A>
+>
+    PPOAgent<
+        'a,
+        PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
 where
-    P: Module + ProbabilisticPolicy<H, L, ObservationKind = Float>,
-    C: Module + Forward<H, 2>,
-    T: Module + Forward<O, H>,
-    P::Error: std::fmt::Debug,
-    C::Error: std::fmt::Debug,
-    T::Error: std::fmt::Debug,
-    NE: From<PPONetworkError<P::Error, C::Error, T::Error>>,
-    PPOModelGroup<P, C, T, Tensor<O>, Tensor<H>, Tensor<L>>: PPOModelTypes<
-            Network = PPONetworkInfo<P, C, T>,
-            Observation = Tensor<O>,
-            Action = Tensor<L>,
-            Error = NE,
-        >,
+    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
     OS: ObservationSpace<O>,
     AS: ActionMap<L, A>,
     AS::Error: std::fmt::Debug,
-    FloatDType: Cast<O, OS::Kind, OutputKind = Float>,
+    OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
     Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
-    Tensor<O>: PrevRank + NextRank<Next = Tensor<BO>>,
+    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
     GE: std::fmt::Debug,
 {
@@ -801,7 +1023,8 @@ where
     fn optimize(&mut self) -> Result<(), PPOError<NE, GE, AS::Error>> {
         let rollout_explained_variance = self.add_advantages_and_returns()?;
 
-        let batch = PPOExperience::<Tensor<O>, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
+        let batch =
+            PPOExperience::<Tensor<O, OS::Kind>, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
         let all_observations = batch.observations.flatten::<O>(0, 1);
         let all_actions = batch.actions.flatten::<L>(0, 1);
         let all_log_probs = batch.log_probs.flatten::<2>(0, 1);
@@ -876,13 +1099,16 @@ where
     /// Returns explained variance `[1]` and prepares detached statistics `[time, env_count, 1]`.
     /// Temporarily combines time and environment axes for rank-O observation evaluation, then restores both axes.
     fn add_advantages_and_returns(&mut self) -> Result<Tensor<1>, PPOError<NE, GE, AS::Error>> {
-        let batch = PPOExperience::<Tensor<O>, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
+        let batch =
+            PPOExperience::<Tensor<O, OS::Kind>, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
         let observations = batch.observations;
         let (batch_size, env_count) = (observations.dims()[0], observations.dims()[1]);
         let observations = observations.flatten::<O>(0, 1);
         let latent_observations = self.latent_observations(observations)?;
 
-        let values_tensor = self.critic_network_forward(&latent_observations)?.detach();
+        let values_tensor = self
+            .critic_network_forward(&latent_observations, batch.rewards.dtype())?
+            .detach();
 
         // Unflatten back to [batch_size, env_count, ...].
         let values_tensor = values_tensor.reshape([batch_size, env_count, 1]);
@@ -895,12 +1121,16 @@ where
             self.latent_observations(bootstrapped_observations)?;
 
         let bootstrapped_values = self
-            .critic_network_forward(&latent_bootstrapped_observations)?
+            .critic_network_forward(&latent_bootstrapped_observations, batch.rewards.dtype())?
             .detach(); // shape [env_count, 1]
 
+        let training_rewards =
+            experience::stack_tensor_field(self.rollout_buffer.get_raw(), |experience| {
+                experience.training_rewards.clone()
+            })?;
         let advantages = self
             .compute_gae(
-                &batch.training_rewards,
+                &training_rewards,
                 &values_tensor,
                 &batch.next_dones,
                 &batch.truncateds,
@@ -947,8 +1177,8 @@ where
     /// Computes advantages `[time, env_count, 1]` from rewards, values, done
     /// masks, and truncation masks with that same shape; `bootstrapped_values`
     /// is `[env_count, 1]`.
-    /// Masks use Bool tensors. Float inputs share dtype and device; rewards and bootstrap values are cast to the compute dtype.
-    /// Detaches critic values and bootstrap values. Collection already includes terminal-value corrections in truncation rewards.
+    /// Float inputs share the environment reward dtype and device. Bool masks are converted to that dtype.
+    /// Float inputs share a device. Detaches critic values and bootstrap values; rewards include corrections for truncated transitions.
     fn compute_gae(
         &self,
         rewards: &Tensor<3>,
@@ -958,14 +1188,15 @@ where
         bootstrapped_values: &Tensor<2>,
     ) -> Tensor<3> {
         let device = values.device();
-        let rewards = rewards.clone().cast(self.dtype);
-        let next_dones = next_dones.clone().float().cast(self.dtype);
-        let next_truncateds = next_truncateds.clone().float().cast(self.dtype);
-        let bootstrapped_values = bootstrapped_values.clone().cast(self.dtype);
+        let dtype = values.dtype();
+        let rewards = rewards.clone();
+        let next_dones = next_dones.clone().float().cast(dtype);
+        let next_truncateds = next_truncateds.clone().float().cast(dtype);
+        let bootstrapped_values = bootstrapped_values.clone();
         let values = values.clone().detach();
         let masks = (1.0f64 - next_dones) * (1.0f64 - next_truncateds);
         let mut next_value = bootstrapped_values.detach();
-        let mut gae = Tensor::zeros(next_value.dims(), (&device, self.dtype));
+        let mut gae = Tensor::zeros(next_value.dims(), (&device, dtype));
         let mut advantages = Vec::with_capacity(rewards.dims()[0]);
         // Environments are independent; only time has a recurrence.
         for time in (0..rewards.dims()[0]).rev() {
@@ -994,65 +1225,42 @@ where
     /// Shared models compute latent features; separate models preserve every axis, dtype, and device because O = H.
     fn latent_observations(
         &self,
-        observations: Tensor<O>,
-    ) -> Result<Tensor<H>, PPOError<NE, GE, AS::Error>> {
-        match &self.network_info {
-            PPONetworkInfo::Shared(network) => network
-                .shared_network
-                .forward(observations)
-                .map_err(|error| PPOError::NetworkError(NE::from(PPONetworkError::Shared(error)))),
-            PPONetworkInfo::Separate(_) => {
-                if const { O == H } {
-                    // Copy the identical axis sizes into the model's rank-H array without adding or removing axes.
-                    let mut shape = [0; H];
-                    shape.copy_from_slice(&observations.dims());
-                    Ok(observations.reshape(shape))
-                } else {
-                    unreachable!("separate observation rank is checked during construction")
-                }
-            }
-        }
+        observations: Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<H, N::LatentKind>, PPOError<NE, GE, AS::Error>> {
+        self.network_info
+            .forward_observations(observations)
+            .map_err(PPOError::NetworkError)
     }
 
     /// Forwards latent or raw `observations` shaped `[batch, ...model_input_shape]` of rank H and
     /// returns critic values shaped `[batch, 1]`.
+    /// Accepts the policy's input kind and rejects outputs that differ from the environment reward dtype; all tensors share a device.
     fn critic_network_forward(
         &mut self,
-        observations: &Tensor<H>,
+        observations: &Tensor<H, N::LatentKind>,
+        reward_dtype: DType,
     ) -> Result<Tensor<2>, PPOError<NE, GE, AS::Error>> {
-        match self.network_info {
-            PPONetworkInfo::Shared(ref mut shared_info) => {
-                let values = shared_info
-                    .critic_head
-                    .forward(observations.clone())
-                    .map_err(|error| {
-                        PPOError::NetworkError(NE::from(PPONetworkError::Critic(error)))
-                    })?;
-                Ok(values)
-            }
-            PPONetworkInfo::Separate(ref mut separate_info) => {
-                let values = separate_info
-                    .critic_network
-                    .forward(observations.clone())
-                    .map_err(|error| {
-                        PPOError::NetworkError(NE::from(PPONetworkError::Critic(error)))
-                    })?;
-                Ok(values)
-            }
+        let values = self
+            .network_info
+            .forward_values(observations.clone())
+            .map_err(PPOError::NetworkError)?;
+        if values.dtype() != reward_dtype {
+            return Err(PPOError::CriticRewardDTypeMismatch {
+                critic: values.dtype(),
+                reward: reward_dtype,
+            });
         }
+        Ok(values)
     }
 
-    /// Adds the bootstrap value for each truncated transition to its reward.
-    /// GAE still stops at the truncation boundary, so the terminal value is
-    /// included exactly once.
-    /// `rewards` is `[environment_count, 1]`, rank-O `transition_next_observations` is
-    /// `[environment_count, ...observation_shape]`, and both boolean slices have
-    /// `environment_count` entries. A true termination always suppresses
-    /// bootstrapping, even if the transition is also truncated.
+    /// Adds discounted terminal values to rewards [environment_count, 1] for nonterminal truncated rows.
+    /// Rank-O terminal observations are [environment_count, ...observation_shape]; both flag slices have environment_count entries.
+    /// Preserves reward dtype and device, rejecting critic dtype mismatches. Terminal values are detached from the model.
+    /// True termination suppresses bootstrapping, including transitions that also truncate.
     fn bootstrap_truncated_rewards(
         &mut self,
-        rewards: &Tensor<2>,
-        transition_next_observations: &Tensor<O>,
+        rewards: Tensor<2>,
+        transition_next_observations: &Tensor<O, OS::Kind>,
         dones: &[bool],
         truncateds: &[bool],
     ) -> Result<Tensor<2>, PPOError<NE, GE, AS::Error>> {
@@ -1069,7 +1277,7 @@ where
             .filter_map(|(index, (truncated, done))| (*truncated && !*done).then_some(index as i64))
             .collect::<Vec<_>>();
         if truncated_indices.is_empty() {
-            return Ok(rewards.clone().cast(self.dtype));
+            return Ok(rewards);
         }
 
         let truncation_count = truncated_indices.len();
@@ -1081,12 +1289,13 @@ where
             .clone()
             .select(0, truncated_indices.clone());
         let latent_observations = self.latent_observations(truncated_next_observations)?;
-        let terminal_values = self.critic_network_forward(&latent_observations)?.detach();
-        let terminal_bootstrap = terminal_values.cast(self.dtype) * f64::from(self.gamma);
-        Ok(rewards.clone().cast(self.dtype).select_assign(
+        let terminal_values = self
+            .critic_network_forward(&latent_observations, rewards.dtype())?
+            .detach();
+        Ok(rewards.select_assign(
             0,
             truncated_indices,
-            terminal_bootstrap,
+            terminal_values * f64::from(self.gamma),
             burn::tensor::IndexingUpdateOp::Add,
         ))
     }
@@ -1096,29 +1305,12 @@ where
     /// Inputs share the model's Float dtype and device; evaluation retains parameter gradients.
     fn actor_network_log_prob_and_entropy(
         &mut self,
-        observations: &Tensor<H>,
+        observations: &Tensor<H, N::LatentKind>,
         actions: &Tensor<L>,
     ) -> Result<(Tensor<2>, Tensor<2>), PPOError<NE, GE, AS::Error>> {
-        match self.network_info {
-            PPONetworkInfo::Shared(ref mut shared_info) => {
-                let (log_probs, entropy) = shared_info
-                    .actor_head
-                    .log_prob_and_entropy(observations.clone(), actions.clone())
-                    .map_err(|error| {
-                        PPOError::NetworkError(NE::from(PPONetworkError::Policy(error)))
-                    })?;
-                Ok((log_probs, entropy))
-            }
-            PPONetworkInfo::Separate(ref mut separate_info) => {
-                let (log_probs, entropy) = separate_info
-                    .actor_network
-                    .log_prob_and_entropy(observations.clone(), actions.clone())
-                    .map_err(|error| {
-                        PPOError::NetworkError(NE::from(PPONetworkError::Policy(error)))
-                    })?;
-                Ok((log_probs, entropy))
-            }
-        }
+        self.network_info
+            .log_prob_and_entropy(observations.clone(), actions.clone())
+            .map_err(PPOError::NetworkError)
     }
 
     #[cfg_attr(
@@ -1135,11 +1327,12 @@ where
     /// `[batch, ...action_shape]`, and scalar statistics (`old_log_probs`,
     /// `advantages`, `returns`, and `rewards`) shaped `[batch, 1]`. `old_values`
     /// is present only when value-loss clipping is enabled.
-    /// `explained_variance` is `[1]`. Rewards retain the environment dtype; other Float inputs share the compute dtype and model device.
+    /// `explained_variance` is `[1]`. Rewards, returns, and advantages share the environment reward dtype.
+    /// Policy actions and log probabilities retain their policy dtype. All tensors share a device.
     /// Detaches rollout estimates while retaining gradients through current model predictions.
     fn compute_loss(
         &mut self,
-        observations: Tensor<O>,
+        observations: Tensor<O, OS::Kind>,
         actions: Tensor<L>,
         old_log_probs: Tensor<2>,
         advantages: Tensor<2>,
@@ -1189,7 +1382,7 @@ where
             }
         };
 
-        let values = self.critic_network_forward(&latent_observations)?;
+        let values = self.critic_network_forward(&latent_observations, rewards.dtype())?;
 
         let entropy_loss = entropy.mean();
 
@@ -1253,119 +1446,30 @@ where
     /// Updates model parameters from actor and critic losses `[1]`.
     /// Shared training clips one norm across all models; separate training uses one combined norm or two independent norms.
     fn backpropagate_loss(&mut self, losses: PPOLosses) -> Result<(), PPOError<NE, GE, AS::Error>> {
-        let actor_loss = losses.actor_loss;
-        let critic_loss = losses.critic_loss;
-
-        match self.network_info {
-            PPONetworkInfo::Shared(ref mut shared_info) => {
-                let total_loss = actor_loss + critic_loss;
-                let models = (
-                    shared_info.shared_network.clone(),
-                    shared_info.actor_head.clone(),
-                    shared_info.critic_head.clone(),
-                );
-                let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &models);
-                let _total_grad_norm = crate::tensor_operations::clip_gradients(
-                    &models,
-                    &mut total_grad,
-                    self.gradient_clip,
-                )?;
-                let (trunk, actor, critic) =
-                    shared_info
-                        .optimizer
-                        .step(shared_info.learning_rate, models, total_grad);
-                shared_info.shared_network = trunk;
-                shared_info.actor_head = actor;
-                shared_info.critic_head = critic;
-            }
-            PPONetworkInfo::Separate(ref mut separate_info) => match separate_info.combined_loss {
-                true => {
-                    let total_loss = actor_loss + critic_loss;
-                    let models = (
-                        separate_info.actor_network.clone(),
-                        separate_info.critic_network.clone(),
-                    );
-                    let mut total_grad =
-                        GradientsParams::from_grads(total_loss.backward(), &models);
-                    let _total_grad_norm = crate::tensor_operations::clip_gradients(
-                        &models,
-                        &mut total_grad,
-                        self.gradient_clip,
-                    )?;
-                    let mut actor_gradients = PPOGradientSelection {
-                        gradients: &total_grad,
-                        selected: GradientsParams::new(),
-                    };
-                    separate_info.actor_network.visit(&mut actor_gradients);
-                    separate_info.actor_network = separate_info.actor_optimizer.step(
-                        separate_info.actor_learning_rate,
-                        separate_info.actor_network.clone(),
-                        actor_gradients.selected,
-                    );
-                    separate_info.critic_network = separate_info.critic_optimizer.step(
-                        separate_info.critic_learning_rate,
-                        separate_info.critic_network.clone(),
-                        total_grad,
-                    );
-                }
-                false => {
-                    let mut actor_grad = GradientsParams::from_grads(
-                        actor_loss.backward(),
-                        &separate_info.actor_network,
-                    );
-                    let _actor_grad_norm = crate::tensor_operations::clip_gradients(
-                        &separate_info.actor_network,
-                        &mut actor_grad,
-                        self.gradient_clip,
-                    )?;
-                    separate_info.actor_network = separate_info.actor_optimizer.step(
-                        separate_info.actor_learning_rate,
-                        separate_info.actor_network.clone(),
-                        actor_grad,
-                    );
-
-                    let mut critic_grad = GradientsParams::from_grads(
-                        critic_loss.backward(),
-                        &separate_info.critic_network,
-                    );
-                    let _critic_grad_norm = crate::tensor_operations::clip_gradients(
-                        &separate_info.critic_network,
-                        &mut critic_grad,
-                        self.gradient_clip,
-                    )?;
-                    separate_info.critic_network = separate_info.critic_optimizer.step(
-                        separate_info.critic_learning_rate,
-                        separate_info.critic_network.clone(),
-                        critic_grad,
-                    );
-                }
-            },
-        }
-
+        self.network_info.backpropagate_loss(
+            losses.actor_loss,
+            losses.critic_loss,
+            self.gradient_clip,
+        )?;
         Ok(())
     }
 
     /// Samples rank-L policy actions `[batch, ...action_shape]` from rank-H
-    /// model observations `[batch, ...model_input_shape]`, preserving the batch axis and compute dtype.
+    /// model observations `[batch, ...model_input_shape]`, preserving the batch axis. The policy defines action dtype.
     fn act_neurons(
         &mut self,
-        observations: &Tensor<H>,
+        observations: &Tensor<H, N::LatentKind>,
     ) -> Result<Tensor<L>, PPOError<NE, GE, AS::Error>> {
-        let network = match self.network_info {
-            PPONetworkInfo::Shared(ref mut shared_info) => &shared_info.actor_head,
-            PPONetworkInfo::Separate(ref mut separate_info) => &separate_info.actor_network,
-        };
-
-        network
+        self.network_info
             .sample(observations.clone())
-            .map_err(|error| PPOError::NetworkError(NE::from(PPONetworkError::Policy(error))))
+            .map_err(PPOError::NetworkError)
     }
 
-    /// Samples rank-L policy actions and maps them to rank-A environment actions from rank-O Float observations.
+    /// Samples rank-L policy actions and maps them to rank-A environment actions from native rank-O observations.
     /// All tensors preserve the leading environment axis; log probabilities are detached `[environment_count, 1]`.
     fn sample_collection_action(
         &mut self,
-        observations: &Tensor<O>,
+        observations: &Tensor<O, OS::Kind>,
     ) -> Result<PPOCollectionAction<L, A, AS::Kind>, PPOError<NE, GE, AS::Error>> {
         let latent_observations = self.latent_observations(observations.clone())?;
         let policy_actions = self.act_neurons(&latent_observations)?;
@@ -1384,24 +1488,8 @@ where
     }
 
     fn update_learning_rates(&mut self) {
-        match self.network_info {
-            PPONetworkInfo::Shared(ref mut shared_info) => {
-                if let Some(lr_scheduler) = &shared_info.lr_scheduler {
-                    let new_lr = self.schedule_progress.parameter(&**lr_scheduler);
-                    shared_info.learning_rate = new_lr;
-                }
-            }
-            PPONetworkInfo::Separate(ref mut separate_info) => {
-                if let Some(actor_lr_scheduler) = &separate_info.actor_lr_scheduler {
-                    let new_lr = self.schedule_progress.parameter(&**actor_lr_scheduler);
-                    separate_info.actor_learning_rate = new_lr;
-                }
-                if let Some(critic_lr_scheduler) = &separate_info.critic_lr_scheduler {
-                    let new_lr = self.schedule_progress.parameter(&**critic_lr_scheduler);
-                    separate_info.critic_learning_rate = new_lr;
-                }
-            }
-        }
+        self.network_info
+            .update_learning_rates(&self.schedule_progress);
     }
 
     /// Logs vectorized `rewards` shaped `[env_count, 1]` alongside one metadata
@@ -1448,15 +1536,7 @@ where
     }
 
     pub fn set_learning_rate(&mut self, lr: f64) {
-        match self.network_info {
-            PPONetworkInfo::Shared(ref mut shared_info) => {
-                shared_info.learning_rate = lr;
-            }
-            PPONetworkInfo::Separate(ref mut separate_info) => {
-                separate_info.actor_learning_rate = lr;
-                separate_info.critic_learning_rate = lr;
-            }
-        }
+        self.network_info.set_learning_rate(lr);
     }
 
     pub fn get_observation_space(&self) -> &OS {
@@ -1477,15 +1557,11 @@ where
         &mut self,
         observation: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A, AS::Kind>, PPOError<NE, GE, AS::Error>> {
-        let observation = FloatDType::cast(observation.clone(), FloatDType::from(self.dtype));
-        let latent_observations = self.latent_observations(observation)?;
-        let network = match self.network_info {
-            PPONetworkInfo::Shared(ref mut shared_info) => &shared_info.actor_head,
-            PPONetworkInfo::Separate(ref mut separate_info) => &separate_info.actor_network,
-        };
-        let neurons = network
+        let latent_observations = self.latent_observations(observation.clone())?;
+        let neurons = self
+            .network_info
             .mode(latent_observations)
-            .map_err(|error| PPOError::NetworkError(NE::from(PPONetworkError::Policy(error))))?;
+            .map_err(PPOError::NetworkError)?;
         self.action_space
             .tensor_from_neurons(neurons)
             .map_err(PPOError::SpaceError)
@@ -1502,16 +1578,12 @@ where
     fn prepare_rollout_collection(
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
-    ) -> Result<Tensor<O>, PPOError<NE, GE, AS::Error>> {
+    ) -> Result<Tensor<O, OS::Kind>, PPOError<NE, GE, AS::Error>> {
         let observations = if let Some(observations) = self.current_observations.take() {
             observations
         } else {
-            FloatDType::cast(
-                env.reset().map_err(PPOError::GymError)?,
-                FloatDType::from(self.dtype),
-            )
-        }
-        .cast(self.dtype);
+            env.reset().map_err(PPOError::GymError)?
+        };
         let environment_count = env.num_envs();
         if environment_count == 0 {
             return Err(PPOConfigurationError::ZeroEnvironments.into());
@@ -1544,7 +1616,7 @@ where
     fn collect_rollout(
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
-        next_observations: &mut Tensor<O>,
+        next_observations: &mut Tensor<O, OS::Kind>,
     ) -> Result<usize, PPOError<NE, GE, AS::Error>> {
         let environment_count = env.num_envs();
         while self.rollout_buffer.len() * environment_count < self.batch_size {
@@ -1553,10 +1625,7 @@ where
             let step_info = env
                 .step(collection_action.environment_actions.clone())
                 .map_err(PPOError::GymError)?;
-            let training_next_observations = FloatDType::cast(
-                step_info.transition_next_observations(),
-                FloatDType::from(self.dtype),
-            );
+            let training_next_observations = step_info.transition_next_observations();
             let MultiGymStepInfo {
                 observations: reset_or_next_observations,
                 rewards: collection_rewards,
@@ -1577,25 +1646,24 @@ where
                 first_collection_timestep,
             )?;
             let training_rewards = self.bootstrap_truncated_rewards(
-                &collection_rewards,
+                collection_rewards.clone().detach(),
                 &training_next_observations,
                 &next_dones,
                 &truncateds,
             )?;
             self.rollout_buffer.add(
                 PPOExperience::builder()
-                    .observations(observations.detach())
-                    .next_observations(training_next_observations.detach())
+                    .observations(observations.without_autodiff())
+                    .next_observations(training_next_observations.without_autodiff())
                     .actions(collection_action.policy_actions.detach())
                     .rewards(collection_rewards.detach())
-                    .training_rewards(training_rewards.detach())
+                    .training_rewards(training_rewards)
                     .next_dones(next_dones)
                     .truncateds(truncateds)
                     .log_probs(collection_action.log_probs)
                     .build(),
             );
-            *next_observations =
-                FloatDType::cast(reset_or_next_observations, FloatDType::from(self.dtype));
+            *next_observations = reset_or_next_observations;
         }
 
         Ok(self.rollout_buffer.len() * environment_count)
@@ -1616,9 +1684,7 @@ where
 
 impl<
     'a,
-    P,
-    C,
-    T,
+    N,
     OS,
     AS,
     GE,
@@ -1632,29 +1698,25 @@ impl<
     const BL: usize,
     const U: usize,
 > Agent<I, O, A>
-    for PPOAgent<'a, PPOModelGroup<P, C, T, Tensor<O>, Tensor<H>, Tensor<L>>, OS, AS, GE, I, A>
+    for PPOAgent<
+        'a,
+        PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
 where
-    P: Module + ProbabilisticPolicy<H, L, ObservationKind = Float>,
-    C: Module + Forward<H, 2>,
-    T: Module + Forward<O, H>,
-    P::Error: std::fmt::Debug,
-    C::Error: std::fmt::Debug,
-    T::Error: std::fmt::Debug,
-    PPOModelGroup<P, C, T, Tensor<O>, Tensor<H>, Tensor<L>>: PPOModelTypes<
-            Network = PPONetworkInfo<P, C, T>,
-            Observation = Tensor<O>,
-            Action = Tensor<L>,
-            Error = NE,
-        >,
+    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
     OS: ObservationSpace<O>,
     AS: ActionMap<L, A>,
     AS::Error: std::fmt::Debug,
-    FloatDType: Cast<O, OS::Kind, OutputKind = Float>,
+    OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
     Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
-    Tensor<O>: PrevRank + NextRank<Next = Tensor<BO>>,
+    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
-    NE: From<PPONetworkError<P::Error, C::Error, T::Error>>,
     GE: std::fmt::Debug,
 {
     type Error = PPOError<NE, GE, AS::Error>;
@@ -1669,8 +1731,7 @@ where
         &mut self,
         observation: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
-        let observation = FloatDType::cast(observation.clone(), FloatDType::from(self.dtype));
-        let latent_observations = self.latent_observations(observation)?;
+        let latent_observations = self.latent_observations(observation.clone())?;
         let neurons = self.act_neurons(&latent_observations)?;
         let actions = self
             .action_space
@@ -1714,7 +1775,7 @@ mod rollout_batch_tests {
     use crate::buffers::experience::{Experience, ExperienceBatchError};
 
     /// Creates Float rank-3 observations `[2, 1, 2]`, rank-2 actions `[2, 1]`, and scalar statistics `[2, 1]`.
-    /// Uses F64 on the supplied device; observations retain gradients, while training rewards include distinct bootstrap corrections.
+    /// Uses F64 on the supplied device and retains observation gradients.
     fn transition(value: f64, device: &Device) -> PPOExperience<Tensor<3>, Tensor<2>> {
         let observations = Tensor::from_data(
             [[[value, value + 1.0]], [[value + 2.0, value + 3.0]]],
@@ -1730,7 +1791,7 @@ mod rollout_batch_tests {
                 (device, DType::F64),
             ))
             .rewards(rewards.clone())
-            .training_rewards(rewards + 100.0)
+            .training_rewards(rewards.clone())
             .next_dones(vec![true, false])
             .truncateds(vec![false, true])
             .log_probs(Tensor::zeros([2, 1], (device, DType::F64)))
@@ -1744,7 +1805,7 @@ mod rollout_batch_tests {
         for item in &mut experiences {
             item.prepared = Some(PPOPreparedExperience {
                 advantages: item.rewards.clone(),
-                returns: item.training_rewards.clone(),
+                returns: item.rewards.clone() + 100.0,
                 old_values: Some(item.log_probs.clone()),
             });
         }
@@ -1762,14 +1823,6 @@ mod rollout_batch_tests {
             batch.rewards.into_data().try_to_vec::<f64>().unwrap(),
             [3.0, 4.0, 12.0, 13.0]
         );
-        assert_eq!(
-            batch
-                .training_rewards
-                .into_data()
-                .try_to_vec::<f64>()
-                .unwrap(),
-            [103.0, 104.0, 112.0, 113.0]
-        );
         assert_eq!(batch.next_dones.dims(), [2, 2, 1]);
         assert_eq!(
             batch.next_dones.into_data().try_to_vec::<bool>().unwrap(),
@@ -1783,6 +1836,10 @@ mod rollout_batch_tests {
         let prepared = batch.prepared.unwrap();
         assert_eq!(prepared.advantages.dims(), [2, 2, 1]);
         assert_eq!(prepared.returns.dims(), [2, 2, 1]);
+        assert_eq!(
+            prepared.returns.into_data().try_to_vec::<f64>().unwrap(),
+            [103.0, 104.0, 112.0, 113.0]
+        );
         assert_eq!(prepared.old_values.unwrap().dims(), [2, 2, 1]);
 
         let gradients = observations.sum().backward();
@@ -1827,7 +1884,7 @@ mod rollout_batch_tests {
         for item in &mut experiences {
             item.prepared = Some(PPOPreparedExperience {
                 advantages: item.rewards.clone(),
-                returns: item.training_rewards.clone(),
+                returns: item.rewards.clone() + 100.0,
                 old_values: None,
             });
         }
@@ -1851,9 +1908,7 @@ mod network_configuration_tests {
         tensor::Device,
     };
 
-    use super::{
-        FakeModule, PPOConfigurationError, PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
-    };
+    use super::{PPOConfigurationError, SeparatePPONetwork, SharedPPONetwork};
 
     fn layer(device: &Device) -> Linear {
         LinearConfig::new(2, 2)
@@ -1874,10 +1929,7 @@ mod network_configuration_tests {
             .lr_scheduler(|_| 0.0005)
             .build()
             .unwrap();
-        let network = PPONetworkInfo::Shared(network);
-        let PPONetworkInfo::Shared(mut network) = network else {
-            panic!("expected a shared network");
-        };
+        let mut network = network;
 
         assert!(network.shared_network.weight.val().is_require_grad());
         assert!(network.actor_head.weight.val().is_require_grad());
@@ -1919,10 +1971,7 @@ mod network_configuration_tests {
             .combined_loss(true)
             .build()
             .unwrap();
-        let network: PPONetworkInfo<Linear, Linear> = PPONetworkInfo::Separate(network);
-        let PPONetworkInfo::Separate(mut network) = network else {
-            panic!("expected a separate network");
-        };
+        let mut network = network;
 
         assert!(network.actor_network.weight.val().is_require_grad());
         assert!(network.critic_network.weight.val().is_require_grad());
@@ -1937,7 +1986,6 @@ mod network_configuration_tests {
             0.0007
         );
         assert!(network.combined_loss);
-        assert_eq!(FakeModule.num_params(), 0);
 
         let actor_gradients = GradientsParams::from_grads(
             network.actor_network.weight.val().sum().backward(),
@@ -2006,6 +2054,7 @@ mod schedule_tests {
         module::ParamId,
         nn::{Initializer, Tanh},
         optim::SgdConfig,
+        tensor::kind::Kind,
     };
     use std::convert::Infallible;
 
@@ -2018,6 +2067,40 @@ mod schedule_tests {
         parameter_schedule::LinearSchedule,
         spaces::{BoxSpace, Discrete},
     };
+
+    #[derive(Module, Debug)]
+    struct ObservationModel<K: Basic> {
+        model: MLP,
+        double_precision: bool,
+        #[module(skip)]
+        kind: PhantomData<K>,
+    }
+
+    impl<K: Basic> Forward<2, 2> for ObservationModel<K>
+    where
+        burn::tensor::FloatDType: burn::tensor::Cast<2, K, OutputKind = Float>,
+    {
+        type InputKind = K;
+        type OutputKind = Float;
+        type Error = crate::models::ModelError;
+
+        /// Converts native observations [batch_size, input_features] inside the model and returns Float outputs [batch_size, output_features].
+        /// Uses the model's floating-point precision and preserves parameter gradients.
+        fn forward(&self, input: Tensor<2, K>) -> Result<Tensor<2>, Self::Error> {
+            use burn::tensor::{Cast, FloatDType};
+            let dtype = if self.double_precision {
+                FloatDType::F64
+            } else {
+                FloatDType::F32
+            };
+            if const { matches!(K::KIND, Kind::Int) } {
+                assert_eq!(input.dtype(), DType::I64);
+            } else if const { matches!(K::KIND, Kind::Float) } {
+                assert_eq!(input.dtype(), DType::F32);
+            }
+            self.model.forward(FloatDType::cast(input, dtype))
+        }
+    }
 
     fn assert_close(actual: f64, expected: f64) {
         assert!(
@@ -2057,6 +2140,8 @@ mod schedule_tests {
         struct FlattenModel;
 
         impl Forward<3, 2> for FlattenModel {
+            type InputKind = Float;
+            type OutputKind = Float;
             type Error = Infallible;
 
             /// Combines matrix item axes in [batch_size, 2, 2] into features [batch_size, 4].
@@ -2112,16 +2197,14 @@ mod schedule_tests {
         }
         .into();
         let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
-        let networks = PPONetworkInfo::Shared(
-            SharedPPONetwork::builder()
-                .shared_network(FlattenModel)
-                .actor_head(actor)
-                .critic_head(mlp(4, 1, &device))
-                .optimizer(SgdConfig::new().init())
-                .learning_rate(1e-3)
-                .build()
-                .unwrap(),
-        );
+        let networks = SharedPPONetwork::builder()
+            .shared_network(FlattenModel)
+            .actor_head(actor)
+            .critic_head(mlp(4, 1, &device))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(1e-3)
+            .build()
+            .unwrap();
         let mut logger = NoopLogger::default();
         let mut agent = PPOAgent::builder()
             .observation_space(env.observation_space())
@@ -2151,7 +2234,7 @@ mod schedule_tests {
     }
 
     #[test]
-    fn integer_and_boolean_observations_use_the_compute_dtype() {
+    fn integer_and_boolean_observations_reach_native_models() {
         struct BoolSpace;
 
         impl ObservationSpace<2> for BoolSpace {
@@ -2167,18 +2250,27 @@ mod schedule_tests {
             }
         }
         let device = Device::flex().autodiff();
-        let actor = ProbabilisticPolicyModel::new(mlp(1, 2, &device), CategoricalDistribution);
-        let networks = PPONetworkInfo::<_, _>::Separate(
-            SeparatePPONetwork::builder()
-                .actor_network(actor)
-                .critic_network(mlp(1, 1, &device))
-                .actor_optimizer(SgdConfig::new().init())
-                .critic_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(1e-3)
-                .critic_learning_rate(1e-3)
-                .build()
-                .unwrap(),
+        let actor = ProbabilisticPolicyModel::new(
+            ObservationModel::<Bool> {
+                model: mlp(1, 2, &device),
+                double_precision: false,
+                kind: PhantomData,
+            },
+            CategoricalDistribution,
         );
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(actor)
+            .critic_network(ObservationModel::<Bool> {
+                model: mlp(1, 1, &device),
+                double_precision: false,
+                kind: PhantomData,
+            })
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
         let mut boolean_agent = PPOAgent::<_, _, _, Infallible>::builder()
             .observation_space(BoolSpace)
             .action_space(Discrete::new(2))
@@ -2195,18 +2287,27 @@ mod schedule_tests {
             [2, 1]
         );
 
-        let actor = ProbabilisticPolicyModel::new(mlp(1, 2, &device), CategoricalDistribution);
-        let networks = PPONetworkInfo::<_, _>::Separate(
-            SeparatePPONetwork::builder()
-                .actor_network(actor)
-                .critic_network(mlp(1, 1, &device))
-                .actor_optimizer(SgdConfig::new().init())
-                .critic_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(1e-3)
-                .critic_learning_rate(1e-3)
-                .build()
-                .unwrap(),
+        let actor = ProbabilisticPolicyModel::new(
+            ObservationModel::<Int> {
+                model: mlp(1, 2, &device),
+                double_precision: false,
+                kind: PhantomData,
+            },
+            CategoricalDistribution,
         );
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(actor)
+            .critic_network(ObservationModel::<Int> {
+                model: mlp(1, 1, &device),
+                double_precision: false,
+                kind: PhantomData,
+            })
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
         let mut integer_agent = PPOAgent::<_, _, _, Infallible>::builder()
             .observation_space(Discrete::new(2))
             .action_space(Discrete::new(2))
@@ -2225,10 +2326,197 @@ mod schedule_tests {
     }
 
     #[test]
-    fn f64_models_train_with_f32_environment_observations() {
+    fn shared_models_preserve_boolean_observations_and_use_float_features() {
+        #[derive(Module, Debug)]
+        struct BooleanTrunk;
+
+        impl Forward<2, 2> for BooleanTrunk {
+            type InputKind = Bool;
+            type OutputKind = Float;
+            type Error = Infallible;
+
+            /// Converts Bool observations [batch_size, 1] into F64 features of the same shape inside the model.
+            fn forward(&self, input: Tensor<2, Bool>) -> Result<Tensor<2>, Self::Error> {
+                Ok(input.cast(burn::tensor::FloatDType::F64))
+            }
+        }
+
+        #[derive(Module, Debug)]
+        struct FloatHead {
+            weight: Param<Tensor<2>>,
+        }
+
+        impl Forward<2, 2> for FloatHead {
+            type InputKind = Float;
+            type OutputKind = Float;
+            type Error = Infallible;
+
+            /// Maps F64 features [batch_size, 1] to F64 outputs [batch_size, output_features].
+            /// Keeps the batch axis and gradients through the weight [1, output_features].
+            fn forward(&self, input: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+                Ok(input.matmul(self.weight.val()))
+            }
+        }
+
+        struct BooleanSpace;
+
+        impl ObservationSpace<2> for BooleanSpace {
+            type Kind = Bool;
+
+            /// Checks Bool observations [batch_size, 1] without changing their layout, dtype, or device.
+            fn contains(&self, values: &Tensor<2, Bool>) -> bool {
+                values.dims()[1] == 1
+            }
+
+            fn shape(&self) -> Vec<usize> {
+                vec![1]
+            }
+        }
+
+        struct BooleanGym {
+            device: Device,
+        }
+
+        impl Gym for BooleanGym {
+            type Error = Infallible;
+            type ObservationSpace = BooleanSpace;
+            type ActionSpace = Discrete;
+
+            /// Accepts an Int action [1] and returns terminal Bool observations [1] with an F32 reward.
+            fn step(
+                &mut self,
+                _action: Tensor<1, Int>,
+            ) -> Result<StepInfo<(), Tensor<1, Bool>>, Self::Error> {
+                Ok(StepInfo {
+                    observation: Tensor::from_data([true], &self.device),
+                    reward: 0.25,
+                    done: false,
+                    truncated: true,
+                    info: (),
+                })
+            }
+
+            /// Returns reset Bool observations [1] on the environment device.
+            fn reset(&mut self) -> Result<ResetInfo<(), Tensor<1, Bool>>, Self::Error> {
+                Ok(ResetInfo {
+                    observation: Tensor::from_data([false], &self.device),
+                    info: (),
+                })
+            }
+
+            fn observation_space(&self) -> BooleanSpace {
+                BooleanSpace
+            }
+
+            fn action_space(&self) -> Discrete {
+                Discrete::new(2)
+            }
+        }
+
         let device = Device::flex().autodiff();
-        let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> =
+        let env: VectorizedGymWrapper<BooleanGym> = BooleanGym {
+            device: device.clone(),
+        }
+        .into();
+        let use_f64_rewards = std::cell::Cell::new(false);
+        let mut env = crate::wrappers::OutputMapMultiGymWrapper::new(
+            env,
+            |observations| Ok::<_, Infallible>(observations),
+            |mut step| {
+                if use_f64_rewards.get() {
+                    step.rewards = step.rewards.cast(DType::F64);
+                }
+                Ok::<_, Infallible>(step)
+            },
+        );
+        let actor = ProbabilisticPolicyModel::new(
+            FloatHead {
+                weight: Param::from_tensor(Tensor::from_data(
+                    [[0.1f64, 0.2]],
+                    (&device, DType::F64),
+                )),
+            },
+            CategoricalDistribution,
+        );
+        let network = SharedPPONetwork::builder()
+            .shared_network(BooleanTrunk)
+            .actor_head(actor)
+            .critic_head(FloatHead {
+                weight: Param::from_tensor(Tensor::from_data(
+                    [[1.0000000001f64]],
+                    (&device, DType::F64),
+                )),
+            })
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(network)
+            .batch_size(2)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .training_horizon(2)
+            .device(device)
+            .build()
+            .unwrap();
+        let mut observations = agent.prepare_rollout_collection(&mut env).unwrap();
+        assert!(matches!(
+            agent.collect_rollout(&mut env, &mut observations),
+            Err(PPOError::CriticRewardDTypeMismatch {
+                critic: DType::F64,
+                reward: DType::F32,
+            })
+        ));
+        assert_eq!(agent.rollout_buffer.len(), 0);
+        use_f64_rewards.set(true);
+        agent.collect_rollout(&mut env, &mut observations).unwrap();
+        let transition = &agent.rollout_buffer.get_raw()[0];
+        assert!(matches!(transition.observations.dtype(), DType::Bool(_)));
+        assert_eq!(
+            transition
+                .next_observations
+                .clone()
+                .into_data()
+                .try_to_vec::<bool>()
+                .unwrap(),
+            [true]
+        );
+        assert_eq!(transition.rewards.dtype(), DType::F64);
+        assert_eq!(transition.training_rewards.dtype(), DType::F64);
+        let expected = 0.25 + 1.0000000001 * f64::from(agent.gamma);
+        assert!(
+            (transition.training_rewards.clone().into_scalar::<f64>() - expected).abs() < 1e-12
+        );
+        agent.add_advantages_and_returns().unwrap();
+        let prepared = agent.rollout_buffer.get_raw()[0].prepared.as_ref().unwrap();
+        assert_eq!(prepared.returns.dtype(), DType::F64);
+        assert!((prepared.returns.clone().into_scalar::<f64>() - expected).abs() < 1e-12);
+        agent.optimize().unwrap();
+        assert_eq!(
+            agent.act_deterministic(&observations).unwrap().dims(),
+            [1, 1]
+        );
+    }
+
+    #[test]
+    fn critic_requires_reward_dtype_and_preserves_observation_dtype() {
+        let device = Device::flex().autodiff();
+        let env: VectorizedGymWrapper<TwoStepTestGym, usize> =
             TwoStepTestGym::new(device.clone(), false).into();
+        let use_f64_rewards = std::cell::Cell::new(false);
+        let mut env = crate::wrappers::OutputMapMultiGymWrapper::new(
+            env,
+            |observations| Ok::<_, Infallible>(observations),
+            |mut step| {
+                if use_f64_rewards.get() {
+                    step.rewards = step.rewards.cast(DType::F64);
+                }
+                Ok::<_, Infallible>(step)
+            },
+        );
         let model = |output| {
             MLP::builder()
                 .input_size(4)
@@ -2241,18 +2529,27 @@ mod schedule_tests {
                 .build()
                 .unwrap()
         };
-        let actor = ProbabilisticPolicyModel::new(model(2), CategoricalDistribution);
-        let networks = PPONetworkInfo::<_, _>::Separate(
-            SeparatePPONetwork::builder()
-                .actor_network(actor)
-                .critic_network(model(1))
-                .actor_optimizer(SgdConfig::new().init())
-                .critic_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(1e-3)
-                .critic_learning_rate(1e-3)
-                .build()
-                .unwrap(),
+        let actor = ProbabilisticPolicyModel::new(
+            ObservationModel::<Float> {
+                model: model(2),
+                double_precision: true,
+                kind: PhantomData,
+            },
+            CategoricalDistribution,
         );
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(actor)
+            .critic_network(ObservationModel::<Float> {
+                model: model(1),
+                double_precision: true,
+                kind: PhantomData,
+            })
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
         struct DTypeLogger {
             updates: usize,
         }
@@ -2269,7 +2566,7 @@ mod schedule_tests {
                 }
                 assert_eq!(entry.returns.dtype(), DType::F64);
                 assert_eq!(entry.advantages.dtype(), DType::F64);
-                assert_eq!(entry.rewards.dtype(), DType::F32);
+                assert_eq!(entry.rewards.dtype(), DType::F64);
                 self.updates += 1;
             }
         }
@@ -2278,7 +2575,6 @@ mod schedule_tests {
             .observation_space(env.observation_space())
             .action_space(env.action_space())
             .network_info(networks)
-            .dtype(DType::F64)
             .batch_size(2)
             .mini_batch_size(2)
             .num_epochs(1)
@@ -2287,10 +2583,19 @@ mod schedule_tests {
             .device(device)
             .build()
             .unwrap();
+        assert!(matches!(
+            agent.learn(&mut env, 2),
+            Err(PPOError::CriticRewardDTypeMismatch {
+                critic: DType::F64,
+                reward: DType::F32,
+            })
+        ));
+        use_f64_rewards.set(true);
+        agent.reset_current_observations();
         agent.learn(&mut env, 2).unwrap();
         assert_eq!(
             agent.current_observations.as_ref().unwrap().dtype(),
-            DType::F64
+            DType::F32
         );
         assert_eq!(logger.updates, 1);
     }
@@ -2316,18 +2621,16 @@ mod schedule_tests {
             let mut before_critic = Parameters(Vec::new());
             actor.visit(&mut before_actor);
             critic.visit(&mut before_critic);
-            let networks = PPONetworkInfo::<_, _>::Separate(
-                SeparatePPONetwork::builder()
-                    .actor_network(actor)
-                    .critic_network(critic)
-                    .actor_optimizer(SgdConfig::new().init())
-                    .critic_optimizer(SgdConfig::new().init())
-                    .actor_learning_rate(0.01)
-                    .critic_learning_rate(0.02)
-                    .combined_loss(combined)
-                    .build()
-                    .unwrap(),
-            );
+            let networks = SeparatePPONetwork::builder()
+                .actor_network(actor)
+                .critic_network(critic)
+                .actor_optimizer(SgdConfig::new().init())
+                .critic_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(0.01)
+                .critic_learning_rate(0.02)
+                .combined_loss(combined)
+                .build()
+                .unwrap();
             let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
                 .observation_space(BoxSpace::new_unbounded([1, 4], &device))
                 .action_space(BoxSpace::new_with_universal_bounds(
@@ -2356,9 +2659,7 @@ mod schedule_tests {
                 .call()
                 .unwrap();
             agent.backpropagate_loss(losses).unwrap();
-            let PPONetworkInfo::Separate(network) = &agent.network_info else {
-                panic!("expected separate network");
-            };
+            let network = &agent.network_info;
             let mut after_actor = Parameters(Vec::new());
             let mut after_critic = Parameters(Vec::new());
             network.actor_network.visit(&mut after_actor);
@@ -2379,17 +2680,15 @@ mod schedule_tests {
             let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> =
                 TwoStepTestGym::new(device.clone(), false).into();
             let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
-            let networks = PPONetworkInfo::<_, _>::Separate(
-                SeparatePPONetwork::builder()
-                    .actor_network(actor)
-                    .critic_network(mlp(4, 1, &device))
-                    .actor_optimizer(SgdConfig::new().init())
-                    .critic_optimizer(SgdConfig::new().init())
-                    .actor_learning_rate(1e-3)
-                    .critic_learning_rate(1e-3)
-                    .build()
-                    .unwrap(),
-            );
+            let networks = SeparatePPONetwork::builder()
+                .actor_network(actor)
+                .critic_network(mlp(4, 1, &device))
+                .actor_optimizer(SgdConfig::new().init())
+                .critic_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(1e-3)
+                .critic_learning_rate(1e-3)
+                .build()
+                .unwrap();
             struct Logger(Vec<(f32, f32)>);
 
             impl PPOLogger<usize> for Logger {
@@ -2434,6 +2733,8 @@ mod schedule_tests {
         }
 
         impl Forward<2, 2> for ObservationCritic {
+            type InputKind = Float;
+            type OutputKind = Float;
             type Error = Infallible;
 
             /// Returns the first feature times the learned weight, mapping [batch_size, 4] to [batch_size, 1].
@@ -2487,17 +2788,15 @@ mod schedule_tests {
         let critic = ObservationCritic {
             weight: Param::from_tensor(Tensor::ones([1], (&device, DType::F32))),
         };
-        let networks = PPONetworkInfo::<_, _>::Separate(
-            SeparatePPONetwork::builder()
-                .actor_network(actor)
-                .critic_network(critic)
-                .actor_optimizer(SgdConfig::new().init())
-                .critic_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(1e-3)
-                .critic_learning_rate(1e-3)
-                .build()
-                .unwrap(),
-        );
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(actor)
+            .critic_network(critic)
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
         let mut agent = PPOAgent::builder()
             .observation_space(env.observation_space())
             .action_space(env.action_space())
@@ -2706,6 +3005,8 @@ mod schedule_tests {
         struct UnitCritic;
 
         impl Forward<2, 2> for UnitCritic {
+            type InputKind = Float;
+            type OutputKind = Float;
             type Error = Infallible;
 
             /// Returns Float values [batch_size, 1] for observations [batch_size, 4], preserving dtype and device.
@@ -2718,17 +3019,15 @@ mod schedule_tests {
         }
         let device = Device::flex().autodiff();
         let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
-        let networks = PPONetworkInfo::<_, _>::Separate(
-            SeparatePPONetwork::builder()
-                .actor_optimizer(SgdConfig::new().init())
-                .critic_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(1e-3)
-                .critic_learning_rate(1e-3)
-                .actor_network(actor)
-                .critic_network(UnitCritic)
-                .build()
-                .unwrap(),
-        );
+        let networks = SeparatePPONetwork::builder()
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .actor_network(actor)
+            .critic_network(UnitCritic)
+            .build()
+            .unwrap();
         let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
             .observation_space(BoxSpace::new_unbounded([1, 4], &device))
             .action_space(Discrete::new(2))
@@ -2739,15 +3038,28 @@ mod schedule_tests {
             .device(device.clone())
             .build()
             .unwrap();
-        let rewards = Tensor::from_floats([[1.0], [2.0]], &device);
         let observations = Tensor::zeros([2, 4], (&device, DType::F32));
         let actual = agent
-            .bootstrap_truncated_rewards(&rewards, &observations, &[true, false], &[true, true])
-            .unwrap()
-            .into_data()
-            .try_to_vec::<f32>()
+            .bootstrap_truncated_rewards(
+                Tensor::zeros([2, 1], (&device, DType::F32)),
+                &observations,
+                &[true, false],
+                &[true, true],
+            )
             .unwrap();
-        assert_eq!(actual, [1.0, 2.99]);
+        assert_eq!(actual.into_data().try_to_vec::<f32>().unwrap(), [0.0, 0.99]);
+        assert!(matches!(
+            agent.bootstrap_truncated_rewards(
+                Tensor::zeros([2, 1], (&device, DType::F64)),
+                &observations,
+                &[true, false],
+                &[true, true],
+            ),
+            Err(PPOError::CriticRewardDTypeMismatch {
+                critic: DType::F32,
+                reward: DType::F64,
+            })
+        ));
     }
 
     #[test]
@@ -2760,17 +3072,15 @@ mod schedule_tests {
         .try_into()
         .unwrap();
         let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
-        let networks = PPONetworkInfo::<_, _>::Separate(
-            SeparatePPONetwork::builder()
-                .actor_optimizer(SgdConfig::new().init())
-                .critic_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(1e-3)
-                .critic_learning_rate(1e-3)
-                .actor_network(actor)
-                .critic_network(mlp(4, 1, &device))
-                .build()
-                .unwrap(),
-        );
+        let networks = SeparatePPONetwork::builder()
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .actor_network(actor)
+            .critic_network(mlp(4, 1, &device))
+            .build()
+            .unwrap();
         struct CollectionLogger {
             collection_rewards: Vec<Vec<f32>>,
             optimization_rewards: Vec<Vec<f32>>,
@@ -2854,17 +3164,15 @@ mod schedule_tests {
         .try_into()
         .unwrap();
         let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
-        let networks = PPONetworkInfo::Shared(
-            SharedPPONetwork::builder()
-                .shared_network(mlp(4, 4, &device))
-                .actor_head(actor)
-                .critic_head(mlp(4, 1, &device))
-                .optimizer(SgdConfig::new().init())
-                .learning_rate(1e-3)
-                .lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
-                .build()
-                .unwrap(),
-        );
+        let networks = SharedPPONetwork::builder()
+            .shared_network(mlp(4, 4, &device))
+            .actor_head(actor)
+            .critic_head(mlp(4, 1, &device))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(1e-3)
+            .lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
+            .build()
+            .unwrap();
         let mut logger = NoopLogger::default();
         let mut agent = PPOAgent::builder()
             .observation_space(env.observation_space())
@@ -2886,14 +3194,10 @@ mod schedule_tests {
             [2, 1]
         );
         assert_eq!(agent.episode_tracker.environment_count(), 2);
-        let PPONetworkInfo::Shared(network) = &agent.network_info else {
-            panic!("expected shared network");
-        };
+        let network = &agent.network_info;
         assert_close(network.learning_rate, 0.00082);
         agent.set_learning_rate(0.25);
-        let PPONetworkInfo::Shared(network) = &agent.network_info else {
-            panic!("expected shared network");
-        };
+        let network = &agent.network_info;
         assert_close(network.learning_rate, 0.25);
         agent.reset_current_observations();
         assert!(agent.current_observations.is_none());
@@ -2933,18 +3237,16 @@ mod schedule_tests {
         actor.visit(&mut actor_ids);
         critic.visit(&mut critic_ids);
         let models = (actor.clone(), critic.clone());
-        let networks = PPONetworkInfo::<_, _>::Separate(
-            SeparatePPONetwork::builder()
-                .actor_network(actor)
-                .critic_network(critic)
-                .actor_optimizer(SgdConfig::new().init())
-                .critic_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(3e-4)
-                .critic_learning_rate(3e-4)
-                .combined_loss(true)
-                .build()
-                .unwrap(),
-        );
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(actor)
+            .critic_network(critic)
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(3e-4)
+            .critic_learning_rate(3e-4)
+            .combined_loss(true)
+            .build()
+            .unwrap();
         let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
             .observation_space(BoxSpace::new_unbounded([1, 4], &device))
             .action_space(BoxSpace::new_with_universal_bounds(
@@ -3038,19 +3340,17 @@ mod schedule_tests {
         .try_into()
         .unwrap();
         let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
-        let networks = PPONetworkInfo::<_, _>::Separate(
-            SeparatePPONetwork::builder()
-                .actor_optimizer(SgdConfig::new().init())
-                .critic_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(1e-3)
-                .critic_learning_rate(1e-3)
-                .actor_network(actor)
-                .critic_network(mlp(4, 1, &device))
-                .actor_lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
-                .critic_lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
-                .build()
-                .unwrap(),
-        );
+        let networks = SeparatePPONetwork::builder()
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .actor_network(actor)
+            .critic_network(mlp(4, 1, &device))
+            .actor_lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
+            .critic_lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
+            .build()
+            .unwrap();
         let mut logger = NoopLogger::default();
         let mut agent = PPOAgent::builder()
             .observation_space(env.observation_space())
@@ -3069,9 +3369,7 @@ mod schedule_tests {
             agent.learn(&mut env, 2).unwrap();
             assert_eq!(agent.schedule_progress.elapsed_steps(), steps);
             assert_close(agent.schedule_progress.parameter(&*agent.clip_range), clip);
-            let PPONetworkInfo::Separate(network) = &agent.network_info else {
-                panic!("expected separate network");
-            };
+            let network = &agent.network_info;
             assert_close(network.actor_learning_rate, rate);
             assert_close(network.critic_learning_rate, rate);
         }
@@ -3082,9 +3380,7 @@ mod schedule_tests {
             [2, 1]
         );
         agent.set_learning_rate(0.25);
-        let PPONetworkInfo::Separate(network) = &agent.network_info else {
-            panic!("expected separate network");
-        };
+        let network = &agent.network_info;
         assert_close(network.actor_learning_rate, 0.25);
         assert_close(network.critic_learning_rate, 0.25);
         assert_eq!(logger.updates, 2);
@@ -3098,17 +3394,15 @@ mod schedule_tests {
             .try_into()
             .unwrap();
         let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
-        let networks = PPONetworkInfo::<_, _>::Separate(
-            SeparatePPONetwork::builder()
-                .actor_network(actor)
-                .critic_network(mlp(4, 1, &device))
-                .actor_optimizer(SgdConfig::new().init())
-                .critic_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(1e-3)
-                .critic_learning_rate(1e-3)
-                .build()
-                .unwrap(),
-        );
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(actor)
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
         let mut agent = PPOAgent::builder()
             .observation_space(env.observation_space())
             .action_space(env.action_space())
@@ -3136,11 +3430,11 @@ mod schedule_tests {
             [false, false, true],
         ];
         let bootstrap = [1.1_f32, 1.2, 1.3];
-        let reward_tensor = Tensor::from_data(
+        let reward_tensor = Tensor::<3>::from_data(
             TensorData::new(rewards.into_iter().flatten().collect::<Vec<_>>(), [3, 3, 1]),
             &device,
         );
-        let value_tensor = Tensor::from_data(
+        let value_tensor = Tensor::<3>::from_data(
             TensorData::new(values.into_iter().flatten().collect::<Vec<_>>(), [3, 3, 1]),
             &device,
         );
@@ -3156,32 +3450,36 @@ mod schedule_tests {
             &device,
         );
         let bootstrap_tensor =
-            Tensor::from_data(TensorData::new(bootstrap.to_vec(), [3, 1]), &device);
-        let actual = agent
-            .compute_gae(
-                &reward_tensor,
-                &value_tensor,
+            Tensor::<2>::from_data(TensorData::new(bootstrap.to_vec(), [3, 1]), &device);
+        for dtype in [DType::F32, DType::F64] {
+            let advantages = agent.compute_gae(
+                &reward_tensor.clone().cast(dtype),
+                &value_tensor.clone().cast(dtype),
                 &done_tensor,
                 &truncated_tensor,
-                &bootstrap_tensor,
-            )
-            .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-        for env_idx in 0..3 {
-            let mut next_value = bootstrap[env_idx];
-            let mut gae = 0.0_f32;
-            for time in (0..3).rev() {
-                let mask = if dones[time][env_idx] || truncateds[time][env_idx] {
-                    0.0
-                } else {
-                    1.0
-                };
-                let value = values[time][env_idx];
-                let delta = rewards[time][env_idx] + 0.9 * next_value * mask - value;
-                gae = delta + 0.9 * 0.8 * gae * mask;
-                assert!((actual[time * 3 + env_idx] - gae).abs() < 1e-5);
-                next_value = value;
+                &bootstrap_tensor.clone().cast(dtype),
+            );
+            assert_eq!(advantages.dtype(), dtype);
+            let actual = advantages
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            for env_idx in 0..3 {
+                let mut next_value = bootstrap[env_idx];
+                let mut gae = 0.0_f32;
+                for time in (0..3).rev() {
+                    let mask = if dones[time][env_idx] || truncateds[time][env_idx] {
+                        0.0
+                    } else {
+                        1.0
+                    };
+                    let value = values[time][env_idx];
+                    let delta = rewards[time][env_idx] + 0.9 * next_value * mask - value;
+                    gae = delta + 0.9 * 0.8 * gae * mask;
+                    assert!((actual[time * 3 + env_idx] - f64::from(gae)).abs() < 1e-5);
+                    next_value = value;
+                }
             }
         }
     }

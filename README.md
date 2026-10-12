@@ -86,14 +86,12 @@ After creating the Candle modules and optimizers, a separate-network PPO agent i
 let policy =
     ProbabilisticPolicyModel::new(actor, CategoricalDistribution);
 
-let networks = PPONetworkInfo::Separate(
-    SeparatePPONetwork::builder()
+let networks = SeparatePPONetwork::builder()
         .actor_network(policy)
         .critic_network(critic)
         .actor_optimizer(actor_optimizer)
         .critic_optimizer(critic_optimizer)
-        .build(),
-);
+        .build();
 
 let mut agent = PPOAgent::builder()
     .action_space(action_space)
@@ -112,7 +110,7 @@ The public boundaries make each part replaceable:
 | Decision | Available choices |
 | --- | --- |
 | Environment execution | Implement `Gym` for one environment or `MultiGym` for a batch. Collect `Gym` implementations with `VectorizedGymWrapper::from(envs)`, or enable `multithreading` and use `MultithreadedVectorizedGymWrapper`. |
-| Network topology | Use `PPONetworkInfo::Separate` for independent actor and critic modules, or `PPONetworkInfo::Shared` for one trunk with policy and value heads. |
+| Network topology | Use `SeparatePPONetwork` for independent actor and critic modules, or `SharedPPONetwork` for one trunk with policy and value heads. |
 | Policy representation | Wrap a Candle module in `ProbabilisticPolicyModel<D>`. Choose a categorical, Gaussian, transformed, or application-defined `Distribution`. |
 | Training state and devices | On-policy agents use rollout storage. Replay agents use `ReplayStorageConfig` to select observation dtype and either one-device or hybrid storage. |
 | Schedules and logging | Use constant, linear, exponential, or application-defined `ParameterSchedule` values. Pass a logger implementation to the agent builder, or omit logging. |
