@@ -615,7 +615,6 @@ impl<
     AS,
     GE,
     I,
-    K: Basic,
     NE: std::fmt::Debug,
     const O: usize,
     const H: usize,
@@ -638,11 +637,11 @@ where
             Action = Tensor<L>,
             Error = NE,
         >,
-    OS: ObservationSpace<O, Kind = K>,
+    OS: ObservationSpace<O>,
     AS: ActionMap<L, A>,
     AS::Error: std::fmt::Debug,
-    FloatDType: Cast<O, K, OutputKind = Float>,
-    Tensor<O, K>: PrevRank,
+    FloatDType: Cast<O, OS::Kind, OutputKind = Float>,
+    Tensor<O, OS::Kind>: PrevRank,
     Tensor<O>: PrevRank + NextRank<Next = Tensor<BO>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
     GE: std::fmt::Debug,
@@ -762,7 +761,6 @@ impl<
     AS,
     GE,
     I,
-    K: Basic,
     NE: std::fmt::Debug,
     const O: usize,
     const H: usize,
@@ -786,12 +784,12 @@ where
             Action = Tensor<L>,
             Error = NE,
         >,
-    OS: ObservationSpace<O, Kind = K>,
+    OS: ObservationSpace<O>,
     AS: ActionMap<L, A>,
     AS::Error: std::fmt::Debug,
-    FloatDType: Cast<O, K, OutputKind = Float>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
-    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    FloatDType: Cast<O, OS::Kind, OutputKind = Float>,
+    Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
+    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     Tensor<O>: PrevRank + NextRank<Next = Tensor<BO>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
     GE: std::fmt::Debug,
@@ -1477,7 +1475,7 @@ where
     /// `[batch, ...action_shape]`.
     pub fn act_deterministic(
         &mut self,
-        observation: &Tensor<O, K>,
+        observation: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A, AS::Kind>, PPOError<NE, GE, AS::Error>> {
         let observation = FloatDType::cast(observation.clone(), FloatDType::from(self.dtype));
         let latent_observations = self.latent_observations(observation)?;
@@ -1625,7 +1623,6 @@ impl<
     AS,
     GE,
     I,
-    K: Basic,
     NE: std::fmt::Debug,
     const O: usize,
     const H: usize,
@@ -1649,12 +1646,12 @@ where
             Action = Tensor<L>,
             Error = NE,
         >,
-    OS: ObservationSpace<O, Kind = K>,
+    OS: ObservationSpace<O>,
     AS: ActionMap<L, A>,
     AS::Error: std::fmt::Debug,
-    FloatDType: Cast<O, K, OutputKind = Float>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
-    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    FloatDType: Cast<O, OS::Kind, OutputKind = Float>,
+    Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
+    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     Tensor<O>: PrevRank + NextRank<Next = Tensor<BO>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
     NE: From<PPONetworkError<P::Error, C::Error, T::Error>>,
@@ -1668,7 +1665,10 @@ where
 
     /// Selects environment actions `[batch, ...action_shape]` for observations
     /// `[batch, ...observation_shape]`.
-    fn act(&mut self, observation: &Tensor<O, K>) -> Result<Tensor<A, AS::Kind>, Self::Error> {
+    fn act(
+        &mut self,
+        observation: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
         let observation = FloatDType::cast(observation.clone(), FloatDType::from(self.dtype));
         let latent_observations = self.latent_observations(observation)?;
         let neurons = self.act_neurons(&latent_observations)?;
