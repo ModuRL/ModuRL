@@ -207,7 +207,7 @@ where
     type Error = PPONetworkError<P::Error, C::Error, T::Error>;
 
     /// Forwards native rank-O observations through the shared model into Float rank-H head inputs, preserving batch size.
-    /// The shared model defines dtype and device requirements and retains parameter gradients.
+    /// Both tensors have shape `[batch_size, ...features]`; the shared model defines the remaining axes, dtype, and device.
     fn forward_observations(
         &self,
         observations: Tensor<O, Self::InputKind>,
@@ -224,14 +224,14 @@ where
             .map_err(PPONetworkError::Critic)
     }
 
-    /// Samples rank-L Float actions from rank-H Float head inputs, preserving the batch axis and policy dtype.
+    /// Samples rank-L Float actions from rank-H Float head inputs, each shaped `[batch_size, ...item_shape]`. Preserves policy dtype.
     fn sample(&self, observations: Tensor<H>) -> Result<Tensor<L>, Self::Error> {
         self.actor_head
             .sample(observations)
             .map_err(PPONetworkError::Policy)
     }
 
-    /// Returns rank-L modal Float actions from rank-H Float head inputs, preserving the batch axis and policy dtype.
+    /// Returns rank-L modal Float actions from rank-H Float head inputs, each shaped `[batch_size, ...item_shape]`. Preserves policy dtype.
     fn mode(&self, observations: Tensor<H>) -> Result<Tensor<L>, Self::Error> {
         self.actor_head
             .mode(observations)
@@ -295,7 +295,7 @@ where
     type LatentKind = P::ObservationKind;
     type Error = PPONetworkError<P::Error, C::Error>;
 
-    /// Returns native rank-O observations unchanged, preserving every axis, kind, dtype, device, and gradient connection.
+    /// Returns native rank-O observations `[batch_size, ...observation_shape]` unchanged, preserving kind, dtype, device, and gradients.
     fn forward_observations(
         &self,
         observations: Tensor<O, Self::InputKind>,
@@ -313,14 +313,14 @@ where
             .map_err(PPONetworkError::Critic)
     }
 
-    /// Samples rank-L Float actions from native rank-O observations, preserving the batch axis and policy dtype.
+    /// Samples rank-L Float actions from native rank-O observations, each shaped `[batch_size, ...item_shape]`. Preserves policy dtype.
     fn sample(&self, observations: Tensor<O, Self::LatentKind>) -> Result<Tensor<L>, Self::Error> {
         self.actor_network
             .sample(observations)
             .map_err(PPONetworkError::Policy)
     }
 
-    /// Returns rank-L modal Float actions from native rank-O observations, preserving the batch axis and policy dtype.
+    /// Returns rank-L modal Float actions from native rank-O observations, each shaped `[batch_size, ...item_shape]`. Preserves policy dtype.
     fn mode(&self, observations: Tensor<O, Self::LatentKind>) -> Result<Tensor<L>, Self::Error> {
         self.actor_network
             .mode(observations)
@@ -623,7 +623,7 @@ mod tests {
         struct Parameters(Vec<f32>);
 
         impl ModuleVisitor for Parameters {
-            /// Reads each rank-D Float parameter to the host in visit order without changing the model.
+            /// Reads each rank-D Float parameter to the host in visit order, preserving its shape and the model.
             fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
                 self.0
                     .extend(param.val().into_data().try_to_vec::<f32>().unwrap());
