@@ -92,7 +92,7 @@ fn main() {
     };
     let networks = A2CNetworkInfo::separate(
         SeparateA2CNetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::with_distribution(
+            .actor_network(ProbabilisticPolicyModel::new(
                 actor,
                 GaussianDistribution::new(action_shape).unwrap(),
             ))

@@ -215,8 +215,9 @@ fn ppo_training_is_device_deterministic() {
             SeparatePPONetwork::builder()
                 .actor_optimizer(actor_optimizer)
                 .critic_optimizer(critic_optimizer)
-                .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+                .actor_network(ProbabilisticPolicyModel::new(
                     actor_network,
+                    CategoricalDistribution,
                 ))
                 .critic_network(critic_network)
                 .build(),

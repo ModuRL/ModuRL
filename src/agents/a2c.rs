@@ -371,8 +371,9 @@ mod tests {
         SeparateA2CNetwork::builder()
             .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
-            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+            .actor_network(ProbabilisticPolicyModel::new(
                 actor,
+                CategoricalDistribution,
             ))
             .critic_network(critic)
             .build()

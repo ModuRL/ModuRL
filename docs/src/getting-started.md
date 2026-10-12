@@ -185,7 +185,7 @@ actions and evaluate their log probabilities:
 
 ```rust,ignore
     let policy =
-        ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
+        ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
 
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
@@ -295,7 +295,7 @@ fn main() {
         .expect("failed to build critic optimizer");
 
     let policy =
-        ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
+        ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
 
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()

@@ -151,8 +151,9 @@ fn ppo_updates_f64_networks_from_native_f32_observations() {
     let critic_optimizer = AdamW::new(critic_vars.all_vars(), ParamsAdamW::default()).unwrap();
     let networks = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+            .actor_network(ProbabilisticPolicyModel::new(
                 actor,
+                CategoricalDistribution,
             ))
             .critic_network(critic)
             .actor_optimizer(actor_optimizer)
@@ -192,8 +193,9 @@ fn a2c_updates_f64_networks_from_native_f32_observations() {
     let critic = mlp(&critic_vars, 4, 1, "critic").unwrap();
     let networks = A2CNetworkInfo::separate(
         SeparateA2CNetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+            .actor_network(ProbabilisticPolicyModel::new(
                 actor,
+                CategoricalDistribution,
             ))
             .critic_network(critic)
             .actor_optimizer(AdamW::new(actor_vars.all_vars(), ParamsAdamW::default()).unwrap())
@@ -238,7 +240,7 @@ fn sac_updates_f64_networks_from_native_f32_observations() {
     let actor_vars = VarMap::new();
     let actor = mlp(&actor_vars, 4, 2, "actor").unwrap();
     let actor_optimizer = AdamW::new(actor_vars.all_vars(), ParamsAdamW::default()).unwrap();
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor);
+    let policy = ProbabilisticPolicyModel::new(actor, CategoricalDistribution);
     let online_vars = VarMap::new();
     let mut target_vars = VarMap::new();
     let critic = discrete_critic(&online_vars, &mut target_vars);

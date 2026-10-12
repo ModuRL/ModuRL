@@ -195,8 +195,9 @@ fn ppo(
     assert_eq!(parameter_count([&actor_vars, &critic_vars]), PPO_PARAMETERS);
     let networks = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+            .actor_network(ProbabilisticPolicyModel::new(
                 actor,
+                CategoricalDistribution,
             ))
             .critic_network(critic)
             .actor_optimizer(AdamW::new(actor_vars.all_vars(), adam(3e-4))?)
@@ -396,8 +397,7 @@ fn sac(
         debug_result(GaussianDistribution::new(vec![1]))?,
         TanhTransform,
     );
-    let policy =
-        ProbabilisticPolicyModel::with_distribution(GaussianActor { network: actor }, distribution);
+    let policy = ProbabilisticPolicyModel::new(GaussianActor { network: actor }, distribution);
     let critic_vars_1 = VarMap::new();
     let mut target_vars_1 = VarMap::new();
     let critic_1 = sac_critic(&critic_vars_1, &mut target_vars_1, device)?;

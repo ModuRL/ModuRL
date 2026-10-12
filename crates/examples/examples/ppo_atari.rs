@@ -324,8 +324,9 @@ fn main() {
     let networks: PPONetworkInfo<AdamW, _, FakeOptimizer> = PPONetworkInfo::Shared(
         SharedPPONetwork::builder()
             .shared_network(cnn)
-            .actor_head(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+            .actor_head(ProbabilisticPolicyModel::new(
                 actor,
+                CategoricalDistribution,
             ))
             .critic_head(critic)
             .optimizer(optimizer)

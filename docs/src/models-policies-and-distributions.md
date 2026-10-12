@@ -54,7 +54,7 @@ The observation kind `K` defaults to `Float`. Custom models can use integer or b
 Construct a policy without specifying the type group:
 
 ```rust,ignore
-let policy = ProbabilisticPolicyModel::with_distribution(
+let policy = ProbabilisticPolicyModel::new(
     actor,
     CategoricalDistribution,
 );
@@ -88,7 +88,7 @@ It does not check input compatibility or validate component outputs.
 their own implementations:
 
 ```rust,ignore
-let policy = ProbabilisticPolicyModel::<(_, MyDistribution, _)>::new(actor);
+let policy = ProbabilisticPolicyModel::new(actor, MyDistribution::default());
 ```
 
 A custom `Distribution<P, A>` implementation provides `sample`, `mode`,

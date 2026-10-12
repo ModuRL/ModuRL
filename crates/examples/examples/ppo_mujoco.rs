@@ -106,7 +106,7 @@ fn main() {
             // The policy interprets actor output as [mean, log_std], samples an
             // unsquashed Gaussian action, and evaluates its log probability.
             // BoxSpace separately clips the action sent to the environment.
-            .actor_network(ProbabilisticPolicyModel::with_distribution(
+            .actor_network(ProbabilisticPolicyModel::new(
                 actor,
                 GaussianDistribution::new(action_shape).unwrap(),
             ))

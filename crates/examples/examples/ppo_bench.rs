@@ -77,8 +77,9 @@ fn ppo_cartpole() {
 
     let ppo_network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
+            .actor_network(ProbabilisticPolicyModel::new(
                 actor_network,
+                CategoricalDistribution,
             ))
             .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
