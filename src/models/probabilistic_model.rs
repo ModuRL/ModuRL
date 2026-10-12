@@ -130,20 +130,11 @@ where
     M: Module + Forward<O, P, K>,
     D: Distribution<P, A> + fmt::Debug,
 {
-    /// Creates a policy with a default distribution and an owned native model.
-    /// Maps rank-`O` observations to rank-`P` float parameters and samples rank-`A` actions.
-    /// Every rank includes a batch axis. Construction does not initialize or detach model parameters.
-    pub fn new(module: M) -> Self
-    where
-        D: Default,
-    {
-        Self::with_distribution(module, D::default())
-    }
-
     /// Connects an owned native model to a distribution using `Forward<O, P, K>`.
     /// Maps `[batch_size, ...observation_shape]` to float `[batch_size, ...parameter_shape]`, preserving batch size.
+    /// The distribution produces `[batch_size, ...action_shape]` of rank A. Ranks O, P, and A each include the batch axis.
     /// The model defines observation conversions and owns all parameters visited by Burn.
-    pub fn with_distribution(module: M, distribution: D) -> Self {
+    pub fn new(module: M, distribution: D) -> Self {
         const {
             assert!(O >= 1, "policy observations require a batch axis");
             assert!(P >= 1, "policy parameters require a batch axis");
@@ -458,8 +449,9 @@ mod tests {
         let device = Device::flex();
         for dtype in [DType::F32, DType::F64] {
             for action_count in [1, 2, 4] {
-                let policy = ProbabilisticPolicyModel::<(_, GaussianDistribution, _)>::new(
+                let policy = ProbabilisticPolicyModel::new(
                     zero_model(4, action_count * 2, &device, dtype),
+                    GaussianDistribution::default(),
                 );
                 for batch_size in [1, 3, 10] {
                     let observations = Tensor::zeros([batch_size, 4], (&device, dtype));
@@ -511,7 +503,7 @@ mod tests {
     fn type_group_is_inferred_for_an_owning_consumer() {
         let device = Device::flex();
         let owner = PolicyOwner {
-            policy: ProbabilisticPolicyModel::with_distribution(
+            policy: ProbabilisticPolicyModel::new(
                 zero_model(2, 2, &device, DType::F64),
                 GaussianDistribution::default(),
             ),
@@ -533,7 +525,7 @@ mod tests {
     fn configured_distribution_preserves_multidimensional_actions_and_candidates() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
-        let policy = ProbabilisticPolicyModel::with_distribution(
+        let policy = ProbabilisticPolicyModel::new(
             zero_model(4, 12, &device, DType::F64),
             GaussianDistribution::<3>::new([2, 3]).unwrap(),
         );
@@ -561,7 +553,7 @@ mod tests {
     fn categorical_candidates_have_integer_kind_and_independent_rank() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let policy = ProbabilisticPolicyModel::with_distribution(
+        let policy = ProbabilisticPolicyModel::new(
             zero_model(2, 4, &device, DType::F64),
             CategoricalDistribution,
         );
@@ -600,7 +592,7 @@ mod tests {
     fn transformed_policy_preserves_bounds_and_parameter_gradients() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
-        let policy = ProbabilisticPolicyModel::with_distribution(
+        let policy = ProbabilisticPolicyModel::new(
             zero_model(2, 4, &device, DType::F64),
             TransformedDistribution::new(GaussianDistribution::default(), TanhTransform),
         );
@@ -632,7 +624,7 @@ mod tests {
     #[test]
     fn custom_models_accept_image_and_integer_observations() {
         let device = Device::flex();
-        let image_policy = ProbabilisticPolicyModel::with_distribution(
+        let image_policy = ProbabilisticPolicyModel::new(
             observation_model(4, &device, DType::F64),
             GaussianDistribution::default(),
         );
@@ -644,7 +636,7 @@ mod tests {
             [3, 1]
         );
         assert_eq!(image_policy.num_params(), 10);
-        let integer_policy = ProbabilisticPolicyModel::with_distribution(
+        let integer_policy = ProbabilisticPolicyModel::new(
             observation_model(2, &device, DType::F64),
             GaussianDistribution::default(),
         );
@@ -658,7 +650,7 @@ mod tests {
     #[test]
     fn boolean_observation_model_converts_explicitly() {
         let device = Device::flex();
-        let policy = ProbabilisticPolicyModel::with_distribution(
+        let policy = ProbabilisticPolicyModel::new(
             observation_model(2, &device, DType::F32),
             GaussianDistribution::default(),
         );
@@ -678,7 +670,7 @@ mod tests {
     fn custom_model_uses_updated_owned_parameters_and_native_records() {
         let device = Device::flex().autodiff();
         let offset = 0.75;
-        let policy = ProbabilisticPolicyModel::with_distribution(
+        let policy = ProbabilisticPolicyModel::new(
             OffsetModel {
                 layer: observation_model(2, &device, DType::F64).layer,
                 offset,
@@ -703,7 +695,7 @@ mod tests {
                 < 1e-12
         );
         let record = policy.clone().into_record();
-        let restored = ProbabilisticPolicyModel::with_distribution(
+        let restored = ProbabilisticPolicyModel::new(
             OffsetModel {
                 layer: observation_model(2, &device, DType::F64).layer,
                 offset,
@@ -744,7 +736,7 @@ mod tests {
     #[test]
     fn errors_preserve_model_and_distribution_causes() {
         let device = Device::flex();
-        let policy = ProbabilisticPolicyModel::with_distribution(
+        let policy = ProbabilisticPolicyModel::new(
             zero_model(2, 2, &device, DType::F64),
             GaussianDistribution::default(),
         );
@@ -754,7 +746,7 @@ mod tests {
                 ModelError::InputFeatures { .. }
             ))
         ));
-        let bad_distribution = ProbabilisticPolicyModel::with_distribution(
+        let bad_distribution = ProbabilisticPolicyModel::new(
             zero_model(2, 3, &device, DType::F32),
             GaussianDistribution::default(),
         );
@@ -828,7 +820,7 @@ mod tests {
         let detached = Arc::new(AtomicBool::new(false));
         let model = zero_model(2, 2, &device, DType::F32);
         let parameter = model.output_layer.weight.val();
-        let policy = ProbabilisticPolicyModel::with_distribution(
+        let policy = ProbabilisticPolicyModel::new(
             model,
             EntropyProbe {
                 detached: detached.clone(),

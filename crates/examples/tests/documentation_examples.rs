@@ -143,7 +143,7 @@ fn getting_started_program() {
     let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
         .expect("failed to build critic optimizer");
 
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
+    let policy = ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
 
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
@@ -320,7 +320,7 @@ fn understand_ppo_training_configuration() {
     let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
         .expect("failed to build critic optimizer");
 
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
+    let policy = ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
     let network_info = PPONetworkInfo::Separate(
         SeparatePPONetwork::builder()
             .actor_network(policy)

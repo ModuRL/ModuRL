@@ -96,7 +96,7 @@ fn main() {
     )
     .unwrap();
     let actor_optimizer = AdamW::new(actor_vars.all_vars(), optimizer_parameters.clone()).unwrap();
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor);
+    let policy = ProbabilisticPolicyModel::new(actor, CategoricalDistribution);
 
     let online_vars_1 = VarMap::new();
     let mut target_vars_1 = VarMap::new();
