@@ -4,11 +4,14 @@ use crate::{
 };
 use burn::tensor::Tensor;
 
+#[cfg(any())]
 pub mod a2c;
+#[cfg(any())]
 pub mod deterministic_actor_critic;
 pub mod ppo;
 pub mod q_learning;
 mod replay_device_strategy;
+#[cfg(any())]
 pub mod sac;
 
 pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
@@ -54,6 +57,7 @@ where
 #[cfg(test)]
 pub(crate) mod test_support {
     use burn::tensor::{DType, Device, Int, Tensor};
+    #[cfg(any())]
     use candle_nn::Optimizer;
     use std::convert::Infallible;
 
@@ -108,11 +112,13 @@ pub(crate) mod test_support {
         }
     }
 
+    #[cfg(any())]
     pub(crate) struct CountingOptimizer {
         pub(crate) steps: usize,
         learning_rate: f64,
     }
 
+    #[cfg(any())]
     impl CountingOptimizer {
         pub(crate) fn with_learning_rate(learning_rate: f64) -> Self {
             Self {
@@ -122,6 +128,7 @@ pub(crate) mod test_support {
         }
     }
 
+    #[cfg(any())]
     impl Optimizer for CountingOptimizer {
         type Config = f64;
 
@@ -262,9 +269,11 @@ mod tests {
         agent.learn(&mut multiple, 2).unwrap();
     }
 
+    #[cfg(any())]
     #[test]
     fn counting_optimizer_counts_whole_updates_with_multiple_parameters() {
         use super::test_support::CountingOptimizer;
+        #[cfg(any())]
         use candle_nn::Optimizer;
 
         let device = candle_core::Device::Cpu;

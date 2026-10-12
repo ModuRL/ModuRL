@@ -281,7 +281,7 @@ where
     }
 
     /// Maps rank-O observation batches to rank-A deterministic environment actions, preserving the batch axis.
-    /// Inputs must meet the owned model's dtype and device contract.
+    /// Inputs have shape `[batch_size, ...observation_shape]` and must meet the model's dtype and device contract.
     pub fn act_deterministic(
         &mut self,
         observations: &Tensor<O, OS::Kind>,
@@ -339,7 +339,7 @@ where
     type ObservationSpace = OS;
     type ActionSpace = AS;
 
-    /// Maps rank-O observation batches to rank-A stochastic actions, preserving the batch axis, native kinds, and device.
+    /// Maps rank-O observations `[batch_size, ...observation_shape]` to rank-A actions `[batch_size, ...action_shape]`, preserving native kinds and device.
     fn act(
         &mut self,
         observations: &Tensor<O, OS::Kind>,

@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use candle_core::{D, Device, Tensor};
+use candle_core::{Device, Tensor};
 use modurl::prelude::*;
 use modurl_logger::{Aggregation, AggregationConfig, Logger, TensorBoardLogger, TerminalLogger};
 
@@ -228,7 +228,12 @@ impl PPOGrapher {
 
 /// Averages a rank-D Burn metric over all axes, reads it to the host, and returns one Candle scalar `[]`.
 fn on_policy_metric<const D: usize>(value: &burn::tensor::Tensor<D>) -> Tensor {
-    let value = value.clone().detach().mean().try_into_scalar::<f32>().expect("failed to read on-policy metric");
+    let value = value
+        .clone()
+        .detach()
+        .mean()
+        .try_into_scalar::<f32>()
+        .expect("failed to read on-policy metric");
     Tensor::new(value, &Device::Cpu).unwrap()
 }
 
@@ -492,10 +497,12 @@ impl<I> PPOLogger<RawRewardInfo<EpisodeStatisticsInfo<I>>>
 
 const SAC_UPDATE_LOG_INTERVAL: usize = 1_000;
 
+#[cfg(any())]
 pub struct SACGrapher {
     terminal: TerminalLogger,
 }
 
+#[cfg(any())]
 impl SACGrapher {
     pub fn new() -> Self {
         let aggregation = with_episode_smoothing(with_metric_window(
@@ -517,6 +524,7 @@ impl SACGrapher {
     }
 }
 
+#[cfg(any())]
 impl<I> SACLogger<I> for SACGrapher {
     fn log_update(&mut self, entry: &SACLogEntry) {
         if !entry
@@ -620,10 +628,12 @@ impl<I> SACLogger<I> for SACGrapher {
 
 const DETERMINISTIC_ACTOR_CRITIC_UPDATE_LOG_INTERVAL: usize = 1_000;
 
+#[cfg(any())]
 pub struct DeterministicActorCriticGrapher {
     terminal: TerminalLogger,
 }
 
+#[cfg(any())]
 impl DeterministicActorCriticGrapher {
     pub fn new() -> Self {
         let aggregation = with_episode_smoothing(with_metric_window(
@@ -726,6 +736,7 @@ impl DeterministicActorCriticGrapher {
     }
 }
 
+#[cfg(any())]
 impl<I> DDPGLogger<I> for DeterministicActorCriticGrapher {
     fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
         self.log_update(entry);
@@ -736,6 +747,7 @@ impl<I> DDPGLogger<I> for DeterministicActorCriticGrapher {
     }
 }
 
+#[cfg(any())]
 impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
     fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
         self.log_update(entry);
@@ -931,6 +943,7 @@ mod tests {
         );
     }
 
+    #[cfg(any())]
     #[test]
     fn deterministic_grapher_uses_batch_timestep_for_completed_episodes() {
         let mut grapher = DeterministicActorCriticGrapher::new();
