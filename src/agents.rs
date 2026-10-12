@@ -4,7 +4,6 @@ use crate::{
 };
 use burn::tensor::Tensor;
 
-#[cfg(any())]
 pub mod a2c;
 #[cfg(any())]
 pub mod deterministic_actor_critic;
