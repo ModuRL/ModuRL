@@ -239,9 +239,10 @@ fn main() {
     // Load one environment on the main thread to discover the ROM's minimal
     // action set. Worker environments are constructed inside their own threads
     // because ALE instances are intentionally not Send.
-    let probe_env = make_atari_env(rom_path.clone(), SEED);
-    let action_count = probe_env.action_space().shape()[0];
-    drop(probe_env);
+    let action_count = {
+        let probe_env = make_atari_env(rom_path.clone(), SEED);
+        probe_env.action_space().shape()[0]
+    };
     let action_space = Discrete::new(action_count);
 
     #[cfg(feature = "multithreading")]
