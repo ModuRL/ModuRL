@@ -13,10 +13,10 @@ use box2d_rs::shapes::b2_edge_shape::*;
 use box2d_rs::shapes::b2_polygon_shape::*;
 
 use bon::bon;
-use candle_core::{Device, Tensor};
+use burn::tensor::{DType, Device, Distribution, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::{self, Space},
+    spaces,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -267,7 +267,7 @@ impl LunarLanderV3 {
         #[builder(default = 15.0)] wind_power: f32,
         #[builder(default = 1.5)] turbulence_power: f32,
         /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = Device::Cpu)]
+        #[builder(default = Device::flex())]
         rng_device: Device,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
@@ -323,8 +323,13 @@ impl LunarLanderV3 {
         })
     }
 
-    fn random_uniform(&self, low: f32, high: f32) -> Result<f32, candle_core::Error> {
-        Tensor::rand(low, high, (), &self.rng_device)?.to_vec0()
+    fn random_uniform(&self, low: f32, high: f32) -> Result<f32, TensorReadError> {
+        Tensor::<1>::random(
+            [1],
+            Distribution::Uniform(f64::from(low), f64::from(high)),
+            (&self.rng_device, DType::F32),
+        )
+        .try_into_scalar::<f32>()
     }
 
     fn destroy(&mut self) {
@@ -587,7 +592,7 @@ impl LunarLanderV3 {
         lander_angle: f32,
         tip: &(f32, f32),
         dispersion: &[f32; 2],
-    ) -> Result<(), candle_core::Error> {
+    ) -> Result<(), TensorReadError> {
         let mut particle_body_def = B2bodyDef {
             body_type: B2bodyType::B2DynamicBody,
             ..Default::default()
@@ -641,7 +646,7 @@ impl LunarLanderV3 {
     fn create_side_engine_particles(
         &mut self,
         params: SideEngineParticleParams,
-    ) -> Result<(), candle_core::Error> {
+    ) -> Result<(), TensorReadError> {
         let SideEngineParticleParams {
             world,
             lander_pos,
@@ -706,7 +711,8 @@ impl LunarLanderV3 {
 
 impl Gym for LunarLanderV3 {
     type Error = EnvironmentError;
-    type SpaceError = candle_core::Error;
+    type ObservationSpace = spaces::BoxSpace;
+    type ActionSpace = spaces::Discrete;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.destroy();
@@ -911,19 +917,22 @@ impl Gym for LunarLanderV3 {
         }
 
         // Step once to ensure proper initialization
-        let step_info = self.step(Tensor::from_vec(vec![0u32], vec![], &Device::Cpu)?)?;
+        let step_info = self.step(Tensor::from_data(
+            TensorData::new(vec![0u32], [1]),
+            &Device::flex(),
+        ))?;
 
         #[cfg(feature = "rendering")]
         self.render()?;
 
         Ok(ResetInfo {
-            state: step_info.state,
+            observation: step_info.observation,
             info: (),
         })
     }
 
-    /// Steps with one scalar discrete action shaped `[]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
+    /// Steps with one scalar Int action shaped `[1]`.
+    fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
         let world = self
             .world
             .as_ref()
@@ -939,8 +948,13 @@ impl Gym for LunarLanderV3 {
             ))?
             .clone();
 
-        let action_u32 = action.to_vec0::<u32>()?;
-        if action_u32 >= 4 {
+        if action.dims() != [1] {
+            return Err(EnvironmentError::InvalidAction(
+                "LunarLander actions must be Int tensors shaped [1]",
+            ));
+        }
+        let action_index = action.clone().try_into_scalar::<i32>()?;
+        if !(0..4).contains(&action_index) {
             return Err(EnvironmentError::InvalidAction(
                 "LunarLander actions must be in the range 0..4",
             ));
@@ -999,7 +1013,7 @@ impl Gym for LunarLanderV3 {
         };
 
         let mut m_power = 0.0;
-        let should_fire_main = action_u32 == 2;
+        let should_fire_main = action_index == 2;
 
         if should_fire_main {
             // Main engine
@@ -1039,12 +1053,12 @@ impl Gym for LunarLanderV3 {
         }
 
         let mut s_power = 0.0;
-        let should_fire_side = action_u32 == 1 || action_u32 == 3;
+        let should_fire_side = action_index == 1 || action_index == 3;
 
         if should_fire_side {
             // Orientation/Side engines
             // action = 1 is left, action = 3 is right
-            let direction = (action_u32 as i32 - 2) as f32;
+            let direction = (action_index - 2) as f32;
             s_power = 1.0;
 
             let lander_pos = lander.borrow().get_position();
@@ -1143,7 +1157,7 @@ impl Gym for LunarLanderV3 {
             if leg_contact_2 { 1.0 } else { 0.0 },
         ];
 
-        let state_tensor = Tensor::from_vec(state.clone(), vec![8], &Device::Cpu)?;
+        let state_tensor = Tensor::from_data(TensorData::new(state.clone(), [8]), &Device::flex());
 
         // Calculate reward
         let mut reward = 0.0;
@@ -1182,7 +1196,7 @@ impl Gym for LunarLanderV3 {
         self.render()?;
 
         Ok(StepInfo {
-            state: state_tensor,
+            observation: state_tensor,
             reward,
             done: terminated,
             truncated: false,
@@ -1190,7 +1204,7 @@ impl Gym for LunarLanderV3 {
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Self::ObservationSpace {
         let low = vec![
             -2.5,
             -2.5,
@@ -1211,16 +1225,14 @@ impl Gym for LunarLanderV3 {
             1.0,
             1.0,
         ];
-        let low_tensor =
-            Tensor::from_vec(low, vec![8], &Device::Cpu).expect("Failed to create low tensor");
-        let high_tensor =
-            Tensor::from_vec(high, vec![8], &Device::Cpu).expect("Failed to create high tensor");
-        Box::new(spaces::BoxSpace::new(low_tensor, high_tensor))
+        let low_tensor: Tensor<1> = Tensor::from_data(TensorData::new(low, [8]), &Device::flex());
+        let high_tensor: Tensor<1> = Tensor::from_data(TensorData::new(high, [8]), &Device::flex());
+        spaces::BoxSpace::new(low_tensor.unsqueeze::<2>(), high_tensor.unsqueeze::<2>())
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Self::ActionSpace {
         // Discrete action space: 0=nop, 1=left engine, 2=main engine, 3=right engine
-        Box::new(spaces::Discrete::new(4))
+        spaces::Discrete::new(4)
     }
 }
 
@@ -1230,7 +1242,7 @@ mod tests {
     use crate::testing::{PARITY_STEPS, Tolerances, check_discrete_parity};
 
     impl LunarLanderV3 {
-        fn get_current_state(&self) -> Result<Tensor, candle_core::Error> {
+        fn get_current_state(&self) -> Result<Tensor<1>, TensorReadError> {
             if let Some(lander) = &self.lander {
                 let pos = lander.borrow().get_position();
                 let vel = lander.borrow().get_linear_velocity();
@@ -1260,17 +1272,23 @@ mod tests {
                     if leg_contact_2 { 1.0 } else { 0.0 },
                 ];
 
-                Tensor::from_vec(state, vec![8], &Device::Cpu)
+                Ok(Tensor::from_data(
+                    TensorData::new(state, [8]),
+                    &Device::flex(),
+                ))
             } else {
                 // Return zeros if no lander exists
                 let state = vec![0.0f32; 8];
-                Tensor::from_vec(state, vec![8], &Device::Cpu)
+                Ok(Tensor::from_data(
+                    TensorData::new(state, [8]),
+                    &Device::flex(),
+                ))
             }
         }
     }
 
     impl LunarLanderV3 {
-        fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error> {
+        fn reset_deterministic(&mut self) -> Result<Tensor<1>, TensorReadError> {
             // Do a deterministic reset that controls all random elements
             self.destroy();
 
@@ -1478,7 +1496,7 @@ mod tests {
 
         /// Restores one LunarLander observation shaped `[8]` plus physics
         /// metadata.
-        fn set_state(&mut self, _state: Tensor, extra_info: Option<serde_json::Value>) {
+        fn set_state(&mut self, _state: Tensor<1>, extra_info: Option<serde_json::Value>) {
             // Extract raw physics values from the extra_info (from Python custom_info)
             let info = extra_info.expect("extra_info is required for set_state");
 
@@ -1602,7 +1620,7 @@ mod tests {
     fn test_lunar_lander_reset() {
         let mut env = LunarLanderV3::builder().build().unwrap();
         let state = env.reset().expect("Failed to reset environment");
-        assert_eq!(state.state.dims(), &[8]);
+        assert_eq!(state.observation.dims(), [8]);
     }
 
     #[test]
@@ -1610,11 +1628,10 @@ mod tests {
         let mut env = LunarLanderV3::builder().build().unwrap();
         env.reset().expect("Failed to reset environment");
 
-        let action = Tensor::from_vec(vec![0u32], vec![], &Device::Cpu)
-            .expect("Failed to create action tensor");
+        let action = Tensor::from_data(TensorData::new(vec![0u32], [1]), &Device::flex());
         let step_info = env.step(action).expect("Failed to step environment");
 
-        assert_eq!(step_info.state.dims(), &[8]);
+        assert_eq!(step_info.observation.dims(), [8]);
         assert!(!step_info.done); // Should not be done immediately
     }
 
@@ -1625,11 +1642,11 @@ mod tests {
 
         // Test all four discrete actions
         for action in 0..4 {
-            let action_tensor = Tensor::from_vec(vec![action as u32], vec![], &Device::Cpu)
-                .expect("Failed to create action tensor");
+            let action_tensor =
+                Tensor::from_data(TensorData::new(vec![action as u32], [1]), &Device::flex());
             let step_info = env.step(action_tensor).expect("Failed to step environment");
 
-            assert_eq!(step_info.state.dims(), &[8]);
+            assert_eq!(step_info.observation.dims(), [8]);
             // Reward should be reasonable (not NaN or infinite)
             assert!(step_info.reward.is_finite());
         }
@@ -1641,7 +1658,7 @@ mod tests {
         env.reset().unwrap();
 
         let error = env
-            .step(Tensor::new(99u32, &Device::Cpu).unwrap())
+            .step(Tensor::from_data([99u32], &Device::flex()))
             .unwrap_err();
 
         assert!(matches!(error, EnvironmentError::InvalidAction(_)));
@@ -1653,11 +1670,10 @@ mod tests {
         env.reset().expect("Failed to reset environment");
 
         // Test with wind enabled
-        let action = Tensor::from_vec(vec![2u32], vec![], &Device::Cpu)
-            .expect("Failed to create action tensor");
+        let action = Tensor::from_data(TensorData::new(vec![2u32], [1]), &Device::flex());
         let step_info = env.step(action).expect("Failed to step environment");
 
-        assert_eq!(step_info.state.dims(), &[8]);
+        assert_eq!(step_info.observation.dims(), [8]);
         assert!(step_info.reward.is_finite());
     }
 
@@ -1673,15 +1689,19 @@ mod tests {
 
         // States should be the same size
         assert_eq!(state1.dims(), state2.dims());
-        assert_eq!(state1.dims(), &[8]);
+        assert_eq!(state1.dims(), [8]);
 
         // The states might not be identical due to random terrain generation
         // but they should be reasonable values
         let state1_vec = state1
-            .to_vec1::<f32>()
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
             .expect("Failed to convert state to vec");
         let state2_vec = state2
-            .to_vec1::<f32>()
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
             .expect("Failed to convert state to vec");
 
         for (i, (&val1, &val2)) in state1_vec.iter().zip(state2_vec.iter()).enumerate() {
@@ -1738,9 +1758,17 @@ mod tests {
         environment.reset_deterministic().unwrap();
         for (index, (&action, expected)) in inputs.iter().zip(&outputs).enumerate() {
             let actual = environment
-                .step(Tensor::from_vec(vec![action], vec![], &Device::Cpu).unwrap())
+                .step(Tensor::from_data(
+                    TensorData::new(vec![action], [1]),
+                    &Device::flex(),
+                ))
                 .unwrap();
-            let observation = actual.state.to_vec1::<f32>().unwrap();
+            let observation = actual
+                .observation
+                .clone()
+                .try_into_data_as::<f32>()
+                .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
+                .unwrap();
             assert_eq!(
                 observation.len(),
                 expected.observation.len(),
@@ -1787,10 +1815,10 @@ mod tests {
                 _ => 0u32,
             };
 
-            let action = Tensor::from_vec(vec![action_value], vec![], &Device::Cpu)
-                .expect("Failed to create action tensor");
+            let action =
+                Tensor::from_data(TensorData::new(vec![action_value], [1]), &Device::flex());
             let StepInfo {
-                state: _,
+                observation: _,
                 reward: _,
                 done,
                 truncated: _,
@@ -1813,15 +1841,19 @@ mod tests {
 
         // States should be the same size
         assert_eq!(state1.dims(), state2.dims());
-        assert_eq!(state1.dims(), &[8]);
+        assert_eq!(state1.dims(), [8]);
 
         // The states might not be identical due to random terrain generation
         // but they should be reasonable values
         let state1_vec = state1
-            .to_vec1::<f32>()
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
             .expect("Failed to convert state1 to vec");
         let state2_vec = state2
-            .to_vec1::<f32>()
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
             .expect("Failed to convert state2 to vec");
 
         for (i, (&val1, &val2)) in state1_vec.iter().zip(state2_vec.iter()).enumerate() {
@@ -1842,24 +1874,30 @@ mod tests {
         // Step both environments with the same actions and compare states
         for step in 0..50 {
             let action_value = step % 4; // Cycle through actions 0, 1, 2, 3
-            let action = Tensor::from_vec(vec![action_value as u32], vec![], &Device::Cpu)
-                .expect("Failed to create action tensor");
+            let action = Tensor::from_data(
+                TensorData::new(vec![action_value as u32], [1]),
+                &Device::flex(),
+            );
 
             let step_info1 = env1.step(action.clone()).expect("Failed to step env1");
             let step_info2 = env2.step(action).expect("Failed to step env2");
 
-            let state1 = step_info1.state;
-            let state2 = step_info2.state;
+            let state1 = step_info1.observation;
+            let state2 = step_info2.observation;
 
             // States should be the same size
             assert_eq!(state1.dims(), state2.dims());
-            assert_eq!(state1.dims(), &[8]);
+            assert_eq!(state1.dims(), [8]);
 
             let state1_vec = state1
-                .to_vec1::<f32>()
+                .clone()
+                .try_into_data_as::<f32>()
+                .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
                 .expect("Failed to convert state1 to vec");
             let state2_vec = state2
-                .to_vec1::<f32>()
+                .clone()
+                .try_into_data_as::<f32>()
+                .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
                 .expect("Failed to convert state2 to vec");
             for (i, (&val1, &val2)) in state1_vec.iter().zip(state2_vec.iter()).enumerate() {
                 assert!(

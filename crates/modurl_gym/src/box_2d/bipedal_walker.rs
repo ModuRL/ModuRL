@@ -15,10 +15,10 @@ use box2d_rs::{
     joints::b2_revolute_joint::B2revoluteJointDef,
     shapes::{b2_edge_shape::B2edgeShape, b2_polygon_shape::B2polygonShape},
 };
-use candle_core::{DType, Device, Tensor};
+use burn::tensor::{DType, Device, Distribution, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::{BoxSpace, Space},
+    spaces::BoxSpace,
 };
 
 const FPS: f32 = 50.0;
@@ -135,8 +135,8 @@ impl BipedalWalkerV3 {
     #[builder]
     pub fn new(
         /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = &Device::Cpu)]
-        rng_device: &Device,
+        #[builder(default = Device::flex(), with = |device: &Device| device.clone())]
+        rng_device: Device,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
@@ -189,10 +189,10 @@ impl BipedalWalkerV3 {
             contact_detector: None,
             previous_shaping: None,
             rng_device: rng_device.clone(),
-            action_space: BoxSpace::new_with_universal_bounds(vec![4], -1.0, 1.0, &Device::Cpu),
+            action_space: BoxSpace::new_with_universal_bounds([1, 4], -1.0, 1.0, &Device::flex()),
             observation_space: BoxSpace::new(
-                Tensor::from_vec(low, 24, &Device::Cpu)?,
-                Tensor::from_vec(high, 24, &Device::Cpu)?,
+                Tensor::from_data(TensorData::new(low, [1, 24]), &Device::flex()),
+                Tensor::from_data(TensorData::new(high, [1, 24]), &Device::flex()),
             ),
             #[cfg(feature = "rendering")]
             renderer: render
@@ -213,7 +213,13 @@ impl BipedalWalkerV3 {
                 "BipedalWalker received an invalid random-sampling range",
             ));
         }
-        Ok(Tensor::rand(low, high, (), &self.rng_device)?.to_vec0::<f32>()?)
+        Ok(Tensor::<1>::random(
+            [1],
+            Distribution::Uniform(f64::from(low), f64::from(high)),
+            (&self.rng_device, DType::F32),
+        )
+        .clone()
+        .try_into_scalar::<f32>()?)
     }
 
     fn clear_world(&mut self) {
@@ -310,7 +316,7 @@ impl BipedalWalkerV3 {
             .create_joint(&B2JointDefEnum::RevoluteJoint(definition))
     }
 
-    fn reset_internal(&mut self, deterministic: bool) -> Result<Tensor, EnvironmentError> {
+    fn reset_internal(&mut self, deterministic: bool) -> Result<Tensor<1>, EnvironmentError> {
         self.clear_world();
         let world = B2world::<WalkerUserData>::new(B2vec2::new(0.0, -10.0));
         let detector = Rc::new(RefCell::new(WalkerContactDetector::default()));
@@ -437,8 +443,8 @@ impl BipedalWalkerV3 {
             self.legs.push(lower);
         }
 
-        let zero_action = Tensor::zeros(4, DType::F32, &Device::Cpu)?;
-        Ok(self.step(zero_action)?.state)
+        let zero_action = Tensor::zeros([4], (&Device::flex(), DType::F32));
+        Ok(self.step(zero_action)?.observation)
     }
 
     fn joint_state(joint: &B2jointPtr<WalkerUserData>) -> Result<(f32, f32), EnvironmentError> {
@@ -581,24 +587,28 @@ impl BipedalWalkerV3 {
     }
 
     #[cfg(test)]
-    fn reset_flat_for_test(&mut self) -> Result<Tensor, EnvironmentError> {
+    fn reset_flat_for_test(&mut self) -> Result<Tensor<1>, EnvironmentError> {
         self.reset_internal(true)
     }
 }
 
 impl Gym for BipedalWalkerV3 {
     type Error = EnvironmentError;
-    type SpaceError = candle_core::Error;
+    type ObservationSpace = BoxSpace;
+    type ActionSpace = BoxSpace;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         let state = self.reset_internal(false)?;
         #[cfg(feature = "rendering")]
         self.render()?;
-        Ok(ResetInfo { state, info: () })
+        Ok(ResetInfo {
+            observation: state,
+            info: (),
+        })
     }
 
     /// Steps with one continuous motor-control vector `action` shaped `[4]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
+    fn step(&mut self, action: Tensor<1>) -> Result<StepInfo, Self::Error> {
         if self.hull.is_none() || self.world.is_none() || self.joints.len() != 4 {
             return Err(EnvironmentError::NotInitialized(
                 "call reset before stepping BipedalWalker",
@@ -609,7 +619,11 @@ impl Gym for BipedalWalkerV3 {
                 "BipedalWalker actions must be a floating-point tensor shaped [4]",
             ));
         }
-        let action = action.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let action = action
+            .cast(DType::F32)
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))?;
         for (index, speed) in [SPEED_HIP, SPEED_KNEE, SPEED_HIP, SPEED_KNEE]
             .into_iter()
             .enumerate()
@@ -696,7 +710,7 @@ impl Gym for BipedalWalkerV3 {
         #[cfg(feature = "rendering")]
         self.render()?;
         Ok(StepInfo {
-            state: Tensor::from_vec(state, 24, &Device::Cpu)?,
+            observation: Tensor::from_data(TensorData::new(state, [24]), &Device::flex()),
             reward,
             done,
             truncated: false,
@@ -704,12 +718,12 @@ impl Gym for BipedalWalkerV3 {
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(self.observation_space.clone())
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(self.action_space.clone())
+    fn action_space(&self) -> Self::ActionSpace {
+        self.action_space.clone()
     }
 }
 
@@ -800,11 +814,17 @@ mod tests {
         let mut environment = BipedalWalkerV3::builder().build().unwrap();
         environment.reset_flat_for_test().unwrap();
         for index in 0..fixture.sequential_actions.len() {
-            let action =
-                Tensor::from_vec(fixture.sequential_actions[index].to_vec(), 4, &Device::Cpu)
-                    .unwrap();
+            let action = Tensor::from_data(
+                TensorData::new(fixture.sequential_actions[index].to_vec(), [4]),
+                &Device::flex(),
+            );
             let actual = environment.step(action).unwrap();
-            let observation = actual.state.to_vec1::<f32>().unwrap();
+            let observation = actual
+                .observation
+                .clone()
+                .try_into_data_as::<f32>()
+                .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
+                .unwrap();
             for (component, expected) in fixture.sequential_observations[index].iter().enumerate() {
                 // Joint and contact states are solver-version-sensitive under
                 // sustained contact. Dedicated cases below cover them without
@@ -835,7 +855,9 @@ mod tests {
         let initial = environment
             .reset_flat_for_test()
             .unwrap()
-            .to_vec1::<f32>()
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
             .unwrap();
         for (component, expected) in fixture.initial_observation.iter().enumerate() {
             assert!(
@@ -849,10 +871,17 @@ mod tests {
         // this tolerance covers their small single-step contact differences.
         for index in 0..fixture.actions.len() {
             environment.reset_flat_for_test().unwrap();
-            let action =
-                Tensor::from_vec(fixture.actions[index].to_vec(), 4, &Device::Cpu).unwrap();
+            let action = Tensor::from_data(
+                TensorData::new(fixture.actions[index].to_vec(), [4]),
+                &Device::flex(),
+            );
             let actual = environment.step(action).unwrap();
-            let observation = actual.state.to_vec1::<f32>().unwrap();
+            let observation = actual
+                .observation
+                .clone()
+                .try_into_data_as::<f32>()
+                .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
+                .unwrap();
             for (component, expected) in fixture.observations[index].iter().enumerate() {
                 assert!(
                     (f64::from(observation[component]) - expected).abs() <= 6e-2,
@@ -869,7 +898,7 @@ mod tests {
     #[test]
     fn default_spaces_match_gymnasium() {
         let mut environment = BipedalWalkerV3::builder().build().unwrap();
-        assert_eq!(environment.reset_flat_for_test().unwrap().dims(), &[24]);
+        assert_eq!(environment.reset_flat_for_test().unwrap().dims(), [24]);
         assert_eq!(environment.action_space().shape(), vec![4]);
         assert_eq!(environment.observation_space().shape(), vec![24]);
     }
@@ -877,7 +906,7 @@ mod tests {
     #[test]
     fn standard_terrain_is_uneven_and_zero_control_falls() {
         let mut environment = BipedalWalkerV3::builder().build().unwrap();
-        assert_eq!(environment.reset().unwrap().state.dims(), &[24]);
+        assert_eq!(environment.reset().unwrap().observation.dims(), [24]);
         let heights = environment
             .terrain_points
             .iter()
@@ -891,9 +920,9 @@ mod tests {
         let mut terminal_reward = None;
         for _ in 0..500 {
             let transition = environment
-                .step(Tensor::zeros(4, DType::F32, &Device::Cpu).unwrap())
+                .step(Tensor::zeros([4], (&Device::flex(), DType::F32)))
                 .unwrap();
-            assert_eq!(transition.state.dims(), &[24]);
+            assert_eq!(transition.observation.dims(), [24]);
             if transition.done {
                 terminal_reward = Some(transition.reward);
                 break;
@@ -908,16 +937,20 @@ mod tests {
         let initial = environment
             .reset_flat_for_test()
             .unwrap()
-            .to_vec1::<f32>()
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
             .unwrap();
         assert_eq!((initial[8], initial[13]), (1.0, 1.0));
 
         translate_walker(&mut environment, 0.0, 10.0);
         let lifted = environment
-            .step(Tensor::zeros(4, DType::F32, &Device::Cpu).unwrap())
+            .step(Tensor::zeros([4], (&Device::flex(), DType::F32)))
             .unwrap()
-            .state
-            .to_vec1::<f32>()
+            .observation
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
             .unwrap();
         assert_eq!((lifted[8], lifted[13]), (0.0, 0.0));
     }
@@ -928,7 +961,7 @@ mod tests {
         environment.reset_flat_for_test().unwrap();
         translate_walker(&mut environment, TERRAIN_LENGTH as f32 * TERRAIN_STEP, 10.0);
         let transition = environment
-            .step(Tensor::zeros(4, DType::F32, &Device::Cpu).unwrap())
+            .step(Tensor::zeros([4], (&Device::flex(), DType::F32)))
             .unwrap();
         assert!(transition.done);
         assert!(!transition.truncated);
