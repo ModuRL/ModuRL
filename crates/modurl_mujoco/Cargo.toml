@@ -2,6 +2,7 @@
 name = "modurl_mujoco"
 version = "0.1.0"
 edition = "2024"
+build = false
 rust-version.workspace = true
 authors.workspace = true
 description = "Gymnasium-compatible MuJoCo environments for ModuRL"

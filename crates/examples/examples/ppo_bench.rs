@@ -1,5 +1,5 @@
 use burn::{
-    nn::{Initializer, activation::Activation},
+    nn::Initializer,
     optim::AdamWConfig,
     tensor::{DType, Device},
 };
@@ -31,7 +31,7 @@ fn ppo_cartpole() {
             .unwrap();
         envs.push(env);
     }
-    let vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
+    let vec_env: VectorizedGymWrapper<CartPoleV1> = VectorizedGymWrapper::new(envs).unwrap();
     let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::flex(), device.clone());
 
     let observation_space = vec_env.observation_space();
@@ -42,7 +42,7 @@ fn ppo_cartpole() {
         .input_size(observation_space.shape()[0])
         .output_size(action_space.get_possible_values())
         .options((&device, DTYPE))
-        .activation(Activation::Tanh)
+        .activation(burn::nn::Tanh)
         .hidden_layer_sizes(vec![64, 64])
         .hidden_initializer(Initializer::Orthogonal {
             gain: 2.0f64.sqrt(),
@@ -59,7 +59,7 @@ fn ppo_cartpole() {
         .input_size(observation_space.shape()[0])
         .output_size(1)
         .options((&device, DTYPE))
-        .activation(Activation::Tanh)
+        .activation(burn::nn::Tanh)
         .hidden_layer_sizes(vec![64, 64])
         .hidden_initializer(Initializer::Orthogonal {
             gain: 2.0f64.sqrt(),

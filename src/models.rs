@@ -18,7 +18,8 @@ pub trait Forward<const I: usize, const O: usize> {
     type Error;
 
     /// Maps a rank-`I` tensor of `InputKind` to a rank-`O` tensor of `OutputKind`.
-    /// Implementations define layouts, dtype, device, gradient behavior, and any explicit observation conversions.
+    /// The input shape has `I` axes; the output shape has `O` axes. These ranks may differ.
+    /// Each implementation specifies axis sizes and meanings, including any batch axis, plus dtype, device, and gradient behavior.
     fn forward(
         &self,
         input: Tensor<I, Self::InputKind>,

@@ -1,14 +1,8 @@
 pub mod graphers;
 
-#[cfg(any(
-    feature = "mujoco-environment",
-    feature = "ant",
-    feature = "half-cheetah",
-    feature = "hopper",
-    feature = "walker2d"
-))]
+#[cfg(any())]
 #[allow(dead_code)]
 pub mod mujoco;
 
-#[cfg(feature = "atari-environment")]
+#[cfg(any())]
 pub(crate) mod nature_cnn;
