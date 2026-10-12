@@ -101,28 +101,25 @@ fn main() {
         weight_decay: 0.0,
         ..Default::default()
     };
-    let networks = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            // The policy interprets actor output as [mean, log_std], samples an
-            // unsquashed Gaussian action, and evaluates its log probability.
-            // BoxSpace separately clips the action sent to the environment.
-            .actor_network(ProbabilisticPolicyModel::new(
-                actor,
-                GaussianDistribution::new(action_shape).unwrap(),
-            ))
-            .critic_network(critic)
-            .actor_optimizer(AdamW::new(actor_vars.all_vars(), optimizer_config.clone()).unwrap())
-            .critic_optimizer(AdamW::new(critic_vars.all_vars(), optimizer_config).unwrap())
-            .actor_lr_scheduler(LinearSchedule::new(3e-4, 0.0))
-            .critic_lr_scheduler(LinearSchedule::new(3e-4, 0.0))
-            .combined_loss(true)
-            .build(),
-    );
+    let networks = SeparatePPONetwork::builder()
+        // The policy interprets actor output as [mean, log_std], samples an
+        // unsquashed Gaussian action, and evaluates its log probability.
+        // BoxSpace separately clips the action sent to the environment.
+        .actor_network(ProbabilisticPolicyModel::new(
+            actor,
+            GaussianDistribution::new(action_shape).unwrap(),
+        ))
+        .critic_network(critic)
+        .actor_optimizer(AdamW::new(actor_vars.all_vars(), optimizer_config.clone()).unwrap())
+        .critic_optimizer(AdamW::new(critic_vars.all_vars(), optimizer_config).unwrap())
+        .actor_lr_scheduler(LinearSchedule::new(3e-4, 0.0))
+        .critic_lr_scheduler(LinearSchedule::new(3e-4, 0.0))
+        .combined_loss(true)
+        .build();
 
     let mut grapher = OnPolicyGrapher::ppo_mujoco(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
     {
         let mut agent = PPOAgent::builder()
-            .dtype(DTYPE)
             .action_space(action_space)
             .network_info(networks)
             .batch_size(2_048)

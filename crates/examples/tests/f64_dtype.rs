@@ -40,6 +40,8 @@ struct Float64QNetwork {
 }
 
 impl modurl::models::Forward<2, 2> for Float64QNetwork {
+    type InputKind = burn::tensor::Float;
+    type OutputKind = burn::tensor::Float;
     type Error = modurl::models::ModelError;
 
     /// Converts observations [batch_size, 4] to F64 and returns F64 Q values [batch_size, 2].
@@ -149,17 +151,15 @@ fn ppo_updates_f64_networks_from_native_f32_observations() {
     let critic = mlp(&critic_vars, 4, 1, "critic").unwrap();
     let actor_optimizer = AdamW::new(actor_vars.all_vars(), ParamsAdamW::default()).unwrap();
     let critic_optimizer = AdamW::new(critic_vars.all_vars(), ParamsAdamW::default()).unwrap();
-    let networks = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::new(
-                actor,
-                CategoricalDistribution,
-            ))
-            .critic_network(critic)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+    let networks = SeparatePPONetwork::builder()
+        .actor_network(ProbabilisticPolicyModel::new(
+            actor,
+            CategoricalDistribution,
+        ))
+        .critic_network(critic)
+        .actor_optimizer(actor_optimizer)
+        .critic_optimizer(critic_optimizer)
+        .build();
 
     let mut agent = PPOAgent::builder()
         .action_space(action_space)
@@ -169,7 +169,6 @@ fn ppo_updates_f64_networks_from_native_f32_observations() {
         .num_epochs(1)
         .training_horizon(4)
         .device(Device::Cpu)
-        .dtype(DTYPE)
         .build()
         .unwrap();
 

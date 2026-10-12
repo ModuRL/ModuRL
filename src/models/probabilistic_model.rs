@@ -2,7 +2,7 @@ use std::{fmt, num::NonZeroUsize};
 
 use burn::{
     module::{Module, ModuleMapper, ModuleVisitor},
-    tensor::{Device, Tensor, kind::Basic},
+    tensor::{Device, Float, Tensor, kind::Basic},
 };
 
 use crate::{
@@ -127,10 +127,10 @@ impl<T: PolicyTypes> ProbabilisticPolicyModel<T> {
 impl<M, D, const O: usize, const P: usize, const A: usize, K: Basic>
     ProbabilisticPolicyModel<(M, D, (Tensor<O, K>, Tensor<P>, Tensor<A>))>
 where
-    M: Module + Forward<O, P, K>,
+    M: Module + Forward<O, P, InputKind = K, OutputKind = Float>,
     D: Distribution<P, A> + fmt::Debug,
 {
-    /// Connects an owned native model to a distribution using `Forward<O, P, K>`.
+    /// Connects an owned native model with input kind `K` and Float output to a distribution.
     /// Maps `[batch_size, ...observation_shape]` to float `[batch_size, ...parameter_shape]`, preserving batch size.
     /// The distribution produces `[batch_size, ...action_shape]` of rank A. Ranks O, P, and A each include the batch axis.
     /// The model defines observation conversions and owns all parameters visited by Burn.
@@ -155,7 +155,7 @@ where
             Parameters = Tensor<P>,
             Action = Tensor<A>,
         >,
-    T::Model: Module + Forward<O, P, K, Error = E>,
+    T::Model: Module + Forward<O, P, InputKind = K, OutputKind = Float, Error = E>,
     D: Distribution<P, A>,
 {
     /// Maps rank-`O` observations `[batch_size, ...observation_shape]` to rank-`P` float parameters.
@@ -249,7 +249,7 @@ where
             Parameters = Tensor<P>,
             Action = Tensor<A>,
         >,
-    T::Model: Module + Forward<O, P, K, Error = E>,
+    T::Model: Module + Forward<O, P, InputKind = K, OutputKind = Float, Error = E>,
     D: Distribution<P, A>,
 {
     type Error = ProbabilisticPolicyModelError<E, D::Error>;
@@ -300,7 +300,7 @@ where
             Parameters = Tensor<P>,
             Action = Tensor<A>,
         >,
-    T::Model: Module + Forward<O, P, K, Error = E>,
+    T::Model: Module + Forward<O, P, InputKind = K, OutputKind = Float, Error = E>,
     D: DifferentiableExpectation<P, A, C>,
 {
     type CandidateKind = D::CandidateKind;
@@ -374,6 +374,8 @@ mod tests {
     }
 
     impl Forward<4, 2> for ObservationModel {
+        type InputKind = Float;
+        type OutputKind = Float;
         type Error = ModelError;
 
         /// Maps image observations `[batch_size, 1, 2, 2]` to float parameters `[batch_size, 2]`.
@@ -389,7 +391,9 @@ mod tests {
         }
     }
 
-    impl Forward<2, 2, Int> for ObservationModel {
+    impl Forward<2, 2> for ObservationModel {
+        type InputKind = Int;
+        type OutputKind = Float;
         type Error = ModelError;
 
         /// Casts integer observations `[batch_size, 2]` to the layer's float dtype and returns `[batch_size, 2]`.
@@ -399,7 +403,14 @@ mod tests {
         }
     }
 
-    impl Forward<2, 2, burn::tensor::Bool> for ObservationModel {
+    #[derive(Module, Debug)]
+    struct BooleanObservationModel {
+        layer: Linear,
+    }
+
+    impl Forward<2, 2> for BooleanObservationModel {
+        type InputKind = burn::tensor::Bool;
+        type OutputKind = Float;
         type Error = ModelError;
 
         /// Casts boolean observations `[batch_size, 2]` to the layer's float dtype and returns `[batch_size, 2]`.
@@ -419,6 +430,8 @@ mod tests {
     }
 
     impl Forward<2, 2> for OffsetModel {
+        type InputKind = Float;
+        type OutputKind = Float;
         type Error = ModelError;
 
         /// Maps `[batch_size, 2]` observations to `[batch_size, 2]` parameters and adds a fixed offset.
@@ -651,7 +664,9 @@ mod tests {
     fn boolean_observation_model_converts_explicitly() {
         let device = Device::flex();
         let policy = ProbabilisticPolicyModel::new(
-            observation_model(2, &device, DType::F32),
+            BooleanObservationModel {
+                layer: observation_model(2, &device, DType::F32).layer,
+            },
             GaussianDistribution::default(),
         );
         assert_eq!(

@@ -211,17 +211,15 @@ fn ppo_training_is_device_deterministic() {
         let critic_optimizer =
             AdamW::new(critic_variables.all_vars(), optimizer_parameters).unwrap();
 
-        let networks = PPONetworkInfo::Separate(
-            SeparatePPONetwork::builder()
-                .actor_optimizer(actor_optimizer)
-                .critic_optimizer(critic_optimizer)
-                .actor_network(ProbabilisticPolicyModel::new(
-                    actor_network,
-                    CategoricalDistribution,
-                ))
-                .critic_network(critic_network)
-                .build(),
-        );
+        let networks = SeparatePPONetwork::builder()
+            .actor_optimizer(actor_optimizer)
+            .critic_optimizer(critic_optimizer)
+            .actor_network(ProbabilisticPolicyModel::new(
+                actor_network,
+                CategoricalDistribution,
+            ))
+            .critic_network(critic_network)
+            .build();
 
         let mut agent = PPOAgent::builder()
             .action_space(action_space)

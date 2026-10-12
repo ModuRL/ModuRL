@@ -49,8 +49,9 @@ The tuple implementation groups the types as:
 The tensor types contain their ranks and kinds. The group describes types; it does not store tensors or provide tensor operations.
 Policy implementations use native `Tensor<O, K>`, `Tensor<P>`, and `Tensor<A>` signatures.
 
-Policy models implement Burn's `Module` and ModuRL's `Forward<O, P, K>`.
-The observation kind `K` defaults to `Float`. Custom models can use integer or boolean observations and perform explicit conversions.
+Policy models implement Burn's `Module` and ModuRL's `Forward<O, P>`.
+Each model declares `InputKind` and `OutputKind` as associated types. Policy parameter outputs must use `Float`.
+Custom models can accept integer or boolean observations and perform explicit conversions.
 Construct a policy without specifying the type group:
 
 ```rust,ignore
@@ -60,7 +61,7 @@ let policy = ProbabilisticPolicyModel::new(
 );
 ```
 
-`Forward::forward` takes `Tensor<O, K>` and returns `Result<Tensor<P>, Self::Error>`.
+`Forward::forward` takes `Tensor<O, Self::InputKind>` and returns `Result<Tensor<P, Self::OutputKind>, Self::Error>`.
 Both tensors start with a batch axis, and the model must preserve batch size.
 The model performs any observation dtype or device conversion explicitly.
 All execution uses the same owned model that Burn visits for optimizer updates, records, and device transfers.

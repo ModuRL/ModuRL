@@ -145,14 +145,12 @@ fn getting_started_program() {
 
     let policy = ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
 
-    let network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(policy)
-            .critic_network(critic_network)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+    let network_info = SeparatePPONetwork::builder()
+        .actor_network(policy)
+        .critic_network(critic_network)
+        .actor_optimizer(actor_optimizer)
+        .critic_optimizer(critic_optimizer)
+        .build();
 
     let mut agent = PPOAgent::builder()
         .action_space(action_space)
@@ -321,14 +319,12 @@ fn understand_ppo_training_configuration() {
         .expect("failed to build critic optimizer");
 
     let policy = ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
-    let network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(policy)
-            .critic_network(critic_network)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+    let network_info = SeparatePPONetwork::builder()
+        .actor_network(policy)
+        .critic_network(critic_network)
+        .actor_optimizer(actor_optimizer)
+        .critic_optimizer(critic_optimizer)
+        .build();
 
     let mut agent = PPOAgent::builder()
         .action_space(action_space)
