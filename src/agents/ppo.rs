@@ -424,6 +424,13 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     _phantom: PhantomData<GE>,
 }
 
+impl<G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'_, G, OS, AS, GE, I, A> {
+    /// Returns the owned network configuration for model inspection and checkpoint snapshots.
+    pub fn network(&self) -> &G::Network {
+        &self.network_info
+    }
+}
+
 #[bon]
 impl<
     'a,
