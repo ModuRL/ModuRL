@@ -44,6 +44,16 @@ pub struct SharedPPONetwork<T: Module, A: Module, C: Module> {
 
 #[bon]
 impl<T: Module, A: Module, C: Module> SharedPPONetwork<T, A, C> {
+    /// Returns a snapshot of the shared model, actor head, and critic head, in that order.
+    /// Parameter tensors retain their shape, dtype, device, and current values.
+    pub fn models(&self) -> (T, A, C) {
+        (
+            self.shared_network.clone(),
+            self.actor_head.clone(),
+            self.critic_head.clone(),
+        )
+    }
+
     /// Owns the models and optimizer, and enables training on the models.
     /// Model input and output contracts must agree. Models must share a device; Critic outputs and PPO statistics must use the environment reward dtype.
     /// Rejects a nonpositive or non-finite learning rate.
@@ -87,6 +97,12 @@ pub struct SeparatePPONetwork<A: Module, C: Module> {
 
 #[bon]
 impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
+    /// Returns a snapshot of the actor and critic models, in that order.
+    /// Parameter tensors retain their shape, dtype, device, and current values.
+    pub fn models(&self) -> (A, C) {
+        (self.actor_network.clone(), self.critic_network.clone())
+    }
+
     /// Owns the models and optimizers, and enables training on both models.
     /// Models must accept the same native observation kind and share a device. Critic outputs and PPO statistics must use the environment reward dtype.
     /// Rejects nonpositive or non-finite learning rates.

@@ -10,20 +10,20 @@
 
 use std::{env, fs, path::PathBuf};
 
-use candle_core::{DType, Device, Module, Result, Tensor, conv::CudnnFwdAlgo};
-use candle_nn::{AdamW, Conv2d, Conv2dConfig, Linear, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use modurl::{
-    agents::ppo::FakeOptimizer,
-    init::{conv2d_ortho, linear_ortho},
-    prelude::*,
+use burn::{
+    module::Module,
+    nn::Initializer,
+    optim::AdamWConfig,
+    tensor::{DType, Device, Int, Tensor},
 };
+use modurl::prelude::*;
 use modurl_ale::{
     AtariGym, AtariInfo, AtariObsType,
     wrappers::{EpisodicLifeGym, FireResetGym, FireResetGymError, NoopResetGym, WarpGym},
 };
 
 mod support;
-use support::graphers::OnPolicyGrapher;
+use support::{graphers::OnPolicyGrapher, nature_cnn::NatureCnn};
 
 const NUM_ENVS: usize = 8;
 const NUM_STEPS: usize = 128;
@@ -64,7 +64,9 @@ fn make_atari_env(
     seed: i32,
 ) -> impl Gym<
     RawRewardInfo<EpisodeStatisticsInfo<AtariInfo>>,
-    SpaceError = candle_core::Error,
+    4,
+    ObservationSpace = BoxSpace<4>,
+    ActionSpace = Discrete,
     Error: Send + Sync + std::fmt::Debug,
 > {
     let mut env = AtariGym::builder()
@@ -80,13 +82,13 @@ fn make_atari_env(
     let env = RecordEpisodeStatisticsGym::new(env);
     let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
     let env = MaxAndSkipGym::new(env, FRAME_SKIP);
-    let env = EpisodicLifeGym::new(env, &Device::Cpu);
+    let env = EpisodicLifeGym::new(env, &Device::flex());
     let env = OptionalFireResetGym::new(env, has_fire_action);
     let env = RecordRawRewardGym::new(env);
     let env = ClipRewardGym::new(env);
     let env = WarpGym::new(env);
     let observation_space =
-        BoxSpace::new_with_universal_bounds(vec![FRAME_STACK, 84, 84], 0.0, 255.0, &Device::Cpu);
+        BoxSpace::new_with_universal_bounds([1, FRAME_STACK, 84, 84], 0.0, 255.0, &Device::flex());
     FrameStackGym::new(env, FRAME_STACK, observation_space)
 }
 
@@ -100,104 +102,44 @@ impl<G> OptionalFireResetGym<G> {
     }
 }
 
-impl<G, I> Gym<I> for OptionalFireResetGym<G>
+impl<G, I> Gym<I, 3> for OptionalFireResetGym<G>
 where
-    G: Gym<I>,
+    G: Gym<I, 3, ActionSpace = Discrete, ObservationSpace = BoxSpace<3>>,
 {
     type Error = FireResetGymError<G::Error>;
-    type SpaceError = G::SpaceError;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = G::ActionSpace;
 
-    fn reset(&mut self) -> std::result::Result<ResetInfo<I>, Self::Error> {
+    fn reset(&mut self) -> std::result::Result<ResetInfo<I, Tensor<2>>, Self::Error> {
         match self {
             Self::Plain(gym) => gym.reset().map_err(FireResetGymError::GymError),
             Self::Fire(gym) => gym.reset(),
         }
     }
 
-    /// Forwards one scalar Atari action shaped `[]`.
-    fn step(&mut self, action: Tensor) -> std::result::Result<StepInfo<I>, Self::Error> {
+    /// Forwards one scalar Int Atari action shaped `[1]`.
+    fn step(
+        &mut self,
+        action: Tensor<1, Int>,
+    ) -> std::result::Result<StepInfo<I, Tensor<2>>, Self::Error> {
         match self {
             Self::Plain(gym) => gym.step(action).map_err(FireResetGymError::GymError),
             Self::Fire(gym) => gym.step(action),
         }
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Self::ActionSpace {
         match self {
             Self::Plain(gym) => gym.action_space(),
             Self::Fire(gym) => gym.action_space(),
         }
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Self::ObservationSpace {
         match self {
             Self::Plain(gym) => gym.observation_space(),
             Self::Fire(gym) => gym.observation_space(),
         }
-    }
-}
-
-/// The shared Nature CNN used by both the policy and value heads.
-struct NatureCnn {
-    conv1: Conv2d,
-    conv2: Conv2d,
-    conv3: Conv2d,
-    hidden: Linear,
-}
-
-impl NatureCnn {
-    fn new(vb: VarBuilder) -> Result<Self> {
-        let gain = 2.0f64.sqrt();
-        Ok(Self {
-            conv1: conv2d_ortho(
-                4,
-                32,
-                8,
-                Conv2dConfig {
-                    stride: 4,
-                    cudnn_fwd_algo: Some(CudnnFwdAlgo::ImplicitGemm),
-                    ..Default::default()
-                },
-                gain,
-                vb.pp("conv1"),
-            )?,
-            conv2: conv2d_ortho(
-                32,
-                64,
-                4,
-                Conv2dConfig {
-                    stride: 2,
-                    cudnn_fwd_algo: Some(CudnnFwdAlgo::ImplicitGemm),
-                    ..Default::default()
-                },
-                gain,
-                vb.pp("conv2"),
-            )?,
-            conv3: conv2d_ortho(
-                64,
-                64,
-                3,
-                Conv2dConfig {
-                    stride: 1,
-                    cudnn_fwd_algo: Some(CudnnFwdAlgo::Winograd),
-                    ..Default::default()
-                },
-                gain,
-                vb.pp("conv3"),
-            )?,
-            hidden: linear_ortho(64 * 7 * 7, 512, gain, vb.pp("hidden"))?,
-        })
-    }
-}
-
-impl Module for NatureCnn {
-    /// Maps a batch of stacked frames shaped `[batch, 4, 84, 84]` to
-    /// features shaped `[batch, 512]`.
-    fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let features = self.conv1.forward(input)?.relu()?;
-        let features = self.conv2.forward(&features)?.relu()?;
-        let features = self.conv3.forward(&features)?.relu()?;
-        self.hidden.forward(&features.flatten_from(1)?)?.relu()
     }
 }
 
@@ -210,38 +152,25 @@ fn main() {
         std::process::exit(2);
     });
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
-    let device = {
-        println!("CPU seed cannot be set");
-        Device::Cpu
-    };
+    let device = Device::flex();
     #[cfg(feature = "cuda")]
-    let device = {
-        let device = Device::new_cuda(0).expect("failed to create CUDA device");
-        device
-            .set_seed(SEED as u64)
-            .expect("failed to seed the CUDA device");
-        device
-    };
-    #[cfg(feature = "metal")]
-    let device = {
-        let device = Device::new_metal(0).expect("failed to create Metal device");
-        device
-            .set_seed(SEED as u64)
-            .expect("failed to seed the Metal device");
-        device
-    };
+    let device = Device::cuda(0);
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
+    let device = device.autodiff();
+    device.seed(SEED as u64);
 
     // ALE and Atari image preprocessing are CPU-native. Keep all eight
     // environments on the CPU and transfer one processed batch at the policy
     // boundary instead of synchronizing each frame and action separately.
-    let environment_device = Device::Cpu;
+    let environment_device = Device::flex();
 
     // Load one environment on the main thread to discover the ROM's minimal
     // action set. Worker environments are constructed inside their own threads
     // because ALE instances are intentionally not Send.
     let action_count = {
         let probe_env = make_atari_env(rom_path.clone(), SEED);
-        probe_env.action_space().shape()[0]
+        probe_env.action_space().get_possible_values()
     };
     let action_space = Discrete::new(action_count);
 
@@ -253,11 +182,11 @@ fn main() {
                 move || make_atari_env(rom_path, seed as i32 + SEED)
             })
             .collect();
-        let observation_space = BoxSpace::new(
-            Tensor::zeros((FRAME_STACK, 84, 84), DType::U8, &Device::Cpu)
-                .expect("failed to build Atari observation space"),
-            Tensor::full(u8::MAX, (FRAME_STACK, 84, 84), &Device::Cpu)
-                .expect("failed to build Atari observation space"),
+        let observation_space = BoxSpace::new_with_universal_bounds(
+            [1, FRAME_STACK, 84, 84],
+            0.0,
+            255.0,
+            &environment_device,
         );
         MultithreadedVectorizedGymWrapper::new(
             constructors,
@@ -272,45 +201,44 @@ fn main() {
             .map(|seed| make_atari_env(rom_path.clone(), seed as i32 + SEED))
             .collect::<Vec<_>>(),
     );
-    let action_device = environment_device.clone();
-    let observation_device = device.clone();
-    let envs =
-        InputMapMultiGymWrapper::new(envs, move |tensor: Tensor| tensor.to_device(&action_device));
-    let observation = |tensor: Tensor| -> candle_core::Result<Tensor> {
-        tensor
-            .to_device(&observation_device)?
-            .to_dtype(DType::F32)?
-            / 255.0
-    };
-    let mut envs =
-        OutputMapMultiGymWrapper::new(envs, &observation, |mut step: MultiGymStepInfo<_>| {
-            step.states = observation(step.states)?;
-            step.rewards = step.rewards.to_device(&observation_device)?;
-            for state in step.terminal_states.iter_mut().flatten() {
-                *state = observation(state.clone())?;
+    let envs = DeviceMultiGymWrapper::new(envs, environment_device, device.clone());
+    let observation_space = envs.observation_space();
+    let normalize =
+        |tensor: Tensor<4>| -> Result<Tensor<4>, std::convert::Infallible> { Ok(tensor / 255.0) };
+    let mut envs = OutputMapMultiGymWrapper::new(
+        envs,
+        normalize,
+        |mut step: MultiGymStepInfo<_, Tensor<3>>| {
+            step.observations = step.observations / 255.0;
+            for observation in step.terminal_observations.iter_mut().flatten() {
+                *observation = observation.clone() / 255.0;
             }
-            Ok(step)
-        });
-
-    let variables = VarMap::new();
-    let vb = VarBuilder::from_varmap(&variables, DType::F32, &device);
-    let cnn = NatureCnn::new(vb.pp("network")).expect("failed to build Nature CNN");
-    let actor =
-        linear_ortho(512, action_count, 0.01, vb.pp("actor")).expect("failed to build actor head");
-    let critic = linear_ortho(512, 1, 1.0, vb.pp("critic")).expect("failed to build critic head");
-
-    // AdamW is equivalent to Adam when weight decay is zero.
-    let optimizer = AdamW::new(
-        variables.all_vars(),
-        ParamsAdamW {
-            lr: LEARNING_RATE,
-            beta1: ADAM_BETA1,
-            beta2: ADAM_BETA2,
-            eps: ADAM_EPSILON,
-            weight_decay: 0.0,
+            Ok::<_, std::convert::Infallible>(step)
         },
-    )
-    .expect("failed to build Adam optimizer");
+    );
+    let cnn = NatureCnn::new(&device).expect("failed to build Nature CNN");
+    let actor = MLP::builder()
+        .input_size(512)
+        .output_size(action_count)
+        .hidden_layer_sizes(vec![])
+        .output_initializer(Initializer::Orthogonal { gain: 0.01 })
+        .options((&device, DType::F32))
+        .build()
+        .unwrap();
+    let critic = MLP::builder()
+        .input_size(512)
+        .output_size(1)
+        .hidden_layer_sizes(vec![])
+        .output_initializer(Initializer::Orthogonal { gain: 1.0 })
+        .options((&device, DType::F32))
+        .build()
+        .unwrap();
+    let optimizer = AdamWConfig::new()
+        .with_beta_1(ADAM_BETA1 as f32)
+        .with_beta_2(ADAM_BETA2 as f32)
+        .with_epsilon(ADAM_EPSILON as f32)
+        .with_weight_decay(0.0)
+        .init();
 
     // Schedule progress advances before each update. The offset preserves the
     // initial learning rate for the first update and reaches one update's
@@ -329,8 +257,10 @@ fn main() {
         ))
         .critic_head(critic)
         .optimizer(optimizer)
+        .learning_rate(LEARNING_RATE)
         .lr_scheduler(learning_rate)
-        .build();
+        .build()
+        .unwrap();
 
     let game_name = rom_path
         .file_stem()
@@ -343,7 +273,8 @@ fn main() {
     let mut logger = OnPolicyGrapher::ppo_atari(TRAINING_TIMESTEPS, game_name);
     {
         let mut agent = PPOAgent::builder()
-            .action_space(Box::new(action_space))
+            .observation_space(observation_space)
+            .action_space(action_space)
             .network_info(networks)
             .clipped(true)
             .batch_size(BATCH_SIZE)
@@ -380,9 +311,11 @@ fn main() {
             trained_timesteps = trained_checkpoint;
 
             let checkpoint_path =
-                checkpoint_dir.join(format!("{game_name}-{checkpoint_timestep}.safetensors"));
-            variables
-                .save(&checkpoint_path)
+                checkpoint_dir.join(format!("{game_name}-{checkpoint_timestep}.bpk"));
+            agent
+                .network()
+                .models()
+                .save_file(&checkpoint_path)
                 .expect("failed to save Atari checkpoint");
             println!(
                 "saved {}-step checkpoint after {trained_timesteps} trained steps to {}",
@@ -396,9 +329,11 @@ fn main() {
             .expect("PPO training failed");
 
         let final_checkpoint_path =
-            checkpoint_dir.join(format!("{game_name}-{REQUESTED_TIMESTEPS}.safetensors"));
-        variables
-            .save(&final_checkpoint_path)
+            checkpoint_dir.join(format!("{game_name}-{REQUESTED_TIMESTEPS}.bpk"));
+        agent
+            .network()
+            .models()
+            .save_file(&final_checkpoint_path)
             .expect("failed to save final Atari checkpoint");
         println!(
             "saved {}-step checkpoint after {TRAINING_TIMESTEPS} trained steps to {}",
