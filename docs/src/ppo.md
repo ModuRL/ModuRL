@@ -47,3 +47,10 @@ environment actions.
 
 For value-based agents in discrete action spaces, read [Value-Based
 Training](./q-learning.md).
+
+Atari training saves Burn checkpoints with the `.bpk` extension.
+`ppo_atari_play` loads the shared encoder, actor, and critic from that checkpoint.
+Candle safetensors checkpoints require conversion before use.
+`agent.network().models()` returns a snapshot of the current owned models for saving.
+For shared networks, the snapshot contains the encoder, actor head, and critic head.
+For separate networks, it contains the actor and critic.

@@ -226,13 +226,19 @@ impl PPOGrapher {
     }
 }
 
+/// Averages a rank-D Burn metric over all axes, reads it to the host, and returns one Candle scalar `[]`.
+fn on_policy_metric<const D: usize>(value: &burn::tensor::Tensor<D>) -> Tensor {
+    let value = value.clone().detach().mean().try_into_scalar::<f32>().expect("failed to read on-policy metric");
+    Tensor::new(value, &Device::Cpu).unwrap()
+}
+
 impl PPOLogger for PPOGrapher {
     fn log(&mut self, info: &PPOLogEntry) {
-        let actor_loss = info.actor_loss.mean_all().unwrap();
-        let critic_loss = info.critic_loss.mean_all().unwrap();
-        let entropy = info.entropy.mean_all().unwrap();
-        let kl_divergence = info.kl_divergence.mean_all().unwrap();
-        let explained_variance = info.explained_variance.mean_all().unwrap();
+        let actor_loss = on_policy_metric(&info.actor_loss);
+        let critic_loss = on_policy_metric(&info.critic_loss);
+        let entropy = on_policy_metric(&info.entropy);
+        let kl_divergence = on_policy_metric(&info.kl_divergence);
+        let explained_variance = on_policy_metric(&info.explained_variance);
         self.terminal
             .log(
                 info.timestep,
@@ -348,11 +354,11 @@ impl<EpisodeSource> OnPolicyGrapher<EpisodeSource> {
             self.raw_reward_samples = 0;
         }
 
-        let actor_loss = info.actor_loss.mean_all().unwrap();
-        let critic_loss = info.critic_loss.mean_all().unwrap();
-        let entropy = info.entropy.mean_all().unwrap();
-        let kl_divergence = info.kl_divergence.mean_all().unwrap();
-        let explained_variance = info.explained_variance.mean_all().unwrap();
+        let actor_loss = on_policy_metric(&info.actor_loss);
+        let critic_loss = on_policy_metric(&info.critic_loss);
+        let entropy = on_policy_metric(&info.entropy);
+        let kl_divergence = on_policy_metric(&info.kl_divergence);
+        let explained_variance = on_policy_metric(&info.explained_variance);
         self.log_terminal_and_tensorboard(
             info.timestep,
             &[
