@@ -1,45 +1,53 @@
 //! Advantage Actor-Critic implemented as a constrained PPO configuration.
 //!
-//! A2C uses the PPO training implementation with policy and value clipping
-//! disabled, one optimization epoch, and the entire rollout as one minibatch.
-//! The public wrappers in this module keep PPO-specific types out of A2C
-//! training programs.
+//! A2C disables policy and value clipping, uses one optimization epoch,
+//! and trains on the complete rollout as one minibatch.
 
-use std::fmt::Debug;
-
+use super::{
+    Agent,
+    ppo::{
+        PPOAgent, PPOConfigurationError, PPOError, PPOModelGroup, PPOModelTypes, PPONetwork,
+        SeparatePPONetwork, SharedPPONetwork,
+    },
+};
+use crate::{buffers::experience::ExperienceBatchError, sampling::SamplingError};
+use crate::{
+    gym::MultiGym,
+    parameter_schedule::ParameterSchedule,
+    spaces::{ActionMap, ObservationSpace},
+    tensor_rank::{NextRank, PrevRank},
+};
 use bon::bon;
-use candle_core::Tensor;
-use candle_nn::Optimizer;
+use burn::{
+    module::Module,
+    optim::ModuleOptimizer,
+    tensor::{DType, Device, Tensor, TensorReadError, kind::Autodiff},
+};
 
 pub use super::ppo::{
     PPOCollectionLogEntry as A2CCollectionLogEntry, PPOEpisodeLogEntry as A2CEpisodeLogEntry,
     PPOLogEntry as A2CLogEntry, PPOLogger as A2CLogger,
 };
-use super::{
-    Agent,
-    ppo::{
-        FakeOptimizer, PPOAgent, PPOConfigurationError, PPOError, PPONetworkInfo,
-        SeparatePPONetwork, SharedPPONetwork,
-    },
-};
-use crate::{
-    gym::MultiGym, models::probabilistic_model::ProbabilisticPolicy,
-    parameter_schedule::ParameterSchedule, spaces::Space,
-};
 
 #[derive(Debug, thiserror::Error)]
 pub enum A2CError<AE, GE, SE>
 where
-    AE: Debug,
-    GE: Debug,
-    SE: Debug,
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
+    SE: std::fmt::Debug,
 {
-    #[error("policy failed: {0}")]
-    PolicyError(#[source] AE),
+    #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
+    CriticRewardDTypeMismatch { critic: DType, reward: DType },
+    #[error("network failed: {0}")]
+    NetworkError(#[source] AE),
     #[error("gym failed: {0}")]
     GymError(#[source] GE),
-    #[error("A2C tensor operation failed: {0}")]
-    TensorError(#[source] candle_core::Error),
+    #[error("reading A2C tensor data failed: {0}")]
+    TensorError(#[from] TensorReadError),
+    #[error("rollout batching failed: {0}")]
+    ExperienceBatch(#[from] ExperienceBatchError),
+    #[error("minibatch sampling failed: {0}")]
+    Sampling(#[from] SamplingError),
     #[error("space operation failed: {0}")]
     SpaceError(#[source] SE),
     #[error("invalid A2C configuration: {0}")]
@@ -52,17 +60,19 @@ where
     MissingOldValues,
 }
 
-impl<AE, GE, SE> From<PPOError<AE, GE, SE>> for A2CError<AE, GE, SE>
-where
-    AE: Debug,
-    GE: Debug,
-    SE: Debug,
+impl<AE: std::fmt::Debug, GE: std::fmt::Debug, SE: std::fmt::Debug> From<PPOError<AE, GE, SE>>
+    for A2CError<AE, GE, SE>
 {
     fn from(error: PPOError<AE, GE, SE>) -> Self {
         match error {
-            PPOError::PolicyError(error) => Self::PolicyError(error),
+            PPOError::CriticRewardDTypeMismatch { critic, reward } => {
+                Self::CriticRewardDTypeMismatch { critic, reward }
+            }
+            PPOError::NetworkError(error) => Self::NetworkError(error),
             PPOError::GymError(error) => Self::GymError(error),
             PPOError::TensorError(error) => Self::TensorError(error),
+            PPOError::ExperienceBatch(error) => Self::ExperienceBatch(error),
+            PPOError::Sampling(error) => Self::Sampling(error),
             PPOError::SpaceError(error) => Self::SpaceError(error),
             PPOError::ConfigurationError(error) => Self::ConfigurationError(error),
             PPOError::MismatchedTerminationBatch { dones, truncateds } => {
@@ -74,144 +84,163 @@ where
     }
 }
 
-/// Shared actor-critic network configuration for A2C.
-pub struct SharedA2CNetwork<O, E> {
-    inner: SharedPPONetwork<O, E>,
+/// Owns a shared model and separate actor and critic heads for A2C.
+pub struct SharedA2CNetwork<T: Module, A: Module, C: Module> {
+    inner: SharedPPONetwork<T, A, C>,
 }
 
 #[bon]
-impl<O, E> SharedA2CNetwork<O, E>
-where
-    O: Optimizer,
-    E: Debug,
-{
+impl<T: Module, A: Module, C: Module> SharedA2CNetwork<T, A, C> {
+    /// Owns the models and optimizer. Model shapes, dtype, and device must meet the PPO network contract.
+    /// Rejects nonpositive or non-finite learning rates.
     #[builder]
     pub fn new(
-        optimizer: O,
-        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
-        shared_network: Box<dyn candle_core::Module>,
-        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
-        critic_head: Box<dyn candle_core::Module>,
-        #[builder(with = |policy: impl ProbabilisticPolicy<Error = E> + 'static| Box::new(policy))]
-        actor_head: Box<dyn ProbabilisticPolicy<Error = E>>,
+        #[builder(into)] optimizer: ModuleOptimizer,
+        learning_rate: f64,
+        shared_network: T,
+        critic_head: C,
+        actor_head: A,
         #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         lr_scheduler: Option<Box<dyn ParameterSchedule>>,
-    ) -> Self {
-        Self {
-            inner: SharedPPONetwork::from_boxed(
-                optimizer,
-                shared_network,
-                critic_head,
-                actor_head,
-                lr_scheduler,
-            ),
-        }
+    ) -> Result<Self, PPOConfigurationError> {
+        Ok(Self {
+            inner: SharedPPONetwork::builder()
+                .optimizer(optimizer)
+                .learning_rate(learning_rate)
+                .shared_network(shared_network)
+                .critic_head(critic_head)
+                .actor_head(actor_head)
+                .maybe_lr_scheduler(lr_scheduler)
+                .build()?,
+        })
     }
 }
 
-/// Separate actor and critic network configuration for A2C.
-pub struct SeparateA2CNetwork<O1, O2, E> {
-    inner: SeparatePPONetwork<O1, O2, E>,
+/// Owns separate actor and critic models for A2C.
+pub struct SeparateA2CNetwork<A: Module, C: Module> {
+    inner: SeparatePPONetwork<A, C>,
 }
 
 #[bon]
-impl<O1, O2, E> SeparateA2CNetwork<O1, O2, E>
-where
-    O1: Optimizer,
-    O2: Optimizer,
-    E: Debug,
-{
+impl<A: Module, C: Module> SeparateA2CNetwork<A, C> {
+    /// Owns the models and optimizers. Models must meet the separate PPO network contract.
+    /// Rejects nonpositive or non-finite learning rates.
     #[builder]
     pub fn new(
-        actor_optimizer: O1,
-        critic_optimizer: O2,
-        #[builder(with = |policy: impl ProbabilisticPolicy<Error = E> + 'static| Box::new(policy))]
-        actor_network: Box<dyn ProbabilisticPolicy<Error = E>>,
-        #[builder(with = |network: impl candle_core::Module + 'static| Box::new(network))]
-        critic_network: Box<dyn candle_core::Module>,
+        #[builder(into)] actor_optimizer: ModuleOptimizer,
+        #[builder(into)] critic_optimizer: ModuleOptimizer,
+        actor_learning_rate: f64,
+        critic_learning_rate: f64,
+        actor_network: A,
+        critic_network: C,
         #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
         #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
         #[builder(default = false)] combined_loss: bool,
-    ) -> Self {
+    ) -> Result<Self, PPOConfigurationError> {
+        Ok(Self {
+            inner: SeparatePPONetwork::builder()
+                .actor_optimizer(actor_optimizer)
+                .critic_optimizer(critic_optimizer)
+                .actor_learning_rate(actor_learning_rate)
+                .critic_learning_rate(critic_learning_rate)
+                .actor_network(actor_network)
+                .critic_network(critic_network)
+                .maybe_actor_lr_scheduler(actor_lr_scheduler)
+                .maybe_critic_lr_scheduler(critic_lr_scheduler)
+                .combined_loss(combined_loss)
+                .build()?,
+        })
+    }
+}
+
+/// Contains an owned A2C network configuration.
+pub struct A2CNetworkInfo<N> {
+    inner: N,
+}
+
+impl<T: Module, A: Module, C: Module> A2CNetworkInfo<SharedPPONetwork<T, A, C>> {
+    pub fn shared(network: SharedA2CNetwork<T, A, C>) -> Self {
         Self {
-            inner: SeparatePPONetwork::from_boxed(
-                actor_optimizer,
-                critic_optimizer,
-                actor_network,
-                critic_network,
-                actor_lr_scheduler,
-                critic_lr_scheduler,
-                combined_loss,
-            ),
+            inner: network.inner,
         }
     }
 }
 
-/// An A2C-typed shared or separate network configuration.
-pub struct A2CNetworkInfo<O1, E, O2 = FakeOptimizer> {
-    inner: PPONetworkInfo<O1, E, O2>,
-}
-
-impl<O, E> A2CNetworkInfo<O, E, FakeOptimizer> {
-    pub fn shared(network: SharedA2CNetwork<O, E>) -> Self {
+impl<A: Module, C: Module> A2CNetworkInfo<SeparatePPONetwork<A, C>> {
+    pub fn separate(network: SeparateA2CNetwork<A, C>) -> Self {
         Self {
-            inner: PPONetworkInfo::Shared(network.inner),
+            inner: network.inner,
         }
     }
 }
 
-impl<O1, E, O2> A2CNetworkInfo<O1, E, O2> {
-    pub fn separate(network: SeparateA2CNetwork<O1, O2, E>) -> Self {
-        Self {
-            inner: PPONetworkInfo::Separate(network.inner),
-        }
-    }
-}
-
-impl<O, E> From<SharedA2CNetwork<O, E>> for A2CNetworkInfo<O, E, FakeOptimizer> {
-    fn from(network: SharedA2CNetwork<O, E>) -> Self {
+impl<T: Module, A: Module, C: Module> From<SharedA2CNetwork<T, A, C>>
+    for A2CNetworkInfo<SharedPPONetwork<T, A, C>>
+{
+    fn from(network: SharedA2CNetwork<T, A, C>) -> Self {
         Self::shared(network)
     }
 }
 
-impl<O1, O2, E> From<SeparateA2CNetwork<O1, O2, E>> for A2CNetworkInfo<O1, E, O2> {
-    fn from(network: SeparateA2CNetwork<O1, O2, E>) -> Self {
+impl<A: Module, C: Module> From<SeparateA2CNetwork<A, C>>
+    for A2CNetworkInfo<SeparatePPONetwork<A, C>>
+{
+    fn from(network: SeparateA2CNetwork<A, C>) -> Self {
         Self::separate(network)
     }
 }
 
-/// Advantage Actor-Critic agent backed by a constrained PPO agent.
-pub struct A2CAgent<'a, O1, O2, AE, GE, SE, I = ()>
-where
-    O1: Optimizer,
-    O2: Optimizer,
-    AE: Debug,
-    GE: Debug,
-    SE: Debug,
-{
-    inner: PPOAgent<'a, O1, O2, AE, GE, SE, I>,
+/// Advantage Actor-Critic agent with one unclipped full-rollout update.
+pub struct A2CAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2> {
+    inner: PPOAgent<'a, G, OS, AS, GE, I, A>,
 }
 
 #[bon]
-impl<'a, O1, O2, AE, GE, SE, I> A2CAgent<'a, O1, O2, AE, GE, SE, I>
+impl<
+    'a,
+    N,
+    OS,
+    AS,
+    GE,
+    I,
+    NE: std::fmt::Debug,
+    const O: usize,
+    const H: usize,
+    const L: usize,
+    const A: usize,
+    const BO: usize,
+    const BL: usize,
+>
+    A2CAgent<
+        'a,
+        PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
 where
-    O1: Optimizer,
-    O2: Optimizer,
-    AE: Debug,
-    GE: Debug,
-    SE: Debug,
+    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
+    OS: ObservationSpace<O>,
+    AS: ActionMap<L, A>,
+    AS::Error: std::fmt::Debug,
+    OS::Kind: Autodiff,
+    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
+    Tensor<L>: NextRank<Next = Tensor<BL>>,
+    GE: std::fmt::Debug,
 {
-    /// Builds A2C as unclipped PPO with one full-rollout optimization epoch.
-    ///
-    /// `batch_size` should be divisible by the number of vectorized
-    /// environments so the collected rollout contains exactly `batch_size`
-    /// transitions.
+    /// Builds A2C with one unclipped optimization epoch over the complete rollout.
+    /// Observation batches have rank O; policy actions have rank L and environment actions have rank A.
+    /// Models must share a device. Critic outputs must use the environment reward dtype.
+    /// Batch size must be divisible by the environment count.
     #[builder]
     pub fn new(
-        action_space: Box<dyn Space<Error = SE>>,
-        network_info: A2CNetworkInfo<O1, AE, O2>,
+        observation_space: OS,
+        action_space: AS,
+        network_info: A2CNetworkInfo<N>,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 1.0)] gae_lambda: f32,
         #[builder(default = false)] normalize_advantage: bool,
@@ -222,10 +251,10 @@ where
         #[builder(default = 0.5)] gradient_clip: f32,
         training_horizon: usize,
         logging_info: Option<&'a mut dyn A2CLogger<I>>,
-        device: candle_core::Device,
-        #[builder(default = candle_core::DType::F32)] dtype: candle_core::DType,
+        device: Device,
     ) -> Result<Self, PPOConfigurationError> {
         let inner = PPOAgent::builder()
+            .observation_space(observation_space)
             .action_space(action_space)
             .network_info(network_info.inner)
             .clipped(false)
@@ -244,46 +273,78 @@ where
             .maybe_logging_info(logging_info)
             .device(device)
             .build()?;
-
         Ok(Self { inner })
     }
 
-    pub fn set_learning_rate(&mut self, lr: f64) {
-        self.inner.set_learning_rate(lr);
+    pub fn set_learning_rate(&mut self, learning_rate: f64) {
+        self.inner.set_learning_rate(learning_rate);
     }
 
-    /// Selects deterministic environment actions for observations shaped
-    /// `[batch, ...observation_shape]`.
+    /// Maps rank-O observation batches to rank-A deterministic environment actions, preserving the batch axis.
+    /// Inputs must meet the owned model's dtype and device contract.
     pub fn act_deterministic(
         &mut self,
-        observation: &Tensor,
-    ) -> Result<Tensor, A2CError<AE, GE, SE>> {
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A, AS::Kind>, A2CError<NE, GE, AS::Error>> {
         self.inner
-            .act_deterministic(observation)
+            .act_deterministic(observations)
             .map_err(A2CError::from)
     }
 
-    pub fn reset_current_states(&mut self) {
-        self.inner.reset_current_states();
+    pub fn reset_current_observations(&mut self) {
+        self.inner.reset_current_observations();
     }
 }
 
-impl<'a, O1, O2, AE, GE, SE, I> Agent<I> for A2CAgent<'a, O1, O2, AE, GE, SE, I>
+impl<
+    'a,
+    N,
+    OS,
+    AS,
+    GE,
+    I,
+    NE: std::fmt::Debug,
+    const O: usize,
+    const H: usize,
+    const L: usize,
+    const A: usize,
+    const BO: usize,
+    const BL: usize,
+    const U: usize,
+> Agent<I, O, A>
+    for A2CAgent<
+        'a,
+        PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
 where
-    O1: Optimizer,
-    O2: Optimizer,
-    AE: Debug,
-    GE: Debug,
-    SE: Debug,
+    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
+    OS: ObservationSpace<O>,
+    AS: ActionMap<L, A>,
+    AS::Error: std::fmt::Debug,
+    OS::Kind: Autodiff,
+    Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
+    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
+    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
+    Tensor<L>: NextRank<Next = Tensor<BL>>,
+    GE: std::fmt::Debug,
 {
-    type Error = A2CError<AE, GE, SE>;
+    type Error = A2CError<NE, GE, AS::Error>;
     type GymError = GE;
-    type SpaceError = SE;
+    type SpaceError = AS::Error;
+    type ObservationSpace = OS;
+    type ActionSpace = AS;
 
-    /// Selects stochastic environment actions for observations shaped
-    /// `[batch, ...observation_shape]`.
-    fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
-        self.inner.act(observation).map_err(A2CError::from)
+    /// Maps rank-O observation batches to rank-A stochastic actions, preserving the batch axis, native kinds, and device.
+    fn act(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
+        self.inner.act(observations).map_err(A2CError::from)
     }
 
     #[cfg_attr(
@@ -297,7 +358,7 @@ where
     )]
     fn learn(
         &mut self,
-        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps).map_err(A2CError::from)
@@ -308,114 +369,118 @@ where
 mod tests {
     use super::*;
     use crate::{
-        agents::test_support::{CountingOptimizer, FixedEnv},
-        distributions::{CategoricalDistribution, CategoricalDistributionError},
+        agents::test_support::FixedEnv,
+        distributions::CategoricalDistribution,
         gym::VectorizedGymWrapper,
-        models::{
-            MLP,
-            probabilistic_model::{ProbabilisticPolicyModel, ProbabilisticPolicyModelError},
-        },
-        spaces::Discrete,
+        models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
     };
-    use candle_core::{DType, Device};
-    use candle_nn::{VarBuilder, VarMap};
+    use burn::{optim::SgdConfig, tensor::DType};
 
     #[derive(Default)]
     struct RecordingLogger {
         updates: usize,
         collections: usize,
-        completed_episodes: usize,
-        advantages: Vec<Vec<f32>>,
+        advantages: Vec<f32>,
     }
 
     impl A2CLogger for RecordingLogger {
         fn log(&mut self, entry: &A2CLogEntry) {
             self.updates += 1;
             assert_eq!(entry.epoch, 0);
-            assert_eq!(entry.advantages.dims(), &[2]);
-            self.advantages
-                .push(entry.advantages.to_vec1::<f32>().unwrap());
+            assert_eq!(entry.advantages.dims(), [2, 1]);
+            self.advantages = entry.advantages.to_data().try_to_vec().unwrap();
         }
 
-        fn log_collection(&mut self, entry: &A2CCollectionLogEntry) {
+        fn log_collection(&mut self, _entry: &A2CCollectionLogEntry) {
             self.collections += 1;
-            self.completed_episodes += entry.completed_episodes.len();
         }
     }
 
-    fn separate_network(
-        device: &Device,
-    ) -> A2CNetworkInfo<
-        CountingOptimizer,
-        ProbabilisticPolicyModelError<CategoricalDistributionError>,
-        CountingOptimizer,
-    > {
-        let actor_vars = VarMap::new();
-        let critic_vars = VarMap::new();
-        let actor = MLP::builder()
+    fn model(output: usize, device: &Device) -> MLP {
+        MLP::builder()
             .input_size(4)
-            .output_size(2)
-            .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, device))
+            .output_size(output)
             .hidden_layer_sizes(vec![2])
+            .options((device, DType::F32))
             .build()
-            .unwrap();
-        let critic = MLP::builder()
-            .input_size(4)
-            .output_size(1)
-            .vb(VarBuilder::from_varmap(&critic_vars, DType::F32, device))
-            .hidden_layer_sizes(vec![2])
-            .build()
-            .unwrap();
-
-        SeparateA2CNetwork::builder()
-            .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
-            .critic_optimizer(CountingOptimizer::with_learning_rate(1e-3))
-            .actor_network(ProbabilisticPolicyModel::new(
-                actor,
-                CategoricalDistribution,
-            ))
-            .critic_network(critic)
-            .build()
-            .into()
+            .unwrap()
     }
 
     #[test]
     fn public_agent_runs_one_full_rollout_update_and_forwards_actions() {
-        let device = Device::Cpu;
-        let mut env: VectorizedGymWrapper<FixedEnv> =
-            vec![FixedEnv::new(device.clone()), FixedEnv::new(device.clone())].into();
+        let device = Device::flex().autodiff();
+        let mut env = VectorizedGymWrapper::from(vec![
+            FixedEnv::new(device.clone()),
+            FixedEnv::new(device.clone()),
+        ]);
+        let network = SeparateA2CNetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                model(2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(model(1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
         let mut logger = RecordingLogger::default();
         let mut agent = A2CAgent::builder()
-            .action_space(Box::new(Discrete::new(2)))
-            .network_info(separate_network(&device))
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(network.into())
             .batch_size(2)
             .training_horizon(4)
             .logging_info(&mut logger)
             .device(device.clone())
             .build()
             .unwrap();
-
         agent.learn(&mut env, 2).unwrap();
-        let observations = Tensor::zeros((2, 4), DType::F32, &device).unwrap();
-        assert_eq!(agent.act(&observations).unwrap().dims(), &[2]);
-        assert_eq!(agent.act_deterministic(&observations).unwrap().dims(), &[2]);
+        let observations = Tensor::zeros([2, 4], (&device, DType::F32));
+        assert_eq!(agent.act(&observations).unwrap().dims(), [2, 1]);
+        assert_eq!(
+            agent.act_deterministic(&observations).unwrap().dims(),
+            [2, 1]
+        );
         agent.set_learning_rate(0.25);
-        agent.reset_current_states();
-
+        agent.reset_current_observations();
         assert_eq!(logger.updates, 1);
         assert_eq!(logger.collections, 1);
-        assert_eq!(logger.completed_episodes, 0);
-        assert!(
-            logger.advantages[0]
-                .iter()
-                .any(|advantage| advantage.abs() > 1e-6),
-            "A2C should not normalize advantages by default"
-        );
+        assert!(logger.advantages.iter().any(|value| value.abs() > 1e-6));
     }
 
     #[test]
-    fn network_configuration_is_a2c_typed_until_it_is_wrapped() {
-        let network = separate_network(&Device::Cpu);
-        assert!(matches!(network.inner, PPONetworkInfo::Separate(_)));
+    fn shared_configuration_runs_one_full_rollout_update() {
+        let device = Device::flex().autodiff();
+        let mut env = VectorizedGymWrapper::from(vec![
+            FixedEnv::new(device.clone()),
+            FixedEnv::new(device.clone()),
+        ]);
+        let network = SharedA2CNetwork::builder()
+            .shared_network(model(4, &device))
+            .actor_head(ProbabilisticPolicyModel::new(
+                model(2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_head(model(1, &device))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut logger = RecordingLogger::default();
+        let mut agent = A2CAgent::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(A2CNetworkInfo::shared(network))
+            .batch_size(2)
+            .training_horizon(4)
+            .logging_info(&mut logger)
+            .device(device)
+            .build()
+            .unwrap();
+        agent.learn(&mut env, 2).unwrap();
+        assert_eq!(logger.updates, 1);
+        assert_eq!(logger.collections, 1);
     }
 }
