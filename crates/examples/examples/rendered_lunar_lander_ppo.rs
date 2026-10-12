@@ -126,23 +126,20 @@ fn main() {
     let critic_optimizer =
         AdamW::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
-    let ppo_network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::new(
-                actor_network,
-                CategoricalDistribution,
-            ))
-            .critic_network(critic_network)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .actor_lr_scheduler(LinearSchedule::new(3e-4, 3e-5))
-            .critic_lr_scheduler(LinearSchedule::new(3e-4, 3e-5))
-            .build(),
-    );
+    let ppo_network_info = SeparatePPONetwork::builder()
+        .actor_network(ProbabilisticPolicyModel::new(
+            actor_network,
+            CategoricalDistribution,
+        ))
+        .critic_network(critic_network)
+        .actor_optimizer(actor_optimizer)
+        .critic_optimizer(critic_optimizer)
+        .actor_lr_scheduler(LinearSchedule::new(3e-4, 3e-5))
+        .critic_lr_scheduler(LinearSchedule::new(3e-4, 3e-5))
+        .build();
 
     // PPO config - Optimized hyperparameters for Lunar Lander
     let mut agent = PPOAgent::builder()
-        .dtype(DTYPE)
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)

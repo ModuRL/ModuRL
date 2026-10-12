@@ -75,22 +75,19 @@ fn ppo_cartpole() {
     let critic_optimizer =
         AdamW::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
-    let ppo_network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::new(
-                actor_network,
-                CategoricalDistribution,
-            ))
-            .critic_network(critic_network)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+    let ppo_network_info = SeparatePPONetwork::builder()
+        .actor_network(ProbabilisticPolicyModel::new(
+            actor_network,
+            CategoricalDistribution,
+        ))
+        .critic_network(critic_network)
+        .actor_optimizer(actor_optimizer)
+        .critic_optimizer(critic_optimizer)
+        .build();
 
     // PPO config
     // Stable baselines3 config:
     let mut agent = PPOAgent::builder()
-        .dtype(DTYPE)
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)

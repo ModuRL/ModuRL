@@ -18,9 +18,9 @@ pub use crate::agents::{
         td3::{TD3Agent, TD3Logger},
     },
     ppo::{
-        FakeModule, PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry,
-        PPOError, PPOLogEntry, PPOLogger, PPOModelGroup, PPOModelTypes, PPONetworkError,
-        PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
+        PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
+        PPOLogEntry, PPOLogger, PPOModelGroup, PPOModelTypes, PPONetwork, PPONetworkError,
+        SeparatePPONetwork, SharedPPONetwork,
     },
     q_learning::{
         QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError,

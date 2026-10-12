@@ -243,7 +243,6 @@ where
             .training_horizon(training_horizon)
             .maybe_logging_info(logging_info)
             .device(device)
-            .dtype(dtype)
             .build()?;
 
         Ok(Self { inner })
