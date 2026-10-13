@@ -89,3 +89,6 @@ cudnn = ["cuda", "candle-core/cudnn"]
 metal = ["candle-core/metal", "burn/metal"]
 multithreading = ["modurl/multithreading"]
 rendering = ["modurl_ale?/rendering", "modurl_gym/rendering", "modurl_mujoco?/rendering"]
+
+[dev-dependencies]
+thiserror = '2.0.20'

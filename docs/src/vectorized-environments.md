@@ -11,7 +11,7 @@ let envs = (0..4)
     .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
     .collect::<Vec<_>>();
 let mut env = DeviceMultiGymWrapper::new(
-    VectorizedGymWrapper::new(envs)?, Device::Cpu, device.clone(),
+    VectorizedGymWrapper::new(envs)?, Device::flex(), device.clone(),
 );
 ```
 
@@ -33,7 +33,7 @@ let env = MultithreadedVectorizedGymWrapper::new(
     observation_space,
     action_space,
 )?;
-let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
+let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
 ```
 
 Each inner environment remains one unit of work. The wrapper preserves the
