@@ -1,5 +1,5 @@
 use crate::spaces::{ActionSpace, ObservationSpace};
-use crate::tensor_rank::{NextRank, PrevRank};
+use crate::tensor_rank::{NextRank, TensorBatchTypes};
 use burn::tensor::{
     DType, IndexingUpdateOp, Int, Slice, Tensor, TensorData,
     kind::{Basic, Kind},
@@ -21,13 +21,7 @@ pub use vectorized::{VectorizedGymError, VectorizedGymWrapper};
 /// Ranks `O` and `A` describe observation and action batches. `PrevRank` determines each single tensor type.
 /// Scalars use `[1]` individually and `[batch_size, 1]` in batches. Kinds come from the associated spaces.
 /// `I` is reset and transition metadata; environments without metadata use `()`.
-pub trait Gym<I = (), const O: usize = 2, const A: usize = 2>
-where
-    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>:
-        PrevRank<Prev = <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
-    Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>:
-        PrevRank<Prev = <Self::ActionSpace as ActionSpace<A>>::Action>,
-{
+pub trait Gym<I = (), const O: usize = 2, const A: usize = 2> {
     type Error;
 
     type ObservationSpace: ObservationSpace<O>;
@@ -38,20 +32,14 @@ where
     /// The environment defines supported dtypes and devices; CPU environments require CPU actions.
     fn step(
         &mut self,
-        action: <Self::ActionSpace as ActionSpace<A>>::Action,
-    ) -> Result<
-        StepInfo<I, <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
-        Self::Error,
-    >;
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
+    ) -> Result<StepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error>;
 
     /// Resets to unbatched `observation_shape`, one rank below `O`; scalar observations use `[1]`.
     /// The environment defines observation kind, dtype, and device.
     fn reset(
         &mut self,
-    ) -> Result<
-        ResetInfo<I, <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
-        Self::Error,
-    >;
+    ) -> Result<ResetInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error>;
 
     fn observation_space(&self) -> Self::ObservationSpace;
 
@@ -62,13 +50,7 @@ where
 /// Slots may be independent environments or coupled players in one world.
 /// Implementations keep batch order and size fixed. Auto-reset implementations retain terminal observations.
 /// `O` and `A` are batch ranks; `PrevRank` determines the unbatched terminal observation type.
-pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2>
-where
-    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>:
-        PrevRank<Prev = <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
-    Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>:
-        PrevRank<Prev = <Self::ActionSpace as ActionSpace<A>>::Action>,
-{
+pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2> {
     type Error;
 
     type ObservationSpace: ObservationSpace<O>;
@@ -79,11 +61,8 @@ where
     /// Callers must follow the environment's dtype and device requirements.
     fn step(
         &mut self,
-        action: Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>,
-    ) -> Result<
-        MultiGymStepInfo<I, <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
-        Self::Error,
-    >;
+        action: <Self::ActionSpace as TensorBatchTypes>::Batch,
+    ) -> Result<MultiGymStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error>;
 
     fn observation_space(&self) -> Self::ObservationSpace;
 
@@ -93,9 +72,8 @@ where
 
     /// Resets all slots to `[num_envs, ...observation_shape]` of rank `O` in the observation space's kind.
     /// The environment defines observation dtype and device. Reset before the first step.
-    fn reset(
-        &mut self,
-    ) -> Result<Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error>;
+    fn reset(&mut self)
+    -> Result<<Self::ObservationSpace as TensorBatchTypes>::Batch, Self::Error>;
 }
 
 /// An unbatched observation tensor `T` and environment metadata; scalar observations use native `Tensor<1>` with shape `[1]`.
@@ -189,10 +167,6 @@ struct GymBatchMetadata {
 fn batch_metadata<G, I, const O: usize, const A: usize>(gym: &G) -> GymBatchMetadata
 where
     G: MultiGym<I, O, A>,
-    Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>:
-        PrevRank<Prev = <G::ActionSpace as ActionSpace<A>>::Action>,
-    Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
-        PrevRank<Prev = <G::ObservationSpace as ObservationSpace<O>>::Observation>,
 {
     GymBatchMetadata {
         num_envs: gym.num_envs(),
