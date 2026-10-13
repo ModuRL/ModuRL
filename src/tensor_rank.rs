@@ -1,4 +1,4 @@
-//! Native tensor types with one more or one fewer axis.
+//! Native tensor rank mappings and item/batch type pairs.
 //!
 //! These mappings preserve the tensor kind. They do not create or convert tensor values.
 //! `NextRank` supports ranks 1 through 1024; `PrevRank` supports ranks 2 through 1025.
@@ -20,6 +20,29 @@ pub trait NextRank: Clone + std::fmt::Debug {
 pub trait PrevRank: Clone + std::fmt::Debug {
     /// The rank-D - 1 tensor type. Removing an axis requires an appropriate Burn operation.
     type Prev: NextRank<Next = Self>;
+}
+
+/// Pairs an item tensor with a tensor that adds one leading batch axis.
+/// Items use `...item_shape`; batches use `[batch_size, ...item_shape]`.
+/// Scalar items `[1]` produce batches `[batch_size, 1]`. Both types preserve the tensor kind.
+/// Dtype, device, and dynamic axis sizes belong to tensor values. This trait does not convert values.
+pub trait TensorBatchTypes {
+    type Kind: Basic;
+
+    /// The item tensor without a batch axis, one rank below `Batch`.
+    type Item: NextRank<Next = Self::Batch>;
+
+    /// The tensor with one additional leading batch axis, one rank above `Item`.
+    type Batch: PrevRank<Prev = Self::Item>;
+}
+
+impl<const B: usize, K: Basic> TensorBatchTypes for Tensor<B, K>
+where
+    Self: PrevRank,
+{
+    type Kind = K;
+    type Item = <Self as PrevRank>::Prev;
+    type Batch = Self;
 }
 
 // Split the range in two at each step to keep macro recursion shallow.
@@ -49,7 +72,53 @@ mod tests {
         kind::{Basic, Bool, Int},
     };
 
-    use super::{NextRank, PrevRank};
+    use super::{NextRank, PrevRank, TensorBatchTypes};
+    use crate::spaces::{ActionSpace, BoxSpace, Discrete, ObservationSpace};
+
+    /// Returns axis sizes for a space's rank-B observations `[batch_size, ...item_shape]`.
+    /// Reads shape metadata without changing the tensor kind, dtype, device, or gradient paths.
+    fn observation_batch_dimensions<S: ObservationSpace<B>, const B: usize>(
+        batch: &S::Batch,
+    ) -> [usize; B] {
+        batch.dims()
+    }
+
+    /// Returns axis sizes for a space's rank-B actions `[batch_size, ...item_shape]`.
+    /// Reads shape metadata without changing the tensor kind, dtype, device, or gradient paths.
+    fn action_batch_dimensions<S: ActionSpace<B>, const B: usize>(batch: &S::Batch) -> [usize; B] {
+        batch.dims()
+    }
+
+    #[test]
+    fn spaces_expose_native_batch_methods_without_repeated_rank_bounds() {
+        let device = Device::flex();
+        let item: <BoxSpace<3> as TensorBatchTypes>::Item =
+            Tensor::from_data([[1.0f64, 2.0, 3.0], [4.0, 5.0, 6.0]], (&device, DType::F64));
+        let batch: <BoxSpace<3> as TensorBatchTypes>::Batch = item.unsqueeze_dim(0);
+        assert_eq!(
+            observation_batch_dimensions::<BoxSpace<3>, 3>(&batch),
+            [1, 2, 3]
+        );
+        assert_eq!(action_batch_dimensions::<BoxSpace<3>, 3>(&batch), [1, 2, 3]);
+        assert_eq!(batch.dtype(), DType::F64);
+        assert_eq!(batch.device(), device);
+
+        let item: <Discrete as TensorBatchTypes>::Item = Tensor::from_data([2i32], &device);
+        let batch: <Discrete as TensorBatchTypes>::Batch = item.unsqueeze_dim(0);
+        assert_eq!(observation_batch_dimensions::<Discrete, 2>(&batch), [1, 1]);
+        assert_eq!(action_batch_dimensions::<Discrete, 2>(&batch), [1, 1]);
+        assert_eq!(batch.into_data().try_to_vec::<i32>().unwrap(), [2]);
+    }
+
+    #[test]
+    fn native_batches_expose_item_types_for_all_tensor_kinds() {
+        fn pair<T: TensorBatchTypes<Item = I, Batch = B>, I, B>() {}
+
+        pair::<Tensor<2>, Tensor<1>, Tensor<2>>();
+        pair::<Tensor<3, Int>, Tensor<2, Int>, Tensor<3, Int>>();
+        pair::<Tensor<4, Bool>, Tensor<3, Bool>, Tensor<4, Bool>>();
+        pair::<Tensor<1025>, Tensor<1024>, Tensor<1025>>();
+    }
 
     // Store the native associated tensor without a public output-rank parameter.
     struct Batch<T: NextRank> {

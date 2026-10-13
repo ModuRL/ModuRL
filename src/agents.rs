@@ -1,9 +1,8 @@
+use crate::tensor_rank::TensorBatchTypes;
 use crate::{
     gym::MultiGym,
     spaces::{ActionSpace, ObservationSpace},
-    tensor_rank::PrevRank,
 };
-use burn::tensor::Tensor;
 
 pub mod a2c;
 #[cfg(any())]
@@ -20,13 +19,7 @@ pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
 /// Ranks `O` and `A` include the batch axis; `PrevRank` determines each unbatched terminal observation type.
 /// Scalar observations use `[batch_size, 1]` and terminal observations use `[1]`.
 /// Associated spaces determine the native observation and action kinds.
-pub trait Agent<I = (), const O: usize = 2, const A: usize = 2>
-where
-    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>:
-        PrevRank<Prev = <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
-    Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>:
-        PrevRank<Prev = <Self::ActionSpace as ActionSpace<A>>::Action>,
-{
+pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     type Error;
     type GymError;
     type SpaceError;
@@ -38,8 +31,8 @@ where
     /// Preserves the batch axis. The agent defines supported observation dtypes/devices and returned action dtypes/devices.
     fn act(
         &mut self,
-        observations: &Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>,
-    ) -> Result<Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>, Self::Error>;
+        observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
+    ) -> Result<<Self::ActionSpace as TensorBatchTypes>::Batch, Self::Error>;
 
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
     /// Terminal observations have rank `O - 1`; scalar terminal observations use `[1]`.

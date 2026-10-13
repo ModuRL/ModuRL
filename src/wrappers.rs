@@ -2,7 +2,7 @@
 //!
 //! The modules group observation transformations, reward transformations, and episode controls.
 
-use crate::tensor_rank::{NextRank, PrevRank};
+use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{Device, Slice, Tensor, kind::Basic};
 use std::convert::Infallible;
 
@@ -32,13 +32,9 @@ impl<G, F> InputMapMultiGymWrapper<G, F> {
     pub fn new<I, E, const O: usize, const A: usize>(gym: G, map_input: F) -> Self
     where
         G: MultiGym<I, O, A>,
-        Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>:
-            PrevRank<Prev = <G::ActionSpace as ActionSpace<A>>::Action>,
-        Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
-            PrevRank<Prev = <G::ObservationSpace as ObservationSpace<O>>::Observation>,
         F: FnMut(
-            Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
-        ) -> Result<Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>, E>,
+            Tensor<A, <G::ActionSpace as TensorBatchTypes>::Kind>,
+        ) -> Result<Tensor<A, <G::ActionSpace as TensorBatchTypes>::Kind>, E>,
     {
         Self { gym, map_input }
     }
@@ -56,33 +52,30 @@ impl<G, F> InputMapMultiGymWrapper<G, F> {
     }
 }
 
-impl<G, F, I, E, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic>
-    MultiGym<I, O, A> for InputMapMultiGymWrapper<G, F>
+impl<G, F, I, E, const O: usize, const A: usize> MultiGym<I, O, A> for InputMapMultiGymWrapper<G, F>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
-    G::ActionSpace: ActionSpace<A, Kind = AK>,
-    Tensor<A, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<A>>::Action>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
-    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
-    F: FnMut(Tensor<A, AK>) -> Result<Tensor<A, AK>, E>,
+    F: FnMut(
+        <G::ActionSpace as TensorBatchTypes>::Batch,
+    ) -> Result<<G::ActionSpace as TensorBatchTypes>::Batch, E>,
 {
     type Error = TensorMapMultiGymError<G::Error, E>;
     type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
 
     /// Maps rank-`A` actions `[num_envs, ...action_shape]` and returns rank-`O` observations `[num_envs, ...observation_shape]`.
-    /// Terminal observations keep unbatched rank `U`; rewards keep `[num_envs, 1]`. Output kinds, dtypes, and devices remain unchanged.
+    /// Terminal observations omit the batch axis; rewards keep `[num_envs, 1]`. Output kinds, dtypes, and devices remain unchanged.
     fn step(
         &mut self,
-        action: Tensor<A, AK>,
-    ) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, Self::Error> {
+        action: <G::ActionSpace as TensorBatchTypes>::Batch,
+    ) -> Result<MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error>
+    {
         let action = (self.map_input)(action).map_err(TensorMapMultiGymError::Mapping)?;
         self.gym.step(action).map_err(TensorMapMultiGymError::Gym)
     }
 
     /// Returns unchanged rank-`O` observations `[num_envs, ...observation_shape]` in the inner kind, dtype, and device.
-    fn reset(&mut self) -> Result<Tensor<O, K>, Self::Error> {
+    fn reset(&mut self) -> Result<<G::ObservationSpace as TensorBatchTypes>::Batch, Self::Error> {
         self.gym.reset().map_err(TensorMapMultiGymError::Gym)
     }
 
@@ -118,27 +111,20 @@ impl<G, FReset, FStep> OutputMapMultiGymWrapper<G, FReset, FStep> {
     ) -> Self
     where
         G: MultiGym<I, O, A>,
-        Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>:
-            PrevRank<Prev = <G::ActionSpace as ActionSpace<A>>::Action>,
-        G::ObservationSpace: ObservationSpace<
-                O,
-                Observation = Tensor<
-                    U,
-                    <<G as MultiGym<I, O, A>>::ObservationSpace as ObservationSpace<O>>::Kind,
-                >,
-            >,
-        Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
-            PrevRank<Prev = Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>>,
-        Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
-            NextRank<Next = Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>>,
+        G::ObservationSpace:
+            ObservationSpace<O, Item = Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
+        Tensor<O, <G::ObservationSpace as TensorBatchTypes>::Kind>:
+            PrevRank<Prev = Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
+        Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>:
+            NextRank<Next = Tensor<O, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
         FReset: FnMut(
-            Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>,
+            Tensor<O, <G::ObservationSpace as TensorBatchTypes>::Kind>,
         )
-            -> Result<Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>, E>,
+            -> Result<Tensor<O, <G::ObservationSpace as TensorBatchTypes>::Kind>, E>,
         FStep: FnMut(
-            MultiGymStepInfo<I, Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>>,
+            MultiGymStepInfo<I, Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
         ) -> Result<
-            MultiGymStepInfo<I, Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>>,
+            MultiGymStepInfo<I, Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
             E,
         >,
     {
@@ -166,9 +152,8 @@ impl<G, FReset, FStep, I, E, const O: usize, const A: usize, const U: usize, K: 
     MultiGym<I, O, A> for OutputMapMultiGymWrapper<G, FReset, FStep>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
-    Tensor<A, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<A>>::Action>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     FReset: FnMut(Tensor<O, K>) -> Result<Tensor<O, K>, E>,
@@ -274,9 +259,8 @@ impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic> 
     for DeviceMultiGymWrapper<G>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
-    Tensor<A, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<A>>::Action>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
 {
