@@ -54,8 +54,6 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
 #[cfg(test)]
 pub(crate) mod test_support {
     use burn::tensor::{DType, Device, Int, Tensor};
-    #[cfg(any())]
-    use candle_nn::Optimizer;
     use std::convert::Infallible;
 
     use crate::{
@@ -106,47 +104,6 @@ pub(crate) mod test_support {
 
         fn action_space(&self) -> Self::ActionSpace {
             Discrete::new(2)
-        }
-    }
-
-    #[cfg(any())]
-    pub(crate) struct CountingOptimizer {
-        pub(crate) steps: usize,
-        learning_rate: f64,
-    }
-
-    #[cfg(any())]
-    impl CountingOptimizer {
-        pub(crate) fn with_learning_rate(learning_rate: f64) -> Self {
-            Self {
-                steps: 0,
-                learning_rate,
-            }
-        }
-    }
-
-    #[cfg(any())]
-    impl Optimizer for CountingOptimizer {
-        type Config = f64;
-
-        fn new(
-            _vars: Vec<candle_core::Var>,
-            learning_rate: Self::Config,
-        ) -> candle_core::Result<Self> {
-            Ok(Self::with_learning_rate(learning_rate))
-        }
-
-        fn step(&mut self, _grads: &candle_core::backprop::GradStore) -> candle_core::Result<()> {
-            self.steps += 1;
-            Ok(())
-        }
-
-        fn learning_rate(&self) -> f64 {
-            self.learning_rate
-        }
-
-        fn set_learning_rate(&mut self, learning_rate: f64) {
-            self.learning_rate = learning_rate;
         }
     }
 
@@ -264,24 +221,6 @@ mod tests {
         assert_eq!(actions.into_data().try_to_vec::<i32>().unwrap(), vec![0, 0]);
         agent.learn(&mut single, 1).unwrap();
         agent.learn(&mut multiple, 2).unwrap();
-    }
-
-    #[cfg(any())]
-    #[test]
-    fn counting_optimizer_counts_whole_updates_with_multiple_parameters() {
-        use super::test_support::CountingOptimizer;
-        #[cfg(any())]
-        use candle_nn::Optimizer;
-
-        let device = candle_core::Device::Cpu;
-        let first = candle_core::Var::new(&[1.0f32], &device).unwrap();
-        let second = candle_core::Var::new(&[2.0f32], &device).unwrap();
-        let loss = (first.as_tensor() + second.as_tensor()).unwrap();
-        let mut optimizer = CountingOptimizer::new(vec![first, second], 0.1).unwrap();
-        optimizer.backward_step(&loss).unwrap();
-        assert_eq!(optimizer.steps, 1);
-        optimizer.set_learning_rate(0.2);
-        assert_eq!(optimizer.learning_rate(), 0.2);
     }
 
     #[test]

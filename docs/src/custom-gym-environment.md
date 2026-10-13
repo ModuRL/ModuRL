@@ -134,4 +134,4 @@ let env = VectorizedGymWrapper::new(envs)?;
 The individual environment only needs to implement the single-environment
 `Gym` contract.
 For four instances, observations have shape `[4, 1]` and actions have shape
-`[4]`. Construction fails when the environment list is empty.
+`[4, 1]`. Construction fails when the environment list is empty.

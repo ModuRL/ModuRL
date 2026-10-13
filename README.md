@@ -5,7 +5,7 @@
 [![docs.rs](https://docs.rs/modurl/badge.svg)](https://docs.rs/modurl)
 [![book](https://img.shields.io/github/actions/workflow/status/ModuRL/ModuRL/book-pages.yml?branch=master&label=book)](https://modurl.github.io/ModuRL/)
 
-`ModuRL` is a deep reinforcement learning framework for Rust, built on [Candle](https://github.com/huggingface/candle).
+`ModuRL` is a deep reinforcement learning framework for Rust.
 
 It provides training algorithms, environments, models, policy distributions, storage, schedules, and logging. Tensor shapes, devices, networks, and optimizer configuration remain explicit.
 
@@ -25,17 +25,17 @@ cargo run --release -p examples --example ppo_cartpole
 The same `Gym` and `Space` traits used by training agents also support direct environment interaction:
 
 ```rust
-use candle_core::Device;
+use burn::tensor::Device;
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 use modurl_gym::EnvironmentError;
 
 fn main() -> Result<(), EnvironmentError> {
-    let device = Device::Cpu;
+    let device = Device::flex();
     let mut env = CartPoleV1::builder().rng_device(&device).build()?;
 
-    let observation = env.reset()?.state;
-    let action = env.action_space().sample_batch(1, &device)?.squeeze(0)?;
+    let observation = env.reset()?.observation;
+    let action = env.action_space().sample_batch(1, &device)?.squeeze_dim::<1>(0);
     let transition = env.step(action)?;
 
     println!("observation shape: {:?}", observation.dims());
@@ -70,7 +70,7 @@ See the [benchmark workloads, fairness controls, and accelerator commands](crate
 ## What ModuRL includes
 
 - Training algorithms: PPO, A2C, SAC, DDPG, TD3, DQN, and Double DQN.
-- Models and policies: MLPs, shared or separate actor-critic networks, categorical and Gaussian policies, transformed distributions, and user-supplied Candle modules.
+- Models and policies: MLPs, shared or separate actor-critic networks, categorical and Gaussian policies, transformed distributions, and user-supplied models.
 - Experience: rollout buffers, replay buffers, configurable replay devices, and parameter schedules.
 - Environments: single and vectorized interfaces, classic control, Box2D, MuJoCo, and Atari integrations.
 - Wrappers: time limits, observation and reward normalization, reward clipping, frame stacking, max-and-skip, and raw reward recording.
@@ -80,7 +80,7 @@ See the [benchmark workloads, fairness controls, and accelerator commands](crate
 
 ModuRL keeps training decisions at the call site. Typed builders require each algorithm's components and provide defaults for tuning options. Agent builders also validate algorithm-specific settings in `build()`.
 
-After creating the Candle modules and optimizers, a separate-network PPO agent is assembled like this:
+After creating the models and optimizers, a separate-network PPO agent is assembled like this:
 
 ```rust
 let policy =
@@ -91,9 +91,12 @@ let networks = SeparatePPONetwork::builder()
         .critic_network(critic)
         .actor_optimizer(actor_optimizer)
         .critic_optimizer(critic_optimizer)
-        .build();
+        .actor_learning_rate(3e-4)
+        .critic_learning_rate(3e-4)
+        .build()?;
 
 let mut agent = PPOAgent::builder()
+    .observation_space(observation_space)
     .action_space(action_space)
     .network_info(networks)
     .batch_size(2_048)
@@ -111,8 +114,8 @@ The public boundaries make each part replaceable:
 | --- | --- |
 | Environment execution | Implement `Gym` for one environment or `MultiGym` for a batch. Collect `Gym` implementations with `VectorizedGymWrapper::from(envs)`, or enable `multithreading` and use `MultithreadedVectorizedGymWrapper`. |
 | Network topology | Use `SeparatePPONetwork` for independent actor and critic modules, or `SharedPPONetwork` for one trunk with policy and value heads. |
-| Policy representation | Wrap a Candle module in `ProbabilisticPolicyModel<D>`. Choose a categorical, Gaussian, transformed, or application-defined `Distribution`. |
-| Training state and devices | On-policy agents use rollout storage. Replay agents use `ReplayStorageConfig` to select observation dtype and either one-device or hybrid storage. |
+| Policy representation | Wrap a model in `ProbabilisticPolicyModel`. Choose a categorical, Gaussian, transformed, or application-defined `Distribution`. |
+| Training state and devices | On-policy agents use rollout storage. Replay agents use `ReplayStorageConfig` to select one-device or hybrid storage; observations retain their native dtype. |
 | Schedules and logging | Use constant, linear, exponential, or application-defined `ParameterSchedule` values. Pass a logger implementation to the agent builder, or omit logging. |
 
 Agents train against these contracts instead of concrete environment, network, or logger types. See [Core Concepts](https://modurl.github.io/ModuRL/dev/core-concepts.html) for how the parts interact.
