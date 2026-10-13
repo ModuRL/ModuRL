@@ -110,7 +110,7 @@ impl<G, I, const O: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic
     for NormalizeObservationGym<G>
 where
     G: Gym<I, BO, BA>,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Observation = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
@@ -192,7 +192,7 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank,
+    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
     Tensor<BA, AK>: PrevRank,
 {
     type Error = G::Error;
