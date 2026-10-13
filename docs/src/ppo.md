@@ -17,7 +17,10 @@ and returns `Result`. The constructor names remain `new`.
 
 Pass a `SeparatePPONetwork` or `SharedPPONetwork` directly to `.network_info(network)`.
 
-The agent infers `PPOModelGroup` from its models and native tensor types.
+The agent infers its model group from `PPONetwork::ModelGroup`.
+Custom `PPONetwork<O, H, L>` implementations must set `ModelGroup` to
+`PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<H, Self::LatentKind>, Tensor<L>>`.
+The built-in shared and separate networks supply this type directly.
 Observations keep `[batch_size, ...observation_shape]`, their native kind, and their dtype.
 Models perform any required conversions. Separate models accept observations directly;
 shared trunks produce Float features, and shared heads accept Float inputs. The compiler rejects incompatible kind connections.

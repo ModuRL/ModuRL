@@ -442,32 +442,13 @@ impl<G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'_, G, OS, AS, GE
 }
 
 #[bon]
-impl<'a, N, OS, AS, GE, I, const O: usize, const H: usize, const L: usize, const A: usize>
-    PPOAgent<
-        'a,
-        PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
-        OS,
-        AS,
-        GE,
-        I,
-        A,
-    >
-where
-    N: PPONetwork<O, H, L, InputKind = OS::Kind>,
-    OS: ObservationSpace<O>,
-    AS: ActionMap<L, A>,
-    AS::Error: std::fmt::Debug,
-    OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>: PrevRank + NextRank,
-    Tensor<L>: NextRank,
-    GE: std::fmt::Debug,
-{
+impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS, GE, I, A> {
     /// Builds PPO for rank-O observation batches and rank-A environment-action batches.
     /// Preserves observation kind and dtype. Policy inputs have rank H; original policy actions have rank L.
     /// Shared trunks produce Float features for Float-input heads. Separate models receive observations directly and require H = O.
     /// Models own input conversions and must share a device. Critic outputs must match reward dtype; tensor kinds must agree at compile time.
     #[builder]
-    pub fn new(
+    pub fn new<N, const O: usize, const H: usize, const L: usize>(
         observation_space: OS,
         action_space: AS,
         network_info: N,
@@ -494,7 +475,17 @@ where
         training_horizon: usize,
         logging_info: Option<&'a mut dyn PPOLogger<I>>,
         device: Device,
-    ) -> Result<Self, PPOConfigurationError> {
+    ) -> Result<Self, PPOConfigurationError>
+    where
+        N: PPONetwork<O, H, L, InputKind = OS::Kind, ModelGroup = G>,
+        G: PPOModelTypes<Network = N, Observation = OS::Batch, Action = Tensor<L>>,
+        OS: ObservationSpace<O>,
+        AS: ActionMap<L, A>,
+        AS::Error: std::fmt::Debug,
+        Tensor<O, OS::Kind>: NextRank,
+        Tensor<L>: NextRank,
+        GE: std::fmt::Debug,
+    {
         const {
             assert!(
                 O >= 2 && A >= 2,
