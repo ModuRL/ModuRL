@@ -4686,7 +4686,7 @@ name = "modurl_ale"
 version = "0.1.0"
 dependencies = [
  "bon",
- "candle-core",
+ "burn",
  "cmake",
  "minifb",
  "modurl",
