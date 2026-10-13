@@ -2,6 +2,7 @@ use burn::tensor::{DType, Device, Distribution, Tensor, kind::Basic};
 use modurl::{
     gym::{Gym, MultiGym, VectorizedGymWrapper},
     spaces::{ActionSpace, BoxSpace, Discrete},
+    tensor_rank::PrevRank,
     wrappers::DeviceMultiGymWrapper,
 };
 use modurl_gym::{
@@ -19,7 +20,7 @@ static RNG_LOCK: Mutex<()> = Mutex::new(());
 fn check_environment<G, K: Basic>(device: &Device, factory: impl Fn() -> G, action: Tensor<1, K>)
 where
     G: Gym<Error = EnvironmentError, ObservationSpace = BoxSpace<2>>,
-    G::ActionSpace: ActionSpace<2, Kind = K>,
+    G::ActionSpace: ActionSpace<2, Kind = K, Action = Tensor<1, K>>,
 {
     let rollout = || {
         let mut env = factory();
@@ -108,6 +109,8 @@ fn observations_stay_on_cpu_and_rng_is_seeded() {
 fn check_reset_rng<G>(device: &Device, mut env: G, size: usize, low: f64, high: f64, dtype: DType)
 where
     G: Gym<Error = EnvironmentError, ObservationSpace = BoxSpace<2>>,
+    Tensor<2, <G::ActionSpace as ActionSpace<2>>::Kind>:
+        PrevRank<Prev = <G::ActionSpace as ActionSpace<2>>::Action>,
 {
     device.seed(123);
     let _ =

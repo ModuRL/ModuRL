@@ -24,6 +24,8 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2>
 where
     Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>:
         PrevRank<Prev = <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
+    Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>:
+        PrevRank<Prev = <Self::ActionSpace as ActionSpace<A>>::Action>,
 {
     type Error;
     type GymError;
