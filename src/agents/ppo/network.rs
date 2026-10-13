@@ -148,6 +148,11 @@ pub trait PPONetwork<const O: usize, const H: usize, const L: usize> {
     type LatentKind: Basic;
     type Error: std::fmt::Debug;
 
+    /// Supplies the network and native tensor types used to construct an agent.
+    /// Use `PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<H, Self::LatentKind>, Tensor<L>>`
+    /// for the native observation, latent, and policy-action batches. Each tensor includes its leading batch axis.
+    type ModelGroup: PPOModelTypes<Network = Self, Error = Self::Error>;
+
     /// Maps observations [batch_size, ...observation_shape] to head inputs [batch_size, ...model_input_shape].
     /// Preserves the batch axis. Models own kind and dtype conversions; separate configurations return the input unchanged.
     fn forward_observations(
@@ -199,12 +204,15 @@ impl<T, P, C, const O: usize, const H: usize, const L: usize> PPONetwork<O, H, L
 where
     T: Module + Forward<O, H, OutputKind = Float, Error: std::fmt::Debug>,
     T::InputKind: Autodiff,
+    Tensor<O, T::InputKind>: NextRank + PrevRank,
+    Tensor<L>: NextRank,
     P: Module + ProbabilisticPolicy<H, L, ObservationKind = Float, Error: std::fmt::Debug>,
     C: Module + Forward<H, 2, InputKind = Float, OutputKind = Float, Error: std::fmt::Debug>,
 {
     type InputKind = T::InputKind;
     type LatentKind = Float;
     type Error = PPONetworkError<P::Error, C::Error, T::Error>;
+    type ModelGroup = PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<H>, Tensor<L>>;
 
     /// Forwards native rank-O observations through the shared model into Float rank-H head inputs, preserving batch size.
     /// Both tensors have shape `[batch_size, ...features]`; the shared model defines the remaining axes, dtype, and device.
@@ -288,12 +296,16 @@ impl<P, C, const O: usize, const L: usize> PPONetwork<O, O, L> for SeparatePPONe
 where
     P: Module + ProbabilisticPolicy<O, L, Error: std::fmt::Debug>,
     P::ObservationKind: Autodiff,
+    Tensor<O, P::ObservationKind>: NextRank + PrevRank,
+    Tensor<L>: NextRank,
     C: Module
         + Forward<O, 2, InputKind = P::ObservationKind, OutputKind = Float, Error: std::fmt::Debug>,
 {
     type InputKind = P::ObservationKind;
     type LatentKind = P::ObservationKind;
     type Error = PPONetworkError<P::Error, C::Error>;
+    type ModelGroup =
+        PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<O, Self::LatentKind>, Tensor<L>>;
 
     /// Returns native rank-O observations `[batch_size, ...observation_shape]` unchanged, preserving kind, dtype, device, and gradients.
     fn forward_observations(

@@ -204,32 +204,13 @@ pub struct A2CAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
 }
 
 #[bon]
-impl<'a, N, OS, AS, GE, I, const O: usize, const H: usize, const L: usize, const A: usize>
-    A2CAgent<
-        'a,
-        PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
-        OS,
-        AS,
-        GE,
-        I,
-        A,
-    >
-where
-    N: PPONetwork<O, H, L, InputKind = OS::Kind>,
-    OS: ObservationSpace<O>,
-    AS: ActionMap<L, A>,
-    AS::Error: std::fmt::Debug,
-    OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>: PrevRank + NextRank,
-    Tensor<L>: NextRank,
-    GE: std::fmt::Debug,
-{
+impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS, GE, I, A> {
     /// Builds A2C with one unclipped optimization epoch over the complete rollout.
     /// Observation batches have rank O; policy actions have rank L and environment actions have rank A.
     /// Models must share a device. Critic outputs must use the environment reward dtype.
     /// Batch size must be divisible by the environment count.
     #[builder]
-    pub fn new(
+    pub fn new<N, const O: usize, const H: usize, const L: usize>(
         observation_space: OS,
         action_space: AS,
         network_info: A2CNetworkInfo<N>,
@@ -244,7 +225,17 @@ where
         training_horizon: usize,
         logging_info: Option<&'a mut dyn A2CLogger<I>>,
         device: Device,
-    ) -> Result<Self, PPOConfigurationError> {
+    ) -> Result<Self, PPOConfigurationError>
+    where
+        N: PPONetwork<O, H, L, InputKind = OS::Kind, ModelGroup = G>,
+        G: PPOModelTypes<Network = N, Observation = OS::Batch, Action = Tensor<L>>,
+        OS: ObservationSpace<O>,
+        AS: ActionMap<L, A>,
+        AS::Error: std::fmt::Debug,
+        Tensor<O, OS::Kind>: NextRank,
+        Tensor<L>: NextRank,
+        GE: std::fmt::Debug,
+    {
         let inner = PPOAgent::builder()
             .observation_space(observation_space)
             .action_space(action_space)
@@ -267,7 +258,28 @@ where
             .build()?;
         Ok(Self { inner })
     }
+}
 
+impl<'a, N, OS, AS, GE, I, const O: usize, const H: usize, const L: usize, const A: usize>
+    A2CAgent<
+        'a,
+        PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
+where
+    N: PPONetwork<O, H, L, InputKind = OS::Kind>,
+    OS: ObservationSpace<O>,
+    AS: ActionMap<L, A>,
+    AS::Error: std::fmt::Debug,
+    OS::Kind: Autodiff,
+    Tensor<O, OS::Kind>: PrevRank + NextRank,
+    Tensor<L>: NextRank,
+    GE: std::fmt::Debug,
+{
     pub fn set_learning_rate(&mut self, learning_rate: f64) {
         self.inner.set_learning_rate(learning_rate);
     }
