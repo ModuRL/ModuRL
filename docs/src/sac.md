@@ -2,6 +2,11 @@
 
 The SAC agent and critic components use Burn and are available through `modurl::agents::sac` and the prelude.
 
+`SACModelGroup` groups the policy, critic, and execution tensor types.
+The builder infers this group from the supplied models and spaces.
+Explicit agent annotations use `SACAgent<'a, G, OS, AS, GE, I, A>`, where `G` is the model group.
+The observation and candidate ranks are inferred; `A` is the environment action batch rank.
+
 Soft Actor-Critic (SAC) trains one stochastic actor and two Q-value critics
 from replayed transitions. The algorithm traditionally known as SAC almost
 always uses exactly two critics. ModuRL accepts any nonempty critic ensemble,

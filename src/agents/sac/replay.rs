@@ -20,7 +20,7 @@ pub enum SACReplayError {
 }
 
 /// Owns SAC's replay ring and aligned observation storage with native observation and action kinds.
-pub(super) struct SACReplay<const O: usize, const A: usize, K: Autodiff, L: Autodiff>
+pub struct SACReplay<const O: usize, const A: usize, K: Autodiff, L: Autodiff>
 where
     DType: Cast<A, L, OutputKind = L>,
 {
