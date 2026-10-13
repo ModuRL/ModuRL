@@ -436,7 +436,7 @@ impl<N: Module> ActionValueCritic<N> {
     }
 
     /// Returns the learning rate used for online critic updates.
-    pub(crate) fn learning_rate(&self) -> f64 {
+    pub fn learning_rate(&self) -> f64 {
         self.learning_rate
     }
 
@@ -503,7 +503,8 @@ impl<N: Module> ActionValueCritic<N> {
         if tau == 1.0 {
             return self.hard_update();
         }
-        self.target_network = interpolate_target_model(&self.online_network, self.target_network.clone(), tau);
+        self.target_network =
+            interpolate_target_model(&self.online_network, self.target_network.clone(), tau);
         Ok(())
     }
 
@@ -573,9 +574,14 @@ pub(crate) fn interpolate_target_model<N: Module>(online: &N, target: N, tau: f6
     if tau == 1.0 {
         return online.clone().valid();
     }
-    let mut values = ActionValueParameterValues { values: GradientsParams::new() };
+    let mut values = ActionValueParameterValues {
+        values: GradientsParams::new(),
+    };
     online.visit(&mut values);
-    let mut mapper = ActionValueTargetUpdate { values: values.values, tau };
+    let mut mapper = ActionValueTargetUpdate {
+        values: values.values,
+        tau,
+    };
     target.map(&mut mapper).valid()
 }
 
