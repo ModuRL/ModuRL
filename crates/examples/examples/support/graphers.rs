@@ -717,7 +717,6 @@ impl<I> DDPGLogger<I> for DeterministicActorCriticGrapher {
     }
 }
 
-#[cfg(any())]
 impl<I> TD3Logger<I> for DeterministicActorCriticGrapher {
     fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
         self.log_update(entry);

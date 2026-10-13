@@ -59,7 +59,7 @@ the global collection timestep used by training and logging.
 
 ## Match the Actor Contract
 
-DDPG uses owned models. Its actor implements `Module` and `Forward<O, A>`.
+DDPG and TD3 use owned models. Each actor implements `Module` and `Forward<O, A>`.
 Observations use `[batch_size, ...observation_shape]`; actions use `[batch_size, ...action_shape]`.
 The agent creates a detached target actor during construction.
 The [DDPG chapter](./ddpg.md) shows the complete builder configuration.
@@ -72,6 +72,7 @@ Use `act_deterministic` for evaluation without exploration noise.
 ## Match the Critic Contract
 
 DDPG requires one `ActionValueCritic` with an owned online network and optimizer.
+TD3 accepts a nonempty ensemble of these critics.
 The critic creates a detached target network automatically.
 A scalar critic maps observations and actions to Q values `[batch_size, 1]`.
 Wrap an MLP with input width `observation_size + action_size` in `ScalarStateActionCritic`.

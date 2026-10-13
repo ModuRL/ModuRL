@@ -28,7 +28,6 @@ use std::{fmt::Debug, marker::PhantomData};
 
 pub mod ddpg;
 mod replay;
-#[cfg(any())]
 pub mod td3;
 
 pub use replay::DeterministicReplayError;
@@ -305,7 +304,6 @@ pub(crate) trait DeterministicActorCriticStrategy {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CriticCountRequirement {
     Exact(usize),
-    #[cfg(test)]
     NonEmpty,
 }
 
