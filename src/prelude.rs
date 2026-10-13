@@ -38,7 +38,7 @@ pub use crate::agents::{
         DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
         SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
         SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
-        SACReplayError, ScalarStateActionCritic,
+        SACModelGroup, SACModelTypes, SACReplayError, ScalarStateActionCritic,
     },
 };
 pub use crate::distributions::{

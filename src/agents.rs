@@ -6,11 +6,8 @@ use crate::{
 
 pub mod a2c;
 pub mod action_value_critic;
-#[cfg(any())]
-pub mod deterministic_actor_critic;
 #[cfg(test)]
-#[path = "agents/deterministic_actor_critic/replay.rs"]
-mod deterministic_actor_critic_replay;
+pub mod deterministic_actor_critic;
 
 pub mod ppo;
 pub mod q_learning;
