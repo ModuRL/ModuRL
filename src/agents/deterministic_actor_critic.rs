@@ -1,42 +1,44 @@
-//! Shared implementation for deterministic off-policy actor-critic agents.
-//!
-//! [`ddpg::DDPGAgent`] and [`td3::TD3Agent`] are thin public wrappers around
-//! the training loop in this module. Their algorithm-specific behavior is
-//! supplied by an internal strategy.
-
-use std::{fmt::Debug, marker::PhantomData};
-
-use bon::bon;
-use candle_core::{DType, Tensor};
-use candle_nn::{Optimizer, VarMap};
+//! Shared collection and training for deterministic off-policy actor-critic agents.
 
 use super::{
     ReplayStorageConfig,
-    sac::{SACCritic, SACCriticError},
+    action_value_critic::{
+        ActionValueCritic, ActionValueCriticError, ActionValueCriticNetwork,
+        interpolate_target_model,
+    },
 };
 use crate::{
     buffers::experience_replay::{
-        ExperienceReplay, ExperienceReplayError, ReplayStorage, ReplayStorageError,
+        ExperienceReplayError, ReplayStorageError, validate_replay_alignment,
     },
     gym::{MultiGym, MultiGymStepInfo},
+    models::Forward,
     objectives::bellman_targets,
     parameter_schedule::ScheduleProgress,
-    spaces::{BoxSpace, Space},
+    spaces::{ActionMap, ObservationSpace},
+    tensor_rank::NextRank,
 };
+use bon::bon;
+use burn::{
+    module::Module,
+    optim::{GradientsParams, ModuleOptimizer},
+    tensor::{DType, Distribution, Float, Tensor, TensorData, TensorReadError, kind::Autodiff},
+};
+use std::{fmt::Debug, marker::PhantomData};
 
+#[cfg(any())]
 pub mod ddpg;
-mod network;
 mod replay;
+#[cfg(any())]
 pub mod td3;
 
-use network::{add_gaussian_noise, copy_actor_var_map};
-use replay::{DeterministicBatch, DeterministicReplayInsert, DeterministicReplayStorage};
+pub use replay::DeterministicReplayError;
+use replay::{
+    DeterministicBatch, DeterministicReplay, DeterministicReplayInsert, DeterministicReplayStorage,
+};
 
 #[cfg(test)]
 mod tests;
-
-/// A scalar state-action critic suitable for DDPG and TD3.
-pub type DeterministicCritic<'a, O> = SACCritic<'a, O>;
 
 /// Invalid deterministic actor-critic configuration.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
@@ -85,96 +87,106 @@ pub enum DeterministicActorCriticConfigurationError {
         /// Number of critics supplied to the builder.
         actual: usize,
     },
+    #[error("actor learning rate must be finite and positive")]
+    InvalidActorLearningRate,
+    #[error("compute dtype must be floating-point, got {0:?}")]
+    InvalidDType(DType),
+    #[error("actor and critic parameters must use the optimization device")]
+    ModelDevice,
+    #[error("{field} space has {actual} item axes, expected {expected}")]
+    SpaceRank {
+        field: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("{field} item dimensions must be nonzero")]
+    ZeroItemDimension { field: &'static str },
 }
 
-/// DDPG and TD3 construction or training failure.
+/// Actor-critic construction, component, or training failure.
 #[derive(Debug, thiserror::Error)]
-pub enum DeterministicActorCriticError<GE, SE>
-where
-    GE: Debug,
-    SE: Debug,
-{
-    /// A Candle tensor operation failed.
-    #[error("actor-critic tensor operation failed: {0}")]
-    TensorError(#[source] candle_core::Error),
+pub enum DeterministicActorCriticError<AE, GE, SE, CE = std::convert::Infallible> {
+    #[error("actor model failed: {0}")]
+    ActorError(#[source] AE),
+    #[error("critic model failed: {0}")]
+    CriticError(#[source] CE),
+    #[error("critic operation failed: {0}")]
+    CriticOperationError(#[from] ActionValueCriticError),
+    #[error("actor-critic tensor read failed: {0}")]
+    TensorError(#[from] TensorReadError),
     #[error("replay storage failed: {0}")]
-    ReplayStorageError(#[source] ReplayStorageError),
-    /// Critic construction, aggregation, or optimization failed.
-    #[error("critic failed: {0}")]
-    CriticError(#[source] SACCriticError),
-    /// An agent builder value violated its configuration contract.
+    ReplayStorageError(#[from] DeterministicReplayError),
     #[error("invalid actor-critic configuration: {0}")]
-    ConfigurationError(#[source] DeterministicActorCriticConfigurationError),
-    /// The online and target actors contain different parameter names.
-    #[error(
-        "online and target actor parameter maps differ (online only: {online_only:?}, target only: {target_only:?})"
-    )]
-    ActorParameterMapMismatch {
-        /// Parameter names found only in the online actor.
-        online_only: Vec<String>,
-        /// Parameter names found only in the target actor.
-        target_only: Vec<String>,
-    },
-    /// The vectorized environment returned an error.
+    ConfigurationError(#[from] DeterministicActorCriticConfigurationError),
     #[error("gym failed: {0}")]
     GymError(#[source] GE),
-    /// The action or observation space returned an error.
     #[error("space operation failed: {0}")]
     SpaceError(#[source] SE),
+    #[error("actor-critic {field} shape differs: expected {expected:?}, got {actual:?}")]
+    Shape {
+        field: &'static str,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    #[error("actor-critic {field} dtype differs: expected {expected:?}, got {actual:?}")]
+    DType {
+        field: &'static str,
+        expected: DType,
+        actual: DType,
+    },
+    #[error("actor-critic {field} uses an incompatible device")]
+    Device { field: &'static str },
+    #[error("observation batches must be nonempty")]
+    EmptyBatch,
 }
 
-/// Result type returned by DDPG and TD3 construction and training operations.
-pub type DeterministicActorCriticResult<T, GE, SE> =
-    Result<T, DeterministicActorCriticError<GE, SE>>;
-
-impl<GE: Debug, SE: Debug> From<candle_core::Error> for DeterministicActorCriticError<GE, SE> {
-    fn from(error: candle_core::Error) -> Self {
-        Self::TensorError(error)
+impl<AE, GE, SE, CE> From<ReplayStorageError> for DeterministicActorCriticError<AE, GE, SE, CE> {
+    fn from(error: ReplayStorageError) -> Self {
+        Self::ReplayStorageError(error.into())
     }
 }
 
-impl<GE: Debug, SE: Debug> From<SACCriticError> for DeterministicActorCriticError<GE, SE> {
-    fn from(error: SACCriticError) -> Self {
-        Self::CriticError(error)
-    }
-}
-
-impl<GE: Debug, SE: Debug> From<DeterministicActorCriticConfigurationError>
-    for DeterministicActorCriticError<GE, SE>
+impl<AE, GE, SE, CE> From<ExperienceReplayError<DeterministicReplayError>>
+    for DeterministicActorCriticError<AE, GE, SE, CE>
 {
-    fn from(error: DeterministicActorCriticConfigurationError) -> Self {
-        Self::ConfigurationError(error)
+    fn from(error: ExperienceReplayError<DeterministicReplayError>) -> Self {
+        match error {
+            ExperienceReplayError::ExperienceError(error) => error.into(),
+            ExperienceReplayError::InsertionExceedsCapacity { capacity, inserted } => {
+                ReplayStorageError::InsertionExceedsCapacity { capacity, inserted }.into()
+            }
+        }
     }
 }
 
 /// Metrics from one replay update.
-pub struct DeterministicActorCriticLogEntry {
-    /// One scalar optimization loss per critic.
-    pub critic_losses: Vec<Tensor>,
-    /// Each critic's Q predictions for the sampled replay state-action pairs.
+pub struct DeterministicActorCriticLogEntry<const A: usize = 2> {
+    /// One detached optimization loss [1] per critic.
+    pub critic_losses: Vec<Tensor<1>>,
+    /// Each critic's Q predictions for the sampled replay observation-action pairs.
     /// Every tensor is shaped `[batch_size, 1]`.
-    pub critic_q_values: Vec<Tensor>,
-    /// Scalar negative mean policy Q loss.
+    pub critic_q_values: Vec<Tensor<2>>,
+    /// Detached negative mean policy Q loss [1].
     ///
     /// This is `None` on updates where TD3 delays the actor.
-    pub actor_loss: Option<Tensor>,
+    pub actor_loss: Option<Tensor<1>>,
     /// Q values used by the actor objective, shaped `[batch_size, 1]`.
     ///
     /// DDPG uses its sole critic. Canonical TD3 uses its first critic for the
     /// actor objective. A configured TD3 actor aggregation mode combines the
     /// critic ensemble instead. This is `None` on updates where TD3 delays the
     /// actor.
-    pub policy_q_values: Option<Tensor>,
+    pub policy_q_values: Option<Tensor<2>>,
     /// Current policy actions shaped `[batch_size, ...action_shape]`.
     /// `None` on updates where TD3 delays the actor.
-    pub policy_actions: Option<Tensor>,
+    pub policy_actions: Option<Tensor<A>>,
     /// Replay actions shaped `[batch_size, ...action_shape]`.
-    pub replay_actions: Tensor,
+    pub replay_actions: Tensor<A>,
     /// Detached expected Q targets shared by all critics, shaped
     /// `[batch_size, 1]`.
-    pub bellman_targets: Tensor,
+    pub bellman_targets: Tensor<2>,
     /// Rewards from the sampled replay batch, shaped `[batch_size, 1]`.
-    pub replay_rewards: Tensor,
+    pub replay_rewards: Tensor<2>,
     /// Current actor optimizer learning rate.
     pub actor_learning_rate: f32,
     /// Current learning rate for each critic optimizer.
@@ -192,7 +204,7 @@ pub struct DeterministicActorCriticLogEntry {
 /// Metrics from one vectorized environment step.
 pub struct DeterministicActorCriticCollectionLogEntry<I = ()> {
     /// Newest reward from each inner environment, shaped `[environment_count, 1]`.
-    pub collection_rewards: Tensor,
+    pub collection_rewards: Tensor<2>,
     /// Typed metadata returned by the inner environments.
     pub infos: Vec<I>,
     /// Global collected-transition count after this vectorized step.
@@ -259,26 +271,36 @@ impl EpisodeTracker {
     }
 }
 
-pub(crate) trait DeterministicActorCriticLogger<I = ()> {
-    fn log_update(&mut self, entry: &DeterministicActorCriticLogEntry);
+pub(crate) trait DeterministicActorCriticLogger<I = (), const A: usize = 2> {
+    fn log_update(&mut self, entry: &DeterministicActorCriticLogEntry<A>);
+
     fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>);
 }
 
 pub(crate) trait DeterministicActorCriticStrategy {
     fn critic_count_requirement(&self) -> CriticCountRequirement;
+
     fn actor_update_interval(&self) -> usize;
+
     fn target_policy_noise(&self) -> f64;
+
     fn target_noise_clip(&self) -> f64;
 
-    /// Combines the target critics' next-state Q estimates into one value per
+    /// Combines the target critics' next-observation Q estimates into one value per
     /// replay transition. DDPG uses its sole critic; TD3 applies its configured
     /// ensemble aggregation. Each input and the output are shaped
     /// `[batch_size, 1]`.
-    fn aggregate_target_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError>;
+    fn aggregate_target_values(
+        &self,
+        values: Vec<Tensor<2>>,
+    ) -> Result<Tensor<2>, ActionValueCriticError>;
 
     /// Combines the critics' current-policy Q estimates into the
     /// `[batch_size, 1]` values used by the actor objective.
-    fn aggregate_actor_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError>;
+    fn aggregate_actor_values(
+        &self,
+        values: Vec<Tensor<2>>,
+    ) -> Result<Tensor<2>, ActionValueCriticError>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -287,59 +309,166 @@ pub(crate) enum CriticCountRequirement {
     NonEmpty,
 }
 
-impl<GE: Debug, SE: Debug> From<ReplayStorageError> for DeterministicActorCriticError<GE, SE> {
-    fn from(error: ReplayStorageError) -> Self {
-        Self::ReplayStorageError(error)
+struct DeterministicActorCriticConfigurationValidator;
+
+#[bon]
+impl DeterministicActorCriticConfigurationValidator {
+    #[builder]
+    fn validate_configuration(
+        actor_learning_rate: f64,
+        dtype: DType,
+        critic_count_requirement: CriticCountRequirement,
+        actual_critic_count: usize,
+        replay_capacity: usize,
+        batch_size: usize,
+        gamma: f64,
+        tau: f64,
+        exploration_noise: f64,
+        target_policy_noise: f64,
+        target_noise_clip: f64,
+        actor_update_interval: usize,
+        update_frequency: usize,
+        training_horizon: usize,
+    ) -> Result<(), DeterministicActorCriticConfigurationError> {
+        let error = if !actor_learning_rate.is_finite() || actor_learning_rate <= 0.0 {
+            Some(DeterministicActorCriticConfigurationError::InvalidActorLearningRate)
+        } else if !dtype.is_float() {
+            Some(DeterministicActorCriticConfigurationError::InvalidDType(
+                dtype,
+            ))
+        } else if matches!(critic_count_requirement, CriticCountRequirement::NonEmpty)
+            && actual_critic_count == 0
+        {
+            Some(DeterministicActorCriticConfigurationError::NoCritics)
+        } else if let CriticCountRequirement::Exact(expected) = critic_count_requirement
+            && actual_critic_count != expected
+        {
+            Some(
+                DeterministicActorCriticConfigurationError::IncorrectCriticCount {
+                    expected,
+                    actual: actual_critic_count,
+                },
+            )
+        } else if replay_capacity == 0 {
+            Some(DeterministicActorCriticConfigurationError::ZeroReplayCapacity)
+        } else if batch_size == 0 {
+            Some(DeterministicActorCriticConfigurationError::ZeroBatchSize)
+        } else if replay_capacity < batch_size {
+            Some(DeterministicActorCriticConfigurationError::ReplayCapacityBelowBatchSize)
+        } else if update_frequency == 0 {
+            Some(DeterministicActorCriticConfigurationError::ZeroUpdateFrequency)
+        } else if training_horizon == 0 {
+            Some(DeterministicActorCriticConfigurationError::ZeroTrainingHorizon)
+        } else if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
+            Some(DeterministicActorCriticConfigurationError::InvalidGamma)
+        } else if !tau.is_finite() || !(0.0..=1.0).contains(&tau) {
+            Some(DeterministicActorCriticConfigurationError::InvalidTau)
+        } else if !exploration_noise.is_finite() || exploration_noise < 0.0 {
+            Some(DeterministicActorCriticConfigurationError::InvalidExplorationNoise)
+        } else if !target_policy_noise.is_finite() || target_policy_noise < 0.0 {
+            Some(DeterministicActorCriticConfigurationError::InvalidTargetPolicyNoise)
+        } else if !target_noise_clip.is_finite() || target_noise_clip < 0.0 {
+            Some(DeterministicActorCriticConfigurationError::InvalidTargetNoiseClip)
+        } else if actor_update_interval == 0 {
+            Some(DeterministicActorCriticConfigurationError::ZeroActorUpdateInterval)
+        } else {
+            None
+        };
+        error.map_or(Ok(()), Err)
     }
 }
 
-impl<GE: Debug, SE: Debug> From<ExperienceReplayError<ReplayStorageError>>
-    for DeterministicActorCriticError<GE, SE>
-{
-    fn from(error: ExperienceReplayError<ReplayStorageError>) -> Self {
-        Self::ReplayStorageError(error.into())
-    }
-}
-
-struct CollectedTransitions<'a> {
-    states: &'a Tensor,
-    next_states: &'a Tensor,
-    actions: &'a Tensor,
-    rewards: &'a Tensor,
+struct CollectedTransitions<'a, const O: usize, const A: usize, K: Autodiff> {
+    observations: &'a Tensor<O, K>,
+    next_observations: &'a Tensor<O, K>,
+    actions: &'a Tensor<A>,
+    rewards: &'a Tensor<2>,
     dones: &'a [bool],
     truncateds: &'a [bool],
     first_timestep: usize,
 }
 
 struct CriticUpdate {
-    losses: Vec<Tensor>,
-    q_values: Vec<Tensor>,
+    losses: Vec<Tensor<1>>,
+    q_values: Vec<Tensor<2>>,
 }
 
-struct ActorUpdate {
-    loss: Tensor,
-    q_values: Tensor,
-    actions: Tensor,
+struct ActorUpdate<const A: usize> {
+    loss: Tensor<1>,
+    q_values: Tensor<2>,
+    actions: Tensor<A>,
 }
 
-pub(crate) struct DeterministicActorCriticAgent<'a, AO, CO, GE, SE, S>
-where
-    AO: Optimizer,
-    CO: Optimizer,
-    GE: Debug,
-    SE: Debug,
-    S: DeterministicActorCriticStrategy,
+/// Owns deterministic actor and critic models for native rank-O observation batches and Float rank-A action batches.
+/// Scalar observations/actions use [batch_size, 1]. Critic candidates add one axis after batch, with C = A + 1.
+/// Models own observation preprocessing. Replay preserves observation dtype and transfers detached samples to the optimization device.
+/// Groups owned models and native execution tensors without adding runtime storage or execution methods.
+pub(crate) trait DeterministicActorCriticModelTypes {
+    type Actor: Module;
+    type Critic: Module;
+    type Observation;
+    type Action;
+    type Candidates;
+    type Replay;
+}
+
+/// Selects actor, critic, observation, action, and candidate types; all actual values remain in the agent.
+pub(crate) struct DeterministicActorCriticModelGroup<
+    M,
+    N,
+    O = Tensor<2>,
+    A = Tensor<2>,
+    C = Tensor<3>,
+> {
+    models: PhantomData<(M, N)>,
+    tensors: PhantomData<(O, A, C)>,
+}
+
+impl<M: Module, N: Module, K: Autodiff, const O: usize, const A: usize, const C: usize>
+    DeterministicActorCriticModelTypes
+    for DeterministicActorCriticModelGroup<M, N, Tensor<O, K>, Tensor<A>, Tensor<C>>
 {
-    online_actor: Box<dyn candle_core::Module>,
-    target_actor: Box<dyn candle_core::Module>,
-    online_actor_vars: &'a VarMap,
-    target_actor_vars: &'a mut VarMap,
-    actor_optimizer: AO,
-    critics: Vec<SACCritic<'a, CO>>,
+    type Actor = M;
+    type Critic = N;
+    type Observation = Tensor<O, K>;
+    type Action = Tensor<A>;
+    type Candidates = Tensor<C>;
+    type Replay = DeterministicReplay<O, A, K>;
+}
+
+/// Infers the model group from the concrete actor, critic, and native tensor types supplied to the builder.
+pub(crate) trait DeterministicActorCriticModelFor<N: Module, O, A, C>: Module {
+    type ModelGroup: DeterministicActorCriticModelTypes<Actor = Self, Critic = N>;
+}
+
+impl<M: Module, N: Module, K: Autodiff, const O: usize, const A: usize, const C: usize>
+    DeterministicActorCriticModelFor<N, Tensor<O, K>, Tensor<A>, Tensor<C>> for M
+{
+    type ModelGroup = DeterministicActorCriticModelGroup<M, N, Tensor<O, K>, Tensor<A>, Tensor<C>>;
+}
+
+/// Stores owned models and replay through their associated types; spaces and action rank remain explicit.
+pub(crate) struct DeterministicActorCriticAgent<
+    G: DeterministicActorCriticModelTypes,
+    OS,
+    AS,
+    S,
+    GE,
+    const A: usize = 2,
+> {
+    online_actor: G::Actor,
+    target_actor: G::Actor,
+    actor_optimizer: ModuleOptimizer,
+    actor_learning_rate: f64,
+    critics: Vec<ActionValueCritic<G::Critic>>,
     strategy: S,
-    action_space: BoxSpace,
-    observation_space: Box<dyn Space<Error = SE>>,
-    replay: ExperienceReplay<DeterministicReplayInsert, DeterministicReplayStorage>,
+    action_space: AS,
+    observation_space: OS,
+    replay: Option<G::Replay>,
+    replay_capacity: usize,
+    batch_size: usize,
+    environment_count: Option<usize>,
+    observation_dtype: Option<DType>,
     gamma: f64,
     tau: f64,
     exploration_noise: f64,
@@ -353,25 +482,23 @@ where
 }
 
 #[bon]
-impl<'a, AO, CO, GE, SE, S> DeterministicActorCriticAgent<'a, AO, CO, GE, SE, S>
-where
-    AO: Optimizer,
-    CO: Optimizer,
-    GE: Debug,
-    SE: Debug,
-    S: DeterministicActorCriticStrategy,
+impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
+    DeterministicActorCriticAgent<G, OS, AS, S, GE, A>
 {
+    /// Builds native observations [batch_size, ...observation_shape] into Float policy and environment actions of rank A.
+    /// Policy outputs must match action_space.policy_shape(); environment actions match action_space.shape().
+    /// Parameters must use the optimization device. Actions, rewards, and Q values use dtype; observations retain their native dtype.
+    /// Clones a detached target actor and allocates replay from the first collected batch's observation dtype.
+    /// Returns typed errors for invalid configuration, space shapes, or parameter devices.
     #[builder]
-    pub(crate) fn new(
-        online_actor: Box<dyn candle_core::Module>,
-        target_actor: Box<dyn candle_core::Module>,
-        online_actor_vars: &'a VarMap,
-        target_actor_vars: &'a mut VarMap,
-        actor_optimizer: AO,
-        critics: Vec<SACCritic<'a, CO>>,
+    pub(crate) fn builder<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
+        online_actor: M,
+        #[builder(into)] actor_optimizer: ModuleOptimizer,
+        actor_learning_rate: f64,
+        critics: Vec<ActionValueCritic<N>>,
         strategy: S,
-        action_space: BoxSpace,
-        observation_space: Box<dyn Space<Error = SE>>,
+        action_space: AS,
+        observation_space: OS,
         replay_storage_config: ReplayStorageConfig,
         #[builder(default = 0.99)] gamma: f64,
         #[builder(default = 0.005)] tau: f64,
@@ -382,12 +509,41 @@ where
         #[builder(default = 1_000)] training_start: usize,
         training_horizon: usize,
         #[builder(default = DType::F32)] dtype: DType,
-    ) -> DeterministicActorCriticResult<Self, GE, SE> {
-        assert!(
-            dtype.is_float(),
-            "deterministic actor-critic compute dtype must be floating-point"
-        );
+    ) -> Result<Self, DeterministicActorCriticConfigurationError>
+    where
+        OS: ObservationSpace<O>,
+        OS::Kind: Autodiff,
+        AS: ActionMap<A, A, Kind = Float, Error = SE>,
+        Tensor<A>: NextRank<Next = Tensor<C>>,
+        M: Module + Forward<O, A, InputKind = OS::Kind, OutputKind = Float, Error = AE>,
+        N: ActionValueCriticNetwork<
+                O,
+                A,
+                C,
+                ObservationKind = OS::Kind,
+                ActionKind = Float,
+                Error = CE,
+            >,
+        S: DeterministicActorCriticStrategy,
+        GE: Debug,
+        M: DeterministicActorCriticModelFor<
+                N,
+                Tensor<O, OS::Kind>,
+                Tensor<A>,
+                Tensor<C>,
+                ModelGroup = G,
+            >,
+        G: DeterministicActorCriticModelTypes<Actor = M, Critic = N>,
+    {
+        const {
+            assert!(
+                O >= 2 && A >= 2 && C == A + 1,
+                "observations and actions require batch and item axes; candidates add one action axis"
+            );
+        }
         DeterministicActorCriticConfigurationValidator::validate_configuration()
+            .actor_learning_rate(actor_learning_rate)
+            .dtype(dtype)
             .critic_count_requirement(strategy.critic_count_requirement())
             .actual_critic_count(critics.len())
             .replay_capacity(replay_capacity)
@@ -401,31 +557,44 @@ where
             .update_frequency(update_frequency)
             .training_horizon(training_horizon)
             .call()?;
-        copy_actor_var_map(online_actor_vars, target_actor_vars, 1.0)?;
-        let storage_device = replay_storage_config.storage_device();
-        let observation_sample = observation_space
-            .sample_batch(1, &storage_device)
-            .map_err(DeterministicActorCriticError::SpaceError)?
-            .squeeze(0)?;
-        let action_sample = action_space.sample_batch(1, &storage_device)?.squeeze(0)?;
-        let replay_storage = DeterministicReplayStorage::new(
+        space_storage_shape::<O>("observations", observation_space.shape(), replay_capacity)?;
+        space_storage_shape::<A>("actions", action_space.shape(), replay_capacity)?;
+        space_storage_shape::<A>(
+            "policy actions",
+            action_space.policy_shape(),
             replay_capacity,
-            observation_sample.dims(),
-            action_sample.dims(),
-            dtype,
-            storage_device.clone(),
         )?;
+        let optimization_device = replay_storage_config.optimization_device();
+        if online_actor
+            .devices()
+            .iter()
+            .any(|device| *device != optimization_device)
+            || critics.iter().any(|critic| {
+                critic
+                    .online_network()
+                    .devices()
+                    .iter()
+                    .any(|device| *device != optimization_device)
+            })
+        {
+            return Err(DeterministicActorCriticConfigurationError::ModelDevice);
+        }
+        let online_actor = online_actor.train();
+        let target_actor = online_actor.clone().valid();
         Ok(Self {
             online_actor,
             target_actor,
-            online_actor_vars,
-            target_actor_vars,
             actor_optimizer,
+            actor_learning_rate,
             critics,
             strategy,
             action_space,
             observation_space,
-            replay: ExperienceReplay::with_storage(replay_storage, batch_size),
+            replay: None,
+            replay_capacity,
+            batch_size,
+            environment_count: None,
+            observation_dtype: None,
             gamma,
             tau,
             exploration_noise,
@@ -440,172 +609,247 @@ where
     }
 }
 
-struct DeterministicActorCriticConfigurationValidator;
-
-#[bon]
-impl DeterministicActorCriticConfigurationValidator {
-    #[builder]
-    fn validate_configuration(
-        critic_count_requirement: CriticCountRequirement,
-        actual_critic_count: usize,
-        replay_capacity: usize,
-        batch_size: usize,
-        gamma: f64,
-        tau: f64,
-        exploration_noise: f64,
-        target_policy_noise: f64,
-        target_noise_clip: f64,
-        actor_update_interval: usize,
-        update_frequency: usize,
-        training_horizon: usize,
-    ) -> Result<(), DeterministicActorCriticConfigurationError> {
-        use DeterministicActorCriticConfigurationError as Error;
-
-        let error = if matches!(critic_count_requirement, CriticCountRequirement::NonEmpty)
-            && actual_critic_count == 0
-        {
-            Some(Error::NoCritics)
-        } else if let CriticCountRequirement::Exact(expected) = critic_count_requirement
-            && actual_critic_count != expected
-        {
-            Some(Error::IncorrectCriticCount {
-                expected,
-                actual: actual_critic_count,
-            })
-        } else if replay_capacity == 0 {
-            Some(Error::ZeroReplayCapacity)
-        } else if batch_size == 0 {
-            Some(Error::ZeroBatchSize)
-        } else if replay_capacity < batch_size {
-            Some(Error::ReplayCapacityBelowBatchSize)
-        } else if update_frequency == 0 {
-            Some(Error::ZeroUpdateFrequency)
-        } else if training_horizon == 0 {
-            Some(Error::ZeroTrainingHorizon)
-        } else if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
-            Some(Error::InvalidGamma)
-        } else if !tau.is_finite() || !(0.0..=1.0).contains(&tau) {
-            Some(Error::InvalidTau)
-        } else if !exploration_noise.is_finite() || exploration_noise < 0.0 {
-            Some(Error::InvalidExplorationNoise)
-        } else if !target_policy_noise.is_finite() || target_policy_noise < 0.0 {
-            Some(Error::InvalidTargetPolicyNoise)
-        } else if !target_noise_clip.is_finite() || target_noise_clip < 0.0 {
-            Some(Error::InvalidTargetNoiseClip)
-        } else if actor_update_interval == 0 {
-            Some(Error::ZeroActorUpdateInterval)
-        } else {
-            None
-        };
-        error.map_or(Ok(()), Err)
-    }
-}
-
-impl<'a, AO, CO, GE, SE, S> DeterministicActorCriticAgent<'a, AO, CO, GE, SE, S>
-where
-    AO: Optimizer,
-    CO: Optimizer,
-    GE: Debug,
+impl<
+    M,
+    N,
+    OS,
+    AS,
+    S,
+    GE,
+    AE: Debug,
+    CE: Debug,
     SE: Debug,
+    const O: usize,
+    const A: usize,
+    const C: usize,
+>
+    DeterministicActorCriticAgent<
+        DeterministicActorCriticModelGroup<M, N, Tensor<O, OS::Kind>, Tensor<A>, Tensor<C>>,
+        OS,
+        AS,
+        S,
+        GE,
+        A,
+    >
+where
+    OS: ObservationSpace<O>,
+    OS::Kind: Autodiff,
+    AS: ActionMap<A, A, Kind = Float, Error = SE>,
+    Tensor<A>: NextRank<Next = Tensor<C>>,
+    M: Module + Forward<O, A, InputKind = OS::Kind, OutputKind = Float, Error = AE>,
+    N: ActionValueCriticNetwork<
+            O,
+            A,
+            C,
+            ObservationKind = OS::Kind,
+            ActionKind = Float,
+            Error = CE,
+        >,
     S: DeterministicActorCriticStrategy,
+    GE: Debug,
 {
-    pub(crate) fn get_action_space(&self) -> &BoxSpace {
+    pub(crate) fn get_action_space(&self) -> &AS {
         &self.action_space
     }
 
-    pub(crate) fn get_observation_space(&self) -> &dyn Space<Error = SE> {
-        self.observation_space.as_ref()
+    pub(crate) fn get_observation_space(&self) -> &OS {
+        &self.observation_space
     }
 
-    /// Maps observations `[batch, ...observation_shape]` to deterministic
-    /// actions `[batch, ...action_shape]`.
+    /// Checks native observations [batch_size, ...observation_shape] without casting or repairing axes.
+    /// Requires a nonempty batch and the established replay dtype once replay storage exists.
+    fn validate_observations(
+        &self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let count = observations.dims()[0];
+        if count == 0 {
+            return Err(DeterministicActorCriticError::EmptyBatch);
+        }
+        let expected =
+            space_storage_shape::<O>("observations", self.observation_space.shape(), count)?;
+        if observations.dims() != expected {
+            return Err(DeterministicActorCriticError::Shape {
+                field: "observations",
+                expected: expected.to_vec(),
+                actual: observations.dims().to_vec(),
+            });
+        }
+        if let Some(expected) = self.observation_dtype
+            && observations.dtype() != expected
+        {
+            return Err(DeterministicActorCriticError::DType {
+                field: "observations",
+                expected,
+                actual: observations.dtype(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Checks rank-D Float tensors with the required shape, compute dtype, and optimization device; preserves all axes and gradients.
+    fn validate_float_tensor<const D: usize>(
+        &self,
+        field: &'static str,
+        values: &Tensor<D>,
+        expected: [usize; D],
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
+        if values.dims() != expected {
+            return Err(DeterministicActorCriticError::Shape {
+                field,
+                expected: expected.to_vec(),
+                actual: values.dims().to_vec(),
+            });
+        }
+        if values.dtype() != self.dtype {
+            return Err(DeterministicActorCriticError::DType {
+                field,
+                expected: self.dtype,
+                actual: values.dtype(),
+            });
+        }
+        if values.device() != self.replay_storage_config.optimization_device() {
+            return Err(DeterministicActorCriticError::Device { field });
+        }
+        Ok(())
+    }
+
+    /// Maps Float policy actions [batch_size, ...policy_shape] to Float environment actions [batch_size, ...action_shape].
+    /// Preserves dtype, device, batch axis, and policy gradients through the action map's clipping behavior.
+    fn decode_actions(
+        &self,
+        latent: Tensor<A>,
+        count: usize,
+    ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let expected =
+            space_storage_shape::<A>("policy actions", self.action_space.policy_shape(), count)?;
+        self.validate_float_tensor("policy actions", &latent, expected)?;
+        let actions = self
+            .action_space
+            .tensor_from_neurons(latent)
+            .map_err(DeterministicActorCriticError::SpaceError)?;
+        let expected = space_storage_shape::<A>("actions", self.action_space.shape(), count)?;
+        self.validate_float_tensor("actions", &actions, expected)?;
+        Ok(actions)
+    }
+
+    /// Maps native observations [batch_size, ...observation_shape] to deterministic Float actions [batch_size, ...action_shape].
+    /// Transfers observations to the optimization device without casting; preserves actor gradients through the action map.
     pub(crate) fn act_deterministic(
         &self,
-        observation: &Tensor,
-    ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        let observation = observation
-            .to_device(&self.replay_storage_config.optimization_device())?
-            .to_dtype(self.dtype)?;
-        let actions = self.online_actor.forward(&observation)?;
-        Ok(self.action_space.tensor_from_neurons(&actions)?)
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        self.validate_observations(observations)?;
+        let latent = self
+            .online_actor
+            .forward(
+                observations
+                    .clone()
+                    .to_device(&self.replay_storage_config.optimization_device()),
+            )
+            .map_err(DeterministicActorCriticError::ActorError)?;
+        self.decode_actions(latent, observations.dims()[0])
     }
 
-    /// Maps observations `[batch, ...observation_shape]` to exploration-noised
-    /// actions `[batch, ...action_shape]`.
+    /// Maps native observations [batch_size, ...observation_shape] to exploration-noised Float actions [batch_size, ...action_shape].
+    /// Adds Gaussian noise to policy outputs before action-space clipping; preserves dtype, device, and actor gradients.
     pub(crate) fn act(
         &self,
-        observation: &Tensor,
-    ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        let observation = observation
-            .to_device(&self.replay_storage_config.optimization_device())?
-            .to_dtype(self.dtype)?;
-        let actions = self.online_actor.forward(&observation)?;
-        let actions = add_gaussian_noise(&actions, self.exploration_noise, None)?;
-        Ok(self.action_space.tensor_from_neurons(&actions)?)
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        self.validate_observations(observations)?;
+        let latent = self
+            .online_actor
+            .forward(
+                observations
+                    .clone()
+                    .to_device(&self.replay_storage_config.optimization_device()),
+            )
+            .map_err(DeterministicActorCriticError::ActorError)?;
+        self.decode_actions(
+            add_gaussian_noise(&latent, self.exploration_noise, None),
+            observations.dims()[0],
+        )
     }
 
+    /// Samples Float environment actions [batch_size, ...action_shape] with the existing device RNG and casts to compute dtype.
     fn random_actions(
         &self,
-        batch_size: usize,
-    ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        let actions = self.action_space.sample_batch(
-            batch_size,
-            &self.replay_storage_config.optimization_device(),
-        )?;
-        Ok(actions.to_dtype(self.dtype)?)
+        count: usize,
+    ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let actions = self
+            .action_space
+            .sample_batch(count, &self.replay_storage_config.optimization_device())
+            .map_err(DeterministicActorCriticError::SpaceError)?
+            .cast(self.dtype);
+        let expected = space_storage_shape::<A>("actions", self.action_space.shape(), count)?;
+        self.validate_float_tensor("random actions", &actions, expected)?;
+        Ok(actions)
     }
 
+    /// Samples detached observations [batch_size, ...observation_shape], actions [batch_size, ...action_shape], and scalars [batch_size, 1].
+    /// Preserves native observation dtype and transfers every field to the optimization device.
     fn sample_batch(
         &self,
-    ) -> Result<Option<DeterministicBatch>, DeterministicActorCriticError<GE, SE>> {
-        if self.replay.len() < self.replay.get_batch_size() {
-            return Ok(None);
-        }
-        let mut batch = self.replay.sample()?;
-        let optimization_device = self.replay_storage_config.optimization_device();
-        for tensor in [
-            &mut batch.states,
-            &mut batch.next_states,
-            &mut batch.actions,
-            &mut batch.rewards,
-            &mut batch.terminated,
-        ] {
-            *tensor = tensor
-                .to_device(&optimization_device)?
-                .to_dtype(self.dtype)?;
-        }
-        Ok(Some(batch))
+    ) -> Result<DeterministicBatch<O, A, OS::Kind>, DeterministicActorCriticError<AE, GE, SE, CE>>
+    {
+        let replay = self
+            .replay
+            .as_ref()
+            .ok_or(ReplayStorageError::EnvironmentCountNotSet)?;
+        let batch = replay.sample()?;
+        let device = self.replay_storage_config.optimization_device();
+        Ok(DeterministicBatch {
+            observations: batch.observations.to_device(&device),
+            next_observations: batch.next_observations.to_device(&device),
+            actions: batch.actions.to_device(&device),
+            rewards: batch.rewards.to_device(&device),
+            terminated: batch.terminated.to_device(&device),
+        })
     }
 
+    /// Computes detached targets [batch_size, 1] from replay rewards, Bool termination flags, and native next observations.
+    /// Smooths target policy actions before clipping. Truncation alone retains bootstrapping; all Float statistics use compute dtype.
     fn bellman_targets(
         &self,
-        batch: &DeterministicBatch,
-    ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        let target_actions = self.target_actor.forward(&batch.next_states)?.detach();
-        let target_actions = add_gaussian_noise(
-            &target_actions,
-            self.strategy.target_policy_noise(),
-            Some(self.strategy.target_noise_clip()),
-        )?;
-        let target_actions = self
-            .action_space
-            .tensor_from_neurons(&target_actions)?
+        batch: &DeterministicBatch<O, A, OS::Kind>,
+    ) -> Result<Tensor<2>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let count = batch.rewards.dims()[0];
+        let latent = self
+            .target_actor
+            .forward(batch.next_observations.clone())
+            .map_err(DeterministicActorCriticError::ActorError)?
             .detach();
-        let target_values = self
+        let actions = self
+            .decode_actions(
+                add_gaussian_noise(
+                    &latent,
+                    self.strategy.target_policy_noise(),
+                    Some(self.strategy.target_noise_clip()),
+                ),
+                count,
+            )?
+            .detach();
+        let values = self
             .critics
             .iter()
-            .map(|critic| critic.target_replay_values(&batch.next_states, &target_actions))
-            .collect::<candle_core::Result<Vec<_>>>()?;
-        let target_values = self
-            .strategy
-            .aggregate_target_values(target_values)?
-            .detach();
+            .map(|critic| {
+                critic
+                    .target_replay_values::<O, A, C>(&batch.next_observations, &actions)
+                    .map_err(DeterministicActorCriticError::CriticError)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for value in &values {
+            self.validate_float_tensor("target critic values", value, [count, 1])?;
+        }
+        let values = self.strategy.aggregate_target_values(values)?;
+        self.validate_float_tensor("aggregated target values", &values, [count, 1])?;
         Ok(bellman_targets(
-            &batch.rewards,
-            &batch.terminated,
-            &target_values,
+            batch.rewards.clone(),
+            batch.terminated.clone(),
+            values.detach(),
             self.gamma,
-        )?
+        )
         .detach())
     }
 
@@ -618,21 +862,30 @@ where
             skip_all
         )
     )]
-    /// Optimizes critics from a replay batch and targets shaped `[batch, 1]`,
-    /// returning one scalar loss and one `[batch, 1]` Q tensor per critic.
+    /// Optimizes critics from native replay batches and detached targets [batch_size, 1].
+    /// Uses full mean squared error and returns detached losses [1] and predictions [batch_size, 1].
     fn optimize_critics(
         &mut self,
-        batch: &DeterministicBatch,
-        targets: &Tensor,
-    ) -> Result<CriticUpdate, DeterministicActorCriticError<GE, SE>> {
+        batch: &DeterministicBatch<O, A, OS::Kind>,
+        targets: &Tensor<2>,
+    ) -> Result<CriticUpdate, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let mut predictions = Vec::with_capacity(self.critics.len());
+        for critic in &self.critics {
+            let predicted = critic
+                .online_replay_values::<O, A, C>(&batch.observations, &batch.actions)
+                .map_err(DeterministicActorCriticError::CriticError)?;
+            self.validate_float_tensor("critic values", &predicted, targets.dims())?;
+            predictions.push(predicted);
+        }
         let mut losses = Vec::with_capacity(self.critics.len());
         let mut q_values = Vec::with_capacity(self.critics.len());
-        for critic in &mut self.critics {
-            let predicted = critic.online_replay_values(&batch.states, &batch.actions)?;
-            let loss = candle_nn::loss::mse(&predicted, targets)?;
-            critic.optimizer_mut().backward_step(&loss)?;
-            losses.push(loss);
-            q_values.push(predicted);
+        for (critic, predicted) in self.critics.iter_mut().zip(predictions) {
+            let loss = (predicted.clone() - targets.clone().detach())
+                .square()
+                .mean();
+            critic.backward_step(&loss)?;
+            losses.push(loss.detach());
+            q_values.push(predicted.detach());
         }
         Ok(CriticUpdate { losses, q_values })
     }
@@ -646,37 +899,47 @@ where
             skip_all
         )
     )]
-    /// Optimizes the actor from states `[batch, ...observation_shape]`,
-    /// returning its scalar loss, `[batch, 1]` Q values, and
-    /// `[batch, ...action_shape]` actions.
+    /// Optimizes the actor from native observations [batch_size, ...observation_shape].
+    /// Adds one candidate axis to Float actions, then removes it from critic values [batch_size, 1, 1].
+    /// Keeps action gradients and excludes critic-parameter gradients. Returns detached loss [1], values [batch_size, 1], and actions of rank A.
     fn optimize_actor(
         &mut self,
-        states: &Tensor,
-    ) -> Result<ActorUpdate, DeterministicActorCriticError<GE, SE>> {
-        let actions = self.online_actor.forward(states)?;
-        let actions = self.action_space.tensor_from_neurons(&actions)?;
-        let candidate_actions = actions.unsqueeze(1)?;
-        let values = self
-            .critics
-            .iter()
-            .map(|critic| {
-                critic
-                    .online_actor_values(states, &candidate_actions)?
-                    .squeeze(1)
-            })
-            .collect::<candle_core::Result<Vec<_>>>()?;
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<ActorUpdate<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let count = observations.dims()[0];
+        let latent = self
+            .online_actor
+            .forward(observations.clone())
+            .map_err(DeterministicActorCriticError::ActorError)?;
+        let actions = self.decode_actions(latent, count)?;
+        let candidates = actions.clone().unsqueeze_dim::<C>(1);
+        let mut values = Vec::with_capacity(self.critics.len());
+        for critic in &self.critics {
+            let value = critic
+                .online_actor_values::<O, A, C>(observations, &candidates)
+                .map_err(DeterministicActorCriticError::CriticError)?;
+            self.validate_float_tensor("actor critic values", &value, [count, 1, 1])?;
+            values.push(value.squeeze_dim::<2>(1));
+        }
         let values = self.strategy.aggregate_actor_values(values)?;
-        let loss = values.mean_all()?.neg()?;
-        self.actor_optimizer.backward_step(&loss)?;
+        self.validate_float_tensor("aggregated actor values", &values, [count, 1])?;
+        let loss = -values.clone().mean();
+        let gradients = GradientsParams::from_grads(loss.clone().backward(), &self.online_actor);
+        self.online_actor = self.actor_optimizer.step(
+            self.actor_learning_rate,
+            self.online_actor.clone(),
+            gradients,
+        );
         Ok(ActorUpdate {
-            loss,
-            q_values: values,
-            actions,
+            loss: loss.detach(),
+            q_values: values.detach(),
+            actions: actions.detach(),
         })
     }
 
-    fn update_targets(&mut self) -> Result<(), DeterministicActorCriticError<GE, SE>> {
-        copy_actor_var_map(self.online_actor_vars, self.target_actor_vars, self.tau)?;
+    fn update_targets(&mut self) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
+        self.target_actor =
+            interpolate_target_model(&self.online_actor, self.target_actor.clone(), self.tau);
         for critic in &mut self.critics {
             critic.polyak_update(self.tau)?;
         }
@@ -695,17 +958,22 @@ where
     fn optimize<I>(
         &mut self,
         collection_timestep: usize,
-        logger: &mut dyn DeterministicActorCriticLogger<I>,
-    ) -> Result<(), DeterministicActorCriticError<GE, SE>> {
-        let Some(batch) = self.sample_batch()? else {
+        logger: &mut dyn DeterministicActorCriticLogger<I, A>,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
+        if !self
+            .replay
+            .as_ref()
+            .is_some_and(DeterministicReplay::can_sample)
+        {
             return Ok(());
-        };
+        }
+        let batch = self.sample_batch()?;
         let targets = self.bellman_targets(&batch)?;
         let critic_update = self.optimize_critics(&batch, &targets)?;
         let actor_updated =
             (self.optimization_steps + 1).is_multiple_of(self.strategy.actor_update_interval());
         let actor_update = actor_updated
-            .then(|| self.optimize_actor(&batch.states))
+            .then(|| self.optimize_actor(&batch.observations))
             .transpose()?;
         if actor_updated {
             self.update_targets()?;
@@ -723,11 +991,11 @@ where
             replay_actions: batch.actions,
             bellman_targets: targets,
             replay_rewards: batch.rewards,
-            actor_learning_rate: self.actor_optimizer.learning_rate() as f32,
+            actor_learning_rate: self.actor_learning_rate as f32,
             critic_learning_rates: self
                 .critics
                 .iter()
-                .map(|critic| critic.optimizer().learning_rate() as f32)
+                .map(|critic| critic.learning_rate() as f32)
                 .collect(),
             exploration_noise_standard_deviation: self.exploration_noise,
             actor_updated,
@@ -738,58 +1006,77 @@ where
         Ok(())
     }
 
+    /// Stores native observations [num_envs, ...observation_shape], Float actions [num_envs, ...action_shape], and rewards [num_envs, 1].
+    /// Establishes replay dtype from the first batch, detaches experience, and keeps termination distinct from truncation.
+    /// Reads rewards to the host for episode summaries after successful replay insertion.
     fn store_transitions(
         &mut self,
-        transitions: CollectedTransitions<'_>,
+        transitions: CollectedTransitions<'_, O, A, OS::Kind>,
         episodes: &mut EpisodeTracker,
-    ) -> Result<Vec<DeterministicActorCriticEpisodeLogEntry>, DeterministicActorCriticError<GE, SE>>
-    {
-        let CollectedTransitions {
-            states,
-            next_states,
-            actions,
-            rewards,
-            dones,
-            truncateds,
-            first_timestep,
-        } = transitions;
-        let environment_count = dones.len();
-        let reward_values = rewards
-            .to_dtype(DType::F32)?
-            .to_device(&candle_core::Device::Cpu)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let mut completed_episodes = Vec::new();
-        for environment_index in 0..environment_count {
-            let reward = reward_values[environment_index];
-            let collection_timestep = first_timestep + environment_index + 1;
+    ) -> Result<
+        Vec<DeterministicActorCriticEpisodeLogEntry>,
+        DeterministicActorCriticError<AE, GE, SE, CE>,
+    > {
+        let count = transitions.dones.len();
+        let reward_values = transitions
+            .rewards
+            .clone()
+            .try_into_data_as::<f32>()?
+            .try_to_vec::<f32>()
+            .map_err(TensorReadError::from)?;
+        if self.replay.is_none() {
+            let storage = DeterministicReplayStorage::builder()
+                .observation_shape(space_storage_shape::<O>(
+                    "observations",
+                    self.observation_space.shape(),
+                    self.replay_capacity,
+                )?)
+                .action_shape(space_storage_shape::<A>(
+                    "actions",
+                    self.action_space.shape(),
+                    self.replay_capacity,
+                )?)
+                .observation_dtype(transitions.observations.dtype())
+                .environment_count(count)
+                .dtype(self.dtype)
+                .device(self.replay_storage_config.storage_device())
+                .build()?;
+            self.replay = Some(DeterministicReplay::new(storage, self.batch_size));
+        }
+        let replay = self
+            .replay
+            .as_mut()
+            .ok_or(ReplayStorageError::EnvironmentCountNotSet)?;
+        replay.insert(DeterministicReplayInsert {
+            observations: transitions.observations.clone(),
+            next_observations: transitions.next_observations.clone(),
+            actions: transitions.actions.clone(),
+            rewards: transitions.rewards.clone(),
+            terminated: Tensor::from_data(
+                TensorData::new(transitions.dones.to_vec(), [count, 1]),
+                &self.replay_storage_config.storage_device(),
+            ),
+            truncateds: transitions.truncateds.to_vec(),
+        })?;
+        self.observation_dtype = Some(transitions.observations.dtype());
+        let mut completed = Vec::new();
+        for (index, reward) in reward_values.into_iter().enumerate() {
             if let Some(entry) = episodes.record(
-                environment_index,
+                index,
                 reward,
-                dones[environment_index],
-                truncateds[environment_index],
-                collection_timestep,
+                transitions.dones[index],
+                transitions.truncateds[index],
+                transitions.first_timestep + index + 1,
             ) {
-                completed_episodes.push(entry);
+                completed.push(entry);
             }
         }
-        let storage_device = self.replay_storage_config.storage_device();
-        self.replay.add(DeterministicReplayInsert {
-            states: states.clone(),
-            next_states: next_states.clone(),
-            actions: actions.clone(),
-            rewards: rewards.clone(),
-            terminated: Tensor::from_vec(
-                dones.iter().map(|&done| u8::from(done)).collect::<Vec<_>>(),
-                (environment_count, 1),
-                &storage_device,
-            )?
-            .to_dtype(self.dtype)?,
-            truncateds: truncateds.to_vec(),
-        })?;
-        Ok(completed_episodes)
+        Ok(completed)
     }
 
+    /// Trains with native observations [num_envs, ...observation_shape] and Float actions [num_envs, ...action_shape].
+    /// Terminal observations have rank U = O - 1. Preserves terminal targets, update cadence, and schedule progress across calls.
+    /// Resets collection on each call; validates replay alignment and metadata before writing experience.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
@@ -799,47 +1086,135 @@ where
             fields(num_timesteps)
         )
     )]
-    pub(crate) fn learn<I>(
+    pub(crate) fn learn<I, K: Autodiff, const U: usize>(
         &mut self,
-        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         num_timesteps: usize,
-        logger: &mut dyn DeterministicActorCriticLogger<I>,
-    ) -> Result<(), DeterministicActorCriticError<GE, SE>> {
-        let mut elapsed_timesteps = 0;
-        let environment_count = env.num_envs();
-        self.replay
-            .storage_mut()
-            .initialize_environment_count(environment_count)?;
+        logger: &mut dyn DeterministicActorCriticLogger<I, A>,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
+    where
+        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    {
+        const {
+            assert!(
+                O == U + 1,
+                "terminal observation rank must omit the batch axis"
+            );
+        }
+        let count = env.num_envs();
+        validate_replay_alignment(self.replay_capacity, count)?;
+        if let Some(expected) = self.environment_count
+            && expected != count
+        {
+            return Err(ReplayStorageError::EnvironmentCountMismatch {
+                expected,
+                actual: count,
+            }
+            .into());
+        }
+        if let Some(replay) = &mut self.replay {
+            replay.validate_environment_count(count)?;
+        }
         let mut observations = env
             .reset()
-            .map_err(DeterministicActorCriticError::GymError)?
-            .to_dtype(self.dtype)?;
-        let mut episodes = EpisodeTracker::new(environment_count);
-        while elapsed_timesteps < num_timesteps {
+            .map_err(DeterministicActorCriticError::GymError)?;
+        self.validate_observations(&observations)?;
+        if observations.dims()[0] != count {
+            return Err(DeterministicActorCriticError::Shape {
+                field: "environment observations",
+                expected: vec![count],
+                actual: vec![observations.dims()[0]],
+            });
+        }
+        self.environment_count = Some(count);
+        let mut episodes = EpisodeTracker::new(count);
+        let mut elapsed = 0;
+        while elapsed < num_timesteps {
             let first_timestep = self.schedule_progress.elapsed_steps();
             let actions = if first_timestep < self.training_start {
-                self.random_actions(environment_count)?
+                self.random_actions(count)?
             } else {
                 self.act(&observations)?
-            };
+            }
+            .without_autodiff();
             let step = env
                 .step(actions.clone())
                 .map_err(DeterministicActorCriticError::GymError)?;
-            let transition_next_states = step.transition_next_states()?.to_dtype(self.dtype)?;
+            for (field, actual) in [
+                ("done flags", step.dones.len()),
+                ("truncation flags", step.truncateds.len()),
+                ("terminal observations", step.terminal_observations.len()),
+                ("environment infos", step.infos.len()),
+            ] {
+                if actual != count {
+                    return Err(ReplayStorageError::BatchLengthMismatch {
+                        field,
+                        expected: count,
+                        actual,
+                    }
+                    .into());
+                }
+            }
+            self.validate_observations(&step.observations)?;
+            let expected =
+                space_storage_shape::<O>("observations", self.observation_space.shape(), count)?;
+            if step.observations.dims() != expected {
+                return Err(DeterministicActorCriticError::Shape {
+                    field: "environment observations",
+                    expected: expected.to_vec(),
+                    actual: step.observations.dims().to_vec(),
+                });
+            }
+            if step.rewards.dims() != [count, 1] {
+                return Err(DeterministicActorCriticError::Shape {
+                    field: "environment rewards",
+                    expected: vec![count, 1],
+                    actual: step.rewards.dims().to_vec(),
+                });
+            }
+            if step.observations.dtype() != observations.dtype() {
+                return Err(DeterministicActorCriticError::DType {
+                    field: "environment observations",
+                    expected: observations.dtype(),
+                    actual: step.observations.dtype(),
+                });
+            }
+            for terminal in step.terminal_observations.iter().flatten() {
+                let expected = self.observation_space.shape();
+                if terminal.dims().to_vec() != expected {
+                    return Err(DeterministicActorCriticError::Shape {
+                        field: "terminal observations",
+                        expected,
+                        actual: terminal.dims().to_vec(),
+                    });
+                }
+                if terminal.dtype() != step.observations.dtype() {
+                    return Err(DeterministicActorCriticError::DType {
+                        field: "terminal observations",
+                        expected: step.observations.dtype(),
+                        actual: terminal.dtype(),
+                    });
+                }
+                if terminal.device() != step.observations.device() {
+                    return Err(DeterministicActorCriticError::Device {
+                        field: "terminal observations",
+                    });
+                }
+            }
+            let next_observations = step.transition_next_observations();
             let MultiGymStepInfo {
-                states: reset_next_states,
+                observations: reset_observations,
                 rewards,
                 infos,
                 dones,
                 truncateds,
                 ..
             } = step;
-            let collection_rewards = rewards.clone();
-            self.schedule_progress.advance_steps(environment_count);
             let completed_episodes = self.store_transitions(
                 CollectedTransitions {
-                    states: &observations,
-                    next_states: &transition_next_states,
+                    observations: &observations,
+                    next_observations: &next_observations,
                     actions: &actions,
                     rewards: &rewards,
                     dones: &dones,
@@ -848,24 +1223,71 @@ where
                 },
                 &mut episodes,
             )?;
-            for offset in 1..=environment_count {
-                let collection_timestep = first_timestep + offset;
-                if collection_timestep >= self.training_start
-                    && collection_timestep.is_multiple_of(self.update_frequency)
+            self.schedule_progress.advance_steps(count);
+            for offset in 1..=count {
+                let timestep = first_timestep + offset;
+                if timestep >= self.training_start && timestep.is_multiple_of(self.update_frequency)
                 {
-                    self.optimize(collection_timestep, logger)?;
+                    self.optimize(timestep, logger)?;
                 }
             }
-            elapsed_timesteps += environment_count;
-            observations = reset_next_states.to_dtype(self.dtype)?;
+            elapsed += count;
+            observations = reset_observations;
             logger.log_collection(&DeterministicActorCriticCollectionLogEntry {
-                collection_rewards,
+                collection_rewards: rewards.without_autodiff(),
                 infos,
                 collection_timestep: self.schedule_progress.elapsed_steps(),
                 completed_episodes,
-                replay_len: self.replay.len(),
+                replay_len: self.replay.as_ref().map_or(0, DeterministicReplay::len),
             });
         }
         Ok(())
     }
+}
+
+/// Builds rank-R storage shape [capacity, ...item_shape] from exactly R - 1 nonzero item axes.
+fn space_storage_shape<const R: usize>(
+    field: &'static str,
+    item_shape: Vec<usize>,
+    capacity: usize,
+) -> Result<[usize; R], DeterministicActorCriticConfigurationError> {
+    const {
+        assert!(R >= 2, "storage requires capacity and item axes");
+    }
+    if item_shape.len() != R - 1 {
+        return Err(DeterministicActorCriticConfigurationError::SpaceRank {
+            field,
+            expected: R - 1,
+            actual: item_shape.len(),
+        });
+    }
+    if item_shape.contains(&0) {
+        return Err(DeterministicActorCriticConfigurationError::ZeroItemDimension { field });
+    }
+    let mut shape = [capacity; R];
+    shape[1..].copy_from_slice(&item_shape);
+    Ok(shape)
+}
+
+/// Adds elementwise Gaussian noise to rank-D Float values, preserving shape, dtype, device, and input gradients.
+/// Samples F32 noise with the existing device RNG, casts to the input dtype, then optionally clips the noise.
+fn add_gaussian_noise<const D: usize>(
+    values: &Tensor<D>,
+    standard_deviation: f64,
+    clip: Option<f64>,
+) -> Tensor<D> {
+    if standard_deviation == 0.0 {
+        return values.clone();
+    }
+    let mut noise = Tensor::<D>::random(
+        values.dims(),
+        Distribution::Normal(0.0, 1.0),
+        (&values.device(), DType::F32),
+    )
+    .cast(values.dtype())
+        * standard_deviation;
+    if let Some(clip) = clip {
+        noise = noise.clamp(-clip, clip);
+    }
+    values.clone() + noise
 }

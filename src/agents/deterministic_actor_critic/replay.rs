@@ -4,8 +4,8 @@ use burn::tensor::{
 };
 
 use crate::buffers::experience_replay::{
-    AlignedObservationReplay, ReplayStorage, ReplayStorageError, TensorReplayColumn,
-    replay_index_tensor,
+    AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
+    ReplayStorageError, TensorReplayColumn, replay_index_tensor,
 };
 
 /// Invalid replay configuration or transition data.
@@ -62,6 +62,66 @@ pub(super) struct DeterministicReplayInsert<const O: usize, const A: usize, K: A
     pub(super) rewards: Tensor<2>,
     pub(super) terminated: Tensor<2, Bool>,
     pub(super) truncateds: Vec<bool>,
+}
+
+/// Owns aligned replay for native rank-O observations, Float rank-A actions, and scalar rewards and Bool flags.
+pub(crate) struct DeterministicReplay<const O: usize, const A: usize, K: Autodiff> {
+    buffer:
+        ExperienceReplay<DeterministicReplayInsert<O, A, K>, DeterministicReplayStorage<O, A, K>>,
+}
+
+impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplay<O, A, K> {
+    pub(super) fn new(storage: DeterministicReplayStorage<O, A, K>, batch_size: usize) -> Self {
+        Self {
+            buffer: ExperienceReplay::with_storage(storage, batch_size),
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub(super) fn can_sample(&self) -> bool {
+        self.len() >= self.buffer.get_batch_size()
+    }
+
+    pub(super) fn validate_environment_count(
+        &mut self,
+        count: usize,
+    ) -> Result<(), DeterministicReplayError> {
+        self.buffer.storage_mut().validate_environment_count(count)
+    }
+
+    /// Inserts native observations [num_envs, ...observation_shape], Float actions [num_envs, ...action_shape], and scalars [num_envs, 1].
+    /// The storage implementation validates fields, transfers them to the storage device, and removes gradients.
+    pub(super) fn insert(
+        &mut self,
+        transitions: DeterministicReplayInsert<O, A, K>,
+    ) -> Result<(), DeterministicReplayError> {
+        self.buffer.add(transitions).map_err(replay_error)
+    }
+
+    /// Samples detached native observations [batch_size, ...observation_shape], Float actions [batch_size, ...action_shape], and scalars [batch_size, 1].
+    /// Uses the shared replay sampler and preserves the configured storage dtypes and device.
+    pub(super) fn sample(&self) -> Result<DeterministicBatch<O, A, K>, DeterministicReplayError> {
+        self.buffer.sample().map_err(replay_error)
+    }
+
+    #[cfg(test)]
+    pub(super) fn storage_mut(&mut self) -> &mut DeterministicReplayStorage<O, A, K> {
+        self.buffer.storage_mut()
+    }
+}
+
+fn replay_error(
+    error: ExperienceReplayError<DeterministicReplayError>,
+) -> DeterministicReplayError {
+    match error {
+        ExperienceReplayError::ExperienceError(error) => error,
+        ExperienceReplayError::InsertionExceedsCapacity { capacity, inserted } => {
+            ReplayStorageError::InsertionExceedsCapacity { capacity, inserted }.into()
+        }
+    }
 }
 
 pub(super) struct DeterministicReplayStorage<const O: usize, const A: usize, K: Autodiff> {
@@ -389,7 +449,10 @@ mod tests {
                 .insert(
                     start,
                     DeterministicReplayInsert {
-                        observations: Tensor::from_data([[[true, true]], [[false, false]]], &device),
+                        observations: Tensor::from_data(
+                            [[[true, true]], [[false, false]]],
+                            &device,
+                        ),
                         next_observations: Tensor::from_data(
                             [[[false, false]], [[true, true]]],
                             &device,
@@ -563,16 +626,17 @@ mod tests {
     fn builder_rejects_invalid_shapes_dtypes_and_environment_alignment() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let build = |observation_shape, action_shape, observation_dtype, dtype, environment_count| {
-            DeterministicReplayStorage::<2, 2, Int>::builder()
-                .observation_shape(observation_shape)
-                .action_shape(action_shape)
-                .observation_dtype(observation_dtype)
-                .environment_count(environment_count)
-                .dtype(dtype)
-                .device(device.clone())
-                .build()
-        };
+        let build =
+            |observation_shape, action_shape, observation_dtype, dtype, environment_count| {
+                DeterministicReplayStorage::<2, 2, Int>::builder()
+                    .observation_shape(observation_shape)
+                    .action_shape(action_shape)
+                    .observation_dtype(observation_dtype)
+                    .environment_count(environment_count)
+                    .dtype(dtype)
+                    .device(device.clone())
+                    .build()
+            };
         assert!(matches!(
             build([4, 1], [6, 1], DType::U64, DType::F32, 2),
             Err(DeterministicReplayError::Shape {
