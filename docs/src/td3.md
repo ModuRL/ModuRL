@@ -24,8 +24,7 @@ cargo run --release -p examples --example td3_mujoco --features walker2d
 
 Normally enable one environment feature; add `rendering` to it to open a
 viewer. Additive builds with several environment features select `ant`,
-`half-cheetah`, `hopper`, then `walker2d`. The program selects CUDA when it is
-available and otherwise uses the CPU. It trains for one million collected
+`half-cheetah`, `hopper`, then `walker2d`. The program uses the CPU by default. Enable `cuda` or `metal` to select an accelerator. It trains for one million collected
 transitions, then displays terminal graphs for optimization and episode
 metrics.
 
@@ -33,37 +32,33 @@ The complete source is `crates/examples/examples/td3_mujoco.rs`. Its actor
 construction is the same as the DDPG example. The difference is the critic
 ensemble and the TD3 builder settings.
 
-`actor` and `critic` are private helper functions defined in that example, not
-functions provided by ModuRL. `actor` builds an actor MLP. `critic` builds one
-pair of online and target critic networks and packages them as a
-`DeterministicCritic`.
-
 ## Build Two Independent Critics
 
-Canonical TD3 uses two critics. Build each critic with separate online and
-target networks, parameter maps, and optimizers:
+Canonical TD3 uses two critics. Each critic owns its network and optimizer.
+Target networks are created automatically:
 
 ```rust,ignore
-let critic_1 = critic(
-    &online_critic_variables_1,
-    &mut target_critic_variables_1,
-    observation_size,
-    action_size,
-    &optimizer_parameters,
-    &device,
-)?;
-let critic_2 = critic(
-    &online_critic_variables_2,
-    &mut target_critic_variables_2,
-    observation_size,
-    action_size,
-    &optimizer_parameters,
-    &device,
-)?;
+use modurl::agents::action_value_critic::ScalarStateActionCritic;
+
+let mut critics = Vec::new();
+for _ in 0..2 {
+    let online_critic = MLP::builder()
+        .input_size(observation_size + action_size)
+        .output_size(1)
+        .hidden_layer_sizes(vec![64, 64])
+        .activation(Relu)
+        .options((&device, DTYPE))
+        .build()?;
+    critics.push(ActionValueCritic::builder()
+        .online_network(ScalarStateActionCritic::new(online_critic))
+        .optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+        .learning_rate(1e-3)
+        .build()?);
+}
 ```
 
-Do not share a `VarMap` or optimizer between the critics. Their independent
-errors are what make the smaller of the two target estimates useful.
+Do not share model parameters or an optimizer between the critics.
+Their independent errors make the smaller target estimate useful.
 
 ## Configure the Three TD3 Safeguards
 
@@ -72,11 +67,9 @@ Pass both critics and the TD3-specific update settings:
 ```rust,ignore
 let mut agent = TD3Agent::builder()
     .online_actor(online_actor)
-    .target_actor(target_actor)
-    .online_actor_vars(&online_actor_variables)
-    .target_actor_vars(&mut target_actor_variables)
-    .actor_optimizer(actor_optimizer)
-    .critics(vec![critic_1, critic_2])
+    .actor_optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+    .actor_learning_rate(1e-3)
+    .critics(critics)
     .action_space(action_space)
     .observation_space(observation_space)
     .replay_storage_config(ReplayStorageConfig::new(
@@ -104,7 +97,7 @@ component. The `BoxSpace` then clamps the noisy target action to the environment
 bounds.
 
 By default, `target_aggregation_mode` is
-`SACCriticAggregationMode::Min`. The smaller target Q estimate becomes the
+`ActionValueCriticAggregationMode::Min`. The smaller target Q estimate becomes the
 bootstrap value shared by both critic losses.
 
 `actor_update_interval` defaults to `2`. The agent updates every critic on each
@@ -142,8 +135,8 @@ ModuRL supports nonempty ensembles of other sizes and explicit aggregation for
 experiments:
 
 ```rust,ignore
-.target_aggregation_mode(SACCriticAggregationMode::Mean)
-.actor_aggregation_mode(SACCriticAggregationMode::Median)
+.target_aggregation_mode(ActionValueCriticAggregationMode::Mean)
+.actor_aggregation_mode(ActionValueCriticAggregationMode::Median)
 ```
 
 `Min`, `Mean`, `Median`, and `Max` use the same elementwise aggregation
