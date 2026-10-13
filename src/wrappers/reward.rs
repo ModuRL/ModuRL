@@ -1,7 +1,7 @@
 //! Wrappers that transform rewards.
 
-use crate::tensor_rank::PrevRank;
-use burn::tensor::{Tensor, kind::Basic};
+use crate::tensor_rank::TensorBatchTypes;
+use burn::tensor::kind::Basic;
 
 use crate::{
     gym::{Gym, ResetInfo, StepInfo},
@@ -31,15 +31,15 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
-    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = ClipRewardGymError<G::Error>;
     type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
 
     /// Returns the inner gym's unbatched rank-`BO - 1` observation, preserving its kind, dtype, device, and item axes.
-    fn reset(&mut self) -> Result<ResetInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
+    fn reset(
+        &mut self,
+    ) -> Result<ResetInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         self.gym.reset().map_err(ClipRewardGymError::GymError)
     }
 
@@ -47,8 +47,8 @@ where
     /// Preserves tensor shapes, kinds, dtypes, and devices, subject to the inner gym's input requirements.
     fn step(
         &mut self,
-        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
-    ) -> Result<StepInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
+    ) -> Result<StepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         let mut info = self
             .gym
             .step(action)

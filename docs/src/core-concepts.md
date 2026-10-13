@@ -21,21 +21,22 @@ DQN, and `DDQNAgent` implements Double DQN.
 An agent coordinates the pieces needed for training: model modules, optimizers,
 schedules, buffers, distributions, and update logic.
 
-An agent's observation space determines its native tensor kind and unbatched
-observation type through `ObservationSpace::Observation`. For `BoxSpace<2>`,
-that type is `Tensor<1>`; for `Discrete`, it is `Tensor<1, Int>`.
-`Gym`, `MultiGym`, and `Agent` use the space's type without separate declarations.
-Custom observation spaces must declare `Observation`, which must equal the
-batch tensor's `PrevRank::Prev` type. Observation batches retain their leading
-batch axis. Dtype and device requirements still follow the environment and model
-contracts.
+Observation and action spaces share `TensorBatchTypes` from `modurl::tensor_rank`.
+This contract declares `Kind`, `Item`, and `Batch`. `Item` omits the batch axis;
+`Batch` adds one leading batch axis. The types must agree with `NextRank` and
+`PrevRank`. `ObservationSpace<O>` and `ActionSpace<A>` bind the batch type to a
+native Burn tensor with the declared rank and kind.
 
-The action space determines the unbatched environment action type through
-`ActionSpace::Action`. `Discrete` supplies `Tensor<1, Int>`, and `BoxSpace<2>`
-supplies `Tensor<1>`. `Gym::step` accepts this type. Batched interaction keeps
-the leading batch axis. Custom action spaces must declare `Action`, which must
-equal the batch tensor's `PrevRank::Prev` type. Original policy samples retain
-their own layout; `ActionMap` converts them into environment action batches.
+For `BoxSpace<2>`, `Item` is `Tensor<1>` and `Batch` is `Tensor<2>`.
+For `Discrete`, those types are `Tensor<1, Int>` and `Tensor<2, Int>`.
+`Gym::step` uses the action space's `Item`. Batched environment interaction and
+agent inputs use each space's `Batch`. Dtype and device requirements still
+follow the environment and model contracts.
+
+Custom spaces implement `TensorBatchTypes` once, then implement the observation
+or action space methods. Space trait objects must specify `Kind`, `Item`, and
+`Batch`. Original policy samples retain their own layout; `ActionMap` converts
+them into environment action batches.
 
 ## Environments and Spaces
 

@@ -1,7 +1,7 @@
 //! Wrappers that add environment metadata.
 
-use crate::tensor_rank::PrevRank;
-use burn::tensor::{Tensor, kind::Basic};
+use crate::tensor_rank::TensorBatchTypes;
+use burn::tensor::kind::Basic;
 
 use crate::{
     gym::{Gym, ResetInfo, StepInfo},
@@ -50,8 +50,6 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
-    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = G::Error;
     type ObservationSpace = G::ObservationSpace;
@@ -60,8 +58,10 @@ where
     /// Returns the inner gym's unbatched rank-`BO - 1` observation, preserving its kind, dtype, device, and item axes.
     fn reset(
         &mut self,
-    ) -> Result<ResetInfo<EpisodeStatisticsInfo<I>, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error>
-    {
+    ) -> Result<
+        ResetInfo<EpisodeStatisticsInfo<I>, <Self::ObservationSpace as TensorBatchTypes>::Item>,
+        Self::Error,
+    > {
         self.episode_return = 0.0;
         self.episode_length = 0;
         let reset = self.gym.reset()?;
@@ -78,9 +78,11 @@ where
     /// Preserves tensor shapes, kinds, dtypes, and devices, subject to the inner gym's input requirements.
     fn step(
         &mut self,
-        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
-    ) -> Result<StepInfo<EpisodeStatisticsInfo<I>, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error>
-    {
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
+    ) -> Result<
+        StepInfo<EpisodeStatisticsInfo<I>, <Self::ObservationSpace as TensorBatchTypes>::Item>,
+        Self::Error,
+    > {
         let step = self.gym.step(action)?;
         self.episode_return += step.reward;
         self.episode_length += 1;
@@ -142,8 +144,6 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
-    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = G::Error;
     type ObservationSpace = G::ObservationSpace;
@@ -152,7 +152,10 @@ where
     /// Returns the inner gym's unbatched rank-`BO - 1` observation, preserving its kind, dtype, device, and item axes.
     fn reset(
         &mut self,
-    ) -> Result<ResetInfo<RawRewardInfo<I>, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
+    ) -> Result<
+        ResetInfo<RawRewardInfo<I>, <Self::ObservationSpace as TensorBatchTypes>::Item>,
+        Self::Error,
+    > {
         let reset = self.gym.reset()?;
         Ok(ResetInfo {
             observation: reset.observation,
@@ -167,8 +170,11 @@ where
     /// Preserves tensor shapes, kinds, dtypes, and devices, subject to the inner gym's input requirements.
     fn step(
         &mut self,
-        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
-    ) -> Result<StepInfo<RawRewardInfo<I>, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
+    ) -> Result<
+        StepInfo<RawRewardInfo<I>, <Self::ObservationSpace as TensorBatchTypes>::Item>,
+        Self::Error,
+    > {
         let step = self.gym.step(action)?;
         Ok(StepInfo {
             observation: step.observation,

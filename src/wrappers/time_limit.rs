@@ -1,7 +1,7 @@
 //! Episode time-limit wrapper.
 
-use crate::tensor_rank::PrevRank;
-use burn::tensor::{Tensor, kind::Basic};
+use crate::tensor_rank::TensorBatchTypes;
+use burn::tensor::kind::Basic;
 
 use crate::{
     gym::{Gym, ResetInfo, StepInfo},
@@ -34,8 +34,6 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
-    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = G::Error;
     type ObservationSpace = G::ObservationSpace;
@@ -43,7 +41,9 @@ where
 
     /// Resets the step count and returns the inner gym's unbatched rank-`BO - 1` observation and metadata.
     /// Preserves the observation kind, dtype, device, and item axes; scalar observations use `[1]`.
-    fn reset(&mut self) -> Result<ResetInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
+    fn reset(
+        &mut self,
+    ) -> Result<ResetInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         self.elapsed_steps = 0;
         self.gym.reset()
     }
@@ -53,8 +53,8 @@ where
     /// Marks truncation at the step limit unless the inner gym reports termination.
     fn step(
         &mut self,
-        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
-    ) -> Result<StepInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
+    ) -> Result<StepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         let mut info = self.gym.step(action)?;
         self.elapsed_steps += 1;
         if self.elapsed_steps >= self.max_episode_steps && !info.done {
