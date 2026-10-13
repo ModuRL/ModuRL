@@ -26,11 +26,9 @@ pub struct VectorizedGymWrapper<G, I = (), const BO: usize = 2, const BA: usize 
     _info: PhantomData<fn() -> I>,
 }
 
-impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> VectorizedGymWrapper<G, I, BO, BA>
+impl<G, I, const BO: usize, const BA: usize> VectorizedGymWrapper<G, I, BO, BA>
 where
     G: Gym<I, BO, BA>,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
-    G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
     pub fn new(envs: Vec<G>) -> Result<Self, VectorizedGymError<G::Error>> {
         if envs.is_empty() {
@@ -51,12 +49,9 @@ where
     }
 }
 
-impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> From<G>
-    for VectorizedGymWrapper<G, I, BO, BA>
+impl<G, I, const BO: usize, const BA: usize> From<G> for VectorizedGymWrapper<G, I, BO, BA>
 where
     G: Gym<I, BO, BA>,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
-    G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
     fn from(env: G) -> Self {
         Self {
@@ -66,12 +61,9 @@ where
     }
 }
 
-impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> TryFrom<Vec<G>>
-    for VectorizedGymWrapper<G, I, BO, BA>
+impl<G, I, const BO: usize, const BA: usize> TryFrom<Vec<G>> for VectorizedGymWrapper<G, I, BO, BA>
 where
     G: Gym<I, BO, BA>,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
-    G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
     type Error = VectorizedGymError<G::Error>;
 

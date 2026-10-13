@@ -36,6 +36,8 @@ bounds include a size-one batch axis. Invalid rank relationships fail during com
 `TensorMapMultiGymError::Mapping`; environment errors use `Gym`. Callbacks
 must preserve the documented tensor layouts and kinds. Observation normalization
 reports host-read failures through `NormalizeObservationGymError::TensorRead`.
+Output callbacks use the observation space's `Batch` type for batched observations
+and `Item` type for terminal observations. These types follow the underlying space.
 
 ## Atari Wrappers
 
