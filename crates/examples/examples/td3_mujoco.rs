@@ -1,5 +1,9 @@
-use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use burn::{
+    nn::{Relu, Tanh},
+    optim::AdamWConfig,
+    tensor::{DType, Device},
+};
+use modurl::agents::action_value_critic::ScalarStateActionCritic;
 use modurl::prelude::*;
 
 mod support;
@@ -11,130 +15,54 @@ use support::{
 const TOTAL_TIMESTEPS: usize = 1_000_000;
 const DTYPE: DType = DType::F32;
 
-fn actor(
-    variables: &VarMap,
-    observation_size: usize,
-    action_size: usize,
-    device: &Device,
-) -> candle_core::Result<MLP> {
-    MLP::builder()
-        .input_size(observation_size)
-        .output_size(action_size)
-        .vb(VarBuilder::from_varmap(variables, DTYPE, device))
-        .hidden_layer_sizes(vec![64, 64])
-        .activation(Tensor::relu)
-        .output_activation(Tensor::tanh)
-        .name("actor".to_owned())
-        .build()
-}
-
-fn critic<'a>(
-    online_variables: &'a VarMap,
-    target_variables: &'a mut VarMap,
-    observation_size: usize,
-    action_size: usize,
-    optimizer_parameters: &ParamsAdamW,
-    device: &Device,
-) -> Result<DeterministicCritic<'a, AdamW>, SACCriticError> {
-    let network = |variables| {
-        MLP::builder()
-            .input_size(observation_size + action_size)
-            .output_size(1)
-            .vb(VarBuilder::from_varmap(variables, DTYPE, device))
-            .hidden_layer_sizes(vec![64, 64])
-            .activation(Tensor::relu)
-            .name("critic".to_owned())
-            .build()
-    };
-    let online = network(online_variables)?;
-    let target = network(target_variables)?;
-
-    DeterministicCritic::builder()
-        .online_network(ScalarStateActionCritic::new(online))
-        .target_network(ScalarStateActionCritic::new(target))
-        .online_vars(online_variables)
-        .target_vars(target_variables)
-        .optimizer(AdamW::new(
-            online_variables.all_vars(),
-            optimizer_parameters.clone(),
-        )?)
-        .build()
-}
-
-fn main() {
-    let device = Device::cuda_if_available(0).unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    let device = Device::flex();
+    #[cfg(feature = "cuda")]
+    let device = Device::cuda(0);
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
+    let device = device.autodiff();
     println!("Environment: {ENVIRONMENT_NAME}");
     println!("Using device: {device:?}");
-
-    let env =
-        VectorizedGymWrapper::from(vec![TimeLimitGym::new(mujoco::build_environment(), 1_000)]);
-    let mut env = DeviceMultiGymWrapper::new(env, candle_core::Device::Cpu, device.clone());
+    let env = VectorizedGymWrapper::from(TimeLimitGym::new(mujoco::build_environment(), 1_000));
+    let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let observation_space = env.observation_space();
-    let environment_action_space = env.action_space();
-    let observation_size = observation_space.shape()[0];
-    let action_shape = environment_action_space.shape();
-    let action_size = action_shape.iter().product();
-    let action_space = BoxSpace::new_with_universal_bounds(action_shape, -1.0, 1.0, &device);
-    let optimizer_parameters = ParamsAdamW {
-        lr: 1e-3,
-        weight_decay: 0.0,
-        ..Default::default()
-    };
-
-    let online_actor_variables = VarMap::new();
-    let mut target_actor_variables = VarMap::new();
-    let online_actor = actor(
-        &online_actor_variables,
-        observation_size,
-        action_size,
-        &device,
-    )
-    .unwrap();
-    let target_actor = actor(
-        &target_actor_variables,
-        observation_size,
-        action_size,
-        &device,
-    )
-    .unwrap();
-    let actor_optimizer = AdamW::new(
-        online_actor_variables.all_vars(),
-        optimizer_parameters.clone(),
-    )
-    .unwrap();
-
-    let online_critic_variables_1 = VarMap::new();
-    let mut target_critic_variables_1 = VarMap::new();
-    let critic_1 = critic(
-        &online_critic_variables_1,
-        &mut target_critic_variables_1,
-        observation_size,
-        action_size,
-        &optimizer_parameters,
-        &device,
-    )
-    .unwrap();
-    let online_critic_variables_2 = VarMap::new();
-    let mut target_critic_variables_2 = VarMap::new();
-    let critic_2 = critic(
-        &online_critic_variables_2,
-        &mut target_critic_variables_2,
-        observation_size,
-        action_size,
-        &optimizer_parameters,
-        &device,
-    )
-    .unwrap();
+    let action_space = env.action_space();
+    let observation_size = observation_space.shape().iter().product();
+    let action_size = action_space.shape().iter().product();
+    let online_actor = MLP::builder()
+        .input_size(observation_size)
+        .output_size(action_size)
+        .hidden_layer_sizes(vec![64, 64])
+        .activation(Relu)
+        .output_activation(Tanh)
+        .options((&device, DTYPE))
+        .build()?;
+    let mut critics = Vec::new();
+    for _ in 0..2 {
+        let online_critic = MLP::builder()
+            .input_size(observation_size + action_size)
+            .output_size(1)
+            .hidden_layer_sizes(vec![64, 64])
+            .activation(Relu)
+            .options((&device, DTYPE))
+            .build()?;
+        critics.push(
+            ActionValueCritic::builder()
+                .online_network(ScalarStateActionCritic::new(online_critic))
+                .optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+                .learning_rate(1e-3)
+                .build()?,
+        );
+    }
     let mut grapher = DeterministicActorCriticGrapher::new();
-
     let mut agent = TD3Agent::builder()
         .dtype(DTYPE)
         .online_actor(online_actor)
-        .target_actor(target_actor)
-        .online_actor_vars(&online_actor_variables)
-        .target_actor_vars(&mut target_actor_variables)
-        .actor_optimizer(actor_optimizer)
-        .critics(vec![critic_1, critic_2])
+        .actor_optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+        .actor_learning_rate(1e-3)
+        .critics(critics)
         .action_space(action_space)
         .observation_space(observation_space)
         .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
@@ -151,9 +79,8 @@ fn main() {
         .training_start(10_000)
         .training_horizon(TOTAL_TIMESTEPS)
         .logger(&mut grapher)
-        .build()
-        .unwrap();
-
-    agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
+        .build()?;
+    agent.learn(&mut env, TOTAL_TIMESTEPS)?;
     grapher.display();
+    Ok(())
 }
