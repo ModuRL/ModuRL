@@ -30,6 +30,10 @@ pub use crate::agents::{
         ddqn::{DDQNAgent, DDQNLogger},
         dqn::{DQNAgent, DQNLogger},
     },
+    sac::{
+        DiscreteVectorHeadCritic, SACCritic, SACCriticAggregationMode, SACCriticError,
+        SACCriticNetwork, ScalarStateActionCritic,
+    },
     // sac::{
     //     DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
     //     SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
