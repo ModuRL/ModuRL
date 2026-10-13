@@ -1,6 +1,7 @@
 use crate::{
     gym::MultiGym,
     spaces::{ActionSpace, ObservationSpace},
+    tensor_rank::PrevRank,
 };
 use burn::tensor::Tensor;
 
@@ -21,11 +22,13 @@ pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
 /// Associated spaces determine the native observation and action kinds.
 pub trait Agent<I = (), const O: usize = 2, const A: usize = 2>
 where
-    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>: crate::tensor_rank::PrevRank,
+    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>:
+        PrevRank<Prev = <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
 {
     type Error;
     type GymError;
     type SpaceError;
+
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A, Error = Self::SpaceError>;
 

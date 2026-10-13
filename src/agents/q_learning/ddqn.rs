@@ -80,6 +80,7 @@ impl QLearningTarget for DDQNTarget {
 pub struct DDQNAgent<'a, M, S, GE, I = (), const R: usize = 2>
 where
     S: ObservationSpace<R>,
+    Tensor<R, S::Kind>: PrevRank<Prev = S::Observation>,
     S::Kind: Autodiff,
 {
     inner: QLearningAgent<M, S, GE, DDQNTarget, R>,
@@ -90,6 +91,7 @@ where
 impl<'a, M, S, GE, I, const R: usize, ME: std::fmt::Debug> DDQNAgent<'a, M, S, GE, I, R>
 where
     S: ObservationSpace<R>,
+    Tensor<R, S::Kind>: PrevRank<Prev = S::Observation>,
     S::Kind: Autodiff,
     M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float, Error = ME>,
     GE: std::fmt::Debug,
@@ -156,7 +158,7 @@ where
 
 impl<M, S, GE, I, const R: usize, const U: usize> Agent<I, R, 2> for DDQNAgent<'_, M, S, GE, I, R>
 where
-    S: ObservationSpace<R>,
+    S: ObservationSpace<R, Observation = Tensor<U, <S as ObservationSpace<R>>::Kind>>,
     S::Kind: Autodiff,
     M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float>,
     M::Error: std::fmt::Debug,
@@ -187,6 +189,8 @@ where
             fields(num_timesteps)
         )
     )]
+    /// Trains with rank-R observation batches `[num_envs, ...observation_shape]`.
+    /// Terminal observations omit the batch axis and preserve the environment observation kind, dtype, and device.
     fn learn(
         &mut self,
         env: &mut dyn MultiGym<I, R, 2, Error = GE, ObservationSpace = S, ActionSpace = Discrete>,

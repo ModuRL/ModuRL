@@ -24,7 +24,7 @@ pub enum FrameStackGymError<E> {
 pub struct FrameStackGym<G, const BF: usize = 3, S = BoxSpace<BF>>
 where
     S: ObservationSpace<BF>,
-    Tensor<BF, S::Kind>: PrevRank,
+    Tensor<BF, S::Kind>: PrevRank<Prev = S::Observation>,
     <Tensor<BF, S::Kind> as PrevRank>::Prev: PrevRank,
 {
     gym: G,
@@ -35,7 +35,7 @@ where
 
 impl<G, const O: usize, const F: usize, const BF: usize, S, K: Basic> FrameStackGym<G, BF, S>
 where
-    S: ObservationSpace<BF, Kind = K>,
+    S: ObservationSpace<BF, Kind = K, Observation = Tensor<F, K>>,
     Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
     Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
@@ -69,10 +69,10 @@ impl<G, I, const O: usize, const BA: usize, const F: usize, const BF: usize, S, 
     Gym<I, BF, BA> for FrameStackGym<G, BF, S>
 where
     G: Gym<I, F, BA>,
-    G::ObservationSpace: ObservationSpace<F, Kind = K>,
+    G::ObservationSpace: ObservationSpace<F, Kind = K, Observation = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BA, AK>: PrevRank,
-    S: ObservationSpace<BF, Kind = K> + Clone,
+    S: ObservationSpace<BF, Kind = K, Observation = Tensor<F, K>> + Clone,
     Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
     Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
@@ -149,7 +149,7 @@ impl<G, I, const O: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic
     for MaxAndSkipGym<G>
 where
     G: Gym<I, BO, BA>,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Observation = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
@@ -210,6 +210,7 @@ mod tests {
     use crate::{
         gym::Gym,
         spaces::{BoxSpace, ObservationSpace},
+        tensor_rank::PrevRank,
         wrappers::test_support::{TestGym, action, scalar},
     };
     use burn::tensor::{Bool, DType, Device, Int, Tensor, kind::Basic};
@@ -223,8 +224,12 @@ mod tests {
         kind: PhantomData<K>,
     }
 
-    impl<const D: usize, K: Basic> ObservationSpace<D> for TypedSpace<D, K> {
+    impl<const D: usize, K: Basic> ObservationSpace<D> for TypedSpace<D, K>
+    where
+        Tensor<D, K>: PrevRank,
+    {
         type Kind = K;
+        type Observation = <Tensor<D, K> as PrevRank>::Prev;
 
         /// Checks the rank-`D` batch's item axes against the declared item shape without inspecting values.
         fn contains(&self, values: &Tensor<D, K>) -> bool {
