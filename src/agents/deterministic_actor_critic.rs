@@ -4,7 +4,7 @@
 //! the training loop in this module. Their algorithm-specific behavior is
 //! supplied by an internal strategy.
 
-use std::{fmt::Debug, marker::PhantomData, ops::Deref};
+use std::{fmt::Debug, marker::PhantomData};
 
 use bon::bon;
 use candle_core::{DType, Tensor};
@@ -16,8 +16,7 @@ use super::{
 };
 use crate::{
     buffers::experience_replay::{
-        AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
-        ReplayStorageError, TensorReplayColumn, replay_index_tensor,
+        ExperienceReplay, ExperienceReplayError, ReplayStorage, ReplayStorageError,
     },
     gym::{MultiGym, MultiGymStepInfo},
     objectives::bellman_targets,
@@ -26,7 +25,15 @@ use crate::{
 };
 
 pub mod ddpg;
+mod network;
+mod replay;
 pub mod td3;
+
+use network::{add_gaussian_noise, copy_actor_var_map};
+use replay::{DeterministicBatch, DeterministicReplayInsert, DeterministicReplayStorage};
+
+#[cfg(test)]
+mod tests;
 
 /// A scalar state-action critic suitable for DDPG and TD3.
 pub type DeterministicCritic<'a, O> = SACCritic<'a, O>;
@@ -280,14 +287,6 @@ pub(crate) enum CriticCountRequirement {
     NonEmpty,
 }
 
-struct DeterministicBatch {
-    states: Tensor,
-    next_states: Tensor,
-    actions: Tensor,
-    rewards: Tensor,
-    terminated: Tensor,
-}
-
 impl<GE: Debug, SE: Debug> From<ReplayStorageError> for DeterministicActorCriticError<GE, SE> {
     fn from(error: ReplayStorageError) -> Self {
         Self::ReplayStorageError(error)
@@ -299,121 +298,6 @@ impl<GE: Debug, SE: Debug> From<ExperienceReplayError<ReplayStorageError>>
 {
     fn from(error: ExperienceReplayError<ReplayStorageError>) -> Self {
         Self::ReplayStorageError(error.into())
-    }
-}
-
-struct DeterministicReplayInsert {
-    states: Tensor,
-    next_states: Tensor,
-    actions: Tensor,
-    rewards: Tensor,
-    terminated: Tensor,
-    truncateds: Vec<bool>,
-}
-
-struct DeterministicReplayStorage {
-    observations: AlignedObservationReplay,
-    actions: TensorReplayColumn,
-    rewards: TensorReplayColumn,
-    terminated: TensorReplayColumn,
-    capacity: usize,
-    device: candle_core::Device,
-}
-
-impl DeterministicReplayStorage {
-    fn new(
-        capacity: usize,
-        state_shape: &[usize],
-        action_shape: &[usize],
-        dtype: DType,
-        device: candle_core::Device,
-    ) -> Result<Self, ReplayStorageError> {
-        Ok(Self {
-            observations: AlignedObservationReplay::new(capacity, state_shape, DType::F32, &device),
-            actions: TensorReplayColumn::new(capacity, action_shape, dtype, &device)?,
-            rewards: TensorReplayColumn::new(capacity, &[1], dtype, &device)?,
-            terminated: TensorReplayColumn::new(capacity, &[1], dtype, &device)?,
-            capacity,
-            device,
-        })
-    }
-
-    fn initialize_environment_count(
-        &mut self,
-        environment_count: usize,
-    ) -> Result<(), ReplayStorageError> {
-        self.observations
-            .initialize_environment_count(environment_count)
-    }
-}
-
-impl ReplayStorage for DeterministicReplayStorage {
-    type Insert = DeterministicReplayInsert;
-    type Batch = DeterministicBatch;
-    type Error = ReplayStorageError;
-
-    fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
-        let prepared = DeterministicReplayInsert {
-            states: transitions.states,
-            next_states: transitions.next_states,
-            actions: self.actions.prepare(&transitions.actions)?,
-            rewards: self.rewards.prepare(&transitions.rewards)?,
-            terminated: self.terminated.prepare(&transitions.terminated)?,
-            truncateds: transitions.truncateds,
-        };
-        let count = prepared.states.dim(0)?;
-        for (name, tensor) in [
-            ("actions", &prepared.actions),
-            ("rewards", &prepared.rewards),
-            ("terminated", &prepared.terminated),
-        ] {
-            let actual = tensor.dim(0)?;
-            if actual != count {
-                return Err(ReplayStorageError::BatchLengthMismatch {
-                    field: name,
-                    expected: count,
-                    actual,
-                });
-            }
-        }
-        self.observations.insert(
-            start,
-            &prepared.states,
-            &prepared.next_states,
-            &prepared.truncateds,
-        )?;
-        for (column, tensor) in [
-            (&self.actions, &prepared.actions),
-            (&self.rewards, &prepared.rewards),
-            (&self.terminated, &prepared.terminated),
-        ] {
-            column.write(start, tensor)?;
-        }
-        Ok(count)
-    }
-
-    fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
-        let (states, next_states) = self.observations.gather(indices)?;
-        let indices = replay_index_tensor(indices, &self.device)?;
-        Ok(DeterministicBatch {
-            states,
-            next_states,
-            actions: self.actions.gather(&indices)?,
-            rewards: self.rewards.gather(&indices)?,
-            terminated: self.terminated.gather(&indices)?,
-        })
-    }
-
-    fn sampleable_len(&self, len: usize) -> usize {
-        self.observations.sampleable_len(len)
-    }
-
-    fn sample_index(&self, index: usize, len: usize) -> usize {
-        self.observations.sample_index(index, len)
     }
 }
 
@@ -615,65 +499,6 @@ impl DeterministicActorCriticConfigurationValidator {
         };
         error.map_or(Ok(()), Err)
     }
-}
-
-fn copy_actor_var_map<GE: Debug, SE: Debug>(
-    online: &VarMap,
-    target: &mut VarMap,
-    tau: f64,
-) -> Result<(), DeterministicActorCriticError<GE, SE>> {
-    let online_values = online
-        .data()
-        .lock()
-        .unwrap()
-        .deref()
-        .iter()
-        .map(|(name, var)| (name.clone(), var.as_tensor().clone()))
-        .collect::<Vec<_>>();
-    let online_names = online_values
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<std::collections::HashSet<_>>();
-    let target_names = target
-        .data()
-        .lock()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    if online_names != target_names {
-        let mut online_only = online_names
-            .difference(&target_names)
-            .cloned()
-            .collect::<Vec<_>>();
-        online_only.sort();
-        let mut target_only = target_names
-            .difference(&online_names)
-            .cloned()
-            .collect::<Vec<_>>();
-        target_only.sort();
-        return Err(DeterministicActorCriticError::ActorParameterMapMismatch {
-            online_only,
-            target_only,
-        });
-    }
-    for (name, online_value) in online_values {
-        let value = if tau == 1.0 {
-            online_value
-        } else {
-            let target_value = target
-                .data()
-                .lock()
-                .unwrap()
-                .get(&name)
-                .expect("validated target actor parameter name")
-                .as_tensor()
-                .clone();
-            ((online_value * tau)? + (target_value * (1.0 - tau))?)?
-        };
-        target.set_one(name, &value)?;
-    }
-    Ok(())
 }
 
 impl<'a, AO, CO, GE, SE, S> DeterministicActorCriticAgent<'a, AO, CO, GE, SE, S>
@@ -1042,120 +867,5 @@ where
             });
         }
         Ok(())
-    }
-}
-
-/// Adds elementwise noise to arbitrarily shaped `values`, preserving its
-/// shape.
-fn add_gaussian_noise(
-    values: &Tensor,
-    standard_deviation: f64,
-    clip: Option<f64>,
-) -> candle_core::Result<Tensor> {
-    if standard_deviation == 0.0 {
-        return Ok(values.clone());
-    }
-    let mut noise = (Tensor::randn(0.0f32, 1.0, values.shape(), values.device())?
-        .to_dtype(values.dtype())?
-        * standard_deviation)?;
-    if let Some(clip) = clip {
-        noise = noise.clamp(-clip, clip)?;
-    }
-    values + noise
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        CriticCountRequirement, DeterministicActorCriticConfigurationError as Error,
-        DeterministicActorCriticConfigurationValidator, add_gaussian_noise,
-    };
-    use candle_core::{Device, Tensor};
-
-    #[test]
-    fn validates_shared_and_strategy_configuration() {
-        assert_eq!(
-            DeterministicActorCriticConfigurationValidator::validate_configuration()
-                .critic_count_requirement(CriticCountRequirement::Exact(2))
-                .actual_critic_count(1)
-                .replay_capacity(10)
-                .batch_size(2)
-                .gamma(0.99)
-                .tau(0.005)
-                .exploration_noise(0.1)
-                .target_policy_noise(0.2)
-                .target_noise_clip(0.5)
-                .actor_update_interval(2)
-                .update_frequency(1)
-                .training_horizon(10)
-                .call(),
-            Err(Error::IncorrectCriticCount {
-                expected: 2,
-                actual: 1,
-            })
-        );
-        assert_eq!(
-            DeterministicActorCriticConfigurationValidator::validate_configuration()
-                .critic_count_requirement(CriticCountRequirement::NonEmpty)
-                .actual_critic_count(0)
-                .replay_capacity(10)
-                .batch_size(2)
-                .gamma(0.99)
-                .tau(0.005)
-                .exploration_noise(0.1)
-                .target_policy_noise(0.0)
-                .target_noise_clip(0.0)
-                .actor_update_interval(1)
-                .update_frequency(1)
-                .training_horizon(10)
-                .call(),
-            Err(Error::NoCritics)
-        );
-        assert_eq!(
-            DeterministicActorCriticConfigurationValidator::validate_configuration()
-                .critic_count_requirement(CriticCountRequirement::Exact(1))
-                .actual_critic_count(1)
-                .replay_capacity(10)
-                .batch_size(2)
-                .gamma(0.99)
-                .tau(0.005)
-                .exploration_noise(-0.1)
-                .target_policy_noise(0.0)
-                .target_noise_clip(0.0)
-                .actor_update_interval(1)
-                .update_frequency(1)
-                .training_horizon(10)
-                .call(),
-            Err(Error::InvalidExplorationNoise)
-        );
-        assert_eq!(
-            DeterministicActorCriticConfigurationValidator::validate_configuration()
-                .critic_count_requirement(CriticCountRequirement::NonEmpty)
-                .actual_critic_count(3)
-                .replay_capacity(10)
-                .batch_size(2)
-                .gamma(0.99)
-                .tau(0.005)
-                .exploration_noise(0.1)
-                .target_policy_noise(0.0)
-                .target_noise_clip(0.0)
-                .actor_update_interval(1)
-                .update_frequency(1)
-                .training_horizon(10)
-                .call(),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn zero_noise_preserves_values() {
-        let values = Tensor::new(&[[1.0f32, 2.0]], &Device::Cpu).unwrap();
-        assert_eq!(
-            add_gaussian_noise(&values, 0.0, Some(0.0))
-                .unwrap()
-                .to_vec2::<f32>()
-                .unwrap(),
-            vec![vec![1.0, 2.0]]
-        );
     }
 }
