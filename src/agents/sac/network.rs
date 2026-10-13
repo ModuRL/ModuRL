@@ -1,12 +1,13 @@
 //! Q-value critics and ensemble aggregation for Soft Actor-Critic.
 
-use crate::models::Forward;
 use bon::bon;
 use burn::{
-    module::{Module, ModuleMapper, ModuleVisitor, Param},
-    optim::{GradientsParams, ModuleOptimizer},
+    module::{Module, ModuleMapper, ModuleVisitor},
+    optim::ModuleOptimizer,
     tensor::{DType, Device, Float, Int, Tensor, TensorReadError, kind::Basic},
 };
+
+use crate::{agents::action_value_critic, models::Forward};
 
 /// A Q network that can evaluate replay actions and policy candidates.
 /// Ranks O and A include batch and event axes. Rank C adds one candidate axis to A.
@@ -79,6 +80,44 @@ pub enum SACCriticError<E = std::convert::Infallible> {
     NoCriticValues,
 }
 
+impl<E> From<action_value_critic::ActionValueCriticError<E>> for SACCriticError<E> {
+    fn from(error: action_value_critic::ActionValueCriticError<E>) -> Self {
+        match error {
+            action_value_critic::ActionValueCriticError::ModelError(error) => {
+                Self::ModelError(error)
+            }
+            action_value_critic::ActionValueCriticError::TensorError(error) => {
+                Self::TensorError(error)
+            }
+            action_value_critic::ActionValueCriticError::InvalidPolyakCoefficient { tau } => {
+                Self::InvalidPolyakCoefficient { tau }
+            }
+            action_value_critic::ActionValueCriticError::InvalidLearningRate => {
+                Self::InvalidLearningRate
+            }
+            action_value_critic::ActionValueCriticError::EmptyInput => Self::EmptyInput,
+            action_value_critic::ActionValueCriticError::BatchMismatch {
+                observations,
+                actions,
+            } => Self::BatchMismatch {
+                observations,
+                actions,
+            },
+            action_value_critic::ActionValueCriticError::ShapeMismatch { expected, actual } => {
+                Self::ShapeMismatch { expected, actual }
+            }
+            action_value_critic::ActionValueCriticError::DTypeMismatch { expected, actual } => {
+                Self::DTypeMismatch { expected, actual }
+            }
+            action_value_critic::ActionValueCriticError::DeviceMismatch => Self::DeviceMismatch,
+            action_value_critic::ActionValueCriticError::InvalidActionIndex { action_count } => {
+                Self::InvalidActionIndex { action_count }
+            }
+            action_value_critic::ActionValueCriticError::NoCriticValues => Self::NoCriticValues,
+        }
+    }
+}
+
 /// Adapts a Float model that maps concatenated observations and actions to `[batch_size, 1]`.
 /// Flattens event axes. Observations and actions must share Float dtype and device.
 ///
@@ -93,75 +132,62 @@ pub enum SACCriticError<E = std::convert::Infallible> {
 /// ```
 #[derive(Clone, Debug)]
 pub struct ScalarStateActionCritic<M: Module> {
-    module: M,
+    network: action_value_critic::ScalarStateActionCritic<M>,
 }
 
 impl<M: Module> Module for ScalarStateActionCritic<M> {
     fn collect_devices(&self, devices: Vec<Device>) -> Vec<Device> {
-        self.module.collect_devices(devices)
+        self.network.collect_devices(devices)
     }
 
     fn fork(self, device: &Device) -> Self {
-        Self::new(self.module.fork(device))
+        Self {
+            network: self.network.fork(device),
+        }
     }
 
     fn to_device(self, device: &Device) -> Self {
-        Self::new(self.module.to_device(device))
+        Self {
+            network: self.network.to_device(device),
+        }
     }
 
     fn train(self) -> Self {
-        Self::new(self.module.train())
+        Self {
+            network: self.network.train(),
+        }
     }
 
     fn valid(&self) -> Self {
-        Self::new(self.module.valid())
+        Self {
+            network: self.network.valid(),
+        }
     }
 
     fn visit<V: ModuleVisitor>(&self, visitor: &mut V) {
-        self.module.visit(visitor);
+        self.network.visit(visitor);
     }
 
     fn map<T: ModuleMapper>(self, mapper: &mut T) -> Self {
-        Self::new(self.module.map(mapper))
+        Self {
+            network: self.network.map(mapper),
+        }
     }
 
     fn materialize(self) -> Self {
-        Self::new(self.module.materialize())
+        Self {
+            network: self.network.materialize(),
+        }
     }
 }
 
 impl<M: Module> ScalarStateActionCritic<M> {
     /// Owns the model used to evaluate scalar Q values.
     pub fn new(module: M) -> Self {
-        Self { module }
+        Self {
+            network: action_value_critic::ScalarStateActionCritic::new(module),
+        }
     }
-}
-
-/// Validates rank-O observations `[batch_size, ...observation_shape]` and rank-A actions `[batch_size, ...action_shape]`.
-/// Candidates add an axis after batch. Requires nonempty axes, matching batches, and matching devices; preserves both native tensors.
-fn validate_critic_inputs<E, const O: usize, const A: usize, K: Basic, L: Basic>(
-    observations: &Tensor<O, K>,
-    actions: &Tensor<A, L>,
-) -> Result<(), SACCriticError<E>> {
-    const {
-        assert!(
-            O >= 2 && A >= 2,
-            "critic inputs require batch and event axes"
-        );
-    }
-    if observations.dims().contains(&0) || actions.dims().contains(&0) {
-        return Err(SACCriticError::EmptyInput);
-    }
-    if observations.dims()[0] != actions.dims()[0] {
-        return Err(SACCriticError::BatchMismatch {
-            observations: observations.dims()[0],
-            actions: actions.dims()[0],
-        });
-    }
-    if observations.device() != actions.device() {
-        return Err(SACCriticError::DeviceMismatch);
-    }
-    Ok(())
 }
 
 impl<M, const O: usize, const A: usize, const C: usize> SACCriticNetwork<O, A, C>
@@ -180,15 +206,12 @@ where
         observations: &Tensor<O>,
         actions: &Tensor<A>,
     ) -> Result<Tensor<2>, Self::Error> {
-        const {
-            assert!(C == A + 1, "candidate rank must be action rank + 1");
-        }
-        <Self as SACCriticNetwork<O, A, C>>::policy_values(
-            self,
+        <action_value_critic::ScalarStateActionCritic<M> as action_value_critic::ActionValueCriticNetwork<O, A, C>>::replay_values(
+            &self.network,
             observations,
-            &actions.clone().unsqueeze_dim::<C>(1),
+            actions,
         )
-        .map(|values| values.squeeze_dim(1))
+        .map_err(Into::into)
     }
 
     /// Broadcasts observations over candidates and flattens event axes into `[batch_size * candidate_count, observation_size + action_size]`.
@@ -198,55 +221,12 @@ where
         observations: &Tensor<O>,
         candidate_actions: &Tensor<C>,
     ) -> Result<Tensor<3>, Self::Error> {
-        const {
-            assert!(
-                C == A + 1 && A >= 2,
-                "candidates must add one axis to batched actions"
-            );
-        }
-
-        validate_critic_inputs(observations, candidate_actions)?;
-        if observations.dtype() != candidate_actions.dtype() {
-            return Err(SACCriticError::DTypeMismatch {
-                expected: observations.dtype(),
-                actual: candidate_actions.dtype(),
-            });
-        }
-
-        let batch_size = observations.dims()[0];
-        let candidate_count = candidate_actions.dims()[1];
-        let observation_size = observations.dims()[1..].iter().product::<usize>();
-        let action_size = candidate_actions.dims()[2..].iter().product::<usize>();
-
-        let inputs = Tensor::cat(
-            vec![
-                observations
-                    .clone()
-                    .reshape([batch_size, observation_size])
-                    .unsqueeze_dim::<3>(1)
-                    .expand([batch_size, candidate_count, observation_size]),
-                candidate_actions
-                    .clone()
-                    .reshape([batch_size, candidate_count, action_size]),
-            ],
-            2,
+        <action_value_critic::ScalarStateActionCritic<M> as action_value_critic::ActionValueCriticNetwork<O, A, C>>::policy_values(
+            &self.network,
+            observations,
+            candidate_actions,
         )
-        .reshape([batch_size * candidate_count, observation_size + action_size]);
-
-        let values = self
-            .module
-            .forward(inputs)
-            .map_err(SACCriticError::ModelError)?;
-        if values.dims() != [batch_size * candidate_count, 1] {
-            return Err(SACCriticError::ShapeMismatch {
-                expected: vec![batch_size * candidate_count, 1],
-                actual: values.dims().to_vec(),
-            });
-        }
-        if values.device() != observations.device() {
-            return Err(SACCriticError::DeviceMismatch);
-        }
-        Ok(values.reshape([batch_size, candidate_count, 1]))
+        .map_err(Into::into)
     }
 
     /// Evaluates observations and candidates with the `policy_values` layouts, returning `[batch_size, candidate_count, 1]`.
@@ -256,8 +236,12 @@ where
         observations: &Tensor<O>,
         candidate_actions: &Tensor<C>,
     ) -> Result<Tensor<3>, Self::Error> {
-        let frozen = Self::new(self.module.clone().set_require_grad(false));
-        <Self as SACCriticNetwork<O, A, C>>::policy_values(&frozen, observations, candidate_actions)
+        <action_value_critic::ScalarStateActionCritic<M> as action_value_critic::ActionValueCriticNetwork<O, A, C>>::actor_values(
+            &self.network,
+            observations,
+            candidate_actions,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -265,47 +249,61 @@ where
 /// Observations preserve the model's native input kind and dtype. The model performs any required preprocessing.
 #[derive(Clone, Debug)]
 pub struct DiscreteVectorHeadCritic<M: Module> {
-    module: M,
+    network: action_value_critic::DiscreteVectorHeadCritic<M>,
 }
 
 impl<M: Module> Module for DiscreteVectorHeadCritic<M> {
     fn collect_devices(&self, devices: Vec<Device>) -> Vec<Device> {
-        self.module.collect_devices(devices)
+        self.network.collect_devices(devices)
     }
 
     fn fork(self, device: &Device) -> Self {
-        Self::new(self.module.fork(device))
+        Self {
+            network: self.network.fork(device),
+        }
     }
 
     fn to_device(self, device: &Device) -> Self {
-        Self::new(self.module.to_device(device))
+        Self {
+            network: self.network.to_device(device),
+        }
     }
 
     fn train(self) -> Self {
-        Self::new(self.module.train())
+        Self {
+            network: self.network.train(),
+        }
     }
 
     fn valid(&self) -> Self {
-        Self::new(self.module.valid())
+        Self {
+            network: self.network.valid(),
+        }
     }
 
     fn visit<V: ModuleVisitor>(&self, visitor: &mut V) {
-        self.module.visit(visitor);
+        self.network.visit(visitor);
     }
 
     fn map<T: ModuleMapper>(self, mapper: &mut T) -> Self {
-        Self::new(self.module.map(mapper))
+        Self {
+            network: self.network.map(mapper),
+        }
     }
 
     fn materialize(self) -> Self {
-        Self::new(self.module.materialize())
+        Self {
+            network: self.network.materialize(),
+        }
     }
 }
 
 impl<M: Module> DiscreteVectorHeadCritic<M> {
     /// Owns the model used to evaluate one value per discrete action.
     pub fn new(module: M) -> Self {
-        Self { module }
+        Self {
+            network: action_value_critic::DiscreteVectorHeadCritic::new(module),
+        }
     }
 }
 
@@ -324,16 +322,12 @@ where
         observations: &Tensor<O, M::InputKind>,
         actions: &Tensor<2, Int>,
     ) -> Result<Tensor<2>, Self::Error> {
-        validate_critic_inputs(observations, actions)?;
-        if actions.dims()[1] != 1 {
-            return Err(SACCriticError::ShapeMismatch {
-                expected: vec![actions.dims()[0], 1],
-                actual: actions.dims().to_vec(),
-            });
-        }
-
-        self.policy_values(observations, &actions.clone().unsqueeze_dim::<3>(1))
-            .map(|values| values.squeeze_dim(1))
+        <action_value_critic::DiscreteVectorHeadCritic<M> as action_value_critic::ActionValueCriticNetwork<O, 2, 3>>::replay_values(
+            &self.network,
+            observations,
+            actions,
+        )
+        .map_err(Into::into)
     }
 
     /// Gathers Int candidates `[batch_size, candidate_count, 1]` from Float model values `[batch_size, action_count]`.
@@ -343,42 +337,12 @@ where
         observations: &Tensor<O, M::InputKind>,
         candidate_actions: &Tensor<3, Int>,
     ) -> Result<Tensor<3>, Self::Error> {
-        validate_critic_inputs(observations, candidate_actions)?;
-        let [batch_size, candidate_count, scalar_size] = candidate_actions.dims();
-        if scalar_size != 1 {
-            return Err(SACCriticError::ShapeMismatch {
-                expected: vec![batch_size, candidate_count, 1],
-                actual: candidate_actions.dims().to_vec(),
-            });
-        }
-
-        let values = self
-            .module
-            .forward(observations.clone())
-            .map_err(SACCriticError::ModelError)?;
-        if values.dims()[0] != batch_size || values.dims()[1] == 0 {
-            return Err(SACCriticError::ShapeMismatch {
-                expected: vec![batch_size, values.dims()[1].max(1)],
-                actual: values.dims().to_vec(),
-            });
-        }
-        if values.device() != candidate_actions.device() {
-            return Err(SACCriticError::DeviceMismatch);
-        }
-
-        let action_count = values.dims()[1];
-        let invalid = candidate_actions.clone().lower_elem(0).bool_or(
-            candidate_actions
-                .clone()
-                .greater_equal_elem(action_count as i64),
-        );
-        if invalid.any().try_into_scalar::<bool>()? {
-            return Err(SACCriticError::InvalidActionIndex { action_count });
-        }
-
-        Ok(values
-            .gather(1, candidate_actions.clone().squeeze_dim::<2>(2))
-            .unsqueeze_dim(2))
+        <action_value_critic::DiscreteVectorHeadCritic<M> as action_value_critic::ActionValueCriticNetwork<O, 2, 3>>::policy_values(
+            &self.network,
+            observations,
+            candidate_actions,
+        )
+        .map_err(Into::into)
     }
 
     /// Returns detached Float `[batch_size, candidate_count, 1]` for observations and Int candidates with the `policy_values` layouts.
@@ -388,8 +352,12 @@ where
         observations: &Tensor<O, M::InputKind>,
         candidate_actions: &Tensor<3, Int>,
     ) -> Result<Tensor<3>, Self::Error> {
-        self.policy_values(observations, candidate_actions)
-            .map(Tensor::detach)
+        <action_value_critic::DiscreteVectorHeadCritic<M> as action_value_critic::ActionValueCriticNetwork<O, 2, 3>>::actor_values(
+            &self.network,
+            observations,
+            candidate_actions,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -418,17 +386,14 @@ where
 /// # }
 /// ```
 pub struct SACCritic<N: Module> {
-    online_network: N,
-    target_network: N,
-    optimizer: ModuleOptimizer,
-    learning_rate: f64,
+    critic: action_value_critic::ActionValueCritic<N>,
 }
 
 #[bon]
 impl<N: Module> SACCritic<N> {
     /// Returns the owned online model for parameter inspection and checkpoint snapshots.
     pub fn online_network(&self) -> &N {
-        &self.online_network
+        self.critic.online_network()
     }
 
     /// Owns the model and optimizer, enables online training, and clones the target snapshot.
@@ -439,66 +404,30 @@ impl<N: Module> SACCritic<N> {
         #[builder(into)] optimizer: ModuleOptimizer,
         learning_rate: f64,
     ) -> Result<Self, SACCriticError> {
-        if !learning_rate.is_finite() || learning_rate <= 0.0 {
-            return Err(SACCriticError::InvalidLearningRate);
-        }
-
-        let online_network = online_network.train();
-        let target_network = online_network.clone().valid();
-
         Ok(Self {
-            online_network,
-            target_network,
-            optimizer,
-            learning_rate,
+            critic: action_value_critic::ActionValueCritic::builder()
+                .online_network(online_network)
+                .optimizer(optimizer)
+                .learning_rate(learning_rate)
+                .build()?,
         })
     }
 
     /// Backpropagates Float loss `[1]` and updates online parameters, preserving their shapes, dtypes, devices, and IDs.
     /// Loss must come from this online model. Leaves the target snapshot unchanged; rejects a nonscalar loss layout.
     pub fn backward_step(&mut self, loss: &Tensor<1>) -> Result<(), SACCriticError> {
-        if loss.dims() != [1] {
-            return Err(SACCriticError::ShapeMismatch {
-                expected: vec![1],
-                actual: loss.dims().to_vec(),
-            });
-        }
-
-        let gradients = GradientsParams::from_grads(loss.clone().backward(), &self.online_network);
-        self.online_network =
-            self.optimizer
-                .step(self.learning_rate, self.online_network.clone(), gradients);
-        Ok(())
+        self.critic.backward_step(loss).map_err(Into::into)
     }
 
     /// Copies online parameters into a detached target snapshot, preserving parameter IDs and layouts.
     pub fn hard_update(&mut self) -> Result<(), SACCriticError> {
-        self.target_network = self.online_network.clone().valid();
-        Ok(())
+        self.critic.hard_update().map_err(Into::into)
     }
 
     /// Updates rank-D target parameters to `tau * online + (1 - tau) * target`.
     /// Preserves parameter IDs, shapes, dtypes, and devices. Rejects a non-finite tau or a value outside 0..=1.
     pub fn polyak_update(&mut self, tau: f64) -> Result<(), SACCriticError> {
-        if !tau.is_finite() || !(0.0..=1.0).contains(&tau) {
-            return Err(SACCriticError::InvalidPolyakCoefficient { tau });
-        }
-        if tau == 0.0 {
-            return Ok(());
-        }
-        if tau == 1.0 {
-            return self.hard_update();
-        }
-        let mut values = CriticParameterValues {
-            values: GradientsParams::new(),
-        };
-        self.online_network.visit(&mut values);
-        let mut mapper = CriticTargetUpdate {
-            values: values.values,
-            tau,
-        };
-        self.target_network = self.target_network.clone().map(&mut mapper).valid();
-        Ok(())
+        self.critic.polyak_update(tau).map_err(Into::into)
     }
 
     /// Evaluates online observations `[batch_size, ...observation_shape]` and replay actions `[batch_size, ...action_shape]`.
@@ -511,7 +440,9 @@ impl<N: Module> SACCritic<N> {
     where
         N: SACCriticNetwork<O, A, C>,
     {
-        self.online_network.replay_values(observations, actions)
+        self.critic
+            .online_network()
+            .replay_values(observations, actions)
     }
 
     /// Evaluates observations and candidates `[batch_size, candidate_count, ...action_shape]` with the network's native input requirements.
@@ -524,7 +455,9 @@ impl<N: Module> SACCritic<N> {
     where
         N: SACCriticNetwork<O, A, C>,
     {
-        self.online_network.actor_values(observations, actions)
+        self.critic
+            .online_network()
+            .actor_values(observations, actions)
     }
 
     /// Evaluates target observations and candidates `[batch_size, candidate_count, ...action_shape]` with the network's native input requirements.
@@ -537,7 +470,8 @@ impl<N: Module> SACCritic<N> {
     where
         N: SACCriticNetwork<O, A, C>,
     {
-        self.target_network
+        self.critic
+            .target_network()
             .policy_values(observations, actions)
             .map(Tensor::detach)
     }
@@ -552,35 +486,10 @@ impl<N: Module> SACCritic<N> {
     where
         N: SACCriticNetwork<O, A, C>,
     {
-        self.target_network
+        self.critic
+            .target_network()
             .replay_values(observations, actions)
             .map(Tensor::detach)
-    }
-}
-
-struct CriticParameterValues {
-    values: GradientsParams,
-}
-
-impl ModuleVisitor for CriticParameterValues {
-    /// Stores detached rank-D online parameter values by ID, preserving shape, dtype, and device.
-    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
-        self.values.register(param.id, param.val().detach());
-    }
-}
-
-struct CriticTargetUpdate {
-    values: GradientsParams,
-    tau: f64,
-}
-
-impl ModuleMapper for CriticTargetUpdate {
-    /// Interpolates one rank-D target parameter, preserving ID, shape, dtype, and device.
-    fn map_float<const D: usize>(&mut self, param: Param<Tensor<D>>) -> Param<Tensor<D>> {
-        let Some(online) = self.values.get::<D>(param.id) else {
-            unreachable!("cloned critic parameter IDs must match");
-        };
-        param.map(|target| online * self.tau + target.detach() * (1.0 - self.tau))
     }
 }
 
@@ -594,6 +503,17 @@ pub enum SACCriticAggregationMode {
     Min,
     /// Uses the highest critic value.
     Max,
+}
+
+impl From<SACCriticAggregationMode> for action_value_critic::ActionValueCriticAggregationMode {
+    fn from(mode: SACCriticAggregationMode) -> Self {
+        match mode {
+            SACCriticAggregationMode::Mean => Self::Mean,
+            SACCriticAggregationMode::Median => Self::Median,
+            SACCriticAggregationMode::Min => Self::Min,
+            SACCriticAggregationMode::Max => Self::Max,
+        }
+    }
 }
 
 /// Aggregates Float rank-D tensors with identical shapes, dtypes, and devices, returning the same layout.
@@ -611,63 +531,92 @@ pub fn aggregate_critic_values<const D: usize, const S: usize>(
     values: &[Tensor<D>],
     mode: SACCriticAggregationMode,
 ) -> Result<Tensor<D>, SACCriticError> {
-    const {
-        assert!(S == D + 1, "stack rank must be value rank + 1");
-    }
-    let Some(first) = values.first() else {
-        return Err(SACCriticError::NoCriticValues);
-    };
-
-    for value in &values[1..] {
-        if value.dims() != first.dims() {
-            return Err(SACCriticError::ShapeMismatch {
-                expected: first.dims().to_vec(),
-                actual: value.dims().to_vec(),
-            });
-        }
-        if value.dtype() != first.dtype() {
-            return Err(SACCriticError::DTypeMismatch {
-                expected: first.dtype(),
-                actual: value.dtype(),
-            });
-        }
-        if value.device() != first.device() {
-            return Err(SACCriticError::DeviceMismatch);
-        }
-    }
-
-    Ok(match mode {
-        SACCriticAggregationMode::Mean => Tensor::stack::<S>(values.to_vec(), D)
-            .mean_dim(D)
-            .squeeze_dim(D),
-        SACCriticAggregationMode::Min | SACCriticAggregationMode::Max => {
-            values[1..].iter().fold(first.clone(), |current, value| {
-                let ties = current.clone().equal(value.clone());
-                let selected = match mode {
-                    SACCriticAggregationMode::Min => current.clone().min_pair(value.clone()),
-                    _ => current.clone().max_pair(value.clone()),
-                };
-                selected.mask_where(ties, current * 0.5 + value.clone() * 0.5)
-            })
-        }
-        SACCriticAggregationMode::Median => {
-            let sorted = Tensor::stack::<S>(values.to_vec(), D).sort(D);
-            let count = values.len();
-            let upper = sorted.clone().narrow(D, count / 2, 1).squeeze_dim::<D>(D);
-            if count % 2 == 1 {
-                upper
-            } else {
-                (sorted.narrow(D, count / 2 - 1, 1).squeeze_dim::<D>(D) + upper) * 0.5
-            }
-        }
-    })
+    action_value_critic::aggregate_critic_values::<D, S>(values, mode.into()).map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::optim::SgdConfig;
+    use burn::{module::Param, optim::SgdConfig, tensor::Device};
     use std::convert::Infallible;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("custom critic failed")]
+    struct CustomError;
+
+    #[derive(Module, Debug)]
+    struct CustomNetwork {
+        weight: Param<Tensor<2>>,
+        #[module(skip)]
+        fail: bool,
+    }
+
+    impl SACCriticNetwork for CustomNetwork {
+        type ObservationKind = Int;
+        type ActionKind = Float;
+        type Error = CustomError;
+
+        /// Combines Int observations [batch_size, 1] and Float actions [batch_size, 1] into Float Q values [batch_size, 1].
+        /// Casts observations to the parameter dtype; keeps online parameter gradients.
+        fn replay_values(
+            &self,
+            observations: &Tensor<2, Int>,
+            actions: &Tensor<2>,
+        ) -> Result<Tensor<2>, Self::Error> {
+            if self.fail {
+                return Err(CustomError);
+            }
+            Ok(Tensor::cat(
+                vec![
+                    observations.clone().float().cast(self.weight.val().dtype()),
+                    actions.clone(),
+                ],
+                1,
+            )
+            .matmul(self.weight.val()))
+        }
+
+        /// Broadcasts Int observations [batch_size, 1] over Float candidates [batch_size, candidate_count, 1].
+        /// Returns Float Q values [batch_size, candidate_count, 1], preserving model gradients.
+        fn policy_values(
+            &self,
+            observations: &Tensor<2, Int>,
+            candidate_actions: &Tensor<3>,
+        ) -> Result<Tensor<3>, Self::Error> {
+            if self.fail {
+                return Err(CustomError);
+            }
+            let [batch_size, candidate_count, _] = candidate_actions.dims();
+            let inputs = Tensor::cat(
+                vec![
+                    observations
+                        .clone()
+                        .float()
+                        .cast(self.weight.val().dtype())
+                        .unsqueeze_dim::<3>(1)
+                        .expand([batch_size, candidate_count, 1]),
+                    candidate_actions.clone(),
+                ],
+                2,
+            )
+            .reshape([batch_size * candidate_count, 2]);
+            Ok(inputs
+                .matmul(self.weight.val())
+                .reshape([batch_size, candidate_count, 1]))
+        }
+
+        /// Returns Float [batch_size, candidate_count, 1] from Int observations and Float candidates with the policy layouts.
+        /// Excludes parameter gradients while preserving candidate-action gradients.
+        fn actor_values(
+            &self,
+            observations: &Tensor<2, Int>,
+            candidate_actions: &Tensor<3>,
+        ) -> Result<Tensor<3>, Self::Error> {
+            self.clone()
+                .set_require_grad(false)
+                .policy_values(observations, candidate_actions)
+        }
+    }
 
     #[derive(Module, Debug)]
     struct SumModel {
@@ -679,7 +628,7 @@ mod tests {
         type OutputKind = Float;
         type Error = Infallible;
 
-        /// Maps Float `[batch_size, features]` through weights `[features, outputs]` to `[batch_size, outputs]`, preserving gradients.
+        /// Maps Float inputs [batch_size, features] through parameters [features, 1] to Q values [batch_size, 1].
         fn forward(&self, input: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
             Ok(input.matmul(self.weight.val()))
         }
@@ -693,24 +642,16 @@ mod tests {
         type OutputKind = Float;
         type Error = Infallible;
 
-        /// Explicitly casts Int observations `[batch_size, action_count]` to Float, preserving shape and device.
+        /// Converts Int observations [batch_size, action_count] to Float action values with unchanged axes.
         fn forward(&self, input: Tensor<2, Int>) -> Result<Tensor<2>, Self::Error> {
             assert_eq!(input.dtype(), DType::I64);
             Ok(input.float())
         }
     }
 
-    /// Creates an autodiff CPU model with weights `[features, 1]` in the requested Float dtype.
-    fn sum_model(features: usize, dtype: DType) -> SumModel {
-        let device = Device::flex().autodiff();
-        SumModel {
-            weight: Param::from_tensor(Tensor::ones([features, 1], (&device, dtype))),
-        }
-    }
-
-    /// Reads rank-D Float values as flattened F64 host values; leaves the source shape and device unchanged.
-    fn numbers<const D: usize>(value: Tensor<D>) -> Vec<f64> {
-        value
+    /// Reads a rank-D Float tensor with arbitrary shape into flattened F64 host values; leaves its axes and device unchanged.
+    fn numbers<const D: usize>(values: Tensor<D>) -> Vec<f64> {
+        values
             .into_data()
             .convert::<f64>()
             .try_to_vec::<f64>()
@@ -718,156 +659,176 @@ mod tests {
     }
 
     #[test]
-    fn scalar_replay_and_candidates_preserve_layout_dtype_and_gradients() {
+    fn custom_sac_network_contract_remains_supported() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-        for dtype in [DType::F32, DType::F64] {
-            let model = sum_model(3, dtype);
-            let device = model.weight.val().device();
-            let critic = ScalarStateActionCritic::new(model);
-            let observations = Tensor::from_data([[1.0f64, 2.0], [3.0, 4.0]], (&device, dtype));
-            let candidates =
-                Tensor::from_data([[[10.0f64], [20.0]], [[30.0], [40.0]]], (&device, dtype));
-            let values = <_ as SACCriticNetwork<2, 2, 3>>::policy_values(
-                &critic,
-                &observations,
-                &candidates,
-            )
+        let device = Device::flex().autodiff();
+        let model = CustomNetwork {
+            weight: Param::from_tensor(Tensor::ones([2, 1], (&device, DType::F64))),
+            fail: false,
+        };
+        let mut critic = SACCritic::builder()
+            .online_network(model)
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.1)
+            .build()
             .unwrap();
-            assert_eq!(values.dims(), [2, 2, 1]);
-            assert_eq!(values.dtype(), dtype);
-            assert_eq!(values.device(), device);
-            assert_eq!(numbers(values), [13.0, 23.0, 37.0, 47.0]);
-            let actions = Tensor::from_data([[10.0f64], [30.0]], (&device, dtype));
-            let values =
-                <_ as SACCriticNetwork<2, 2, 3>>::replay_values(&critic, &observations, &actions)
-                    .unwrap();
-            assert_eq!(values.dims(), [2, 1]);
-            assert_eq!(numbers(values), [13.0, 37.0]);
-        }
-    }
-
-    #[test]
-    fn scalar_adapter_flattens_five_action_event_axes() {
-        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-        let model = sum_model(34, DType::F32);
-        let device = model.weight.val().device();
-        let critic = ScalarStateActionCritic::new(model);
-        let observations = Tensor::from_data([[1.0f32, 2.0], [3.0, 4.0]], &device);
-        let candidates = Tensor::ones([2, 2, 2, 2, 2, 2, 2], &device);
+        let observations = Tensor::from_data([[2i64]], (&device, DType::I64));
+        let actions = Tensor::from_data([[3.0f64]], (&device, DType::F64));
+        let candidates =
+            Tensor::from_data([[[3.0f64], [4.0]]], (&device, DType::F64)).require_grad();
         assert_eq!(
             numbers(
-                <_ as SACCriticNetwork<2, 6, 7>>::policy_values(
-                    &critic,
-                    &observations,
-                    &candidates
-                )
-                .unwrap()
-            ),
-            [35.0, 35.0, 39.0, 39.0]
-        );
-        let actions = Tensor::ones([2, 2, 2, 2, 2, 2], &device);
-        assert_eq!(
-            numbers(
-                <_ as SACCriticNetwork<2, 6, 7>>::replay_values(&critic, &observations, &actions)
+                critic
+                    .online_replay_values::<2, 2, 3>(&observations, &actions)
                     .unwrap()
             ),
-            [35.0, 39.0]
+            [5.0]
+        );
+        assert_eq!(
+            numbers(
+                critic
+                    .target_policy_values::<2, 2, 3>(&observations, &candidates)
+                    .unwrap()
+            ),
+            [5.0, 6.0]
+        );
+        let values = critic
+            .online_actor_values::<2, 2, 3>(&observations, &candidates)
+            .unwrap();
+        let gradients = values.sum().backward();
+        assert_eq!(numbers(candidates.grad(&gradients).unwrap()), [1.0, 1.0]);
+        assert!(
+            critic
+                .online_network()
+                .weight
+                .val()
+                .grad(&gradients)
+                .is_none()
+        );
+        let loss = critic
+            .online_replay_values::<2, 2, 3>(&observations, &actions)
+            .unwrap()
+            .sum();
+        critic.backward_step(&loss).unwrap();
+        assert_eq!(
+            numbers(
+                critic
+                    .target_replay_values::<2, 2, 3>(&observations, &actions)
+                    .unwrap()
+            ),
+            [5.0]
+        );
+        assert_eq!(observations.dtype(), DType::I64);
+        let failing = SACCritic::builder()
+            .online_network(CustomNetwork {
+                weight: Param::from_tensor(Tensor::ones([2, 1], &device)),
+                fail: true,
+            })
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.1)
+            .build()
+            .unwrap();
+        assert!(matches!(
+            failing.online_replay_values::<2, 2, 3>(&observations, &actions),
+            Err(CustomError)
+        ));
+        let error = SACCriticError::from(action_value_critic::ActionValueCriticError::ModelError(
+            CustomError,
+        ));
+        assert!(matches!(error, SACCriticError::ModelError(CustomError)));
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            "custom critic failed"
         );
     }
 
     #[test]
-    fn scalar_actor_gradients_reach_actions_but_not_critic_parameters() {
+    fn scalar_sac_adapter_keeps_error_types_and_gradient_boundaries() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-        let model = sum_model(3, DType::F64);
-        let weight = model.weight.val();
-        let device = weight.device();
-        let critic = ScalarStateActionCritic::new(model);
-        let observations = Tensor::from_data([[1.0f64, 2.0]], (&device, DType::F64)).require_grad();
+        let device = Device::flex().autodiff();
+        let model = SumModel {
+            weight: Param::from_tensor(Tensor::ones([3, 1], (&device, DType::F64))),
+        };
+        let parameters = model.weight.val();
+        let network = ScalarStateActionCritic::new(model);
+        let observations = Tensor::from_data([[1.0f64, 2.0]], (&device, DType::F64));
         let actions = Tensor::from_data([[[3.0f64], [4.0]]], (&device, DType::F64)).require_grad();
-        let gradients =
-            <_ as SACCriticNetwork<2, 2, 3>>::actor_values(&critic, &observations, &actions)
-                .unwrap()
-                .sum()
-                .backward();
+        let values =
+            <_ as SACCriticNetwork<2, 2, 3>>::policy_values(&network, &observations, &actions)
+                .unwrap();
+        assert_eq!(numbers(values.clone()), [6.0, 7.0]);
+        assert!(parameters.grad(&values.sum().backward()).is_some());
+        let actor =
+            <_ as SACCriticNetwork<2, 2, 3>>::actor_values(&network, &observations, &actions)
+                .unwrap();
+        let gradients = actor.sum().backward();
         assert_eq!(numbers(actions.grad(&gradients).unwrap()), [1.0, 1.0]);
-        assert_eq!(numbers(observations.grad(&gradients).unwrap()), [2.0, 2.0]);
-        assert!(weight.grad(&gradients).is_none());
-        let replay_actions = Tensor::from_data([[3.0f64]], (&device, DType::F64));
-        let gradients = <_ as SACCriticNetwork<2, 2, 3>>::replay_values(
-            &critic,
-            &observations,
-            &replay_actions,
-        )
-        .unwrap()
-        .sum()
-        .backward();
-        assert_eq!(numbers(weight.grad(&gradients).unwrap()), [1.0, 2.0, 3.0]);
+        assert!(parameters.grad(&gradients).is_none());
+        assert!(matches!(
+            <_ as SACCriticNetwork<2, 2, 3>>::policy_values(
+                &network,
+                &observations,
+                &Tensor::ones([1, 2, 1], &device)
+            ),
+            Err(SACCriticError::DTypeMismatch {
+                expected: DType::F64,
+                actual: DType::F32
+            })
+        ));
+        assert!(matches!(
+            <_ as SACCriticNetwork<2, 2, 3>>::policy_values(
+                &network,
+                &observations,
+                &Tensor::ones([2, 2, 1], (&device, DType::F64))
+            ),
+            Err(SACCriticError::BatchMismatch {
+                observations: 1,
+                actions: 2
+            })
+        ));
     }
 
     #[test]
-    fn discrete_adapter_gathers_indices_and_keeps_native_observations() {
+    fn discrete_sac_adapter_preserves_native_inputs_and_index_errors() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let critic = DiscreteVectorHeadCritic::new(IntegerModel);
-        let observations =
-            Tensor::<2, Int>::from_data([[1i64, 2, 3], [4, 5, 6]], (&device, DType::I64));
-        let actions = Tensor::<2, Int>::from_data([[2i64], [0]], &device);
+        let network = DiscreteVectorHeadCritic::new(IntegerModel);
+        let observations = Tensor::from_data([[1i64, 2, 3], [4, 5, 6]], (&device, DType::I64));
+        let actions = Tensor::from_data([[2i64], [0]], &device);
         assert_eq!(
-            numbers(critic.replay_values(&observations, &actions).unwrap()),
+            numbers(network.replay_values(&observations, &actions).unwrap()),
             [3.0, 4.0]
         );
-        let candidates =
-            Tensor::<3, Int>::from_data([[[0i64], [1], [2]], [[0], [1], [2]]], &device);
-        let values = critic.policy_values(&observations, &candidates).unwrap();
-        assert_eq!(values.dims(), [2, 3, 1]);
-        assert_eq!(numbers(values), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        assert_eq!(observations.dtype(), DType::I64);
+        let candidates = Tensor::from_data([[[0i64], [2]], [[1], [0]]], &device);
+        assert_eq!(
+            numbers(network.policy_values(&observations, &candidates).unwrap()),
+            [1.0, 3.0, 5.0, 4.0]
+        );
         for index in [-1i64, 3] {
             assert!(matches!(
-                critic.replay_values(&observations, &Tensor::from_data([[index], [0]], &device)),
-                Err(SACCriticError::InvalidActionIndex { .. })
+                network.replay_values(&observations, &Tensor::from_data([[index], [0]], &device)),
+                Err(SACCriticError::InvalidActionIndex { action_count: 3 })
             ));
         }
         assert!(matches!(
-            critic.replay_values(&observations, &Tensor::zeros([2, 2], &device)),
+            network.replay_values(&observations, &Tensor::zeros([2, 2], &device)),
             Err(SACCriticError::ShapeMismatch { .. })
         ));
     }
 
     #[test]
-    fn discrete_actor_gradients_reach_weights_but_not_critic_parameters() {
-        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-        let device = Device::flex().autodiff();
-        let weight = Tensor::<2>::ones([2, 3], &device).require_grad();
-        let critic = DiscreteVectorHeadCritic::new(SumModel {
-            weight: Param::from_tensor(weight.clone()),
-        });
-        let observations = Tensor::from_data([[1.0f32, 2.0]], &device);
-        let candidates = Tensor::<3, Int>::from_data([[[0i64], [1], [2]]], &device);
-        let values = critic.actor_values(&observations, &candidates).unwrap();
-        assert!(!values.is_require_grad());
-        let weights = Tensor::from_data([[[0.2f32], [0.3], [0.5]]], &device).require_grad();
-        let expected = numbers(values.clone());
-        let gradients = (values * weights.clone()).sum().backward();
-        assert_eq!(numbers(weights.grad(&gradients).unwrap()), expected);
-        assert!(weight.grad(&gradients).is_none());
-    }
-
-    #[test]
-    fn cloned_targets_are_independent_and_polyak_preserves_ids_and_dtypes() {
+    fn sac_wrapper_keeps_target_updates_and_optimizer_validation() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         for dtype in [DType::F32, DType::F64] {
-            let model = sum_model(3, dtype);
-            let id = model.weight.id;
-            let device = model.weight.val().device();
+            let device = Device::flex().autodiff();
             let mut critic = SACCritic::builder()
-                .online_network(ScalarStateActionCritic::new(model))
+                .online_network(ScalarStateActionCritic::new(SumModel {
+                    weight: Param::from_tensor(Tensor::ones([3, 1], (&device, dtype))),
+                }))
                 .optimizer(SgdConfig::new().init())
                 .learning_rate(0.5)
                 .build()
                 .unwrap();
-            assert_eq!(critic.target_network.module.weight.id, id);
-            assert!(!critic.target_network.module.weight.val().is_require_grad());
             let observations = Tensor::ones([1, 2], (&device, dtype));
             let actions = Tensor::ones([1, 1], (&device, dtype));
             let loss = critic
@@ -875,42 +836,48 @@ mod tests {
                 .unwrap()
                 .sum();
             critic.backward_step(&loss).unwrap();
-            assert_eq!(critic.online_network.module.weight.id, id);
-            assert_eq!(numbers(critic.online_network.module.weight.val()), [0.5; 3]);
-            assert_eq!(numbers(critic.target_network.module.weight.val()), [1.0; 3]);
-            critic.polyak_update(0.25).unwrap();
-            let target = &critic.target_network.module.weight;
-            assert_eq!(target.id, id);
-            assert_eq!(target.val().dims(), [3, 1]);
-            assert_eq!(target.val().dtype(), dtype);
-            assert_eq!(target.val().device(), device);
-            assert_eq!(numbers(target.val()), [0.875; 3]);
-            assert!(!target.val().is_require_grad());
-            critic.polyak_update(0.0).unwrap();
             assert_eq!(
-                numbers(critic.target_network.module.weight.val()),
-                [0.875; 3]
+                numbers(
+                    critic
+                        .online_replay_values::<2, 2, 3>(&observations, &actions)
+                        .unwrap()
+                ),
+                [1.5]
             );
-            critic.polyak_update(1.0).unwrap();
-            assert_eq!(numbers(critic.target_network.module.weight.val()), [0.5; 3]);
-            let candidates = Tensor::ones([1, 2, 1], (&device, dtype)).require_grad();
-            let values = critic
-                .target_policy_values::<2, 2, 3>(&observations, &candidates)
-                .unwrap();
-            assert!(!values.is_require_grad());
-            assert_eq!(numbers(values), [1.5; 2]);
-            let values = critic
+            assert_eq!(
+                numbers(
+                    critic
+                        .target_replay_values::<2, 2, 3>(&observations, &actions)
+                        .unwrap()
+                ),
+                [3.0]
+            );
+            critic.polyak_update(0.25).unwrap();
+            let target = critic
                 .target_replay_values::<2, 2, 3>(&observations, &actions)
                 .unwrap();
-            assert!(!values.is_require_grad());
-            assert_eq!(numbers(values), [1.5]);
-            let values = critic
-                .online_actor_values::<2, 2, 3>(&observations, &candidates)
-                .unwrap();
+            assert_eq!(target.dtype(), dtype);
+            assert!(!target.is_require_grad());
+            assert_eq!(numbers(target), [2.625]);
+            critic.polyak_update(0.0).unwrap();
             assert_eq!(
-                numbers(candidates.grad(&values.sum().backward()).unwrap()),
-                [0.5; 2]
+                numbers(
+                    critic
+                        .target_replay_values::<2, 2, 3>(&observations, &actions)
+                        .unwrap()
+                ),
+                [2.625]
             );
+            critic.polyak_update(1.0).unwrap();
+            assert_eq!(
+                numbers(
+                    critic
+                        .target_replay_values::<2, 2, 3>(&observations, &actions)
+                        .unwrap()
+                ),
+                [1.5]
+            );
+            critic.hard_update().unwrap();
             assert!(matches!(
                 critic.backward_step(&Tensor::ones([2], &device)),
                 Err(SACCriticError::ShapeMismatch { .. })
@@ -922,178 +889,64 @@ mod tests {
                 ));
             }
         }
-    }
-
-    #[test]
-    fn invalid_configuration_and_scalar_inputs_return_typed_errors() {
-        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         for rate in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(matches!(
                 SACCritic::builder()
-                    .online_network(sum_model(3, DType::F32))
+                    .online_network(burn::nn::Relu)
                     .optimizer(SgdConfig::new().init())
                     .learning_rate(rate)
                     .build(),
                 Err(SACCriticError::InvalidLearningRate)
             ));
         }
-        let model = sum_model(3, DType::F32);
-        let device = model.weight.val().device();
-        let critic = ScalarStateActionCritic::new(model);
-        let observations = Tensor::ones([2, 2], &device);
+    }
+
+    #[test]
+    fn sac_aggregation_preserves_modes_gradients_and_error_variants() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        for (mode, expected) in [
+            (SACCriticAggregationMode::Mean, 4.0),
+            (SACCriticAggregationMode::Median, 3.0),
+            (SACCriticAggregationMode::Min, 1.0),
+            (SACCriticAggregationMode::Max, 9.0),
+        ] {
+            let values = [1.0f64, 2.0, 9.0, 4.0]
+                .map(|value| Tensor::from_data([[value]], (&device, DType::F64)));
+            assert_eq!(
+                numbers(aggregate_critic_values::<2, 3>(&values, mode).unwrap()),
+                [expected]
+            );
+        }
+        let values = [1.0f64; 2]
+            .map(|value| Tensor::from_data([[value]], (&device, DType::F64)).require_grad());
+        let gradients = aggregate_critic_values::<2, 3>(&values, SACCriticAggregationMode::Min)
+            .unwrap()
+            .sum()
+            .backward();
+        for value in &values {
+            assert_eq!(numbers(value.grad(&gradients).unwrap()), [0.5]);
+        }
         assert!(matches!(
-            <_ as SACCriticNetwork<2, 2, 3>>::policy_values(
-                &critic,
-                &observations,
-                &Tensor::ones([1, 2, 1], &device)
-            ),
-            Err(SACCriticError::BatchMismatch { .. })
+            aggregate_critic_values::<2, 3>(&[], SACCriticAggregationMode::Mean),
+            Err(SACCriticError::NoCriticValues)
         ));
         assert!(matches!(
-            <_ as SACCriticNetwork<2, 2, 3>>::policy_values(
-                &critic,
-                &observations,
-                &Tensor::zeros([2, 0, 1], &device)
-            ),
-            Err(SACCriticError::EmptyInput)
-        ));
-        assert!(matches!(
-            <_ as SACCriticNetwork<2, 2, 3>>::policy_values(
-                &critic,
-                &observations,
-                &Tensor::ones([2, 2, 1], (&device, DType::F64))
-            ),
-            Err(SACCriticError::DTypeMismatch { .. })
-        ));
-        let wrong_output = ScalarStateActionCritic::new(burn::nn::Relu);
-        assert!(matches!(
-            <_ as SACCriticNetwork<2, 2, 3>>::policy_values(
-                &wrong_output,
-                &observations,
-                &Tensor::ones([2, 2, 1], &device)
+            aggregate_critic_values::<2, 3>(
+                &[Tensor::ones([1, 1], &device), Tensor::ones([2, 1], &device)],
+                SACCriticAggregationMode::Min
             ),
             Err(SACCriticError::ShapeMismatch { .. })
         ));
-    }
-
-    #[test]
-    fn native_model_target_matches_before_and_after_online_initialization() {
-        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-        use crate::models::MLP;
-
-        let device = Device::flex().autodiff();
-        let model = MLP::builder()
-            .input_size(3)
-            .output_size(1)
-            .hidden_layer_sizes(vec![4])
-            .options(&device)
-            .build()
-            .unwrap();
-        let mut critic = SACCritic::builder()
-            .online_network(ScalarStateActionCritic::new(model))
-            .optimizer(SgdConfig::new().init())
-            .learning_rate(0.01)
-            .build()
-            .unwrap();
-        let observations = Tensor::from_data([[1.0f32, 2.0]], &device);
-        let actions = Tensor::from_data([[3.0f32]], &device);
-        let initial_target = numbers(
-            critic
-                .target_replay_values::<2, 2, 3>(&observations, &actions)
-                .unwrap(),
-        );
-        let online = critic
-            .online_replay_values::<2, 2, 3>(&observations, &actions)
-            .unwrap();
-        assert_eq!(numbers(online.clone()), initial_target);
-        critic.backward_step(&online.sum()).unwrap();
-        assert_eq!(
-            numbers(
-                critic
-                    .target_replay_values::<2, 2, 3>(&observations, &actions)
-                    .unwrap()
-            ),
-            initial_target
-        );
-        critic.hard_update().unwrap();
-        assert_eq!(
-            numbers(
-                critic
-                    .target_replay_values::<2, 2, 3>(&observations, &actions)
-                    .unwrap()
-            ),
-            numbers(
-                critic
-                    .online_replay_values::<2, 2, 3>(&observations, &actions)
-                    .unwrap()
-            )
-        );
-    }
-
-    #[test]
-    fn aggregation_preserves_all_modes_even_medians_and_gradients() {
-        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-        let device = Device::flex().autodiff();
-        for (mode, expected, gradient) in [
-            (SACCriticAggregationMode::Mean, 2.0, [1.0 / 3.0; 3]),
-            (SACCriticAggregationMode::Min, 1.0, [1.0, 0.0, 0.0]),
-            (SACCriticAggregationMode::Max, 3.0, [0.0, 0.0, 1.0]),
-            (SACCriticAggregationMode::Median, 2.0, [0.0, 1.0, 0.0]),
-        ] {
-            let values = [1.0f64, 2.0, 3.0]
-                .map(|value| Tensor::from_data([[value]], (&device, DType::F64)).require_grad());
-            let result = aggregate_critic_values::<2, 3>(&values, mode).unwrap();
-            assert_eq!(numbers(result.clone()), [expected]);
-            assert_eq!(result.dtype(), DType::F64);
-            let gradients = result.sum().backward();
-            for (value, expected) in values.iter().zip(gradient) {
-                let actual = value.grad(&gradients).map(numbers).unwrap_or(vec![0.0])[0];
-                assert!(
-                    (actual - expected).abs() < 1e-12,
-                    "{mode:?}: {actual} != {expected}"
-                );
-            }
-        }
-        let values = [1.0f64, 2.0, 10.0, 4.0]
-            .map(|value| Tensor::from_data([[value]], (&device, DType::F64)).require_grad());
-        let median =
-            aggregate_critic_values::<2, 3>(&values, SACCriticAggregationMode::Median).unwrap();
-        assert_eq!(numbers(median.clone()), [3.0]);
-        let gradients = median.sum().backward();
-        assert_eq!(numbers(values[1].grad(&gradients).unwrap()), [0.5]);
-        assert_eq!(numbers(values[3].grad(&gradients).unwrap()), [0.5]);
-        for mode in [SACCriticAggregationMode::Min, SACCriticAggregationMode::Max] {
-            let tied =
-                [1.0f32; 3].map(|value| Tensor::from_data([[value]], &device).require_grad());
-            let gradients = aggregate_critic_values::<2, 3>(&tied, mode)
-                .unwrap()
-                .sum()
-                .backward();
-            for (value, expected) in tied.iter().zip([0.25, 0.25, 0.5]) {
-                assert_eq!(numbers(value.grad(&gradients).unwrap()), [expected]);
-            }
-        }
-    }
-
-    #[test]
-    fn aggregation_rejects_empty_mismatched_shapes_and_dtypes() {
-        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-        let device = Device::flex();
         assert!(matches!(
-            aggregate_critic_values::<2, 3>(&[], SACCriticAggregationMode::Min),
-            Err(SACCriticError::NoCriticValues)
+            aggregate_critic_values::<2, 3>(
+                &[
+                    Tensor::ones([1, 1], &device),
+                    Tensor::ones([1, 1], (&device, DType::F64))
+                ],
+                SACCriticAggregationMode::Max
+            ),
+            Err(SACCriticError::DTypeMismatch { .. })
         ));
-        for (shape, dtype) in [([2, 1], DType::F32), ([1, 1], DType::F64)] {
-            assert!(matches!(
-                aggregate_critic_values::<2, 3>(
-                    &[
-                        Tensor::ones([1, 1], &device),
-                        Tensor::ones(shape, (&device, dtype))
-                    ],
-                    SACCriticAggregationMode::Mean
-                ),
-                Err(SACCriticError::ShapeMismatch { .. } | SACCriticError::DTypeMismatch { .. })
-            ));
-        }
     }
 }

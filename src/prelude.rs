@@ -12,6 +12,10 @@ pub use crate::agents::{
         A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
         A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
     },
+    action_value_critic::{
+        ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
+        ActionValueCriticNetwork,
+    },
     // deterministic_actor_critic::{
     //     DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
     //     DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
