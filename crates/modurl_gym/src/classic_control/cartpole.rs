@@ -446,7 +446,6 @@ mod tests {
                 observation: _,
                 reward: _,
                 done: d,
-                truncated: _,
                 ..
             } = env.step(action).unwrap();
             done = d;
