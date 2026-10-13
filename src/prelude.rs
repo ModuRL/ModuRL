@@ -31,15 +31,11 @@ pub use crate::agents::{
         dqn::{DQNAgent, DQNLogger},
     },
     sac::{
-        DiscreteVectorHeadCritic, SACCritic, SACCriticAggregationMode, SACCriticError,
-        SACCriticNetwork, ScalarStateActionCritic,
+        DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
+        SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
+        SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
+        SACReplayError, ScalarStateActionCritic,
     },
-    // sac::{
-    //     DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
-    //     SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
-    //     SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
-    //     ScalarStateActionCritic,
-    // },
 };
 pub use crate::distributions::{
     AffineTransform, AffineTransformError, CategoricalDistribution, CategoricalDistributionError,
