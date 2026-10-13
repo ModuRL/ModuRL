@@ -34,7 +34,7 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank,
+    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
     Tensor<BA, AK>: PrevRank,
 {
     type Error = G::Error;

@@ -32,7 +32,8 @@ impl<G, F> InputMapMultiGymWrapper<G, F> {
     pub fn new<I, E, const O: usize, const A: usize>(gym: G, map_input: F) -> Self
     where
         G: MultiGym<I, O, A>,
-        Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
+        Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
+            PrevRank<Prev = <G::ObservationSpace as ObservationSpace<O>>::Observation>,
         F: FnMut(
             Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
         ) -> Result<Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>, E>,
@@ -57,7 +58,7 @@ impl<G, F, I, E, const O: usize, const A: usize, const U: usize, K: Basic, AK: B
     MultiGym<I, O, A> for InputMapMultiGymWrapper<G, F>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
@@ -114,6 +115,13 @@ impl<G, FReset, FStep> OutputMapMultiGymWrapper<G, FReset, FStep> {
     ) -> Self
     where
         G: MultiGym<I, O, A>,
+        G::ObservationSpace: ObservationSpace<
+                O,
+                Observation = Tensor<
+                    U,
+                    <<G as MultiGym<I, O, A>>::ObservationSpace as ObservationSpace<O>>::Kind,
+                >,
+            >,
         Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
             PrevRank<Prev = Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>>,
         Tensor<U, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
@@ -153,7 +161,7 @@ impl<G, FReset, FStep, I, E, const O: usize, const A: usize, const U: usize, K: 
     MultiGym<I, O, A> for OutputMapMultiGymWrapper<G, FReset, FStep>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
@@ -260,7 +268,7 @@ impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic> 
     for DeviceMultiGymWrapper<G>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,

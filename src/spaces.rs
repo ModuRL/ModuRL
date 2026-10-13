@@ -1,11 +1,40 @@
+use crate::tensor_rank::{NextRank, PrevRank};
 use burn::tensor::{DType, Device, Distribution, Float, Int, Tensor, kind::Basic};
 
 /// Checks which rank-`O` observation batches are valid.
 /// A single environment uses a batch of one.
-pub trait ObservationSpace<const O: usize> {
+/// The associated observation tensor omits the batch axis and preserves the tensor kind.
+///
+/// An observation type with the batch rank is rejected:
+///
+/// ```compile_fail
+/// use burn::tensor::{Float, Tensor};
+/// use modurl::spaces::ObservationSpace;
+///
+/// fn invalid_rank<S: ObservationSpace<2, Kind = Float, Observation = Tensor<2>>>() {}
+/// ```
+///
+/// An observation type with a different tensor kind is rejected:
+///
+/// ```compile_fail
+/// use burn::tensor::{Float, Int, Tensor};
+/// use modurl::spaces::ObservationSpace;
+///
+/// fn invalid_kind<S: ObservationSpace<2, Kind = Float, Observation = Tensor<1, Int>>>() {}
+/// ```
+pub trait ObservationSpace<const O: usize>
+where
+    Tensor<O, Self::Kind>: PrevRank<Prev = Self::Observation>,
+{
     type Kind: Basic;
+
+    /// The unbatched observation tensor, one rank below `O`, preserving the tensor kind.
+    /// Scalars use `[1]`; dtype and device belong to tensor values.
+    type Observation: NextRank<Next = Tensor<O, Self::Kind>>;
+
     /// Checks observations `[batch, ...self.shape()]` against the shape and bounds.
     fn contains(&self, values: &Tensor<O, Self::Kind>) -> bool;
+
     /// Returns the shape of one environment value, excluding the batch axis.
     fn shape(&self) -> Vec<usize>;
 }
@@ -78,6 +107,7 @@ impl Discrete {
 
 impl ObservationSpace<2> for Discrete {
     type Kind = Int;
+    type Observation = Tensor<1, Int>;
 
     /// Checks integer indices shaped `[batch_size, 1]` without changing the input.
     fn contains(&self, values: &Tensor<2, Int>) -> bool {
@@ -186,8 +216,12 @@ impl<const R: usize> BoxSpace<R> {
     }
 }
 
-impl<const R: usize> ObservationSpace<R> for BoxSpace<R> {
+impl<const R: usize> ObservationSpace<R> for BoxSpace<R>
+where
+    Tensor<R>: PrevRank,
+{
     type Kind = Float;
+    type Observation = <Tensor<R> as PrevRank>::Prev;
 
     /// Checks rank-R values `[batch_size, ...self.shape()]` without changing the input.
     fn contains(&self, values: &Tensor<R>) -> bool {
@@ -506,9 +540,13 @@ mod tests {
     fn observation_and_action_roles_use_independent_ranks() {
         let _guard = RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let observations: Box<dyn ObservationSpace<4, Kind = Float>> = Box::new(
-            BoxSpace::<4>::new_with_universal_bounds([1, 2, 3, 4], 0.0, 255.0, &device),
-        );
+        let observations: Box<dyn ObservationSpace<4, Kind = Float, Observation = Tensor<3>>> =
+            Box::new(BoxSpace::<4>::new_with_universal_bounds(
+                [1, 2, 3, 4],
+                0.0,
+                255.0,
+                &device,
+            ));
         let actions: Box<dyn ActionSpace<2, Kind = Int, Error = SpaceError>> =
             Box::new(Discrete::new(3));
         assert_eq!(observations.shape(), vec![2, 3, 4]);

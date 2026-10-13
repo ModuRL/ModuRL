@@ -23,10 +23,12 @@ pub use vectorized::{VectorizedGymError, VectorizedGymWrapper};
 /// `I` is reset and transition metadata; environments without metadata use `()`.
 pub trait Gym<I = (), const O: usize = 2, const A: usize = 2>
 where
-    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
+    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>:
+        PrevRank<Prev = <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
     Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>: PrevRank,
 {
     type Error;
+
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
 
@@ -37,10 +39,7 @@ where
         &mut self,
         action: <Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind> as PrevRank>::Prev,
     ) -> Result<
-        StepInfo<
-            I,
-            <Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind> as PrevRank>::Prev,
-        >,
+        StepInfo<I, <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
         Self::Error,
     >;
 
@@ -49,10 +48,7 @@ where
     fn reset(
         &mut self,
     ) -> Result<
-        ResetInfo<
-            I,
-            <Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind> as PrevRank>::Prev,
-        >,
+        ResetInfo<I, <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
         Self::Error,
     >;
 
@@ -67,9 +63,11 @@ where
 /// `O` and `A` are batch ranks; `PrevRank` determines the unbatched terminal observation type.
 pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2>
 where
-    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
+    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>:
+        PrevRank<Prev = <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
 {
     type Error;
+
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
 
@@ -80,10 +78,7 @@ where
         &mut self,
         action: Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>,
     ) -> Result<
-        MultiGymStepInfo<
-            I,
-            <Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind> as PrevRank>::Prev,
-        >,
+        MultiGymStepInfo<I, <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
         Self::Error,
     >;
 
@@ -191,7 +186,8 @@ struct GymBatchMetadata {
 fn batch_metadata<G, I, const O: usize, const A: usize>(gym: &G) -> GymBatchMetadata
 where
     G: MultiGym<I, O, A>,
-    Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
+    Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
+        PrevRank<Prev = <G::ObservationSpace as ObservationSpace<O>>::Observation>,
 {
     GymBatchMetadata {
         num_envs: gym.num_envs(),

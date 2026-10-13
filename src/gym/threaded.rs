@@ -39,7 +39,7 @@ fn start_worker<
 ) -> GymWorker<I, Tensor<U, K>, G::Error, A, AK>
 where
     G: MultiGym<I, O, A> + 'static,
-    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
@@ -79,7 +79,8 @@ where
 pub struct MultithreadedStackedMultiGym<G, I = (), const O: usize = 2, const A: usize = 2>
 where
     G: MultiGym<I, O, A>,
-    Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>: PrevRank,
+    Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>:
+        PrevRank<Prev = <G::ObservationSpace as ObservationSpace<O>>::Observation>,
 {
     groups: Vec<
         GymWorker<
@@ -99,7 +100,7 @@ impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic + 'static, A
     MultithreadedStackedMultiGym<G, I, O, A>
 where
     G: MultiGym<I, O, A> + 'static,
-    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
@@ -154,7 +155,7 @@ impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic + 'static, A
     MultiGym<I, O, A> for MultithreadedStackedMultiGym<G, I, O, A>
 where
     G: MultiGym<I, O, A> + 'static,
-    G::ObservationSpace: ObservationSpace<O, Kind = K>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
@@ -261,7 +262,8 @@ where
 pub struct MultithreadedVectorizedGymWrapper<G, I = (), const BO: usize = 2, const BA: usize = 2>
 where
     G: Gym<I, BO, BA>,
-    Tensor<BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind>: PrevRank,
+    Tensor<BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind>:
+        PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
     Tensor<BA, <G::ActionSpace as ActionSpace<BA>>::Kind>: PrevRank,
 {
     envs: Vec<
@@ -289,7 +291,7 @@ impl<
 > MultithreadedVectorizedGymWrapper<G, I, BO, BA>
 where
     G: Gym<I, BO, BA> + 'static,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Observation = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
@@ -342,7 +344,7 @@ impl<
 > MultiGym<I, BO, BA> for MultithreadedVectorizedGymWrapper<G, I, BO, BA>
 where
     G: Gym<I, BO, BA> + 'static,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Observation = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,

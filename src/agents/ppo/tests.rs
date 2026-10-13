@@ -383,6 +383,7 @@ mod schedule_tests {
 
         impl ObservationSpace<2> for BoolSpace {
             type Kind = Bool;
+            type Observation = Tensor<1, Bool>;
 
             /// Accepts Bool observations [batch_size, 1] without changing their dtype, device, or axes.
             fn contains(&self, values: &Tensor<2, Bool>) -> bool {
@@ -507,6 +508,7 @@ mod schedule_tests {
 
         impl ObservationSpace<2> for BooleanSpace {
             type Kind = Bool;
+            type Observation = Tensor<1, Bool>;
 
             /// Checks Bool observations [batch_size, 1] without changing their layout, dtype, or device.
             fn contains(&self, values: &Tensor<2, Bool>) -> bool {
