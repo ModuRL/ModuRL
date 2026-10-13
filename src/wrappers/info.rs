@@ -51,7 +51,7 @@ where
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
-    Tensor<BA, AK>: PrevRank,
+    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = G::Error;
     type ObservationSpace = G::ObservationSpace;
@@ -78,7 +78,7 @@ where
     /// Preserves tensor shapes, kinds, dtypes, and devices, subject to the inner gym's input requirements.
     fn step(
         &mut self,
-        action: <Tensor<BA, AK> as PrevRank>::Prev,
+        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
     ) -> Result<StepInfo<EpisodeStatisticsInfo<I>, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error>
     {
         let step = self.gym.step(action)?;
@@ -143,7 +143,7 @@ where
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
-    Tensor<BA, AK>: PrevRank,
+    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = G::Error;
     type ObservationSpace = G::ObservationSpace;
@@ -167,7 +167,7 @@ where
     /// Preserves tensor shapes, kinds, dtypes, and devices, subject to the inner gym's input requirements.
     fn step(
         &mut self,
-        action: <Tensor<BA, AK> as PrevRank>::Prev,
+        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
     ) -> Result<StepInfo<RawRewardInfo<I>, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
         let step = self.gym.step(action)?;
         Ok(StepInfo {
