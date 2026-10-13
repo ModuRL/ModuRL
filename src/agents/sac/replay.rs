@@ -123,6 +123,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
         const {
             assert!(O >= 2 && A >= 2, "replay needs capacity and item axes");
         }
+
         let capacity = observation_shape[0];
         if action_shape[0] != capacity {
             return Err(SACReplayError::Shape {
@@ -131,11 +132,13 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
                 actual: vec![action_shape[0]],
             });
         }
+
         let observations = AlignedObservationReplay::new(
             observation_shape,
             environment_count,
             (&device, observation_dtype),
         )?;
+
         Ok(Self {
             observations,
             actions: TensorReplayColumn::new(action_shape, (&device, action_dtype)),
@@ -157,6 +160,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
         observation_shape[0] = count;
         let mut action_shape = self.actions.tensor().dims();
         action_shape[0] = count;
+
         validate_shape("observations", &transitions.observations, observation_shape)?;
         validate_shape(
             "next observations",
@@ -176,6 +180,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
             &transitions.entropy_change_weights,
             [count, 1],
         )?;
+
         if transitions.truncateds.len() != count {
             return Err(ReplayStorageError::BatchLengthMismatch {
                 field: "truncations",
@@ -184,6 +189,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
             }
             .into());
         }
+
         let dtype = self.observations.observations().dtype();
         for actual in [
             transitions.observations.dtype(),
@@ -196,7 +202,9 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
                 });
             }
         }
+
         self.validate_environment_count(count)?;
+
         Ok(count)
     }
 
@@ -244,6 +252,7 @@ where
         let device = self.rewards.tensor().device();
         let statistics_dtype = self.rewards.tensor().dtype();
         let action_dtype = self.actions.tensor().dtype();
+
         self.observations.insert(
             start,
             transitions.observations.to_device(&device),
@@ -254,6 +263,7 @@ where
             start,
             <DType as Cast<A, L>>::cast(transitions.actions.to_device(&device), action_dtype),
         )?;
+
         self.rewards.write(
             start,
             transitions
@@ -263,6 +273,7 @@ where
         )?;
         self.terminated
             .write(start, transitions.terminated.to_device(&device))?;
+
         self.collection_policy_entropies.write(
             start,
             transitions
@@ -277,6 +288,7 @@ where
                 .to_device(&device)
                 .cast(statistics_dtype),
         )?;
+
         Ok(count)
     }
 
@@ -285,6 +297,7 @@ where
     fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
         let (observations, next_observations) = self.observations.gather(indices)?;
         let rows = replay_index_tensor(indices, &self.rewards.tensor().device())?;
+
         Ok(SACOptimizationBatch {
             observations,
             next_observations,

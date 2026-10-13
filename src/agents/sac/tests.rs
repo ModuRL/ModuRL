@@ -10,7 +10,7 @@ use crate::{
 };
 use burn::{
     optim::SgdConfig,
-    tensor::{Float, Int},
+    tensor::{Device, Float, Int},
 };
 use std::convert::Infallible;
 
