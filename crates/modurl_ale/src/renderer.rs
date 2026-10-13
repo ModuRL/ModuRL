@@ -8,32 +8,34 @@ pub(crate) struct Renderer {
 }
 
 impl Renderer {
-    pub(crate) fn new(width: usize, height: usize, title: &str, render_to_window: bool) -> Self {
+    pub(crate) fn new(
+        width: usize,
+        height: usize,
+        title: &str,
+        render_to_window: bool,
+    ) -> Result<Self, minifb::Error> {
         let window = if render_to_window {
-            Some(
-                Window::new(title, width, height, WindowOptions::default()).expect("create window"),
-            )
+            Some(Window::new(title, width, height, WindowOptions::default())?)
         } else {
             None
         };
 
-        Self {
+        Ok(Self {
             window,
             buffer: vec![0; width * height],
             width,
             height,
-        }
+        })
     }
 
     pub(crate) fn set_buffer(&mut self, buffer: &[u32]) {
         self.buffer.copy_from_slice(buffer);
     }
 
-    pub(crate) fn present(&mut self) {
+    pub(crate) fn present(&mut self) -> Result<(), minifb::Error> {
         if let Some(window) = &mut self.window {
-            window
-                .update_with_buffer(&self.buffer, self.width, self.height)
-                .unwrap();
+            window.update_with_buffer(&self.buffer, self.width, self.height)?;
         }
+        Ok(())
     }
 }

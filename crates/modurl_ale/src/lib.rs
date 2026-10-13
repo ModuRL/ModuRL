@@ -1,5 +1,3 @@
-#![cfg(any())]
-
 //! Atari 2600 environments backed by the Arcade Learning Environment (ALE).
 //!
 //! No ROMs are included or downloaded. Supply a filesystem path to a ROM you are legally
@@ -13,4 +11,7 @@ mod bindings;
 mod renderer;
 pub mod wrappers;
 
-pub use atari::{AtariGym, AtariGymError, AtariInfo, AtariObsType};
+pub use atari::{
+    AtariGym, AtariGymError, AtariInfo, AtariObservationMode, AtariObservationSpace,
+    GrayscaleScreen, Ram, RgbScreen,
+};
