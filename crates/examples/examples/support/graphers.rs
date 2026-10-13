@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use candle_core::{Device, Tensor};
+use burn::tensor::{Device, Tensor};
 use modurl::prelude::*;
 use modurl_logger::{Aggregation, AggregationConfig, Logger, TensorBoardLogger, TerminalLogger};
 
@@ -106,21 +106,19 @@ impl<EpisodeSource> DQNGrapher<EpisodeSource> {
         }
 
         let count = self.pending_updates as f64;
-        let loss = Tensor::new(
-            (self.pending_loss.take().unwrap() / count)
+        let loss = Tensor::from_data(
+            [(self.pending_loss.take().unwrap() / count)
                 .try_into_scalar::<f32>()
-                .unwrap(),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let mean_q_value = Tensor::new(
-            (self.pending_q_value.take().unwrap() / count)
+                .unwrap()],
+            &Device::flex(),
+        );
+        let mean_q_value = Tensor::from_data(
+            [(self.pending_q_value.take().unwrap() / count)
                 .try_into_scalar::<f32>()
-                .unwrap(),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let epsilon = Tensor::new(self.pending_epsilon, &Device::Cpu).unwrap();
+                .unwrap()],
+            &Device::flex(),
+        );
+        let epsilon = Tensor::from_data([self.pending_epsilon], &Device::flex());
         self.terminal
             .log(
                 self.pending_timestep,
@@ -135,8 +133,8 @@ impl<EpisodeSource> DQNGrapher<EpisodeSource> {
     }
 
     fn log_episode(&mut self, timestep: usize, episode_return: f32, episode_length: usize) {
-        let episode_return = Tensor::new(episode_return, &Device::Cpu).unwrap();
-        let episode_length = Tensor::new(episode_length as f32, &Device::Cpu).unwrap();
+        let episode_return = Tensor::from_data([episode_return], &Device::flex());
+        let episode_length = Tensor::from_data([episode_length as f32], &Device::flex());
         self.terminal
             .log(
                 timestep,
@@ -226,15 +224,9 @@ impl PPOGrapher {
     }
 }
 
-/// Averages a rank-D Burn metric over all axes, reads it to the host, and returns one Candle scalar `[]`.
-fn on_policy_metric<const D: usize>(value: &burn::tensor::Tensor<D>) -> Tensor {
-    let value = value
-        .clone()
-        .detach()
-        .mean()
-        .try_into_scalar::<f32>()
-        .expect("failed to read on-policy metric");
-    Tensor::new(value, &Device::Cpu).unwrap()
+/// Averages a rank-D Float metric over all axes, returning a detached Float tensor [1] on the input device.
+fn on_policy_metric<const D: usize>(value: &Tensor<D>) -> Tensor<1> {
+    value.clone().detach().mean()
 }
 
 impl PPOLogger for PPOGrapher {
@@ -260,8 +252,9 @@ impl PPOLogger for PPOGrapher {
 
     fn log_collection(&mut self, info: &PPOCollectionLogEntry) {
         for episode in &info.completed_episodes {
-            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            let episode_return = Tensor::from_data([episode.episode_return], &Device::flex());
+            let episode_length =
+                Tensor::from_data([episode.episode_length as f32], &Device::flex());
             self.terminal
                 .log(
                     episode.collection_timestep,
@@ -345,11 +338,10 @@ impl<EpisodeSource> OnPolicyGrapher<EpisodeSource> {
         if new_timestep {
             self.timestep = info.timestep;
             if self.raw_reward_samples > 0 {
-                let mean_raw_reward = Tensor::new(
-                    self.raw_reward_sum / self.raw_reward_samples as f32,
-                    &Device::Cpu,
-                )
-                .unwrap();
+                let mean_raw_reward = Tensor::from_data(
+                    [self.raw_reward_sum / self.raw_reward_samples as f32],
+                    &Device::flex(),
+                );
                 self.log_terminal_and_tensorboard(
                     info.timestep,
                     &[("Mean Raw Step Reward", &mean_raw_reward)],
@@ -385,8 +377,8 @@ impl<EpisodeSource> OnPolicyGrapher<EpisodeSource> {
     }
 
     fn record_episode(&mut self, timestep: usize, episode_return: f32, episode_length: usize) {
-        let episode_return = Tensor::new(episode_return, &Device::Cpu).unwrap();
-        let episode_length = Tensor::new(episode_length as f32, &Device::Cpu).unwrap();
+        let episode_return = Tensor::from_data([episode_return], &Device::flex());
+        let episode_length = Tensor::from_data([episode_length as f32], &Device::flex());
         self.log_terminal_and_tensorboard(
             timestep,
             &[
@@ -421,7 +413,7 @@ impl<EpisodeSource> OnPolicyGrapher<EpisodeSource> {
     }
 
     /// Logs named scalar metric tensors, each shaped `[]`.
-    fn log_terminal_and_tensorboard(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) {
+    fn log_terminal_and_tensorboard(&mut self, timestep: usize, metrics: &[(&str, &Tensor<1>)]) {
         self.terminal.log(timestep, metrics).unwrap();
         self.tensorboard.log(timestep, metrics).unwrap();
     }
@@ -548,7 +540,7 @@ impl<I> SACLogger<I> for SACGrapher {
         let entropy_change_loss = entry.entropy_change_loss.as_ref().map(on_policy_metric);
         let target_entropy = entry
             .target_entropy
-            .map(|value| Tensor::new(value, &Device::Cpu).unwrap());
+            .map(|value| Tensor::from_data([value], &Device::flex()));
 
         let mut metrics = vec![
             ("Critic Loss", &critic_loss),
@@ -590,8 +582,9 @@ impl<I> SACLogger<I> for SACGrapher {
         // Update metrics may already have advanced this monotonic logger, so
         // completed episodes are intentionally recorded at the batch time.
         for episode in &entry.completed_episodes {
-            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            let episode_return = Tensor::from_data([episode.episode_return], &Device::flex());
+            let episode_length =
+                Tensor::from_data([episode.episode_length as f32], &Device::flex());
             self.terminal
                 .log(
                     entry.collection_timestep,
@@ -645,11 +638,10 @@ impl DeterministicActorCriticGrapher {
         ));
         let bellman_target = on_policy_metric(&entry.bellman_targets);
         let replay_reward = on_policy_metric(&entry.replay_rewards);
-        let exploration_noise = Tensor::new(
-            entry.exploration_noise_standard_deviation as f32,
-            &Device::Cpu,
-        )
-        .unwrap();
+        let exploration_noise = Tensor::from_data(
+            [entry.exploration_noise_standard_deviation as f32],
+            &Device::flex(),
+        );
         let actor_loss = entry.actor_loss.as_ref().map(on_policy_metric);
         let policy_q = entry.policy_q_values.as_ref().map(on_policy_metric);
 
@@ -688,8 +680,9 @@ impl DeterministicActorCriticGrapher {
         // See the SAC grapher: completed episodes use the enclosing batch time
         // because optimization metrics may already have advanced the logger.
         for episode in &entry.completed_episodes {
-            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            let episode_return = Tensor::from_data([episode.episode_return], &Device::flex());
+            let episode_length =
+                Tensor::from_data([episode.episode_length as f32], &Device::flex());
             self.terminal
                 .log(
                     entry.collection_timestep,
@@ -873,7 +866,7 @@ mod tests {
         ));
         let mut logger = TerminalLogger::new(aggregation);
         for timestep in 0..=100 {
-            let value = Tensor::new(timestep as f32, &Device::Cpu).unwrap();
+            let value = Tensor::from_data([timestep as f32], &Device::flex());
             logger
                 .log(
                     timestep,
@@ -980,7 +973,7 @@ mod tests {
     #[test]
     fn deterministic_grapher_uses_batch_timestep_for_completed_episodes() {
         let mut grapher = DeterministicActorCriticGrapher::new();
-        let update_metric = Tensor::new(1.0_f32, &Device::Cpu).unwrap();
+        let update_metric = Tensor::from_data([1.0_f32], &Device::flex());
         grapher
             .terminal
             .log(6_000, &[("Update", &update_metric)])

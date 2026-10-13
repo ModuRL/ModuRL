@@ -4712,7 +4712,7 @@ dependencies = [
 name = "modurl_logger"
 version = "0.1.0"
 dependencies = [
- "candle-core",
+ "burn",
  "console",
  "crc",
  "prost",
