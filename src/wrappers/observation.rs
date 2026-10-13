@@ -2,7 +2,7 @@
 
 use crate::gym::{Gym, ResetInfo, StepInfo};
 use crate::spaces::{ActionSpace, BoxSpace, ObservationSpace};
-use crate::tensor_rank::{NextRank, PrevRank};
+use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{
     Tensor,
     kind::{Basic, Ordered},
@@ -23,19 +23,17 @@ pub enum FrameStackGymError<E> {
 /// Supported stacked batch ranks are 3 through 1025, as defined by `PrevRank`.
 pub struct FrameStackGym<G, const BF: usize = 3, S = BoxSpace<BF>>
 where
-    S: ObservationSpace<BF>,
-    Tensor<BF, S::Kind>: PrevRank<Prev = S::Observation>,
-    <Tensor<BF, S::Kind> as PrevRank>::Prev: PrevRank,
+    S: ObservationSpace<BF, Item: PrevRank>,
 {
     gym: G,
     stack_size: usize,
-    frames: VecDeque<<<Tensor<BF, S::Kind> as PrevRank>::Prev as PrevRank>::Prev>,
+    frames: VecDeque<<S::Item as PrevRank>::Prev>,
     observation_space: S,
 }
 
 impl<G, const O: usize, const F: usize, const BF: usize, S, K: Basic> FrameStackGym<G, BF, S>
 where
-    S: ObservationSpace<BF, Kind = K, Observation = Tensor<F, K>>,
+    S: ObservationSpace<BF, Kind = K, Item = Tensor<F, K>>,
     Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
     Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
@@ -69,10 +67,9 @@ impl<G, I, const O: usize, const BA: usize, const F: usize, const BF: usize, S, 
     Gym<I, BF, BA> for FrameStackGym<G, BF, S>
 where
     G: Gym<I, F, BA>,
-    G::ObservationSpace: ObservationSpace<F, Kind = K, Observation = Tensor<O, K>>,
+    G::ObservationSpace: ObservationSpace<F, Kind = K, Item = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
-    S: ObservationSpace<BF, Kind = K, Observation = Tensor<F, K>> + Clone,
+    S: ObservationSpace<BF, Kind = K, Item = Tensor<F, K>> + Clone,
     Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
     Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
@@ -98,7 +95,7 @@ where
     /// Returns rank `F` with `[frame_count, ...observation_shape]`, or `[frame_count, 1]` for scalars, preserving kind, dtype, and device.
     fn step(
         &mut self,
-        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
     ) -> Result<StepInfo<I, Tensor<F, K>>, Self::Error> {
         let step = self
             .gym
@@ -149,11 +146,10 @@ impl<G, I, const O: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic
     for MaxAndSkipGym<G>
 where
     G: Gym<I, BO, BA>,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K, Observation = Tensor<O, K>>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
-    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
     K: Ordered,
 {
     type Error = MaxAndSkipGymError<G::Error>;
@@ -169,7 +165,7 @@ where
     /// Preserves item axes, numeric kind, dtype, and device; scalars use `[1]`. Stops on termination or truncation.
     fn step(
         &mut self,
-        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
     ) -> Result<StepInfo<I, Tensor<O, K>>, Self::Error> {
         let mut step = self
             .gym
@@ -207,6 +203,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::tensor_rank::TensorBatchTypes;
     use crate::{
         gym::Gym,
         spaces::{BoxSpace, ObservationSpace},
@@ -224,13 +221,19 @@ mod tests {
         kind: PhantomData<K>,
     }
 
-    impl<const D: usize, K: Basic> ObservationSpace<D> for TypedSpace<D, K>
+    impl<const D: usize, K: Basic> TensorBatchTypes for TypedSpace<D, K>
     where
         Tensor<D, K>: PrevRank,
     {
         type Kind = K;
-        type Observation = <Tensor<D, K> as PrevRank>::Prev;
+        type Item = <Tensor<D, K> as PrevRank>::Prev;
+        type Batch = Tensor<D, K>;
+    }
 
+    impl<const D: usize, K: Basic> ObservationSpace<D> for TypedSpace<D, K>
+    where
+        Tensor<D, K>: PrevRank,
+    {
         /// Checks the rank-`D` batch's item axes against the declared item shape without inspecting values.
         fn contains(&self, values: &Tensor<D, K>) -> bool {
             values.dims()[1..] == self.shape[1..]

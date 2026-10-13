@@ -10,6 +10,7 @@ use super::{
         SeparatePPONetwork, SharedPPONetwork,
     },
 };
+use crate::tensor_rank::TensorBatchTypes;
 use crate::{buffers::experience::ExperienceBatchError, sampling::SamplingError};
 use crate::{
     gym::MultiGym,
@@ -231,9 +232,8 @@ impl<
     >
 where
     N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
+    OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
     AS: ActionMap<L, A>,
-    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>:
@@ -333,9 +333,8 @@ impl<
     >
 where
     N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
+    OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
     AS: ActionMap<L, A>,
-    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,

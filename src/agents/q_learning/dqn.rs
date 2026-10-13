@@ -1,3 +1,4 @@
+use crate::tensor_rank::TensorBatchTypes;
 use bon::bon;
 use burn::{
     module::Module,
@@ -75,7 +76,6 @@ impl QLearningTarget for DQNTarget {
 pub struct DQNAgent<'a, M, S, GE, I = (), const R: usize = 2>
 where
     S: ObservationSpace<R>,
-    Tensor<R, S::Kind>: PrevRank<Prev = S::Observation>,
     S::Kind: Autodiff,
 {
     inner: QLearningAgent<M, S, GE, DQNTarget, R>,
@@ -86,7 +86,6 @@ where
 impl<'a, M, S, GE, I, const R: usize, ME: std::fmt::Debug> DQNAgent<'a, M, S, GE, I, R>
 where
     S: ObservationSpace<R>,
-    Tensor<R, S::Kind>: PrevRank<Prev = S::Observation>,
     S::Kind: Autodiff,
     M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float, Error = ME>,
     GE: std::fmt::Debug,
@@ -153,7 +152,7 @@ where
 
 impl<M, S, GE, I, const R: usize, const U: usize> Agent<I, R, 2> for DQNAgent<'_, M, S, GE, I, R>
 where
-    S: ObservationSpace<R, Observation = Tensor<U, <S as ObservationSpace<R>>::Kind>>,
+    S: ObservationSpace<R, Item = Tensor<U, <S as TensorBatchTypes>::Kind>>,
     S::Kind: Autodiff,
     M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float>,
     M::Error: std::fmt::Debug,
