@@ -214,11 +214,12 @@ fn batch_offsets<E>(
 /// Concatenates observations `[group_size, ...observation_shape]` and rewards `[group_size, 1]` along the batch axis.
 /// Returns `[total_size, ...observation_shape]` of rank `O` and rewards `[total_size, 1]`, preserving each tensor's kind, dtype, device, and gradients.
 /// Groups must share item dimensions, dtypes, and devices. Metadata, flags, and terminal observations retain group order.
-fn combine_steps<I, const O: usize, K: Basic, const U: usize>(
-    steps: Vec<MultiGymStepInfo<I, Tensor<U, K>>>,
-) -> MultiGymStepInfo<I, Tensor<U, K>>
+/// Item type `T` has rank `O - 1`; its observation batch is native `Tensor<O, K>`.
+fn combine_steps<I, T, const O: usize, K: Basic>(
+    steps: Vec<MultiGymStepInfo<I, T>>,
+) -> MultiGymStepInfo<I, T>
 where
-    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    T: NextRank<Next = Tensor<O, K>>,
 {
     let count = steps.iter().map(|step| step.infos.len()).sum();
     let mut observations = Vec::with_capacity(steps.len());
