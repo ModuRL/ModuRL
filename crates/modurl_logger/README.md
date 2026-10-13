@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-candle-core = "0.11.0"
+burn = { version = "=0.22.0", default-features = false, features = ["std", "flex"] }
 modurl_logger = "0.1.0"
 ```
 
@@ -18,13 +18,13 @@ modurl_logger = "0.1.0"
 Log two loss values and display them as a terminal graph:
 
 ```rust
-use candle_core::{Device, Tensor};
+use burn::tensor::{Device, Tensor};
 use modurl_logger::{Error, Logger, TerminalLogger};
 
 fn main() -> Result<(), Error> {
-    let device = Device::Cpu;
-    let first_loss = Tensor::new(0.8_f32, &device)?;
-    let second_loss = Tensor::new(0.3_f32, &device)?;
+    let device = Device::flex();
+    let first_loss = Tensor::<1>::from_data([0.8_f32], &device);
+    let second_loss = Tensor::<1>::from_data([0.3_f32], &device);
     let mut logger = TerminalLogger::default();
 
     logger.log(100, &[("loss", &first_loss)])?;
@@ -34,7 +34,7 @@ fn main() -> Result<(), Error> {
 }
 ```
 
-`Logger::log` accepts named numeric tensors shaped `[]`. A larger timestep completes the preceding timestep. Call `finish` or `display` after the last entry so the logger processes the final timestep.
+`Logger::log` accepts named Float tensors shaped `[1]`. A larger timestep completes the preceding timestep. Call `finish` or `display` after the last entry so the logger processes the final timestep.
 
 ## Backends
 
