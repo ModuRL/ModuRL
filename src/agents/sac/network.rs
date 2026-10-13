@@ -204,6 +204,7 @@ where
                 "candidates must add one axis to batched actions"
             );
         }
+
         validate_critic_inputs(observations, candidate_actions)?;
         if observations.dtype() != candidate_actions.dtype() {
             return Err(SACCriticError::DTypeMismatch {
@@ -211,10 +212,12 @@ where
                 actual: candidate_actions.dtype(),
             });
         }
+
         let batch_size = observations.dims()[0];
         let candidate_count = candidate_actions.dims()[1];
         let observation_size = observations.dims()[1..].iter().product::<usize>();
         let action_size = candidate_actions.dims()[2..].iter().product::<usize>();
+
         let inputs = Tensor::cat(
             vec![
                 observations
@@ -229,6 +232,7 @@ where
             2,
         )
         .reshape([batch_size * candidate_count, observation_size + action_size]);
+
         let values = self
             .module
             .forward(inputs)
@@ -327,6 +331,7 @@ where
                 actual: actions.dims().to_vec(),
             });
         }
+
         self.policy_values(observations, &actions.clone().unsqueeze_dim::<3>(1))
             .map(|values| values.squeeze_dim(1))
     }
@@ -346,6 +351,7 @@ where
                 actual: candidate_actions.dims().to_vec(),
             });
         }
+
         let values = self
             .module
             .forward(observations.clone())
@@ -359,6 +365,7 @@ where
         if values.device() != candidate_actions.device() {
             return Err(SACCriticError::DeviceMismatch);
         }
+
         let action_count = values.dims()[1];
         let invalid = candidate_actions.clone().lower_elem(0).bool_or(
             candidate_actions
@@ -368,6 +375,7 @@ where
         if invalid.any().try_into_scalar::<bool>()? {
             return Err(SACCriticError::InvalidActionIndex { action_count });
         }
+
         Ok(values
             .gather(1, candidate_actions.clone().squeeze_dim::<2>(2))
             .unsqueeze_dim(2))
@@ -434,8 +442,10 @@ impl<N: Module> SACCritic<N> {
         if !learning_rate.is_finite() || learning_rate <= 0.0 {
             return Err(SACCriticError::InvalidLearningRate);
         }
+
         let online_network = online_network.train();
         let target_network = online_network.clone().valid();
+
         Ok(Self {
             online_network,
             target_network,
@@ -453,6 +463,7 @@ impl<N: Module> SACCritic<N> {
                 actual: loss.dims().to_vec(),
             });
         }
+
         let gradients = GradientsParams::from_grads(loss.clone().backward(), &self.online_network);
         self.online_network =
             self.optimizer
@@ -606,6 +617,7 @@ pub fn aggregate_critic_values<const D: usize, const S: usize>(
     let Some(first) = values.first() else {
         return Err(SACCriticError::NoCriticValues);
     };
+
     for value in &values[1..] {
         if value.dims() != first.dims() {
             return Err(SACCriticError::ShapeMismatch {
@@ -623,6 +635,7 @@ pub fn aggregate_critic_values<const D: usize, const S: usize>(
             return Err(SACCriticError::DeviceMismatch);
         }
     }
+
     Ok(match mode {
         SACCriticAggregationMode::Mean => Tensor::stack::<S>(values.to_vec(), D)
             .mean_dim(D)
