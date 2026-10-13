@@ -102,29 +102,22 @@ pub struct OutputMapMultiGymWrapper<G, FReset, FStep> {
 
 impl<G, FReset, FStep> OutputMapMultiGymWrapper<G, FReset, FStep> {
     /// Creates callbacks for rank-`O` observations `[num_envs, ...observation_shape]` and complete step results.
-    /// Step callbacks also receive rewards `[num_envs, 1]` and unbatched rank-`U` terminal observations.
+    /// Step callbacks also receive rewards `[num_envs, 1]` and terminal observations without the batch axis.
     /// Callbacks must preserve layouts and native kinds; they control output dtypes and devices.
-    pub fn new<I, E, const O: usize, const A: usize, const U: usize>(
+    pub fn new<I, E, const O: usize, const A: usize>(
         gym: G,
         map_reset: FReset,
         map_step: FStep,
     ) -> Self
     where
         G: MultiGym<I, O, A>,
-        G::ObservationSpace:
-            ObservationSpace<O, Item = Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
-        Tensor<O, <G::ObservationSpace as TensorBatchTypes>::Kind>:
-            PrevRank<Prev = Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
-        Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>:
-            NextRank<Next = Tensor<O, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
         FReset: FnMut(
-            Tensor<O, <G::ObservationSpace as TensorBatchTypes>::Kind>,
-        )
-            -> Result<Tensor<O, <G::ObservationSpace as TensorBatchTypes>::Kind>, E>,
+            <G::ObservationSpace as TensorBatchTypes>::Batch,
+        ) -> Result<<G::ObservationSpace as TensorBatchTypes>::Batch, E>,
         FStep: FnMut(
-            MultiGymStepInfo<I, Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
+            MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>,
         ) -> Result<
-            MultiGymStepInfo<I, Tensor<U, <G::ObservationSpace as TensorBatchTypes>::Kind>>,
+            MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>,
             E,
         >,
     {
@@ -148,33 +141,35 @@ impl<G, FReset, FStep> OutputMapMultiGymWrapper<G, FReset, FStep> {
     }
 }
 
-impl<G, FReset, FStep, I, E, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic>
-    MultiGym<I, O, A> for OutputMapMultiGymWrapper<G, FReset, FStep>
+impl<G, FReset, FStep, I, E, const O: usize, const A: usize> MultiGym<I, O, A>
+    for OutputMapMultiGymWrapper<G, FReset, FStep>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-    G::ActionSpace: ActionSpace<A, Kind = AK>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
-    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
-    FReset: FnMut(Tensor<O, K>) -> Result<Tensor<O, K>, E>,
-    FStep: FnMut(MultiGymStepInfo<I, Tensor<U, K>>) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, E>,
+    FReset: FnMut(
+        <G::ObservationSpace as TensorBatchTypes>::Batch,
+    ) -> Result<<G::ObservationSpace as TensorBatchTypes>::Batch, E>,
+    FStep: FnMut(
+        MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>,
+    )
+        -> Result<MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, E>,
 {
     type Error = TensorMapMultiGymError<G::Error, E>;
     type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
 
     /// Forwards rank-`A` actions `[num_envs, ...action_shape]` and maps the complete step result.
-    /// Observations retain rank `O`, rewards retain rank 1, and unbatched terminal observations retain rank `U`.
+    /// Observations retain rank `O`, rewards retain `[num_envs, 1]`, and terminal observations omit the batch axis.
     fn step(
         &mut self,
-        action: Tensor<A, AK>,
-    ) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, Self::Error> {
+        action: <G::ActionSpace as TensorBatchTypes>::Batch,
+    ) -> Result<MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error>
+    {
         let step = self.gym.step(action).map_err(TensorMapMultiGymError::Gym)?;
         (self.map_step)(step).map_err(TensorMapMultiGymError::Mapping)
     }
 
     /// Maps rank-`O` reset observations `[num_envs, ...observation_shape]` without changing the layout or kind.
-    fn reset(&mut self) -> Result<Tensor<O, K>, Self::Error> {
+    fn reset(&mut self) -> Result<<G::ObservationSpace as TensorBatchTypes>::Batch, Self::Error> {
         let observations = self.gym.reset().map_err(TensorMapMultiGymError::Gym)?;
         (self.map_reset)(observations).map_err(TensorMapMultiGymError::Mapping)
     }
