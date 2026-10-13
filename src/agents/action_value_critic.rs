@@ -435,6 +435,11 @@ impl<N: Module> ActionValueCritic<N> {
         &self.online_network
     }
 
+    /// Returns the learning rate used for online critic updates.
+    pub(crate) fn learning_rate(&self) -> f64 {
+        self.learning_rate
+    }
+
     /// Returns the detached target model for evaluation and parameter inspection.
     pub(crate) fn target_network(&self) -> &N {
         &self.target_network
@@ -498,15 +503,7 @@ impl<N: Module> ActionValueCritic<N> {
         if tau == 1.0 {
             return self.hard_update();
         }
-        let mut values = ActionValueParameterValues {
-            values: GradientsParams::new(),
-        };
-        self.online_network.visit(&mut values);
-        let mut mapper = ActionValueTargetUpdate {
-            values: values.values,
-            tau,
-        };
-        self.target_network = self.target_network.clone().map(&mut mapper).valid();
+        self.target_network = interpolate_target_model(&self.online_network, self.target_network.clone(), tau);
         Ok(())
     }
 
@@ -565,6 +562,21 @@ impl<N: Module> ActionValueCritic<N> {
             .replay_values(observations, actions)
             .map(Tensor::detach)
     }
+}
+
+/// Updates a cloned target model with tau * online + (1 - tau) * target and disables target gradients.
+/// Parameter IDs, shapes, dtypes, and devices must match. Tau must be finite and in 0..=1.
+pub(crate) fn interpolate_target_model<N: Module>(online: &N, target: N, tau: f64) -> N {
+    if tau == 0.0 {
+        return target;
+    }
+    if tau == 1.0 {
+        return online.clone().valid();
+    }
+    let mut values = ActionValueParameterValues { values: GradientsParams::new() };
+    online.visit(&mut values);
+    let mut mapper = ActionValueTargetUpdate { values: values.values, tau };
+    target.map(&mut mapper).valid()
 }
 
 struct ActionValueParameterValues {

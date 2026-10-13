@@ -10,7 +10,7 @@ use crate::buffers::experience_replay::{
 
 /// Invalid replay configuration or transition data.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum DeterministicReplayError {
+pub enum DeterministicReplayError {
     #[error("replay storage failed: {0}")]
     Storage(#[from] ReplayStorageError),
     #[error("replay {field} shape differs: expected {expected:?}, got {actual:?}")]
@@ -280,5 +280,345 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
 }
 
 #[cfg(test)]
-#[path = "replay/tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use burn::tensor::{Int, TensorData};
+
+    /// Creates U64 observations [2, 1] and Float actions, rewards, and Bool flags [2, 1].
+    fn integer_transitions(device: &Device) -> DeterministicReplayInsert<2, 2, Int> {
+        DeterministicReplayInsert {
+            observations: Tensor::from_data([[u64::MAX - 1], [u64::MAX - 2]], (device, DType::U64)),
+            next_observations: Tensor::from_data([[7u64], [8]], (device, DType::U64)),
+            actions: Tensor::from_data([[0.25f32], [-0.5]], device),
+            rewards: Tensor::from_data([[1.0f32], [2.0]], device),
+            terminated: Tensor::from_data([[false], [true]], device),
+            truncateds: vec![true, false],
+        }
+    }
+
+    fn integer_storage(device: &Device) -> DeterministicReplayStorage<2, 2, Int> {
+        DeterministicReplayStorage::builder()
+            .observation_shape([4, 1])
+            .action_shape([4, 1])
+            .observation_dtype(DType::U64)
+            .environment_count(2)
+            .dtype(DType::F64)
+            .device(device.clone())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn native_integer_precision_truncation_and_ring_alignment_are_preserved() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let mut storage = integer_storage(&device);
+        assert_eq!(storage.capacity(), 4);
+        storage.insert(0, integer_transitions(&device)).unwrap();
+        let before = storage.gather(&[0, 1]).unwrap();
+        assert_eq!(before.observations.dtype(), DType::U64);
+        assert_eq!(
+            before
+                .observations
+                .clone()
+                .into_data()
+                .try_to_vec::<u64>()
+                .unwrap(),
+            [u64::MAX - 1, u64::MAX - 2]
+        );
+        assert_eq!(before.actions.dtype(), DType::F64);
+        assert_eq!(
+            before.actions.into_data().try_to_vec::<f64>().unwrap(),
+            [0.25, -0.5]
+        );
+        assert_eq!(before.rewards.dtype(), DType::F64);
+        assert_eq!(
+            before.rewards.into_data().try_to_vec::<f64>().unwrap(),
+            [1.0, 2.0]
+        );
+        assert_eq!(
+            before
+                .terminated
+                .into_data()
+                .iter::<bool>()
+                .collect::<Vec<_>>(),
+            [false, true]
+        );
+        let mut next = integer_transitions(&device);
+        next.observations = Tensor::from_data([[3u64], [4]], (&device, DType::U64));
+        storage.insert(2, next).unwrap();
+        assert_eq!(
+            storage
+                .gather(&[0, 1])
+                .unwrap()
+                .next_observations
+                .into_data()
+                .try_to_vec::<u64>()
+                .unwrap(),
+            [7, 4]
+        );
+        assert_eq!(storage.sampleable_len(4), 4);
+        let mut wrapped = integer_transitions(&device);
+        wrapped.observations = Tensor::from_data([[5u64], [6]], (&device, DType::U64));
+        wrapped.truncateds = vec![false, false];
+        storage.insert(0, wrapped).unwrap();
+        assert_eq!(storage.sampleable_len(4), 2);
+        assert_eq!(storage.sample_index(0, 4), 0);
+        assert_eq!(storage.sample_index(1, 4), 1);
+        assert_eq!(
+            before.observations.into_data().try_to_vec::<u64>().unwrap(),
+            [u64::MAX - 1, u64::MAX - 2]
+        );
+    }
+
+    #[test]
+    fn boolean_observations_keep_high_rank_item_axes_and_terminal_overrides() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let mut storage = DeterministicReplayStorage::<3, 3, Bool>::builder()
+            .observation_shape([4, 1, 2])
+            .action_shape([4, 1, 1])
+            .observation_dtype(Tensor::<3, Bool>::zeros([1, 1, 2], &device).dtype())
+            .environment_count(2)
+            .dtype(DType::F32)
+            .device(device.clone())
+            .build()
+            .unwrap();
+        for start in [0, 2] {
+            storage
+                .insert(
+                    start,
+                    DeterministicReplayInsert {
+                        observations: Tensor::from_data([[[true, true]], [[false, false]]], &device),
+                        next_observations: Tensor::from_data(
+                            [[[false, false]], [[true, true]]],
+                            &device,
+                        ),
+                        actions: Tensor::ones([2, 1, 1], &device),
+                        rewards: Tensor::ones([2, 1], &device),
+                        terminated: Tensor::from_data([[false], [true]], &device),
+                        truncateds: vec![true, false],
+                    },
+                )
+                .unwrap();
+        }
+        let batch = storage.gather(&[0, 0]).unwrap();
+        assert_eq!(batch.observations.dims(), [2, 1, 2]);
+        assert_eq!(batch.actions.dims(), [2, 1, 1]);
+        assert_eq!(batch.rewards.dims(), [2, 1]);
+        assert_eq!(batch.terminated.dims(), [2, 1]);
+        assert_eq!(
+            batch
+                .next_observations
+                .into_data()
+                .iter::<bool>()
+                .collect::<Vec<_>>(),
+            [false; 4]
+        );
+        let empty = storage.gather(&[]).unwrap();
+        assert_eq!(empty.observations.dims(), [0, 1, 2]);
+        assert_eq!(empty.actions.dims(), [0, 1, 1]);
+    }
+
+    #[test]
+    fn float_experience_is_detached_and_compute_dtype_is_preserved() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let storage_device = device.clone().without_autodiff();
+        let mut storage = DeterministicReplayStorage::<2, 2, Float>::builder()
+            .observation_shape([4, 1])
+            .action_shape([4, 1])
+            .observation_dtype(DType::F64)
+            .environment_count(2)
+            .dtype(DType::F64)
+            .device(storage_device.clone())
+            .build()
+            .unwrap();
+        storage
+            .insert(
+                0,
+                DeterministicReplayInsert {
+                    observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
+                    next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
+                    actions: Tensor::ones([2, 1], &device).require_grad(),
+                    rewards: Tensor::ones([2, 1], &device).require_grad(),
+                    terminated: Tensor::from_data([[false], [true]], &device),
+                    truncateds: vec![true, false],
+                },
+            )
+            .unwrap();
+        let batch = storage.gather(&[0, 1]).unwrap();
+        for tensor in [
+            batch.observations,
+            batch.next_observations,
+            batch.actions,
+            batch.rewards,
+        ] {
+            assert!(!tensor.is_autodiff());
+            assert!(!tensor.is_require_grad());
+            assert_eq!(tensor.dtype(), DType::F64);
+            assert_eq!(tensor.device(), storage_device);
+        }
+        assert!(!batch.terminated.is_autodiff());
+    }
+
+    #[test]
+    fn invalid_transitions_do_not_overwrite_existing_rows() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let mut storage = integer_storage(&device);
+        storage.insert(0, integer_transitions(&device)).unwrap();
+        for field in [
+            "observations",
+            "next observations",
+            "actions",
+            "rewards",
+            "termination",
+        ] {
+            let mut transitions = integer_transitions(&device);
+            match field {
+                "observations" => {
+                    transitions.observations = Tensor::zeros([2, 2], (&device, DType::U64))
+                }
+                "next observations" => {
+                    transitions.next_observations = Tensor::zeros([2, 2], (&device, DType::U64))
+                }
+                "actions" => transitions.actions = Tensor::zeros([2, 2], &device),
+                "rewards" => transitions.rewards = Tensor::zeros([2, 2], &device),
+                "termination" => {
+                    transitions.terminated =
+                        Tensor::from_data([[false, false], [false, false]], &device)
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(storage.insert(0, transitions), Err(DeterministicReplayError::Shape { field: actual, .. }) if actual == field)
+            );
+        }
+        for next in [false, true] {
+            let mut transitions = integer_transitions(&device);
+            if next {
+                transitions.next_observations = transitions.next_observations.cast(DType::U32);
+            } else {
+                transitions.observations = transitions.observations.cast(DType::U32);
+            }
+            assert!(matches!(
+                storage.insert(0, transitions),
+                Err(DeterministicReplayError::DType {
+                    expected: DType::U64,
+                    actual: DType::U32,
+                    ..
+                })
+            ));
+        }
+        let mut truncateds = integer_transitions(&device);
+        truncateds.truncateds.pop();
+        assert!(matches!(
+            storage.insert(0, truncateds),
+            Err(DeterministicReplayError::Storage(
+                ReplayStorageError::BatchLengthMismatch {
+                    field: "truncations",
+                    ..
+                }
+            ))
+        ));
+        assert!(matches!(
+            storage.validate_environment_count(1),
+            Err(DeterministicReplayError::Storage(
+                ReplayStorageError::EnvironmentCountMismatch {
+                    expected: 2,
+                    actual: 1
+                }
+            ))
+        ));
+        for start in [1, 4] {
+            assert!(matches!(
+                storage.insert(start, integer_transitions(&device)),
+                Err(DeterministicReplayError::InvalidStart { .. })
+            ));
+        }
+        assert_eq!(
+            storage
+                .gather(&[0, 1])
+                .unwrap()
+                .observations
+                .into_data()
+                .try_to_vec::<u64>()
+                .unwrap(),
+            [u64::MAX - 1, u64::MAX - 2]
+        );
+        assert_eq!(
+            storage
+                .gather(&[0, 1])
+                .unwrap()
+                .next_observations
+                .into_data()
+                .try_to_vec::<u64>()
+                .unwrap(),
+            [7, 8]
+        );
+    }
+
+    #[test]
+    fn builder_rejects_invalid_shapes_dtypes_and_environment_alignment() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let build = |observation_shape, action_shape, observation_dtype, dtype, environment_count| {
+            DeterministicReplayStorage::<2, 2, Int>::builder()
+                .observation_shape(observation_shape)
+                .action_shape(action_shape)
+                .observation_dtype(observation_dtype)
+                .environment_count(environment_count)
+                .dtype(dtype)
+                .device(device.clone())
+                .build()
+        };
+        assert!(matches!(
+            build([4, 1], [6, 1], DType::U64, DType::F32, 2),
+            Err(DeterministicReplayError::Shape {
+                field: "action storage",
+                ..
+            })
+        ));
+        for (observations, actions) in [([4, 0], [4, 1]), ([4, 1], [4, 0])] {
+            assert!(matches!(
+                build(observations, actions, DType::U64, DType::F32, 2),
+                Err(DeterministicReplayError::ZeroItemDimension { .. })
+            ));
+        }
+        assert!(matches!(
+            build([4, 1], [4, 1], DType::F32, DType::F32, 2),
+            Err(DeterministicReplayError::InvalidDType {
+                field: "observations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            build([4, 1], [4, 1], DType::U64, DType::I64, 2),
+            Err(DeterministicReplayError::InvalidDType {
+                field: "actions and rewards",
+                ..
+            })
+        ));
+        for (capacity, count) in [(0, 2), (2, 2), (3, 2), (4, 0)] {
+            assert!(matches!(
+                build([capacity, 1], [capacity, 1], DType::U64, DType::F32, count),
+                Err(DeterministicReplayError::Storage(
+                    ReplayStorageError::InvalidReplayAlignment { .. }
+                ))
+            ));
+        }
+        assert!(matches!(
+            build([usize::MAX, 1], [usize::MAX, 1], DType::U64, DType::F32, 1),
+            Err(DeterministicReplayError::Storage(
+                ReplayStorageError::CapacityOverflow { .. }
+            ))
+        ));
+        let bool_dtype =
+            Tensor::<2, Bool>::from_data(TensorData::new(vec![true], [1, 1]), &device).dtype();
+        assert!(matches!(
+            build([4, 1], [4, 1], bool_dtype, DType::F32, 2),
+            Err(DeterministicReplayError::InvalidDType { .. })
+        ));
+    }
+}
