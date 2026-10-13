@@ -292,7 +292,7 @@ fn categorical_bellman_targets_and_half_mse_preserve_f64() {
     let actor = LinearModel {
         weight: Param::from_tensor(Tensor::zeros([1, 2], (&device, DType::F64))),
     };
-    let mut agent = SACAgent::<_, _, _, _, Infallible>::builder()
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
         .policy(ProbabilisticPolicyModel::new(
             actor,
             CategoricalDistribution,
@@ -364,7 +364,7 @@ fn agent_builder_rejects_invalid_sizes_ranges_and_dtype() {
         } else {
             vec![discrete_critic(&device, DType::F32)]
         };
-        let result = SACAgent::<_, _, _, _, Infallible>::builder()
+        let result = SACAgent::<_, _, _, Infallible>::builder()
             .policy(ProbabilisticPolicyModel::new(
                 linear_model(1, 2, 0.0, &device),
                 CategoricalDistribution,
@@ -419,7 +419,7 @@ fn agent_builder_rejects_invalid_sizes_ranges_and_dtype() {
 fn mismatched_critic_dtype_is_rejected_before_training_arithmetic() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    let mut agent = SACAgent::<_, _, _, _, Infallible>::builder()
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
         .policy(ProbabilisticPolicyModel::new(
             linear_model(1, 2, 0.0, &device),
             CategoricalDistribution,
@@ -458,7 +458,7 @@ fn actor_update_changes_policy_without_updating_critics_or_targets() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let actor = linear_model(1, 2, 0.0, &device);
-    let mut agent = SACAgent::<_, _, _, _, Infallible>::builder()
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
         .policy(ProbabilisticPolicyModel::new(
             actor,
             CategoricalDistribution,
@@ -623,7 +623,7 @@ fn continuous_policy_uses_reparameterized_actions_and_detached_targets() {
         Tensor::full([1, 1], -1.0, &device),
         Tensor::ones([1, 1], &device),
     );
-    let mut agent = SACAgent::<_, _, _, _, Infallible>::builder()
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
         .policy(policy)
         .actor_optimizer(SgdConfig::new().init())
         .actor_learning_rate(0.01)
@@ -733,7 +733,7 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         .learning_rate(0.01)
         .build()
         .unwrap();
-    let mut agent = SACAgent::<_, _, _, _, Infallible>::builder()
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
         .policy(policy)
         .actor_optimizer(SgdConfig::new().init())
         .actor_learning_rate(0.01)
@@ -779,7 +779,7 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         .learning_rate(0.01)
         .build()
         .unwrap();
-    let mut agent = SACAgent::<_, _, _, _, Infallible>::builder()
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
         .policy(policy)
         .actor_optimizer(SgdConfig::new().init())
         .actor_learning_rate(0.01)

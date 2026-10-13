@@ -25,7 +25,7 @@ use crate::{
     models::probabilistic_model::ExpectationPolicy,
     objectives::{bellman_targets, clipped_value_loss},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
-    spaces::{ActionMap, ActionSpace, ObservationSpace},
+    spaces::{ActionMap, ObservationSpace},
     tensor_rank::{NextRank, PrevRank},
 };
 
@@ -371,34 +371,78 @@ impl SACEpisodeTracker {
 /// O and A include environment batch axes; L is the sampled policy rank and C is the candidate rank, with C = A + 1.
 /// Observations retain their native kind and dtype. Models perform input conversions; dtype configures floating-point training statistics.
 /// Replay storage is allocated for the first collected transition and retained across learn calls.
-pub struct SACAgent<
-    'a,
-    P,
+/// Groups the owned policy, critic model, native execution tensors, and replay type without adding execution methods.
+pub trait SACModelTypes {
+    type Policy: Module;
+    type Critic: Module;
+    type Observation;
+    type Action;
+    type PolicyAction;
+    type Candidates;
+    type Replay;
+}
+
+/// Selects policy, critic, and native tensor types; the agent stores all actual models and tensors directly.
+pub struct SACModelGroup<P, N, O = Tensor<2>, A = Tensor<2>, L = Tensor<2>, C = Tensor<3>> {
+    models: PhantomData<(P, N)>,
+    tensors: PhantomData<(O, A, L, C)>,
+}
+
+impl<
+    P: Module,
     N: Module,
-    OS,
-    AS,
-    GE,
-    I = (),
-    const O: usize = 2,
-    const A: usize = 2,
-    const L: usize = 2,
-    const C: usize = 3,
-> where
-    OS: ObservationSpace<O>,
-    AS: ActionSpace<A>,
-    OS::Kind: Autodiff,
-    AS::Kind: Autodiff,
-    DType: Cast<A, AS::Kind, OutputKind = AS::Kind>,
+    K: Autodiff,
+    H: Autodiff,
+    const O: usize,
+    const A: usize,
+    const L: usize,
+    const C: usize,
+> SACModelTypes for SACModelGroup<P, N, Tensor<O, K>, Tensor<A, H>, Tensor<L>, Tensor<C, H>>
+where
+    DType: Cast<A, H, OutputKind = H>,
 {
-    policy: P,
+    type Policy = P;
+    type Critic = N;
+    type Observation = Tensor<O, K>;
+    type Action = Tensor<A, H>;
+    type PolicyAction = Tensor<L>;
+    type Candidates = Tensor<C, H>;
+    type Replay = SACReplay<O, A, K, H>;
+}
+
+/// Infers a SAC model group from a concrete policy, critic, and native execution tensors supplied to the builder.
+pub trait SACPolicyModelTypes<N: Module, O, A, L, C>: Module {
+    type ModelGroup: SACModelTypes<Policy = Self, Critic = N>;
+}
+
+impl<
+    P: Module,
+    N: Module,
+    K: Autodiff,
+    H: Autodiff,
+    const O: usize,
+    const A: usize,
+    const L: usize,
+    const C: usize,
+> SACPolicyModelTypes<N, Tensor<O, K>, Tensor<A, H>, Tensor<L>, Tensor<C, H>> for P
+where
+    DType: Cast<A, H, OutputKind = H>,
+{
+    type ModelGroup = SACModelGroup<P, N, Tensor<O, K>, Tensor<A, H>, Tensor<L>, Tensor<C, H>>;
+}
+
+/// Owns SAC models through an associated-type group; environment spaces and action rank remain explicit.
+/// Observation, policy-action, and candidate ranks are inferred by the implementation from the native tensor types.
+pub struct SACAgent<'a, G: SACModelTypes, OS, AS, GE, I = (), const A: usize = 2> {
+    policy: G::Policy,
     actor_optimizer: ModuleOptimizer,
     actor_learning_rate: f64,
-    critics: Vec<SACCritic<N>>,
+    critics: Vec<SACCritic<G::Critic>>,
     entropy_configuration: SACEntropyConfiguration,
     aggregation_mode: SACCriticAggregationMode,
     action_space: AS,
     observation_space: OS,
-    replay: Option<SACReplay<O, A, OS::Kind, AS::Kind>>,
+    replay: Option<G::Replay>,
     replay_capacity: usize,
     batch_size: usize,
     gamma: f64,
@@ -416,39 +460,22 @@ pub struct SACAgent<
 }
 
 #[bon]
-impl<
-    'a,
-    P,
-    N,
-    OS,
-    AS,
-    GE,
-    I,
-    PE: Debug,
-    CE: Debug,
-    SE: Debug,
-    const O: usize,
-    const A: usize,
-    const L: usize,
-    const C: usize,
-> SACAgent<'a, P, N, OS, AS, GE, I, O, A, L, C>
-where
-    OS: ObservationSpace<O>,
-    AS: ActionMap<L, A, Error = SE>,
-    OS::Kind: Autodiff,
-    AS::Kind: Autodiff,
-    DType: Cast<A, AS::Kind, OutputKind = AS::Kind>,
-    P: Module
-        + ExpectationPolicy<O, L, C, ObservationKind = OS::Kind, CandidateKind = AS::Kind, Error = PE>,
-    N: SACCriticNetwork<O, A, C, ObservationKind = OS::Kind, ActionKind = AS::Kind, Error = CE>,
-    GE: Debug,
-{
+impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS, GE, I, A> {
     /// Builds SAC for observations `[batch_size, ...observation_shape]` and environment actions `[batch_size, ...action_shape]`.
     /// Preserves observation kind and dtype; policy and critic models own input conversions. Candidate actions add one axis after batch.
     /// Models and automatic log alpha must use the optimization device. Critic outputs must use dtype; replay transfers detached tensors to its storage device.
     /// Rejects invalid sizes, ranks, dtypes, devices, learning rates, and parameter ranges.
     #[builder]
-    pub fn new(
+    pub fn new<
+        P,
+        N,
+        PE: Debug,
+        CE: Debug,
+        SE: Debug,
+        const O: usize,
+        const L: usize,
+        const C: usize,
+    >(
         policy: P,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
         actor_learning_rate: f64,
@@ -469,7 +496,35 @@ where
         #[builder(default = NonZeroUsize::MIN)] samples: NonZeroUsize,
         training_horizon: usize,
         #[builder(default = DType::F32)] dtype: DType,
-    ) -> Result<Self, SACConfigurationError> {
+    ) -> Result<Self, SACConfigurationError>
+    where
+        OS: ObservationSpace<O>,
+        AS: ActionMap<L, A, Error = SE>,
+        OS::Kind: Autodiff,
+        AS::Kind: Autodiff,
+        Tensor<A, AS::Kind>: NextRank<Next = Tensor<C, AS::Kind>>,
+        DType: Cast<A, AS::Kind, OutputKind = AS::Kind>,
+        P: Module
+            + ExpectationPolicy<
+                O,
+                L,
+                C,
+                ObservationKind = OS::Kind,
+                CandidateKind = AS::Kind,
+                Error = PE,
+            >,
+        N: SACCriticNetwork<O, A, C, ObservationKind = OS::Kind, ActionKind = AS::Kind, Error = CE>,
+        GE: Debug,
+        P: SACPolicyModelTypes<
+                N,
+                Tensor<O, OS::Kind>,
+                Tensor<A, AS::Kind>,
+                Tensor<L>,
+                Tensor<C, AS::Kind>,
+                ModelGroup = G,
+            >,
+        G: SACModelTypes<Policy = P, Critic = N>,
+    {
         const {
             assert!(
                 O >= 2 && A >= 2 && L >= 2 && C == A + 1,
@@ -554,7 +609,52 @@ where
             _errors: PhantomData,
         })
     }
+}
 
+impl<
+    'a,
+    P,
+    N,
+    OS,
+    AS,
+    GE,
+    I,
+    PE: Debug,
+    CE: Debug,
+    SE: Debug,
+    const O: usize,
+    const A: usize,
+    const L: usize,
+    const C: usize,
+>
+    SACAgent<
+        'a,
+        SACModelGroup<
+            P,
+            N,
+            Tensor<O, OS::Kind>,
+            Tensor<A, AS::Kind>,
+            Tensor<L>,
+            Tensor<C, AS::Kind>,
+        >,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
+where
+    OS: ObservationSpace<O>,
+    AS: ActionMap<L, A, Error = SE>,
+    OS::Kind: Autodiff,
+    AS::Kind: Autodiff,
+    Tensor<A, AS::Kind>: NextRank<Next = Tensor<C, AS::Kind>>,
+    DType: Cast<A, AS::Kind, OutputKind = AS::Kind>,
+    P: Module
+        + ExpectationPolicy<O, L, C, ObservationKind = OS::Kind, CandidateKind = AS::Kind, Error = PE>,
+    N: SACCriticNetwork<O, A, C, ObservationKind = OS::Kind, ActionKind = AS::Kind, Error = CE>,
+    GE: Debug,
+{
     pub fn get_action_space(&self) -> &AS {
         &self.action_space
     }
@@ -1239,11 +1339,21 @@ impl<
     const L: usize,
     const C: usize,
     const U: usize,
-> Agent<I, O, A> for SACAgent<'_, P, N, OS, AS, GE, I, O, A, L, C>
+> Agent<I, O, A>
+    for SACAgent<
+        '_,
+        SACModelGroup<P, N, Tensor<O, K>, Tensor<A, AS::Kind>, Tensor<L>, Tensor<C, AS::Kind>>,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
 where
     OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
     AS: ActionMap<L, A>,
     AS::Kind: Autodiff,
+    Tensor<A, AS::Kind>: NextRank<Next = Tensor<C, AS::Kind>>,
     DType: Cast<A, AS::Kind, OutputKind = AS::Kind>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
