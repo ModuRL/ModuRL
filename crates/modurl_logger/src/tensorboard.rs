@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use candle_core::Tensor;
+use burn::tensor::Tensor;
 use crc::{CRC_32_ISCSI, Crc};
 use prost::{Message, Oneof};
 
@@ -117,8 +117,8 @@ impl TensorBoardLogger {
 impl Logger for TensorBoardLogger {
     type Error = TensorBoardError;
 
-    /// Logs named scalar metric tensors, each shaped `[]`.
-    fn log(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) -> TensorBoardResult<()> {
+    /// Logs named scalar metric tensors, each shaped `[1]`.
+    fn log(&mut self, timestep: usize, metrics: &[(&str, &Tensor<1>)]) -> TensorBoardResult<()> {
         tensorboard_timestep(timestep)?;
         if let Some(completed) = self.aggregator.log(timestep, metrics)? {
             self.write_completed(completed)?;
@@ -280,7 +280,7 @@ struct SummaryValue {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use candle_core::{Device, Tensor};
+    use burn::tensor::{Device, Tensor};
     use prost::Message;
 
     use super::{
@@ -340,9 +340,9 @@ mod tests {
         let directory = TestDirectory::new();
         let mut logger = TensorBoardLogger::with_default_aggregation(&directory.path).unwrap();
         let event_file = logger.event_file().to_owned();
-        let one = Tensor::new(1.0_f32, &Device::Cpu).unwrap();
-        let three = Tensor::new(3.0_f32, &Device::Cpu).unwrap();
-        let five = Tensor::new(5.0_f32, &Device::Cpu).unwrap();
+        let one = Tensor::from_data([1.0_f32], &Device::flex());
+        let three = Tensor::from_data([3.0_f32], &Device::flex());
+        let five = Tensor::from_data([5.0_f32], &Device::flex());
 
         logger.log(7, &[("loss", &one)]).unwrap();
         logger.log(7, &[("loss", &three)]).unwrap();
@@ -381,7 +381,7 @@ mod tests {
     fn rejects_steps_that_tensorboard_cannot_represent() {
         let directory = TestDirectory::new();
         let mut logger = TensorBoardLogger::with_default_aggregation(&directory.path).unwrap();
-        let value = Tensor::new(1.0_f32, &Device::Cpu).unwrap();
+        let value = Tensor::from_data([1.0_f32], &Device::flex());
 
         let error = logger.log(usize::MAX, &[("loss", &value)]).unwrap_err();
 
