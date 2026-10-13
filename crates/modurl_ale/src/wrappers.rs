@@ -1,8 +1,13 @@
 use crate::AtariInfo;
-use candle_core::{DType, Device, Tensor};
+use burn::tensor::{
+    DType, Device, Int, Tensor, TensorData, TensorReadError,
+    kind::{Basic, Kind},
+};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    sampling::sample_u32_inclusive,
+    sampling::{SamplingError, sample_u32_inclusive},
+    spaces::{Discrete, ObservationSpace},
+    tensor_rank::{NextRank, PrevRank, TensorBatchTypes},
     wrappers::EpisodeStatisticsInfo,
 };
 use std::sync::OnceLock;
@@ -31,22 +36,26 @@ impl<G> NoopResetGym<G> {
 pub enum NoopResetGymError<E> {
     #[error("wrapped gym error: {0}")]
     GymError(#[source] E),
-    #[error("failed to create a no-op action tensor: {0}")]
-    CandleError(#[source] candle_core::Error),
+    #[error("no-op sampling failed: {0}")]
+    Sampling(#[source] SamplingError),
 }
 
-impl<G, I> Gym<I> for NoopResetGym<G>
+impl<G, I, const O: usize> Gym<I, O, 2> for NoopResetGym<G>
 where
-    G: Gym<I>,
+    G: Gym<I, O, 2, ActionSpace = Discrete>,
 {
-    type Error = NoopResetGymError<<G as Gym<I>>::Error>;
-    type SpaceError = <G as Gym<I>>::SpaceError;
+    type Error = NoopResetGymError<G::Error>;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = Discrete;
 
-    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
+    fn reset(
+        &mut self,
+    ) -> Result<ResetInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         let mut reset = self.gym.reset().map_err(NoopResetGymError::GymError)?;
-        for _ in 0..sample_u32_inclusive(1, self.noop_max, reset.state.device()).unwrap() {
-            let noop_action =
-                Tensor::new(0u32, reset.state.device()).map_err(NoopResetGymError::CandleError)?;
+        for _ in 0..sample_u32_inclusive(1, self.noop_max, &Device::flex())
+            .map_err(NoopResetGymError::Sampling)?
+        {
+            let noop_action = Tensor::from_data([0i32], &Device::flex());
             let step = self
                 .gym
                 .step(noop_action)
@@ -55,7 +64,7 @@ where
                 self.gym.reset().map_err(NoopResetGymError::GymError)?
             } else {
                 ResetInfo {
-                    state: step.state,
+                    observation: step.observation,
                     info: step.info,
                 }
             };
@@ -63,16 +72,19 @@ where
         Ok(reset)
     }
 
-    /// Forwards one scalar Atari action shaped `[]`.
-    fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<I>, Self::Error> {
+    /// Forwards Int Atari actions [1], preserving the wrapped observation item shape, kind, dtype, and device.
+    fn step(
+        &mut self,
+        action: Tensor<1, Int>,
+    ) -> Result<StepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         self.gym.step(action).map_err(NoopResetGymError::GymError)
     }
 
-    fn action_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Discrete {
         self.gym.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
 }
@@ -106,7 +118,7 @@ pub struct EpisodicLifeGym<G> {
     gym: G,
     last_lives: u32,
     was_real_done: bool,
-    device: candle_core::Device,
+    device: Device,
 }
 
 impl<G> EpisodicLifeGym<G> {
@@ -120,25 +132,28 @@ impl<G> EpisodicLifeGym<G> {
     }
 }
 
-impl<G, I> Gym<I> for EpisodicLifeGym<G>
+impl<G, I, const O: usize> Gym<I, O, 2> for EpisodicLifeGym<G>
 where
-    G: Gym<I>,
+    G: Gym<I, O, 2, ActionSpace = Discrete>,
     I: AtariLives,
 {
     type Error = G::Error;
-    type SpaceError = G::SpaceError;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = Discrete;
 
-    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
+    fn reset(
+        &mut self,
+    ) -> Result<ResetInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         let reset = if self.was_real_done {
             self.gym.reset()?
         } else {
-            let noop_action = Tensor::new(0u32, &self.device).unwrap();
+            let noop_action = Tensor::from_data([0i32], &self.device);
             let step = self.gym.step(noop_action)?;
             if step.done || step.truncated {
                 self.gym.reset()?
             } else {
                 ResetInfo {
-                    state: step.state,
+                    observation: step.observation,
                     info: step.info,
                 }
             }
@@ -148,8 +163,11 @@ where
         Ok(reset)
     }
 
-    /// Forwards one scalar Atari action shaped `[]`.
-    fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<I>, Self::Error> {
+    /// Forwards Int Atari actions [1], preserving the wrapped observation item shape, kind, dtype, and device.
+    fn step(
+        &mut self,
+        action: Tensor<1, Int>,
+    ) -> Result<StepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         let mut step = self.gym.step(action)?;
         let current_lives = step.info.lives();
 
@@ -164,11 +182,11 @@ where
         Ok(step)
     }
 
-    fn action_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Discrete {
         self.gym.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
 }
@@ -177,8 +195,6 @@ where
 pub enum FireResetGymError<E> {
     #[error("wrapped gym error: {0}")]
     GymError(#[source] E),
-    #[error("failed to create a fire-reset action tensor: {0}")]
-    CandleError(#[source] candle_core::Error),
 }
 
 /// Sends the standard FIRE startup actions after reset.
@@ -195,58 +211,52 @@ impl<G> FireResetGym<G> {
     }
 }
 
-impl<G, I> Gym<I> for FireResetGym<G>
+impl<G, I, const O: usize> Gym<I, O, 2> for FireResetGym<G>
 where
-    G: Gym<I>,
+    G: Gym<I, O, 2, ActionSpace = Discrete>,
 {
-    type Error = FireResetGymError<<G as Gym<I>>::Error>;
-    type SpaceError = <G as Gym<I>>::SpaceError;
+    type Error = FireResetGymError<G::Error>;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = Discrete;
 
-    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
-        let mut reset = self.gym.reset().map_err(FireResetGymError::GymError)?;
-        let fire_action =
-            Tensor::new(1u32, reset.state.device()).map_err(FireResetGymError::CandleError)?;
-        let step = self
+    fn reset(
+        &mut self,
+    ) -> Result<ResetInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
+        self.gym.reset().map_err(FireResetGymError::GymError)?;
+        let first = self
             .gym
-            .step(fire_action)
+            .step(Tensor::from_data([1i32], &Device::flex()))
             .map_err(FireResetGymError::GymError)?;
-        reset = if step.done || step.truncated {
-            self.gym.reset().map_err(FireResetGymError::GymError)?
-        } else {
-            ResetInfo {
-                state: step.state,
-                info: step.info,
-            }
-        };
-
-        let second_action =
-            Tensor::new(2u32, reset.state.device()).map_err(FireResetGymError::CandleError)?;
-        let step = self
+        if first.done || first.truncated {
+            self.gym.reset().map_err(FireResetGymError::GymError)?;
+        }
+        let second = self
             .gym
-            .step(second_action)
+            .step(Tensor::from_data([2i32], &Device::flex()))
             .map_err(FireResetGymError::GymError)?;
-        reset = if step.done || step.truncated {
-            self.gym.reset().map_err(FireResetGymError::GymError)?
+        if second.done || second.truncated {
+            self.gym.reset().map_err(FireResetGymError::GymError)
         } else {
-            ResetInfo {
-                state: step.state,
-                info: step.info,
-            }
-        };
-
-        Ok(reset)
+            Ok(ResetInfo {
+                observation: second.observation,
+                info: second.info,
+            })
+        }
     }
 
-    /// Forwards one scalar Atari action shaped `[]`.
-    fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<I>, Self::Error> {
+    /// Forwards Int Atari actions [1], preserving the wrapped observation item shape, kind, dtype, and device.
+    fn step(
+        &mut self,
+        action: Tensor<1, Int>,
+    ) -> Result<StepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         self.gym.step(action).map_err(FireResetGymError::GymError)
     }
 
-    fn action_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Discrete {
         self.gym.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
 }
@@ -255,16 +265,53 @@ where
 pub enum WarpGymError<E> {
     #[error("wrapped gym error: {0}")]
     GymError(#[source] E),
-    #[error("failed to warp an Atari observation: {0}")]
-    CandleError(#[source] candle_core::Error),
+    #[error("reading Atari observation failed: {0}")]
+    Tensor(#[from] TensorReadError),
+    #[error(
+        "warp requires nonempty grayscale [height, width] or RGB [height, width, 3], got {0:?}"
+    )]
+    Shape(Vec<usize>),
+    #[error("warp requires U8 Int or F32 Float observations, got {0:?}")]
+    DType(DType),
+    #[error("warp observations must use CPU Flex")]
+    Device,
 }
 
-/// Converts RGB observations to luminance and resizes them to 84×84.
-///
-/// This produces the compact grayscale input shape used by the standard Atari
-/// convolutional policy.
-pub struct WarpGym<G> {
+/// Converts CPU RGB or grayscale observations into grayscale [84, 84].
+/// Preserves U8 Int or F32 Float representation and uses the reference area-resize calculation.
+pub struct WarpGym<G, const O: usize = 4> {
     gym: G,
+}
+
+/// Warped CPU observations [batch_size, 84, 84] with the input tensor kind.
+pub struct WarpObservationSpace<K: Basic> {
+    kind: std::marker::PhantomData<K>,
+}
+
+impl<K: Basic> TensorBatchTypes for WarpObservationSpace<K> {
+    type Kind = K;
+    type Item = Tensor<2, K>;
+    type Batch = Tensor<3, K>;
+}
+
+impl<K: Basic> ObservationSpace<3> for WarpObservationSpace<K> {
+    /// Checks observations [batch_size, 84, 84] on CPU Flex without changing kind or axes.
+    fn contains(&self, observations: &Tensor<3, K>) -> bool {
+        let dtype_matches = if const { matches!(K::KIND, Kind::Int) } {
+            observations.dtype() == DType::U8
+        } else if const { matches!(K::KIND, Kind::Float) } {
+            observations.dtype() == DType::F32
+        } else {
+            false
+        };
+        observations.dims()[1..] == [84, 84]
+            && observations.device() == Device::flex()
+            && dtype_matches
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        vec![84, 84]
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -302,7 +349,7 @@ fn area_spans(source_len: usize, target_len: usize) -> Vec<AreaSpan> {
 static ATARI_HORIZONTAL_SPANS: OnceLock<Vec<AreaSpan>> = OnceLock::new();
 static ATARI_VERTICAL_SPANS: OnceLock<Vec<AreaSpan>> = OnceLock::new();
 
-impl<G> WarpGym<G> {
+impl<G, const O: usize> WarpGym<G, O> {
     pub fn new(gym: G) -> Self {
         Self { gym }
     }
@@ -389,94 +436,130 @@ impl<G> WarpGym<G> {
         output
     }
 
-    /// Converts an Atari observation `[210, 160, 3]` or `[210, 160]` to the
-    /// warped grayscale shape `[84, 84]`.
-    fn preprocess_observation(&self, obs: &Tensor) -> Result<Tensor, candle_core::Error> {
-        let device = obs.device().clone();
-        let dims = obs.dims();
-        let (height, width) = match dims {
-            [height, width] | [height, width, 3] => (*height, *width),
-            _ => candle_core::bail!("expected an Atari RGB or grayscale observation, got {dims:?}"),
-        };
-
-        if obs.dtype() == DType::U8 {
-            let bytes = obs.flatten_all()?.to_vec1::<u8>()?;
-            if matches!(dims, [_, _, 3]) && (height, width) == (210, 160) {
-                return Tensor::from_vec(
-                    Self::resize_atari_rgb_u8(&bytes, height, width),
-                    (84, 84),
-                    &device,
-                );
+    /// Converts CPU rank-D RGB [height, width, 3] or grayscale [height, width] into [84, 84].
+    /// Preserves U8 Int or F32 Float data; reads input to the host and returns a CPU tensor with no batch axis.
+    fn preprocess_observation<K: Basic, E, const D: usize>(
+        &self,
+        observation: &Tensor<D, K>,
+    ) -> Result<Tensor<2, K>, WarpGymError<E>> {
+        const {
+            assert!(
+                D == 2 || D == 3,
+                "warp accepts grayscale rank 2 or RGB rank 3"
+            );
+        }
+        let dims = observation.dims();
+        if dims[0] == 0
+            || dims[1] == 0
+            || (if const { D == 3 } {
+                dims[2] != 3
+            } else {
+                false
+            })
+        {
+            return Err(WarpGymError::Shape(dims.to_vec()));
+        }
+        if observation.device() != Device::flex() {
+            return Err(WarpGymError::Device);
+        }
+        let (height, width) = (dims[0], dims[1]);
+        let data = observation
+            .clone()
+            .try_into_data()
+            .map_err(TensorReadError::from)?;
+        if observation.dtype() == DType::U8 {
+            let bytes = data.try_to_vec::<u8>().map_err(TensorReadError::from)?;
+            if const { D == 3 } && (height, width) == (210, 160) {
+                return Ok(Tensor::from_data(
+                    TensorData::new(Self::resize_atari_rgb_u8(&bytes, height, width), [84, 84]),
+                    (&Device::flex(), DType::U8),
+                ));
             }
-            let luminance: Vec<f32> = match dims {
-                [_, _] => bytes.into_iter().map(f32::from).collect(),
-                [_, _, 3] => bytes
+            let luminance: Vec<f32> = if const { D == 2 } {
+                bytes.into_iter().map(f32::from).collect()
+            } else {
+                bytes
                     .as_chunks::<3>()
                     .0
                     .iter()
                     .map(|pixel| {
                         pixel[0] as f32 * 0.299 + pixel[1] as f32 * 0.587 + pixel[2] as f32 * 0.114
                     })
-                    .collect(),
-                _ => unreachable!(),
+                    .collect()
             };
             let resized = Self::resize_area_data(&luminance, height, width, 84, 84)
                 .into_iter()
                 .map(|value| value.round().clamp(0.0, 255.0) as u8)
                 .collect::<Vec<_>>();
-            return Tensor::from_vec(resized, (84, 84), &device);
+            return Ok(Tensor::from_data(
+                TensorData::new(resized, [84, 84]),
+                (&Device::flex(), DType::U8),
+            ));
         }
-
-        let luminance = match dims {
-            [height, width] => {
-                let _ = (height, width);
-                obs.flatten_all()?.to_vec1::<f32>()?
-            }
-            [_, _, 3] => obs
-                .flatten_all()?
-                .to_vec1::<f32>()?
+        if observation.dtype() != DType::F32 {
+            return Err(WarpGymError::DType(observation.dtype()));
+        }
+        let values = data.try_to_vec::<f32>().map_err(TensorReadError::from)?;
+        let luminance = if const { D == 2 } {
+            values
+        } else {
+            values
                 .as_chunks::<3>()
                 .0
                 .iter()
                 .map(|pixel| pixel[0] * 0.299 + pixel[1] * 0.587 + pixel[2] * 0.114)
-                .collect(),
-            _ => unreachable!(),
+                .collect()
         };
-        let resized = Self::resize_area_data(&luminance, height, width, 84, 84);
-        Tensor::from_vec(resized, (84, 84), &device)
+        Ok(Tensor::from_data(
+            TensorData::new(
+                Self::resize_area_data(&luminance, height, width, 84, 84),
+                [84, 84],
+            ),
+            &Device::flex(),
+        ))
     }
 }
 
-impl<G, I> Gym<I> for WarpGym<G>
+impl<G, I, K: Basic, const O: usize, const D: usize> Gym<I, 3, 2> for WarpGym<G, O>
 where
-    G: Gym<I>,
+    G: Gym<I, O, 2, ActionSpace = Discrete>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<D, K>>,
+    Tensor<D, K>: NextRank<Next = Tensor<O, K>>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<D, K>>,
 {
-    type Error = WarpGymError<<G as Gym<I>>::Error>;
-    type SpaceError = <G as Gym<I>>::SpaceError;
+    type Error = WarpGymError<G::Error>;
+    type ObservationSpace = WarpObservationSpace<K>;
+    type ActionSpace = Discrete;
 
-    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
-        let mut reset = self.gym.reset().map_err(WarpGymError::GymError)?;
-        reset.state = self
-            .preprocess_observation(&reset.state)
-            .map_err(WarpGymError::CandleError)?;
-        Ok(reset)
+    /// Warps rank-D CPU RGB/grayscale reset observations to rank 2 [84, 84], preserving native dtype and metadata.
+    fn reset(&mut self) -> Result<ResetInfo<I, Tensor<2, K>>, Self::Error> {
+        let reset = self.gym.reset().map_err(WarpGymError::GymError)?;
+        Ok(ResetInfo {
+            observation: self.preprocess_observation(&reset.observation)?,
+            info: reset.info,
+        })
     }
 
-    /// Forwards one scalar Atari action shaped `[]`.
-    fn step(&mut self, action: candle_core::Tensor) -> Result<StepInfo<I>, Self::Error> {
-        let mut info = self.gym.step(action).map_err(WarpGymError::GymError)?;
-        info.state = self
-            .preprocess_observation(&info.state)
-            .map_err(WarpGymError::CandleError)?;
-        Ok(info)
+    /// Forwards Int actions [1] and warps rank-D CPU observations to rank 2 [84, 84]; preserves reward and end flags.
+    fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo<I, Tensor<2, K>>, Self::Error> {
+        let step = self.gym.step(action).map_err(WarpGymError::GymError)?;
+        Ok(StepInfo {
+            observation: self.preprocess_observation(&step.observation)?,
+            reward: step.reward,
+            done: step.done,
+            truncated: step.truncated,
+            info: step.info,
+        })
     }
 
-    fn action_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Discrete {
         self.gym.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
-        self.gym.observation_space()
+    fn observation_space(&self) -> Self::ObservationSpace {
+        WarpObservationSpace {
+            kind: std::marker::PhantomData,
+        }
     }
 }
 
@@ -490,7 +573,7 @@ mod tests {
 
     #[derive(Clone)]
     struct ScriptStep {
-        state: f32,
+        observation: f32,
         reward: f32,
         done: bool,
         truncated: bool,
@@ -509,7 +592,7 @@ mod tests {
     impl ScriptGym {
         fn new(steps: Vec<ScriptStep>) -> Self {
             Self {
-                device: Device::Cpu,
+                device: Device::flex(),
                 reset_count: 0,
                 actions: vec![],
                 lives: 3,
@@ -518,9 +601,15 @@ mod tests {
             }
         }
 
-        fn step(state: f32, reward: f32, done: bool, truncated: bool, lives: u32) -> ScriptStep {
+        fn step(
+            observation: f32,
+            reward: f32,
+            done: bool,
+            truncated: bool,
+            lives: u32,
+        ) -> ScriptStep {
             ScriptStep {
-                state,
+                observation,
                 reward,
                 done,
                 truncated,
@@ -528,18 +617,19 @@ mod tests {
             }
         }
 
-        fn tensor(&self, value: f32) -> Tensor {
-            Tensor::new(value, &self.device).unwrap()
+        fn tensor(&self, value: f32) -> Tensor<1> {
+            Tensor::from_data([value], &self.device)
         }
     }
 
     impl Gym<AtariInfo> for ScriptGym {
-        type Error = candle_core::Error;
-        type SpaceError = candle_core::Error;
+        type Error = TensorReadError;
+        type ObservationSpace = BoxSpace<2>;
+        type ActionSpace = Discrete;
 
-        /// Steps with one scalar discrete action shaped `[]`.
-        fn step(&mut self, action: Tensor) -> Result<StepInfo<AtariInfo>, Self::Error> {
-            self.actions.push(action.to_scalar::<u32>()?);
+        /// Steps with one scalar discrete action shaped `[1]`.
+        fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo<AtariInfo>, Self::Error> {
+            self.actions.push(action.try_into_scalar::<u32>()?);
             let step = self.steps.get(self.step_index).cloned().unwrap_or_else(|| {
                 Self::step(
                     10_000.0 + self.step_index as f32,
@@ -552,7 +642,7 @@ mod tests {
             self.step_index += 1;
             self.lives = step.lives;
             Ok(StepInfo {
-                state: self.tensor(step.state),
+                observation: self.tensor(step.observation),
                 reward: step.reward,
                 done: step.done,
                 truncated: step.truncated,
@@ -568,7 +658,7 @@ mod tests {
             self.reset_count += 1;
             self.lives = 3;
             Ok(ResetInfo {
-                state: self.tensor(100.0 * self.reset_count as f32),
+                observation: self.tensor(100.0 * self.reset_count as f32),
                 info: AtariInfo {
                     lives: self.lives,
                     frame_number: 0,
@@ -577,32 +667,137 @@ mod tests {
             })
         }
 
-        fn observation_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
-            Box::new(BoxSpace::new(
-                Tensor::full(0.0, &[], &self.device).unwrap(),
-                Tensor::full(10_000.0, &[], &self.device).unwrap(),
-            ))
+        fn observation_space(&self) -> Self::ObservationSpace {
+            BoxSpace::new_with_universal_bounds([1, 1], 0.0, 10_000.0, &self.device)
         }
 
-        fn action_space(&self) -> Box<dyn modurl::spaces::Space<Error = Self::SpaceError>> {
-            Box::new(Discrete::new(4))
+        fn action_space(&self) -> Discrete {
+            Discrete::new(4)
         }
     }
 
-    /// Reads one scalar tensor shaped `[]`.
-    fn scalar(tensor: &Tensor) -> f32 {
-        tensor.to_scalar::<f32>().unwrap()
+    /// Reads one scalar tensor shaped `[1]`.
+    fn scalar(tensor: &Tensor<1>) -> f32 {
+        tensor.clone().try_into_scalar::<f32>().unwrap()
+    }
+
+    struct ImageGym;
+
+    impl Gym<AtariInfo, 4, 2> for ImageGym {
+        type Error = std::convert::Infallible;
+        type ObservationSpace = crate::AtariObservationSpace<4>;
+        type ActionSpace = Discrete;
+
+        /// Returns CPU U8 RGB observations [210, 160, 3] without a batch axis.
+        fn reset(&mut self) -> Result<ResetInfo<AtariInfo, Tensor<3, Int>>, Self::Error> {
+            Ok(ResetInfo {
+                observation: Tensor::zeros([210, 160, 3], (&Device::flex(), DType::U8)),
+                info: AtariInfo {
+                    lives: 3,
+                    frame_number: 0,
+                    episode_frame_number: 0,
+                },
+            })
+        }
+
+        /// Accepts CPU Int actions [1] and returns terminal RGB observations [210, 160, 3].
+        fn step(
+            &mut self,
+            action: Tensor<1, Int>,
+        ) -> Result<StepInfo<AtariInfo, Tensor<3, Int>>, Self::Error> {
+            assert_eq!(action.dims(), [1]);
+            Ok(StepInfo {
+                observation: Tensor::full([210, 160, 3], 37, (&Device::flex(), DType::U8)),
+                reward: 2.0,
+                done: true,
+                truncated: false,
+                info: AtariInfo {
+                    lives: 0,
+                    frame_number: 1,
+                    episode_frame_number: 1,
+                },
+            })
+        }
+
+        fn action_space(&self) -> Discrete {
+            Discrete::new(4)
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            crate::AtariObservationSpace::new(vec![210, 160, 3])
+        }
+    }
+
+    #[test]
+    fn warped_vectorized_observations_keep_terminal_frames_and_native_kind() {
+        use modurl::gym::{MultiGym, VectorizedGymWrapper};
+        let gym = WarpGym::new(FireResetGym::new(ImageGym));
+        let mut env = VectorizedGymWrapper::from(gym);
+        let reset = env.reset().unwrap();
+        assert_eq!(reset.dims(), [1, 84, 84]);
+        assert_eq!(reset.dtype(), DType::U8);
+        let step = env
+            .step(Tensor::from_data([[0i32]], &Device::flex()))
+            .unwrap();
+        assert_eq!(step.dones, [true]);
+        assert_eq!(step.truncateds, [false]);
+        assert_eq!(step.observations.dtype(), DType::U8);
+        let terminal = step.transition_next_observations();
+        assert_eq!(terminal.dims(), [1, 84, 84]);
+        assert_eq!(
+            terminal.into_data().try_to_vec::<u8>().unwrap(),
+            vec![37; 84 * 84]
+        );
+        assert_eq!(
+            step.observations.into_data().try_to_vec::<u8>().unwrap(),
+            vec![0; 84 * 84]
+        );
     }
 
     #[test]
     fn warp_preserves_u8_through_grayscale_and_resize() {
-        let wrapper = WarpGym::new(ScriptGym::new(vec![]));
-        let rgb = Tensor::zeros((210, 160, 3), DType::U8, &Device::Cpu).unwrap();
+        let wrapper = WarpGym::<_, 4>::new(ScriptGym::new(vec![]));
+        let rgb = Tensor::<3, Int>::zeros([210, 160, 3], (&Device::flex(), DType::U8));
 
-        let warped = wrapper.preprocess_observation(&rgb).unwrap();
+        let warped = wrapper
+            .preprocess_observation::<_, std::convert::Infallible, 3>(&rgb)
+            .unwrap();
 
         assert_eq!(warped.dtype(), DType::U8);
-        assert_eq!(warped.dims(), &[84, 84]);
+        assert_eq!(warped.dims(), [84, 84]);
+    }
+
+    #[test]
+    fn warp_preserves_grayscale_bytes_and_float_values() {
+        let wrapper = WarpGym::<_, 3>::new(ScriptGym::new(vec![]));
+        let bytes = Tensor::<2, Int>::full([84, 84], 37, (&Device::flex(), DType::U8));
+        let output = wrapper
+            .preprocess_observation::<_, std::convert::Infallible, 2>(&bytes)
+            .unwrap();
+        assert_eq!(output.dtype(), DType::U8);
+        assert_eq!(
+            output.into_data().try_to_vec::<u8>().unwrap(),
+            vec![37; 84 * 84]
+        );
+        let values = Tensor::<2>::full([84, 84], 0.5, &Device::flex());
+        let output = wrapper
+            .preprocess_observation::<_, std::convert::Infallible, 2>(&values)
+            .unwrap();
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(
+            output.into_data().try_to_vec::<f32>().unwrap(),
+            vec![0.5; 84 * 84]
+        );
+        let invalid = Tensor::<3, Int>::zeros([84, 84, 2], (&Device::flex(), DType::U8));
+        assert!(matches!(
+            wrapper.preprocess_observation::<_, std::convert::Infallible, 3>(&invalid),
+            Err(WarpGymError::Shape(_))
+        ));
+        let invalid = Tensor::<2>::zeros([84, 84], (&Device::flex(), DType::F64));
+        assert!(matches!(
+            wrapper.preprocess_observation::<_, std::convert::Infallible, 2>(&invalid),
+            Err(WarpGymError::DType(DType::F64))
+        ));
     }
 
     #[test]
@@ -667,7 +862,7 @@ mod tests {
 
         assert_eq!(wrapper.gym.actions, vec![0]);
         assert_eq!(wrapper.gym.reset_count, 2);
-        assert_eq!(scalar(&obs.state), 200.0);
+        assert_eq!(scalar(&obs.observation), 200.0);
     }
 
     #[test]
@@ -682,7 +877,7 @@ mod tests {
 
         assert_eq!(wrapper.gym.actions, vec![1, 2]);
         assert_eq!(wrapper.gym.reset_count, 1);
-        assert_eq!(scalar(&obs.state), 12.0);
+        assert_eq!(scalar(&obs.observation), 12.0);
     }
 
     #[test]
@@ -697,7 +892,7 @@ mod tests {
 
         assert_eq!(wrapper.gym.actions, vec![1, 2]);
         assert_eq!(wrapper.gym.reset_count, 2);
-        assert_eq!(scalar(&obs.state), 22.0);
+        assert_eq!(scalar(&obs.observation), 22.0);
     }
 
     #[test]
@@ -712,7 +907,7 @@ mod tests {
 
         assert_eq!(wrapper.gym.actions, vec![1, 2]);
         assert_eq!(wrapper.gym.reset_count, 2);
-        assert_eq!(scalar(&obs.state), 200.0);
+        assert_eq!(scalar(&obs.observation), 200.0);
     }
 
     #[test]
@@ -721,18 +916,18 @@ mod tests {
             ScriptGym::step(11.0, 0.0, false, false, 2),
             ScriptGym::step(12.0, 0.0, false, false, 2),
         ]);
-        let mut wrapper = EpisodicLifeGym::new(gym, &Device::Cpu);
+        let mut wrapper = EpisodicLifeGym::new(gym, &Device::flex());
 
         let _ = wrapper.reset().unwrap();
         let step = wrapper
-            .step(Tensor::new(1u32, &Device::Cpu).unwrap())
+            .step(Tensor::from_data([1i32], &Device::flex()))
             .unwrap();
         let reset_obs = wrapper.reset().unwrap();
 
         assert!(step.done);
         assert_eq!(wrapper.gym.actions, vec![1, 0]);
         assert_eq!(wrapper.gym.reset_count, 1);
-        assert_eq!(scalar(&reset_obs.state), 12.0);
+        assert_eq!(scalar(&reset_obs.observation), 12.0);
     }
 
     #[test]
@@ -743,18 +938,18 @@ mod tests {
             ScriptGym::step(13.0, 2.0, true, false, 0),
         ]);
         let gym = RecordEpisodeStatisticsGym::new(gym);
-        let mut wrapper = EpisodicLifeGym::new(gym, &Device::Cpu);
+        let mut wrapper = EpisodicLifeGym::new(gym, &Device::flex());
 
         wrapper.reset().unwrap();
         let life_loss = wrapper
-            .step(Tensor::new(1u32, &Device::Cpu).unwrap())
+            .step(Tensor::from_data([1i32], &Device::flex()))
             .unwrap();
         assert!(life_loss.done);
         assert!(life_loss.info.completed_episode.is_none());
 
         wrapper.reset().unwrap();
         let game_over = wrapper
-            .step(Tensor::new(1u32, &Device::Cpu).unwrap())
+            .step(Tensor::from_data([1i32], &Device::flex()))
             .unwrap();
         assert!(game_over.done);
         assert_eq!(
@@ -772,18 +967,18 @@ mod tests {
             ScriptGym::step(11.0, 0.0, false, false, 2),
             ScriptGym::step(12.0, 0.0, true, false, 0),
         ]);
-        let mut wrapper = EpisodicLifeGym::new(gym, &Device::Cpu);
+        let mut wrapper = EpisodicLifeGym::new(gym, &Device::flex());
 
         let _ = wrapper.reset().unwrap();
         let step = wrapper
-            .step(Tensor::new(1u32, &Device::Cpu).unwrap())
+            .step(Tensor::from_data([1i32], &Device::flex()))
             .unwrap();
         let reset_obs = wrapper.reset().unwrap();
 
         assert!(step.done);
         assert_eq!(wrapper.gym.actions, vec![1, 0]);
         assert_eq!(wrapper.gym.reset_count, 2);
-        assert_eq!(scalar(&reset_obs.state), 200.0);
+        assert_eq!(scalar(&reset_obs.observation), 200.0);
     }
 
     #[test]
@@ -792,11 +987,11 @@ mod tests {
             ScriptGym::step(11.0, 0.0, false, true, 3),
             ScriptGym::step(12.0, 0.0, false, false, 3),
         ]);
-        let mut wrapper = EpisodicLifeGym::new(gym, &Device::Cpu);
+        let mut wrapper = EpisodicLifeGym::new(gym, &Device::flex());
 
         let _ = wrapper.reset().unwrap();
         let step = wrapper
-            .step(Tensor::new(1u32, &Device::Cpu).unwrap())
+            .step(Tensor::from_data([1i32], &Device::flex()))
             .unwrap();
         let reset_obs = wrapper.reset().unwrap();
 
@@ -804,6 +999,6 @@ mod tests {
         assert!(step.truncated);
         assert_eq!(wrapper.gym.actions, vec![1]);
         assert_eq!(wrapper.gym.reset_count, 2);
-        assert_eq!(scalar(&reset_obs.state), 200.0);
+        assert_eq!(scalar(&reset_obs.observation), 200.0);
     }
 }
