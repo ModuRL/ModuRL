@@ -10,7 +10,6 @@ pub mod deterministic_actor_critic;
 pub mod ppo;
 pub mod q_learning;
 mod replay_device_strategy;
-#[cfg(any())]
 pub mod sac;
 
 pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
