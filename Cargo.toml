@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 authors.workspace = true
-description = "Modular reinforcement learning algorithms and utilities built on Candle"
+description = "Modular reinforcement learning algorithms and utilities"
 license = "MIT"
 repository.workspace = true
 homepage.workspace = true
 documentation = "https://docs.rs/modurl"
 readme = "README.md"
-keywords = ["reinforcement", "machine-learning", "candle", "rl"]
+keywords = ["reinforcement", "machine-learning", "rl"]
 categories = ["artificial-intelligence", "science", "algorithms"]
 
 [workspace]
@@ -34,8 +34,6 @@ homepage = "https://modurl.github.io/ModuRL/"
 [dependencies]
 bon = "3.7.2"
 burn = { version = "=0.22.0", default-features = false, features = ["std", "optim"] }
-candle-core = "0.11.0"
-candle-nn = "0.11.0"
 rand = "0.10.2"
 tracing = { version = "0.1.37", optional = true }
 thiserror = "2.0.20"

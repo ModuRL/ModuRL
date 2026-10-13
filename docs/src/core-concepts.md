@@ -87,7 +87,7 @@ tensors. The agent and policy model decide what those outputs mean.
 
 A policy is the rule used to choose actions. A stochastic policy samples from
 a distribution. PPO wraps its actor module in
-`ProbabilisticPolicyModel<D>`, where `D` defines how to interpret the actor's
+`ProbabilisticPolicyModel`, whose distribution defines how to interpret the actor's
 output. `D` can be a distribution supplied by ModuRL or a user-defined type
 that implements the public `Distribution` trait. This gives PPO the operations
 it needs:
@@ -114,7 +114,7 @@ and state-action critics.
 
 ## Tensors and Devices
 
-ModuRL uses Candle tensors.
+ModuRL uses Burn tensors.
 
 A tensor has a shape, data type, and device. The shape must match what the model
 or environment expects. The device says where the tensor lives, such as CPU,
@@ -123,7 +123,7 @@ CUDA, or Metal.
 Most examples start with:
 
 ```rust,ignore
-let device = Device::Cpu;
+let device = Device::flex();
 ```
 
 The important rule is that tensors and models used together should live on the
@@ -135,7 +135,7 @@ be on the CPU.
 An optimizer updates model parameters.
 
 In PPO with separate networks, the two model modules can have separate
-optimizers. The optimizer receives variables from the matching `VarMap`.
+optimizers. Each model owns the parameters that its optimizer updates.
 
 A schedule is a value that changes during training. For example,
 `ConstantSchedule` keeps the PPO clip range fixed. `LinearSchedule` can move a
@@ -150,7 +150,7 @@ and updates their parameters.
 
 These are roles in the PPO configuration, not separate library architecture
 types. The public types in the example are `MLP`,
-`ProbabilisticPolicyModel<CategoricalDistribution>`, and `PPOAgent`.
+`ProbabilisticPolicyModel`, and `PPOAgent`.
 
 Read [Understand a PPO Training Run](./understand-ppo-training.md) to inspect
 the results of the example, or [Use Vectorized Environments](./vectorized-environments.md) to work with batched environment steps directly.

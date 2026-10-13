@@ -2938,6 +2938,7 @@ dependencies = [
  "modurl_gym",
  "modurl_logger",
  "modurl_mujoco",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4663,8 +4664,6 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "burn",
- "candle-core",
- "candle-nn",
  "rand 0.10.3",
  "thiserror 2.0.20",
  "tracing",
