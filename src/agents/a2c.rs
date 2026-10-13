@@ -233,6 +233,7 @@ where
     N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
     OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
     AS: ActionMap<L, A>,
+    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>:
@@ -334,6 +335,7 @@ where
     N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
     OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
     AS: ActionMap<L, A>,
+    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,

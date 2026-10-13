@@ -41,12 +41,39 @@ where
 
 /// Checks valid environment actions and supplies random action batches.
 /// A single environment uses a batch of one.
-pub trait ActionSpace<const A: usize> {
+/// The associated action tensor omits the batch axis and preserves the tensor kind.
+///
+/// An action type with the batch rank is rejected:
+///
+/// ```compile_fail
+/// use burn::tensor::{Int, Tensor};
+/// use modurl::spaces::ActionSpace;
+///
+/// fn invalid_rank<S: ActionSpace<2, Kind = Int, Action = Tensor<2, Int>>>() {}
+/// ```
+///
+/// An action type with a different tensor kind is rejected:
+///
+/// ```compile_fail
+/// use burn::tensor::{Float, Int, Tensor};
+/// use modurl::spaces::ActionSpace;
+///
+/// fn invalid_kind<S: ActionSpace<2, Kind = Float, Action = Tensor<1, Int>>>() {}
+/// ```
+pub trait ActionSpace<const A: usize>
+where
+    Tensor<A, Self::Kind>: PrevRank<Prev = Self::Action>,
+{
     type Kind: Basic;
     type Error;
 
+    /// The unbatched action tensor, one rank below `A`, preserving the tensor kind.
+    /// Scalars use `[1]`; dtype and device belong to tensor values.
+    type Action: NextRank<Next = Tensor<A, Self::Kind>>;
+
     /// Checks actions `[batch, ...self.shape()]` against the shape and bounds.
     fn contains(&self, values: &Tensor<A, Self::Kind>) -> bool;
+
     /// Returns the shape of one environment action, excluding the batch axis.
     fn shape(&self) -> Vec<usize>;
 
@@ -59,7 +86,10 @@ pub trait ActionSpace<const A: usize> {
 }
 
 /// Converts original policy samples of rank `L` into environment actions of rank `A`.
-pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A> {
+pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A>
+where
+    Tensor<A, Self::Kind>: PrevRank<Prev = Self::Action>,
+{
     /// Returns the shape of one policy sample, excluding the batch axis.
     fn policy_shape(&self) -> Vec<usize>;
     /// Converts policy samples `[batch, ...self.policy_shape()]` of rank `L`
@@ -122,6 +152,7 @@ impl ObservationSpace<2> for Discrete {
 impl ActionSpace<2> for Discrete {
     type Kind = Int;
     type Error = SpaceError;
+    type Action = Tensor<1, Int>;
 
     /// Checks integer indices shaped `[batch_size, 1]` without changing the input.
     fn contains(&self, values: &Tensor<2, Int>) -> bool {
@@ -233,9 +264,13 @@ where
     }
 }
 
-impl<const R: usize> ActionSpace<R> for BoxSpace<R> {
+impl<const R: usize> ActionSpace<R> for BoxSpace<R>
+where
+    Tensor<R>: PrevRank,
+{
     type Kind = Float;
     type Error = SpaceError;
+    type Action = <Tensor<R> as PrevRank>::Prev;
 
     /// Checks rank-R values `[batch_size, ...self.shape()]` without changing the input.
     fn contains(&self, values: &Tensor<R>) -> bool {
@@ -270,7 +305,10 @@ impl<const R: usize> ActionSpace<R> for BoxSpace<R> {
     }
 }
 
-impl<const R: usize> ActionMap<R, R> for BoxSpace<R> {
+impl<const R: usize> ActionMap<R, R> for BoxSpace<R>
+where
+    Tensor<R>: PrevRank,
+{
     fn policy_shape(&self) -> Vec<usize> {
         self.shape()
     }
@@ -496,9 +534,13 @@ mod tests {
     fn box_sampling_and_clipping_work_through_a_trait_object() {
         let _guard = RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let space: Box<dyn ActionMap<2, 2, Error = SpaceError, Kind = Float>> = Box::new(
-            BoxSpace::<2>::new_with_universal_bounds([1, 2], -1.0, 1.0, &device),
-        );
+        let space: Box<dyn ActionMap<2, 2, Error = SpaceError, Kind = Float, Action = Tensor<1>>> =
+            Box::new(BoxSpace::<2>::new_with_universal_bounds(
+                [1, 2],
+                -1.0,
+                1.0,
+                &device,
+            ));
         assert_eq!(space.sample_batch(4, &device).unwrap().dims(), [4, 2]);
         let actions = space
             .tensor_from_neurons(Tensor::from_floats([[-2.0, 2.0]], &device))
@@ -547,8 +589,9 @@ mod tests {
                 255.0,
                 &device,
             ));
-        let actions: Box<dyn ActionSpace<2, Kind = Int, Error = SpaceError>> =
-            Box::new(Discrete::new(3));
+        let actions: Box<
+            dyn ActionSpace<2, Kind = Int, Error = SpaceError, Action = Tensor<1, Int>>,
+        > = Box::new(Discrete::new(3));
         assert_eq!(observations.shape(), vec![2, 3, 4]);
         assert!(observations.contains(&Tensor::zeros([5, 2, 3, 4], &device)));
         assert!(!observations.contains(&Tensor::zeros([5, 2, 4, 3], &device)));

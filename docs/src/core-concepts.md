@@ -30,6 +30,13 @@ batch tensor's `PrevRank::Prev` type. Observation batches retain their leading
 batch axis. Dtype and device requirements still follow the environment and model
 contracts.
 
+The action space determines the unbatched environment action type through
+`ActionSpace::Action`. `Discrete` supplies `Tensor<1, Int>`, and `BoxSpace<2>`
+supplies `Tensor<1>`. `Gym::step` accepts this type. Batched interaction keeps
+the leading batch axis. Custom action spaces must declare `Action`, which must
+equal the batch tensor's `PrevRank::Prev` type. Original policy samples retain
+their own layout; `ActionMap` converts them into environment action batches.
+
 ## Environments and Spaces
 
 An environment is the world the agent interacts with.
