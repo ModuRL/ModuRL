@@ -17,10 +17,10 @@ logger can therefore support both algorithms:
 ```rust,ignore
 use modurl::prelude::*;
 
-struct ConsoleLogger;
+pub struct ConsoleLogger;
 
 fn log_update(entry: &DeterministicActorCriticLogEntry) {
-    if entry.update_index % 1_000 != 0 {
+    if !entry.update_index.is_multiple_of(1_000) {
         return;
     }
 
@@ -28,16 +28,16 @@ fn log_update(entry: &DeterministicActorCriticLogEntry) {
         .clone()
         .cast(burn::tensor::DType::F32)
         .into_scalar::<f32>();
-    let actor_loss = entry.actor_loss
-        .as_ref()
-        .map(|loss| loss.clone().cast(burn::tensor::DType::F32).into_scalar::<f32>());
+    let actor_loss = entry.actor_loss.as_ref().map(|loss| {
+        loss.clone()
+            .cast(burn::tensor::DType::F32)
+            .into_scalar::<f32>()
+    });
 
     println!(
         "step={} update={} critic_loss={critic_loss:.4} \
-         actor_updated={} actor_loss={actor_loss:?}",
-        entry.collection_timestep,
-        entry.update_index,
-        entry.actor_updated,
+     actor_updated={} actor_loss={actor_loss:?}",
+        entry.collection_timestep, entry.update_index, entry.actor_updated,
     );
 }
 
@@ -60,10 +60,7 @@ impl<I> DDPGLogger<I> for ConsoleLogger {
         log_update(entry);
     }
 
-    fn log_collection(
-        &mut self,
-        entry: &DeterministicActorCriticCollectionLogEntry<I>,
-    ) {
+    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
         log_collection(entry);
     }
 }
@@ -73,10 +70,7 @@ impl<I> TD3Logger<I> for ConsoleLogger {
         log_update(entry);
     }
 
-    fn log_collection(
-        &mut self,
-        entry: &DeterministicActorCriticCollectionLogEntry<I>,
-    ) {
+    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
         log_collection(entry);
     }
 }

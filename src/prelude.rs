@@ -2,7 +2,7 @@
 //!
 //! This prelude re-exports the traits users need for method resolution and the
 //! high-use ModuRL types that appear in most examples. External crates such as
-//! Candle and ModuRL Gym are intentionally left explicit.
+//! the tensor framework and ModuRL Gym are intentionally left explicit.
 
 pub use crate::agents::{
     Agent, ReplayDeviceStrategy, ReplayStorageConfig,
