@@ -330,8 +330,9 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
         if self.observations.is_none() {
             self.observations = Some(AlignedObservationReplay::new(
                 self.observation_storage_shape,
+                count,
                 (&self.device, dtype),
-            ));
+            )?);
             self.observation_dtype = Some(dtype);
         }
         let observations = self
