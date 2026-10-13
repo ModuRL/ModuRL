@@ -26,7 +26,6 @@ use burn::{
 };
 use std::{fmt::Debug, marker::PhantomData};
 
-#[cfg(any())]
 pub mod ddpg;
 mod replay;
 #[cfg(any())]
@@ -306,6 +305,7 @@ pub(crate) trait DeterministicActorCriticStrategy {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CriticCountRequirement {
     Exact(usize),
+    #[cfg(test)]
     NonEmpty,
 }
 
@@ -336,9 +336,7 @@ impl DeterministicActorCriticConfigurationValidator {
             Some(DeterministicActorCriticConfigurationError::InvalidDType(
                 dtype,
             ))
-        } else if matches!(critic_count_requirement, CriticCountRequirement::NonEmpty)
-            && actual_critic_count == 0
-        {
+        } else if actual_critic_count == 0 {
             Some(DeterministicActorCriticConfigurationError::NoCritics)
         } else if let CriticCountRequirement::Exact(expected) = critic_count_requirement
             && actual_critic_count != expected
@@ -403,7 +401,7 @@ struct ActorUpdate<const A: usize> {
 /// Scalar observations/actions use [batch_size, 1]. Critic candidates add one axis after batch, with C = A + 1.
 /// Models own observation preprocessing. Replay preserves observation dtype and transfers detached samples to the optimization device.
 /// Groups owned models and native execution tensors without adding runtime storage or execution methods.
-pub(crate) trait DeterministicActorCriticModelTypes {
+pub trait DeterministicActorCriticModelTypes {
     type Actor: Module;
     type Critic: Module;
     type Observation;
@@ -413,13 +411,7 @@ pub(crate) trait DeterministicActorCriticModelTypes {
 }
 
 /// Selects actor, critic, observation, action, and candidate types; all actual values remain in the agent.
-pub(crate) struct DeterministicActorCriticModelGroup<
-    M,
-    N,
-    O = Tensor<2>,
-    A = Tensor<2>,
-    C = Tensor<3>,
-> {
+pub struct DeterministicActorCriticModelGroup<M, N, O = Tensor<2>, A = Tensor<2>, C = Tensor<3>> {
     models: PhantomData<(M, N)>,
     tensors: PhantomData<(O, A, C)>,
 }
@@ -437,7 +429,7 @@ impl<M: Module, N: Module, K: Autodiff, const O: usize, const A: usize, const C:
 }
 
 /// Infers the model group from the concrete actor, critic, and native tensor types supplied to the builder.
-pub(crate) trait DeterministicActorCriticModelFor<N: Module, O, A, C>: Module {
+pub trait DeterministicActorCriticModelFor<N: Module, O, A, C>: Module {
     type ModelGroup: DeterministicActorCriticModelTypes<Actor = Self, Critic = N>;
 }
 
