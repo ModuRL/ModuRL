@@ -10,7 +10,6 @@ use super::{
         SeparatePPONetwork, SharedPPONetwork,
     },
 };
-use crate::tensor_rank::TensorBatchTypes;
 use crate::{buffers::experience::ExperienceBatchError, sampling::SamplingError};
 use crate::{
     gym::MultiGym,
@@ -205,22 +204,7 @@ pub struct A2CAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
 }
 
 #[bon]
-impl<
-    'a,
-    N,
-    OS,
-    AS,
-    GE,
-    I,
-    NE: std::fmt::Debug,
-    const O: usize,
-    const H: usize,
-    const L: usize,
-    const A: usize,
-    const BO: usize,
-    const BL: usize,
-    const U: usize,
->
+impl<'a, N, OS, AS, GE, I, const O: usize, const H: usize, const L: usize, const A: usize>
     A2CAgent<
         'a,
         PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
@@ -231,15 +215,13 @@ impl<
         A,
     >
 where
-    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+    N: PPONetwork<O, H, L, InputKind = OS::Kind>,
+    OS: ObservationSpace<O>,
     AS: ActionMap<L, A>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>:
-        PrevRank<Prev = Tensor<U, OS::Kind>> + NextRank<Next = Tensor<BO, OS::Kind>>,
-    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
-    Tensor<L>: NextRank<Next = Tensor<BL>>,
+    Tensor<O, OS::Kind>: PrevRank + NextRank,
+    Tensor<L>: NextRank,
     GE: std::fmt::Debug,
 {
     /// Builds A2C with one unclipped optimization epoch over the complete rollout.
@@ -294,8 +276,8 @@ where
     /// Inputs have shape `[batch_size, ...observation_shape]` and must meet the model's dtype and device contract.
     pub fn act_deterministic(
         &mut self,
-        observations: &Tensor<O, OS::Kind>,
-    ) -> Result<Tensor<A, AS::Kind>, A2CError<NE, GE, AS::Error>> {
+        observations: &OS::Batch,
+    ) -> Result<AS::Batch, A2CError<N::Error, GE, AS::Error>> {
         self.inner
             .act_deterministic(observations)
             .map_err(A2CError::from)
@@ -313,7 +295,6 @@ impl<
     AS,
     GE,
     I,
-    NE: std::fmt::Debug,
     const O: usize,
     const H: usize,
     const L: usize,
@@ -332,28 +313,26 @@ impl<
         A,
     >
 where
-    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+    N: PPONetwork<O, H, L, InputKind = OS::Kind>,
+    OS: ObservationSpace<O, Item = Tensor<U, <OS as crate::tensor_rank::TensorBatchTypes>::Kind>>,
     AS: ActionMap<L, A>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
-    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
-    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
+    Tensor<O, OS::Kind>: PrevRank + NextRank,
+    Tensor<L>: NextRank,
+    Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
+    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     GE: std::fmt::Debug,
 {
-    type Error = A2CError<NE, GE, AS::Error>;
+    type Error = A2CError<N::Error, GE, AS::Error>;
     type GymError = GE;
     type SpaceError = AS::Error;
     type ObservationSpace = OS;
     type ActionSpace = AS;
 
     /// Maps rank-O observations `[batch_size, ...observation_shape]` to rank-A actions `[batch_size, ...action_shape]`, preserving native kinds and device.
-    fn act(
-        &mut self,
-        observations: &Tensor<O, OS::Kind>,
-    ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
+    fn act(&mut self, observations: &OS::Batch) -> Result<AS::Batch, Self::Error> {
         self.inner.act(observations).map_err(A2CError::from)
     }
 

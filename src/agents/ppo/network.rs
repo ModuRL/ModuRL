@@ -446,15 +446,15 @@ pub enum PPONetworkError<
     Shared(#[source] TE),
 }
 
-impl<N, K: Autodiff, Q: Basic, const O: usize, const H: usize, const L: usize> PPOModelTypes
-    for PPOModelGroup<N, Tensor<O, K>, Tensor<H, Q>, Tensor<L>>
+impl<N, const O: usize, const H: usize, const L: usize> PPOModelTypes
+    for PPOModelGroup<N, Tensor<O, N::InputKind>, Tensor<H, N::LatentKind>, Tensor<L>>
 where
-    N: PPONetwork<O, H, L, InputKind = K, LatentKind = Q>,
-    Tensor<O, K>: NextRank + PrevRank,
+    N: PPONetwork<O, H, L>,
+    Tensor<O, N::InputKind>: NextRank + PrevRank,
     Tensor<L>: NextRank,
 {
     type Network = N;
-    type Observation = Tensor<O, K>;
+    type Observation = Tensor<O, N::InputKind>;
     type Action = Tensor<L>;
     type Error = N::Error;
 }
