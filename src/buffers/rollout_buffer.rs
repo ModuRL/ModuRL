@@ -18,10 +18,7 @@ pub struct RolloutBuffer<T> {
     device: Device,
 }
 
-impl<T> RolloutBuffer<T>
-where
-    T: experience::Experience,
-{
+impl<T> RolloutBuffer<T> {
     /// Creates a buffer whose device supplies shuffle randomness. A zero batch
     /// size disables batch production until the buffer is replaced.
     pub fn new(batch_size: usize, device: Device) -> Self {
@@ -44,7 +41,10 @@ where
         &mut self.buffer
     }
 
-    pub fn get_all(&self) -> Result<Vec<T::Batch>, T::Error> {
+    pub fn get_all(&self) -> Result<Vec<T::Batch>, T::Error>
+    where
+        T: experience::Experience,
+    {
         if self.batch_size == 0 {
             return Ok(Vec::new());
         }
@@ -53,7 +53,10 @@ where
     }
 
     /// Shuffles the buffer and returns all samples.
-    pub fn get_all_shuffled(&mut self) -> Result<Vec<T::Batch>, RolloutBufferError<T::Error>> {
+    pub fn get_all_shuffled(&mut self) -> Result<Vec<T::Batch>, RolloutBufferError<T::Error>>
+    where
+        T: experience::Experience,
+    {
         shuffle_with_device_rng(&mut self.buffer, &self.device)?;
 
         let samples = self
@@ -83,6 +86,20 @@ where
 mod tests {
     use super::*;
     use burn::tensor::{Int, Tensor};
+
+    #[test]
+    fn raw_storage_does_not_require_an_experience_implementation() {
+        struct UnbatchedValue(usize);
+
+        let mut buffer = RolloutBuffer::new(2, Device::flex());
+        buffer.add(UnbatchedValue(3));
+        assert_eq!(buffer.get_raw()[0].0, 3);
+        buffer.get_raw_mut()[0].0 = 4;
+        assert_eq!(buffer.get_raw()[0].0, 4);
+        assert_eq!(buffer.len(), 1);
+        buffer.clear();
+        assert!(buffer.is_empty());
+    }
 
     #[derive(Clone)]
     struct TestExperience {
