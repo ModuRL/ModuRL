@@ -1,7 +1,7 @@
 use super::{MultiGym, MultiGymStepInfo, batch_metadata, batch_offsets, combine_steps};
 use crate::spaces::{ActionSpace, ObservationSpace};
-use crate::tensor_rank::{NextRank, PrevRank};
-use burn::tensor::{Slice, Tensor, kind::Basic};
+use crate::tensor_rank::TensorBatchTypes;
+use burn::tensor::{Slice, Tensor};
 use std::marker::PhantomData;
 
 #[derive(Debug, thiserror::Error)]
@@ -42,11 +42,9 @@ pub struct StackedMultiGym<G, I = (), const O: usize = 2, const A: usize = 2> {
     _info: PhantomData<fn() -> I>,
 }
 
-impl<G, I, const O: usize, const A: usize, K: Basic, AK: Basic> StackedMultiGym<G, I, O, A>
+impl<G, I, const O: usize, const A: usize> StackedMultiGym<G, I, O, A>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K>,
-    G::ActionSpace: ActionSpace<A, Kind = AK>,
 {
     /// Connects nonempty groups with matching observation and action item shapes.
     pub fn new(gyms: Vec<G>) -> Result<Self, StackedMultiGymError<G::Error>> {
@@ -83,12 +81,9 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, K: Basic, AK: Basic> TryFrom<Vec<G>>
-    for StackedMultiGym<G, I, O, A>
+impl<G, I, const O: usize, const A: usize> TryFrom<Vec<G>> for StackedMultiGym<G, I, O, A>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K>,
-    G::ActionSpace: ActionSpace<A, Kind = AK>,
 {
     type Error = StackedMultiGymError<G::Error>;
 
@@ -97,14 +92,9 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic> MultiGym<I, O, A>
-    for StackedMultiGym<G, I, O, A>
+impl<G, I, const O: usize, const A: usize> MultiGym<I, O, A> for StackedMultiGym<G, I, O, A>
 where
     G: MultiGym<I, O, A>,
-    G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-    G::ActionSpace: ActionSpace<A, Kind = AK>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
-    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
 {
     type Error = StackedMultiGymError<G::Error>;
     type ObservationSpace = G::ObservationSpace;
@@ -115,8 +105,9 @@ where
     /// Input dimensions, dtype, and device must satisfy the inner gyms' contracts.
     fn step(
         &mut self,
-        action: Tensor<A, AK>,
-    ) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, Self::Error> {
+        action: <G::ActionSpace as TensorBatchTypes>::Batch,
+    ) -> Result<MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error>
+    {
         let mut steps = Vec::with_capacity(self.gyms.len());
         for (gym_index, gym) in self.gyms.iter_mut().enumerate() {
             let range = self.group_offsets[gym_index]..self.group_offsets[gym_index + 1];
@@ -143,7 +134,7 @@ where
 
     /// Concatenates reset observations `[group_size, ...observation_shape]` to `[total_size, ...observation_shape]` of rank `O`.
     /// All groups must share observation kind, dtype, device, and item dimensions. Gradient paths are preserved.
-    fn reset(&mut self) -> Result<Tensor<O, K>, Self::Error> {
+    fn reset(&mut self) -> Result<<G::ObservationSpace as TensorBatchTypes>::Batch, Self::Error> {
         let mut observations = Vec::with_capacity(self.gyms.len());
         for (gym_index, gym) in self.gyms.iter_mut().enumerate() {
             observations.push(
@@ -157,9 +148,57 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::VectorizedGymWrapper;
     use super::super::test_support::*;
     use super::*;
-    use burn::tensor::Device;
+    use crate::wrappers::OutputMapMultiGymWrapper;
+    use burn::tensor::{DType, Device};
+    use std::convert::Infallible;
+
+    #[test]
+    fn output_mapping_preserves_stacked_scalar_f64_terminals() {
+        let device = Device::flex();
+        let stack = StackedMultiGym::new(vec![
+            VectorizedGymWrapper::from(ScalarEnv),
+            VectorizedGymWrapper::from(ScalarEnv),
+        ])
+        .unwrap();
+        let mut gym = OutputMapMultiGymWrapper::new(
+            stack,
+            |observations: Tensor<2>| Ok::<_, Infallible>(observations + 1.0),
+            |mut step: MultiGymStepInfo| {
+                step.observations = step.observations + 1.0;
+                Ok::<_, Infallible>(step)
+            },
+        );
+        let observations = gym.reset().unwrap();
+        assert_eq!(observations.dims(), [2, 1]);
+        assert_eq!(observations.dtype(), DType::F64);
+        assert_eq!(observations.device(), device);
+        let step = gym
+            .step(Tensor::from_data(
+                [[10.0f64], [20.0]],
+                (&device, DType::F64),
+            ))
+            .unwrap();
+        assert_eq!(step.observations.dims(), [2, 1]);
+        assert_eq!(step.observations.dtype(), DType::F64);
+        assert_eq!(step.observations.device(), device);
+        assert_eq!(
+            step.observations.into_data().try_to_vec::<f64>().unwrap(),
+            [1.0, 1.0]
+        );
+        assert_eq!(step.rewards.dims(), [2, 1]);
+        assert_eq!(step.dones, [true, true]);
+        assert_eq!(step.truncateds, [false, false]);
+        for (terminal, expected) in step.terminal_observations.into_iter().zip([10.0, 20.0]) {
+            let terminal = terminal.unwrap();
+            assert_eq!(terminal.dims(), [1]);
+            assert_eq!(terminal.dtype(), DType::F64);
+            assert_eq!(terminal.device(), device);
+            assert_eq!(terminal.into_scalar::<f64>(), expected);
+        }
+    }
 
     #[test]
     fn stacked_batches_route_actions_and_preserve_slot_order() {
