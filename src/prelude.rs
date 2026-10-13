@@ -20,6 +20,7 @@ pub use crate::agents::{
         DeterministicActorCriticLogEntry, DeterministicActorCriticModelGroup,
         DeterministicActorCriticModelTypes,
         ddpg::{DDPGAgent, DDPGLogger},
+        td3::{TD3Agent, TD3Logger},
     },
     ppo::{
         PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
