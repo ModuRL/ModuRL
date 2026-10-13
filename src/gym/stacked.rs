@@ -47,6 +47,7 @@ where
     G: MultiGym<I, O, A>,
     G::ObservationSpace: ObservationSpace<O, Kind = K>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<A, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<A>>::Action>,
     Tensor<O, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<O>>::Observation>,
 {
     /// Connects nonempty groups with matching observation and action item shapes.
@@ -90,6 +91,7 @@ where
     G: MultiGym<I, O, A>,
     G::ObservationSpace: ObservationSpace<O, Kind = K>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<A, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<A>>::Action>,
     Tensor<O, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<O>>::Observation>,
 {
     type Error = StackedMultiGymError<G::Error>;
@@ -105,6 +107,7 @@ where
     G: MultiGym<I, O, A>,
     G::ObservationSpace: ObservationSpace<O, Kind = K, Observation = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<A, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<A>>::Action>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
 {

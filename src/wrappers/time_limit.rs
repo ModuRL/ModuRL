@@ -35,7 +35,7 @@ where
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
-    Tensor<BA, AK>: PrevRank,
+    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = G::Error;
     type ObservationSpace = G::ObservationSpace;
@@ -53,7 +53,7 @@ where
     /// Marks truncation at the step limit unless the inner gym reports termination.
     fn step(
         &mut self,
-        action: <Tensor<BA, AK> as PrevRank>::Prev,
+        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
     ) -> Result<StepInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
         let mut info = self.gym.step(action)?;
         self.elapsed_steps += 1;

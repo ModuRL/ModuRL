@@ -71,7 +71,7 @@ where
     G: Gym<I, F, BA>,
     G::ObservationSpace: ObservationSpace<F, Kind = K, Observation = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BA, AK>: PrevRank,
+    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
     S: ObservationSpace<BF, Kind = K, Observation = Tensor<F, K>> + Clone,
     Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
     Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
@@ -98,7 +98,7 @@ where
     /// Returns rank `F` with `[frame_count, ...observation_shape]`, or `[frame_count, 1]` for scalars, preserving kind, dtype, and device.
     fn step(
         &mut self,
-        action: <Tensor<BA, AK> as PrevRank>::Prev,
+        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
     ) -> Result<StepInfo<I, Tensor<F, K>>, Self::Error> {
         let step = self
             .gym
@@ -153,7 +153,7 @@ where
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
-    Tensor<BA, AK>: PrevRank,
+    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
     K: Ordered,
 {
     type Error = MaxAndSkipGymError<G::Error>;
@@ -169,7 +169,7 @@ where
     /// Preserves item axes, numeric kind, dtype, and device; scalars use `[1]`. Stops on termination or truncation.
     fn step(
         &mut self,
-        action: <Tensor<BA, AK> as PrevRank>::Prev,
+        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
     ) -> Result<StepInfo<I, Tensor<O, K>>, Self::Error> {
         let mut step = self
             .gym
