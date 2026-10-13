@@ -6,7 +6,6 @@ use crate::{
 
 pub mod a2c;
 pub mod action_value_critic;
-#[cfg(test)]
 pub mod deterministic_actor_critic;
 
 pub mod ppo;

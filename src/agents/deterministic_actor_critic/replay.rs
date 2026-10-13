@@ -65,7 +65,7 @@ pub(super) struct DeterministicReplayInsert<const O: usize, const A: usize, K: A
 }
 
 /// Owns aligned replay for native rank-O observations, Float rank-A actions, and scalar rewards and Bool flags.
-pub(crate) struct DeterministicReplay<const O: usize, const A: usize, K: Autodiff> {
+pub struct DeterministicReplay<const O: usize, const A: usize, K: Autodiff> {
     buffer:
         ExperienceReplay<DeterministicReplayInsert<O, A, K>, DeterministicReplayStorage<O, A, K>>,
 }

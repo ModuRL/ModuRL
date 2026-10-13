@@ -25,11 +25,12 @@ fn log_update(entry: &DeterministicActorCriticLogEntry) {
     }
 
     let critic_loss = entry.critic_losses[0]
-        .to_scalar::<f32>()
-        .expect("critic loss must be scalar");
+        .clone()
+        .cast(burn::tensor::DType::F32)
+        .into_scalar::<f32>();
     let actor_loss = entry.actor_loss
         .as_ref()
-        .map(|loss| loss.to_scalar::<f32>().expect("actor loss must be scalar"));
+        .map(|loss| loss.clone().cast(burn::tensor::DType::F32).into_scalar::<f32>());
 
     println!(
         "step={} update={} critic_loss={critic_loss:.4} \
