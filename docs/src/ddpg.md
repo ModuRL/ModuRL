@@ -21,89 +21,62 @@ cargo run --release -p examples --example ddpg_mujoco --features walker2d
 
 Normally enable one environment feature; add `rendering` to it to open a
 viewer. Additive builds with several environment features select `ant`,
-`half-cheetah`, `hopper`, then `walker2d`. The program selects CUDA when it is
-available and otherwise uses the CPU. It trains for one million collected
+`half-cheetah`, `hopper`, then `walker2d`. The program uses the CPU by default. Enable `cuda` or `metal` to select an accelerator. It trains for one million collected
 transitions, then displays terminal graphs for optimization and episode
 metrics.
 
 The complete source is `crates/examples/examples/ddpg_mujoco.rs`. It contains
 four parts:
 
-1. Separate online and target actor networks.
-2. One online/target critic pair.
+1. An owned actor model.
+2. One `ActionValueCritic` with an owned online network and optimizer.
 3. A bounded continuous action space and replay-device strategy.
 4. A `DDPGAgent` that owns collection and optimization.
 
-`actor` and `critic` are private helper functions defined in that example, not
-functions provided by ModuRL. `actor` builds an actor MLP. `critic` builds the
-online and target critic networks and packages them as a
-`DeterministicCritic`.
+## Build the Actor and Critic
 
-## Build the Online and Target Actors
-
-Both actor networks must have the same architecture and parameter names. Only
-the online actor has an optimizer:
+The actor implements `Module` and `Forward<O, A>`.
+Observation rank `O` and action rank `A` include the batch axis.
+The agent creates a detached target actor automatically.
+`ActionValueCritic` creates its own detached target network.
 
 ```rust,ignore
-let online_actor_variables = VarMap::new();
-let mut target_actor_variables = VarMap::new();
+use modurl::agents::action_value_critic::ScalarStateActionCritic;
 
-let online_actor = actor(
-    &online_actor_variables,
-    observation_size,
-    action_size,
-    &device,
-)?;
-let target_actor = actor(
-    &target_actor_variables,
-    observation_size,
-    action_size,
-    &device,
-)?;
-let actor_optimizer = AdamW::new(
-    online_actor_variables.all_vars(),
-    actor_optimizer_parameters,
-)?;
-```
-
-`DDPGAgent` copies the online actor parameters to the target actor during
-construction. Later, it moves each target parameter toward the corresponding
-online parameter by `tau` after every replay update.
-
-## Build One Critic
-
-DDPG requires exactly one `DeterministicCritic`. Its online network learns from
-replay. Its target network supplies the next-state Q estimate:
-
-```rust,ignore
-let critic = DeterministicCritic::builder()
-    .online_network(ScalarStateActionCritic::new(
-        online_critic,
-    ))
-    .target_network(ScalarStateActionCritic::new(
-        target_critic,
-    ))
-    .online_vars(&online_critic_variables)
-    .target_vars(&mut target_critic_variables)
-    .optimizer(critic_optimizer)
+let online_actor = MLP::builder()
+    .input_size(observation_size)
+    .output_size(action_size)
+    .hidden_layer_sizes(vec![64, 64])
+    .activation(Relu)
+    .output_activation(Tanh)
+    .options((&device, DType::F32))
+    .build()?;
+let critic = ActionValueCritic::builder()
+    .online_network(ScalarStateActionCritic::new(online_critic))
+    .optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+    .learning_rate(1e-3)
     .build()?;
 ```
+
+The critic receives observations `[batch_size, ...observation_shape]` and actions `[batch_size, ...action_shape]`.
+It returns Q values `[batch_size, 1]`.
+`ScalarStateActionCritic` flattens event axes and joins Float observations and actions.
+Its inputs must share dtype and device. Custom critics can accept other native observation kinds.
+
+After each replay update, targets move toward online parameters by `tau`.
 
 The actor learns to maximize the online critic's mean Q estimate. Equivalently,
 the optimizer minimizes the negative mean Q value.
 
 ## Assemble the Agent
 
-The example passes all owned modules and borrowed parameter maps to the
-builder:
+The builder accepts owned models and optimizers:
 
 ```rust,ignore
 let mut agent = DDPGAgent::builder()
     .online_actor(online_actor)
-    .target_actor(target_actor)
-    .online_actor_vars(&online_actor_variables)
-    .target_actor_vars(&mut target_actor_variables)
-    .actor_optimizer(actor_optimizer)
+    .actor_optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+    .actor_learning_rate(1e-4)
     .critic(critic)
     .action_space(action_space)
     .observation_space(observation_space)
@@ -123,15 +96,25 @@ let mut agent = DDPGAgent::builder()
 agent.learn(&mut env, TOTAL_TIMESTEPS)?;
 ```
 
-The `action_space` must be a `BoxSpace`. Its shape must match the actor output,
-and its bounds must match the environment's accepted actions. The included
+The `action_space` implements `ActionMap<A, A>` with Float actions.
+`BoxSpace` clamps actor outputs to the environment bounds.
+Actor outputs must match the policy event shape. Environment actions must match the action event shape. The included
 MuJoCo environments use one-dimensional action vectors bounded by
 `-1.0..=1.0`; their vector length depends on the selected environment.
+
+Observations keep their native kind and dtype in inputs and replay.
+Models must perform any required conversion explicitly.
+The `dtype` setting controls actions, rewards, and Q values, including F64 where supported.
+Actions and Q values must share the configured dtype; mismatches return an error.
+Replay rewards are converted to that dtype.
+Model parameters must use the optimization device.
+Replay stores detached transitions and uses terminal observations for truncation targets.
 
 Important defaults and constraints are:
 
 | Setting | Default | Constraint or effect |
 | --- | --- | --- |
+| `actor_learning_rate` | Required | Finite and positive |
 | `gamma` | `0.99` | Finite and between zero and one |
 | `tau` | `0.005` | Target-network update coefficient from zero to one |
 | `exploration_noise` | `0.1` | Non-negative Gaussian standard deviation |

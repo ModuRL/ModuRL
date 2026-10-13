@@ -607,12 +607,10 @@ impl<I> SACLogger<I> for SACGrapher {
 
 const DETERMINISTIC_ACTOR_CRITIC_UPDATE_LOG_INTERVAL: usize = 1_000;
 
-#[cfg(any())]
 pub struct DeterministicActorCriticGrapher {
     terminal: TerminalLogger,
 }
 
-#[cfg(any())]
 impl DeterministicActorCriticGrapher {
     pub fn new() -> Self {
         let aggregation = with_episode_smoothing(with_metric_window(
@@ -637,29 +635,23 @@ impl DeterministicActorCriticGrapher {
             return;
         }
 
-        let critic_loss = Tensor::stack(&entry.critic_losses, 0)
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let replay_q = Tensor::stack(&entry.critic_q_values, 0)
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let bellman_target = entry.bellman_targets.mean_all().unwrap();
-        let replay_reward = entry.replay_rewards.mean_all().unwrap();
+        let critic_loss = on_policy_metric(&burn::tensor::Tensor::<1>::stack::<2>(
+            entry.critic_losses.clone(),
+            0,
+        ));
+        let replay_q = on_policy_metric(&burn::tensor::Tensor::<2>::stack::<3>(
+            entry.critic_q_values.clone(),
+            0,
+        ));
+        let bellman_target = on_policy_metric(&entry.bellman_targets);
+        let replay_reward = on_policy_metric(&entry.replay_rewards);
         let exploration_noise = Tensor::new(
             entry.exploration_noise_standard_deviation as f32,
             &Device::Cpu,
         )
         .unwrap();
-        let actor_loss = entry
-            .actor_loss
-            .as_ref()
-            .map(|loss| loss.mean_all().unwrap());
-        let policy_q = entry
-            .policy_q_values
-            .as_ref()
-            .map(|values| values.mean_all().unwrap());
+        let actor_loss = entry.actor_loss.as_ref().map(on_policy_metric);
+        let policy_q = entry.policy_q_values.as_ref().map(on_policy_metric);
 
         let mut metrics = vec![
             ("Critic Loss", &critic_loss),
@@ -684,7 +676,7 @@ impl DeterministicActorCriticGrapher {
             .collection_timestep
             .is_multiple_of(DETERMINISTIC_ACTOR_CRITIC_UPDATE_LOG_INTERVAL)
         {
-            let mean_step_reward = entry.collection_rewards.mean_all().unwrap();
+            let mean_step_reward = on_policy_metric(&entry.collection_rewards);
             self.terminal
                 .log(
                     entry.collection_timestep,
@@ -715,7 +707,6 @@ impl DeterministicActorCriticGrapher {
     }
 }
 
-#[cfg(any())]
 impl<I> DDPGLogger<I> for DeterministicActorCriticGrapher {
     fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
         self.log_update(entry);
@@ -987,7 +978,6 @@ mod tests {
         );
     }
 
-    #[cfg(any())]
     #[test]
     fn deterministic_grapher_uses_batch_timestep_for_completed_episodes() {
         let mut grapher = DeterministicActorCriticGrapher::new();
@@ -998,8 +988,7 @@ mod tests {
             .unwrap();
 
         grapher.log_collection_metrics(&DeterministicActorCriticCollectionLogEntry {
-            collection_rewards: Tensor::zeros((2, 1), candle_core::DType::F32, &Device::Cpu)
-                .unwrap(),
+            collection_rewards: burn::tensor::Tensor::zeros([2, 1], &burn::tensor::Device::flex()),
             infos: vec![(), ()],
             collection_timestep: 6_000,
             completed_episodes: vec![
