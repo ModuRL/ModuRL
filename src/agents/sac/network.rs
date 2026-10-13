@@ -418,6 +418,11 @@ pub struct SACCritic<N: Module> {
 
 #[bon]
 impl<N: Module> SACCritic<N> {
+    /// Returns the owned online model for parameter inspection and checkpoint snapshots.
+    pub fn online_network(&self) -> &N {
+        &self.online_network
+    }
+
     /// Owns the model and optimizer, enables online training, and clones the target snapshot.
     /// Rejects a nonpositive or non-finite learning rate.
     #[builder]
@@ -701,6 +706,7 @@ mod tests {
 
     #[test]
     fn scalar_replay_and_candidates_preserve_layout_dtype_and_gradients() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         for dtype in [DType::F32, DType::F64] {
             let model = sum_model(3, dtype);
             let device = model.weight.val().device();
@@ -729,6 +735,7 @@ mod tests {
 
     #[test]
     fn scalar_adapter_flattens_five_action_event_axes() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let model = sum_model(34, DType::F32);
         let device = model.weight.val().device();
         let critic = ScalarStateActionCritic::new(model);
@@ -757,6 +764,7 @@ mod tests {
 
     #[test]
     fn scalar_actor_gradients_reach_actions_but_not_critic_parameters() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let model = sum_model(3, DType::F64);
         let weight = model.weight.val();
         let device = weight.device();
@@ -785,6 +793,7 @@ mod tests {
 
     #[test]
     fn discrete_adapter_gathers_indices_and_keeps_native_observations() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
         let critic = DiscreteVectorHeadCritic::new(IntegerModel);
         let observations =
@@ -814,6 +823,7 @@ mod tests {
 
     #[test]
     fn discrete_actor_gradients_reach_weights_but_not_critic_parameters() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let weight = Tensor::<2>::ones([2, 3], &device).require_grad();
         let critic = DiscreteVectorHeadCritic::new(SumModel {
@@ -832,6 +842,7 @@ mod tests {
 
     #[test]
     fn cloned_targets_are_independent_and_polyak_preserves_ids_and_dtypes() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         for dtype in [DType::F32, DType::F64] {
             let model = sum_model(3, dtype);
             let id = model.weight.id;
@@ -902,6 +913,7 @@ mod tests {
 
     #[test]
     fn invalid_configuration_and_scalar_inputs_return_typed_errors() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         for rate in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(matches!(
                 SACCritic::builder()
@@ -953,6 +965,7 @@ mod tests {
 
     #[test]
     fn native_model_target_matches_before_and_after_online_initialization() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         use crate::models::MLP;
 
         let device = Device::flex().autodiff();
@@ -1006,6 +1019,7 @@ mod tests {
 
     #[test]
     fn aggregation_preserves_all_modes_even_medians_and_gradients() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         for (mode, expected, gradient) in [
             (SACCriticAggregationMode::Mean, 2.0, [1.0 / 3.0; 3]),
@@ -1050,6 +1064,7 @@ mod tests {
 
     #[test]
     fn aggregation_rejects_empty_mismatched_shapes_and_dtypes() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
         assert!(matches!(
             aggregate_critic_values::<2, 3>(&[], SACCriticAggregationMode::Min),
