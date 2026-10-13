@@ -5,9 +5,7 @@
 //! Candle and ModuRL Gym are intentionally left explicit.
 
 pub use crate::agents::{
-    Agent,
-    ReplayDeviceStrategy,
-    ReplayStorageConfig,
+    Agent, ReplayDeviceStrategy, ReplayStorageConfig,
     a2c::{
         A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
         A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
@@ -16,13 +14,13 @@ pub use crate::agents::{
         ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
         ActionValueCriticNetwork,
     },
-    // deterministic_actor_critic::{
-    //     DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
-    //     DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
-    //     DeterministicActorCriticLogEntry, DeterministicActorCriticResult, DeterministicCritic,
-    //     ddpg::{DDPGAgent, DDPGLogger},
-    //     td3::{TD3Agent, TD3Logger},
-    // },
+    deterministic_actor_critic::{
+        DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
+        DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
+        DeterministicActorCriticLogEntry, DeterministicActorCriticModelGroup,
+        DeterministicActorCriticModelTypes,
+        ddpg::{DDPGAgent, DDPGLogger},
+    },
     ppo::{
         PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
         PPOLogEntry, PPOLogger, PPOModelGroup, PPOModelTypes, PPONetwork, PPONetworkError,
