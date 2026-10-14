@@ -1,6 +1,7 @@
 # Keep the Python frameworks on one PyTorch build so CPU, CUDA, and MPS use
 # the same kernels and device-detection rules.
-torch==2.13.0
+torch==2.10.0
 gymnasium==1.2.2
 stable-baselines3==2.9.0
-tianshou==2.0.1
+ale-py==0.11.2
+opencv-python==4.13.0.92

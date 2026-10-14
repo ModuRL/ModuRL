@@ -16,6 +16,7 @@ use crate::{
     objectives::bellman_targets,
     parameter_schedule::ScheduleProgress,
     spaces::{ActionMap, ObservationSpace},
+    tensor_operations::transfer_bool_tensor,
     tensor_rank::NextRank,
 };
 use bon::bon;
@@ -794,7 +795,7 @@ where
             next_observations: batch.next_observations.to_device(&device),
             actions: batch.actions.to_device(&device),
             rewards: batch.rewards.to_device(&device),
-            terminated: batch.terminated.to_device(&device),
+            terminated: transfer_bool_tensor(batch.terminated, &device),
         })
     }
 
