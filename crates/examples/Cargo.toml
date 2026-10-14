@@ -9,10 +9,10 @@ autoexamples = false
 name = "dqn_cartpole"
 path = "examples/dqn_cartpole.rs"
 
-# [[example]]
-# name = "dqn_atari"
-# path = "examples/dqn_atari.rs"
-# required-features = ["atari-environment"]
+[[example]]
+name = "dqn_atari"
+path = "examples/dqn_atari.rs"
+required-features = ["atari-environment"]
 
 [[example]]
 name = "ppo_bench"
@@ -56,15 +56,15 @@ name = "rendered_lunar_lander_ppo"
 path = "examples/rendered_lunar_lander_ppo.rs"
 required-features = ["rendering"]
 
-# [[example]]
-# name = "ppo_atari"
-# path = "examples/ppo_atari.rs"
-# required-features = ["atari-environment"]
+[[example]]
+name = "ppo_atari"
+path = "examples/ppo_atari.rs"
+required-features = ["atari-environment"]
 
-# [[example]]
-# name = "ppo_atari_play"
-# path = "examples/ppo_atari_play.rs"
-# required-features = ["atari-environment", "rendering"]
+[[example]]
+name = "ppo_atari_play"
+path = "examples/ppo_atari_play.rs"
+required-features = ["atari-environment", "rendering"]
 
 [dependencies]
 burn = { version = "=0.22.0", default-features = false, features = ["std", "optim", "flex", "autodiff"] }
@@ -73,8 +73,6 @@ modurl_ale = { version = "0.1.0", path = "../modurl_ale", optional = true }
 modurl_gym = { version = "0.1.0", path = "../modurl_gym" }
 modurl_logger = { version = "0.1.0", path = "../modurl_logger" }
 modurl_mujoco = { version = "0.1.0", path = "../modurl_mujoco", optional = true }
-candle-core = "0.11.0"
-candle-nn = "0.11.0"
 
 [features]
 default = []
@@ -84,9 +82,8 @@ half-cheetah = ["mujoco-environment"]
 hopper = ["mujoco-environment"]
 mujoco-environment = ["dep:modurl_mujoco"]
 walker2d = ["mujoco-environment"]
-cuda = ["candle-core/cuda", "burn/cuda"]
-cudnn = ["cuda", "candle-core/cudnn"]
-metal = ["candle-core/metal", "burn/metal"]
+cuda = ["burn/cuda"]
+metal = ["burn/metal"]
 multithreading = ["modurl/multithreading"]
 rendering = ["modurl_ale?/rendering", "modurl_gym/rendering", "modurl_mujoco?/rendering"]
 

@@ -14,113 +14,22 @@ use std::{
 use burn::{
     module::Module,
     nn::Initializer,
-    tensor::{DType, Device, Int, Tensor},
+    tensor::{DType, Device},
 };
 use modurl::prelude::*;
-use modurl_ale::{
-    AtariGym, AtariInfo, AtariObsType,
-    wrappers::{EpisodicLifeGym, FireResetGym, FireResetGymError, NoopResetGym, WarpGym},
-};
 
+#[path = "support/atari.rs"]
+mod atari;
+#[path = "support/nature_cnn.rs"]
+mod nature_cnn;
 mod support;
-use support::nature_cnn::NatureCnn;
+use atari::make_atari_env;
+use nature_cnn::NatureCnn;
 
 const SEED: i32 = 1;
-const NOOP_MAX: u32 = 30;
 const FRAME_SKIP: usize = 4;
-const FRAME_STACK: usize = 4;
 const MAX_EPISODE_FRAMES: u32 = 400_000;
 const ATARI_FRAME_RATE: f64 = 60.0;
-
-enum OptionalFireResetGym<G> {
-    Plain(G),
-    Fire(FireResetGym<G>),
-}
-
-impl<G> OptionalFireResetGym<G> {
-    fn new(gym: G, enabled: bool) -> Self {
-        if enabled {
-            Self::Fire(FireResetGym::new(gym))
-        } else {
-            Self::Plain(gym)
-        }
-    }
-}
-
-impl<G, I> Gym<I, 3> for OptionalFireResetGym<G>
-where
-    G: Gym<I, 3, ActionSpace = Discrete, ObservationSpace = BoxSpace<3>>,
-{
-    type Error = FireResetGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
-    type ActionSpace = G::ActionSpace;
-
-    fn reset(&mut self) -> std::result::Result<ResetInfo<I, Tensor<2>>, Self::Error> {
-        match self {
-            Self::Plain(gym) => gym.reset().map_err(FireResetGymError::GymError),
-            Self::Fire(gym) => gym.reset(),
-        }
-    }
-
-    /// Steps the environment using an action tensor with shape `[1]`.
-    fn step(
-        &mut self,
-        action: Tensor<1, Int>,
-    ) -> std::result::Result<StepInfo<I, Tensor<2>>, Self::Error> {
-        match self {
-            Self::Plain(gym) => gym.step(action).map_err(FireResetGymError::GymError),
-            Self::Fire(gym) => gym.step(action),
-        }
-    }
-
-    fn action_space(&self) -> Self::ActionSpace {
-        match self {
-            Self::Plain(gym) => gym.action_space(),
-            Self::Fire(gym) => gym.action_space(),
-        }
-    }
-
-    fn observation_space(&self) -> Self::ObservationSpace {
-        match self {
-            Self::Plain(gym) => gym.observation_space(),
-            Self::Fire(gym) => gym.observation_space(),
-        }
-    }
-}
-
-fn make_atari_env(
-    rom_path: PathBuf,
-) -> impl Gym<
-    RawRewardInfo<EpisodeStatisticsInfo<AtariInfo>>,
-    4,
-    ObservationSpace = BoxSpace<4>,
-    ActionSpace = Discrete,
-    Error: std::fmt::Debug,
-> {
-    let mut env = AtariGym::builder()
-        .rom_path(rom_path)
-        .obs_type(AtariObsType::RGBScreen)
-        .random_seed(SEED)
-        .repeat_action_probability(0.0)
-        .render(true)
-        .render_every(FRAME_SKIP)
-        .build()
-        .expect("failed to load the Atari ROM");
-    let has_fire_action = env.minimal_action_set().contains(&1);
-
-    let env = TimeLimitGym::new(env, MAX_EPISODE_FRAMES);
-    let env = RecordEpisodeStatisticsGym::new(env);
-    let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
-    let env = MaxAndSkipGym::new(env, FRAME_SKIP);
-    let env = EpisodicLifeGym::new(env, &Device::flex());
-    let env = OptionalFireResetGym::new(env, has_fire_action);
-    let env = RecordRawRewardGym::new(env);
-    let env = ClipRewardGym::new(env);
-    let env = WarpGym::new(env);
-    let observation_space =
-        BoxSpace::new_with_universal_bounds([1, FRAME_STACK, 84, 84], 0.0, 255.0, &Device::flex());
-    FrameStackGym::new(env, FRAME_STACK, observation_space)
-}
 
 fn main() {
     let mut args = env::args_os().skip(1).map(PathBuf::from);
@@ -143,11 +52,11 @@ fn main() {
     let device = device.autodiff();
     device.seed(SEED as u64);
 
-    let mut gym = make_atari_env(rom_path);
+    let mut gym = make_atari_env(rom_path, SEED, MAX_EPISODE_FRAMES, true);
     let action_space = gym.action_space();
     let action_count = action_space.get_possible_values();
 
-    let cnn = NatureCnn::new(&device).expect("failed to build Nature CNN");
+    let cnn = NatureCnn::new(&device, true).expect("failed to build Nature CNN");
     let actor = ProbabilisticPolicyModel::new(
         MLP::builder()
             .input_size(512)
@@ -180,12 +89,7 @@ fn main() {
     let mut next_action_time = Instant::now();
 
     loop {
-        let input = observation
-            .clone()
-            .unsqueeze::<4>()
-            .to_device(&device)
-            .cast(DType::F32)
-            / 255.0;
+        let input = observation.clone().unsqueeze::<4>().to_device(&device);
         let action_neurons = actor
             .sample(cnn.forward(input).expect("CNN inference failed"))
             .expect("failed to sample action");
