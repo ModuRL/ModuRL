@@ -28,10 +28,13 @@ Enable display rendering with `features = ["rendering"]`.
 
 ## PPO Atari example
 
-The PPO Atari source is not enabled as an executable in `crates/examples/Cargo.toml`.
-It follows the Atari
-recreation from *The 37 Implementation Details of Proximal Policy
-Optimization*. Training executables need their own models and preprocessing for the native observation contract.
+The workspace includes a PPO Atari executable based on the Atari recreation from
+*The 37 Implementation Details of Proximal Policy Optimization*.
+Pass it a locally supplied ROM:
+
+```console
+cargo run --release -p examples --example ppo_atari --features atari-environment -- path/to/game.bin
+```
 
 It uses eight environments, the standard Atari wrapper stack and shared Nature
 CNN, and the reference PPO2 hyperparameters for 10 million agent steps (40

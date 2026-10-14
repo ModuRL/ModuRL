@@ -14,16 +14,18 @@ use burn::{
     module::Module,
     nn::Initializer,
     optim::AdamWConfig,
-    tensor::{DType, Device, Int, Tensor},
+    tensor::{DType, Device},
 };
 use modurl::prelude::*;
-use modurl_ale::{
-    AtariGym, AtariInfo, AtariObsType,
-    wrappers::{EpisodicLifeGym, FireResetGym, FireResetGymError, NoopResetGym, WarpGym},
-};
 
+#[path = "support/atari.rs"]
+mod atari;
+#[path = "support/nature_cnn.rs"]
+mod nature_cnn;
 mod support;
-use support::{graphers::OnPolicyGrapher, nature_cnn::NatureCnn};
+use atari::make_atari_env;
+use nature_cnn::NatureCnn;
+use support::graphers::OnPolicyGrapher;
 
 const NUM_ENVS: usize = 8;
 const NUM_STEPS: usize = 128;
@@ -46,102 +48,9 @@ const ENTROPY_COEFFICIENT: f32 = 0.01;
 const VALUE_COEFFICIENT: f32 = 0.5;
 const MAX_GRADIENT_NORM: f32 = 0.5;
 
-const NOOP_MAX: u32 = 30;
-const FRAME_SKIP: usize = 4;
-const FRAME_STACK: usize = 4;
 // This wrapper is inside the action-repeat wrapper, so the limit is measured
 // in emulator frames rather than agent steps.
 const MAX_EPISODE_FRAMES: u32 = 400_000;
-
-/// Applies FIRE reset only to games whose action set includes FIRE.
-enum OptionalFireResetGym<G> {
-    Plain(G),
-    Fire(FireResetGym<G>),
-}
-
-fn make_atari_env(
-    rom_path: PathBuf,
-    seed: i32,
-) -> impl Gym<
-    RawRewardInfo<EpisodeStatisticsInfo<AtariInfo>>,
-    4,
-    ObservationSpace = BoxSpace<4>,
-    ActionSpace = Discrete,
-    Error: Send + Sync + std::fmt::Debug,
-> {
-    let mut env = AtariGym::builder()
-        .rom_path(rom_path)
-        .obs_type(AtariObsType::RGBScreen)
-        .random_seed(seed)
-        .repeat_action_probability(0.0)
-        .build()
-        .expect("failed to load the Atari ROM");
-    let has_fire_action = env.minimal_action_set().contains(&1);
-
-    let env = TimeLimitGym::new(env, MAX_EPISODE_FRAMES);
-    let env = RecordEpisodeStatisticsGym::new(env);
-    let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
-    let env = MaxAndSkipGym::new(env, FRAME_SKIP);
-    let env = EpisodicLifeGym::new(env, &Device::flex());
-    let env = OptionalFireResetGym::new(env, has_fire_action);
-    let env = RecordRawRewardGym::new(env);
-    let env = ClipRewardGym::new(env);
-    let env = WarpGym::new(env);
-    let observation_space =
-        BoxSpace::new_with_universal_bounds([1, FRAME_STACK, 84, 84], 0.0, 255.0, &Device::flex());
-    FrameStackGym::new(env, FRAME_STACK, observation_space)
-}
-
-impl<G> OptionalFireResetGym<G> {
-    fn new(gym: G, enabled: bool) -> Self {
-        if enabled {
-            Self::Fire(FireResetGym::new(gym))
-        } else {
-            Self::Plain(gym)
-        }
-    }
-}
-
-impl<G, I> Gym<I, 3> for OptionalFireResetGym<G>
-where
-    G: Gym<I, 3, ActionSpace = Discrete, ObservationSpace = BoxSpace<3>>,
-{
-    type Error = FireResetGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
-    type ActionSpace = G::ActionSpace;
-
-    fn reset(&mut self) -> std::result::Result<ResetInfo<I, Tensor<2>>, Self::Error> {
-        match self {
-            Self::Plain(gym) => gym.reset().map_err(FireResetGymError::GymError),
-            Self::Fire(gym) => gym.reset(),
-        }
-    }
-
-    /// Forwards one scalar Int Atari action shaped `[1]`.
-    fn step(
-        &mut self,
-        action: Tensor<1, Int>,
-    ) -> std::result::Result<StepInfo<I, Tensor<2>>, Self::Error> {
-        match self {
-            Self::Plain(gym) => gym.step(action).map_err(FireResetGymError::GymError),
-            Self::Fire(gym) => gym.step(action),
-        }
-    }
-
-    fn action_space(&self) -> Self::ActionSpace {
-        match self {
-            Self::Plain(gym) => gym.action_space(),
-            Self::Fire(gym) => gym.action_space(),
-        }
-    }
-
-    fn observation_space(&self) -> Self::ObservationSpace {
-        match self {
-            Self::Plain(gym) => gym.observation_space(),
-            Self::Fire(gym) => gym.observation_space(),
-        }
-    }
-}
 
 fn main() {
     let rom_path = env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(|| {
@@ -169,7 +78,7 @@ fn main() {
     // action set. Worker environments are constructed inside their own threads
     // because ALE instances are intentionally not Send.
     let action_count = {
-        let probe_env = make_atari_env(rom_path.clone(), SEED);
+        let probe_env = make_atari_env(rom_path.clone(), SEED, MAX_EPISODE_FRAMES, false);
         probe_env.action_space().get_possible_values()
     };
     let action_space = Discrete::new(action_count);
@@ -179,44 +88,35 @@ fn main() {
         let constructors: Vec<_> = (0..NUM_ENVS)
             .map(|seed| {
                 let rom_path = rom_path.clone();
-                move || make_atari_env(rom_path, seed as i32 + SEED)
+                move || make_atari_env(rom_path, seed as i32 + SEED, MAX_EPISODE_FRAMES, false)
             })
             .collect();
-        let observation_space = BoxSpace::new_with_universal_bounds(
-            [1, FRAME_STACK, 84, 84],
-            0.0,
-            255.0,
-            &environment_device,
-        );
+        let observation_space = atari::FrameObservationSpace;
         MultithreadedVectorizedGymWrapper::new(
             constructors,
             observation_space,
             action_space.clone(),
         )
+        .unwrap()
     };
 
     #[cfg(not(feature = "multithreading"))]
-    let envs = VectorizedGymWrapper::from(
+    let envs = VectorizedGymWrapper::new(
         (0..NUM_ENVS)
-            .map(|seed| make_atari_env(rom_path.clone(), seed as i32 + SEED))
+            .map(|seed| {
+                make_atari_env(
+                    rom_path.clone(),
+                    seed as i32 + SEED,
+                    MAX_EPISODE_FRAMES,
+                    false,
+                )
+            })
             .collect::<Vec<_>>(),
-    );
-    let envs = DeviceMultiGymWrapper::new(envs, environment_device, device.clone());
+    )
+    .unwrap();
+    let mut envs = DeviceMultiGymWrapper::new(envs, environment_device, device.clone());
     let observation_space = envs.observation_space();
-    let normalize =
-        |tensor: Tensor<4>| -> Result<Tensor<4>, std::convert::Infallible> { Ok(tensor / 255.0) };
-    let mut envs = OutputMapMultiGymWrapper::new(
-        envs,
-        normalize,
-        |mut step: MultiGymStepInfo<_, Tensor<3>>| {
-            step.observations = step.observations / 255.0;
-            for observation in step.terminal_observations.iter_mut().flatten() {
-                *observation = observation.clone() / 255.0;
-            }
-            Ok::<_, std::convert::Infallible>(step)
-        },
-    );
-    let cnn = NatureCnn::new(&device).expect("failed to build Nature CNN");
+    let cnn = NatureCnn::new(&device, true).expect("failed to build Nature CNN");
     let actor = MLP::builder()
         .input_size(512)
         .output_size(action_count)
@@ -342,4 +242,107 @@ fn main() {
         );
     }
     logger.display();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::tensor::{Int, Tensor};
+    use std::convert::Infallible;
+
+    struct FrameGym;
+
+    impl Gym<(), 4> for FrameGym {
+        type Error = Infallible;
+        type ObservationSpace = atari::FrameObservationSpace;
+        type ActionSpace = Discrete;
+
+        /// Returns native U8 reset frames [4, 84, 84] on CPU.
+        fn reset(&mut self) -> Result<ResetInfo<(), Tensor<3, Int>>, Self::Error> {
+            Ok(ResetInfo {
+                observation: Tensor::full([4, 84, 84], 127, (&Device::flex(), DType::U8)),
+                info: (),
+            })
+        }
+
+        /// Accepts scalar Int actions [1] and returns terminal U8 frames [4, 84, 84].
+        fn step(
+            &mut self,
+            action: Tensor<1, Int>,
+        ) -> Result<StepInfo<(), Tensor<3, Int>>, Self::Error> {
+            assert_eq!(action.dims(), [1]);
+            Ok(StepInfo {
+                observation: Tensor::full([4, 84, 84], 200, (&Device::flex(), DType::U8)),
+                reward: 1.0,
+                done: false,
+                truncated: true,
+                info: (),
+            })
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            atari::FrameObservationSpace
+        }
+
+        fn action_space(&self) -> Discrete {
+            Discrete::new(2)
+        }
+    }
+
+    #[derive(Default)]
+    struct UpdateLogger {
+        updates: usize,
+    }
+
+    impl PPOLogger for UpdateLogger {
+        fn log(&mut self, entry: &PPOLogEntry) {
+            self.updates += 1;
+            assert_eq!(entry.critic_loss.dtype(), DType::F32);
+            assert!(entry.critic_loss.clone().into_scalar::<f32>().is_finite());
+        }
+    }
+
+    #[test]
+    fn shared_ppo_trains_from_native_byte_frames_and_terminal_observations() {
+        let device = Device::flex().autodiff();
+        let env = VectorizedGymWrapper::from(FrameGym);
+        let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
+        let head = |output| {
+            MLP::builder()
+                .input_size(512)
+                .output_size(output)
+                .hidden_layer_sizes(vec![])
+                .options(&device)
+                .build()
+                .unwrap()
+        };
+        let networks = SharedPPONetwork::builder()
+            .shared_network(NatureCnn::new(&device, false).unwrap())
+            .actor_head(ProbabilisticPolicyModel::new(
+                head(2),
+                CategoricalDistribution,
+            ))
+            .critic_head(head(1))
+            .optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+            .learning_rate(2.5e-4)
+            .build()
+            .unwrap();
+        let mut logger = UpdateLogger::default();
+        let mut agent = PPOAgent::builder()
+            .network_info(networks)
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .batch_size(2)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .training_horizon(2)
+            .device(device)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+        agent.learn(&mut env, 2).unwrap();
+        assert_eq!(agent.act(&env.reset().unwrap()).unwrap().dims(), [1, 1]);
+        assert_eq!(logger.updates, 1);
+        assert_eq!(env.reset().unwrap().dtype(), DType::U8);
+    }
 }

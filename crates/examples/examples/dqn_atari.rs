@@ -10,26 +10,25 @@
 //!
 //! `cargo run --release -p examples --example dqn_atari --features atari-environment,cuda -- path/to/game.bin`
 //!
-use std::{env, path::PathBuf};
-
-use candle_core::{DType, Device, Module, Result, Tensor, conv::CudnnFwdAlgo};
-use candle_nn::{
-    AdamW, Conv2d, Conv2dConfig, Init, Linear, Optimizer, ParamsAdamW, VarBuilder, VarMap,
+use burn::{
+    module::Module,
+    nn::Initializer,
+    optim::AdamWConfig,
+    tensor::{DType, Device, Float, Int, Tensor},
 };
 use modurl::prelude::*;
-use modurl_ale::{
-    AtariGym, AtariInfo, AtariObsType,
-    wrappers::{EpisodicLifeGym, FireResetGym, FireResetGymError, NoopResetGym, WarpGym},
-};
-
+use std::{env, path::PathBuf};
+#[path = "support/atari.rs"]
+mod atari;
+#[path = "support/nature_cnn.rs"]
+mod nature_cnn;
 mod support;
+use atari::make_atari_env;
+use nature_cnn::{NatureCnn, NatureCnnError};
 use support::graphers::DQNGrapher;
 
 const SEED: i32 = 1;
-const FRAME_SKIP: usize = 4;
-const FRAME_STACK: usize = 4;
 const NUM_ENVS: usize = 1;
-const NOOP_MAX: u32 = 30;
 const MAX_EPISODE_FRAMES: u32 = 108_000;
 
 // Separate state and next-state storage at this capacity uses about 53 GiB.
@@ -44,189 +43,41 @@ const LEARNING_RATE: f64 = 1e-4;
 
 const AGENT_UPDATE_FREQUENCY: usize = 4;
 
-/// Applies FIRE reset only to games whose minimal action set includes FIRE.
-enum OptionalFireResetGym<G> {
-    Plain(G),
-    Fire(FireResetGym<G>),
-}
-
-impl<G> OptionalFireResetGym<G> {
-    fn new(gym: G, enabled: bool) -> Self {
-        if enabled {
-            Self::Fire(FireResetGym::new(gym))
-        } else {
-            Self::Plain(gym)
-        }
-    }
-}
-
-impl<G, I> Gym<I> for OptionalFireResetGym<G>
-where
-    G: Gym<I>,
-{
-    type Error = FireResetGymError<G::Error>;
-    type SpaceError = G::SpaceError;
-
-    fn reset(&mut self) -> std::result::Result<ResetInfo<I>, Self::Error> {
-        match self {
-            Self::Plain(gym) => gym.reset().map_err(FireResetGymError::GymError),
-            Self::Fire(gym) => gym.reset(),
-        }
-    }
-
-    /// Steps with a scalar action shaped `[]`.
-    fn step(&mut self, action: Tensor) -> std::result::Result<StepInfo<I>, Self::Error> {
-        match self {
-            Self::Plain(gym) => gym.step(action).map_err(FireResetGymError::GymError),
-            Self::Fire(gym) => gym.step(action),
-        }
-    }
-
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        match self {
-            Self::Plain(gym) => gym.action_space(),
-            Self::Fire(gym) => gym.action_space(),
-        }
-    }
-
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        match self {
-            Self::Plain(gym) => gym.observation_space(),
-            Self::Fire(gym) => gym.observation_space(),
-        }
-    }
-}
-
-fn make_atari_env(
-    rom_path: PathBuf,
-    seed: i32,
-) -> impl Gym<
-    RawRewardInfo<EpisodeStatisticsInfo<AtariInfo>>,
-    SpaceError = candle_core::Error,
-    Error: Send + Sync + std::fmt::Debug,
-> {
-    let mut env = AtariGym::builder()
-        .rom_path(rom_path)
-        .obs_type(AtariObsType::RGBScreen)
-        .random_seed(seed)
-        .repeat_action_probability(0.0)
-        .build()
-        .expect("failed to load the Atari ROM");
-    let has_fire_action = env.minimal_action_set().contains(&1);
-
-    let env = TimeLimitGym::new(env, MAX_EPISODE_FRAMES);
-    let env = RecordEpisodeStatisticsGym::new(env);
-    let env = NoopResetGym::new_with_noop_max(env, NOOP_MAX);
-    let env = MaxAndSkipGym::new(env, FRAME_SKIP);
-    let env = EpisodicLifeGym::new(env, &Device::Cpu);
-    let env = OptionalFireResetGym::new(env, has_fire_action);
-    let env = RecordRawRewardGym::new(env);
-    let env = ClipRewardGym::new(env);
-    let env = WarpGym::new(env);
-    let observation_space =
-        BoxSpace::new_with_universal_bounds(vec![FRAME_STACK, 84, 84], 0.0, 255.0, &Device::Cpu);
-    FrameStackGym::new(env, FRAME_STACK, observation_space)
-}
-
-/// The convolutional Q-network used by CleanRL's Atari DQN.
+/// Maps native U8 frame stacks to one Q value per action with CleanRL's convolutional architecture.
+#[derive(Module, Debug)]
 struct AtariQNetwork {
-    conv1: Conv2d,
-    conv2: Conv2d,
-    conv3: Conv2d,
-    hidden: Linear,
-    q_values: Linear,
-}
-
-// PyTorch's default Conv2d and Linear initialization used by CleanRL is
-// Kaiming uniform with `a = sqrt(5)`, which simplifies to this bound.
-fn cleanrl_linear(in_features: usize, out_features: usize, vb: VarBuilder) -> Result<Linear> {
-    let bound = 1.0 / (in_features as f64).sqrt();
-    let init = Init::Uniform {
-        lo: -bound,
-        up: bound,
-    };
-    let weight = vb.get_with_hints((out_features, in_features), "weight", init)?;
-    let bias = vb.get_with_hints(out_features, "bias", init)?;
-    Ok(Linear::new(weight, Some(bias)))
-}
-
-fn cleanrl_conv2d(
-    in_channels: usize,
-    out_channels: usize,
-    kernel_size: usize,
-    config: Conv2dConfig,
-    vb: VarBuilder,
-) -> Result<Conv2d> {
-    let bound = 1.0 / ((in_channels * kernel_size * kernel_size) as f64).sqrt();
-    let init = Init::Uniform {
-        lo: -bound,
-        up: bound,
-    };
-    let weight = vb.get_with_hints(
-        (
-            out_channels,
-            in_channels / config.groups,
-            kernel_size,
-            kernel_size,
-        ),
-        "weight",
-        init,
-    )?;
-    let bias = vb.get_with_hints(out_channels, "bias", init)?;
-    Ok(Conv2d::new(weight, Some(bias), config))
+    encoder: NatureCnn,
+    q_values: MLP,
 }
 
 impl AtariQNetwork {
-    fn new(action_count: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(action_count: usize, device: &Device) -> Result<Self, ModelError> {
+        let bound = 1.0 / 512.0f64.sqrt();
         Ok(Self {
-            conv1: cleanrl_conv2d(
-                4,
-                32,
-                8,
-                Conv2dConfig {
-                    stride: 4,
-                    cudnn_fwd_algo: Some(CudnnFwdAlgo::Gemm),
-                    ..Default::default()
-                },
-                vb.pp("conv1"),
-            )?,
-            conv2: cleanrl_conv2d(
-                32,
-                64,
-                4,
-                Conv2dConfig {
-                    stride: 2,
-                    cudnn_fwd_algo: Some(CudnnFwdAlgo::ImplicitGemm),
-                    ..Default::default()
-                },
-                vb.pp("conv2"),
-            )?,
-            conv3: cleanrl_conv2d(
-                64,
-                64,
-                3,
-                Conv2dConfig {
-                    stride: 1,
-                    cudnn_fwd_algo: Some(CudnnFwdAlgo::ImplicitGemm),
-                    ..Default::default()
-                },
-                vb.pp("conv3"),
-            )?,
-            hidden: cleanrl_linear(64 * 7 * 7, 512, vb.pp("hidden"))?,
-            q_values: cleanrl_linear(512, action_count, vb.pp("q_values"))?,
+            encoder: NatureCnn::new(device, false)?,
+            q_values: MLP::builder()
+                .input_size(512)
+                .output_size(action_count)
+                .hidden_layer_sizes(vec![])
+                .output_initializer(Initializer::Uniform {
+                    min: -bound,
+                    max: bound,
+                })
+                .options((device, DType::F32))
+                .build()?,
         })
     }
 }
 
-impl Module for AtariQNetwork {
-    /// Maps `[batch, 4, 84, 84]` observations to `[batch, action_count]`.
-    fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let x = (input / 255.0)?;
-        let x = self.conv1.forward(&x)?.relu()?;
-        let x = self.conv2.forward(&x)?.relu()?;
-        let x = self.conv3.forward(&x)?.relu()?;
-        self.q_values
-            .forward(&self.hidden.forward(&x.flatten_from(1)?)?.relu()?)
+impl Forward<4, 2> for AtariQNetwork {
+    type InputKind = Int;
+    type OutputKind = Float;
+    type Error = NatureCnnError;
+
+    /// Converts U8 observations [batch_size, 4, 84, 84] explicitly to normalized F32 features and returns [batch_size, action_count].
+    /// Preserves batch and model gradients; inputs must use the parameter device.
+    fn forward(&self, observations: Tensor<4, Int>) -> Result<Tensor<2>, Self::Error> {
+        Ok(self.q_values.forward(self.encoder.forward(observations)?)?)
     }
 }
 
@@ -235,84 +86,43 @@ fn main() {
         eprintln!("usage: cargo run --release -p examples --example dqn_atari --features atari-environment[,cuda] -- path/to/game.bin");
         std::process::exit(2);
     });
-
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
-    let device = Device::Cpu;
+    let device = Device::flex();
     #[cfg(feature = "cuda")]
-    let device = Device::new_cuda(0).expect("failed to create CUDA device");
-    #[cfg(feature = "metal")]
-    let device = Device::new_metal(0).expect("failed to create Metal device");
-    #[cfg(any(feature = "cuda", feature = "metal"))]
-    device
-        .set_seed(SEED as u64)
-        .expect("failed to seed accelerator device");
-
-    let action_count = {
-        let probe_env = make_atari_env(rom_path.clone(), SEED);
-        probe_env.action_space().shape()[0]
-    };
-    let action_space = Discrete::new(action_count);
-
-    let envs = VectorizedGymWrapper::from(
+    let device = Device::cuda(0);
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
+    let device = device.autodiff();
+    device.seed(SEED as u64);
+    let mut envs = VectorizedGymWrapper::new(
         (0..NUM_ENVS)
-            .map(|environment_index| {
-                make_atari_env(rom_path.clone(), SEED + environment_index as i32)
+            .map(|index| {
+                make_atari_env(
+                    rom_path.clone(),
+                    SEED + index as i32,
+                    MAX_EPISODE_FRAMES,
+                    false,
+                )
             })
-            .collect::<Vec<_>>(),
-    );
-
-    // Keep ALE and replay on CPU; the agent moves inference and samples as needed.
-    let action_device = Device::Cpu;
-    let observation_device = Device::Cpu;
-    let mut envs = DeviceMultiGymWrapper::new(envs, action_device, observation_device);
-
-    let online_vars = VarMap::new();
-    let online_q_network = AtariQNetwork::new(
-        action_count,
-        VarBuilder::from_varmap(&online_vars, DType::F32, &device).pp("network"),
+            .collect(),
     )
-    .expect("failed to build online Q-network");
-    let mut target_vars = VarMap::new();
-    let target_q_network = AtariQNetwork::new(
-        action_count,
-        VarBuilder::from_varmap(&target_vars, DType::F32, &device).pp("network"),
-    )
-    .expect("failed to build target Q-network");
-    // With zero weight decay, AdamW has the same update as CleanRL's Adam.
-    let optimizer = AdamW::new(
-        online_vars.all_vars(),
-        ParamsAdamW {
-            lr: LEARNING_RATE,
-            weight_decay: 0.0,
-            ..Default::default()
-        },
-    )
-    .expect("failed to build optimizer");
-
-    #[cfg(feature = "cuda")]
-    let device_strategy = ReplayDeviceStrategy::Hybrid {
-        optimization_device: device.clone(),
-        storage_device: Device::Cpu,
-    };
-    #[cfg(not(feature = "cuda"))]
-    let device_strategy = ReplayDeviceStrategy::OneDevice(device.clone());
-
-    // Use the statistics recorded inside episodic-life and reward-clipping so
-    // the reported return is the raw score for a complete game, as in CleanRL.
+    .unwrap();
+    let action_space = envs.action_space();
+    let observation_space = envs.observation_space();
+    let online_q_network = AtariQNetwork::new(action_space.get_possible_values(), &device).unwrap();
+    let optimizer = AdamWConfig::new().with_weight_decay(0.0).init();
+    let replay_storage_config = ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
+        storage_device: Device::flex(),
+        optimization_device: device,
+    });
     let mut grapher = DQNGrapher::atari();
-    let replay_storage_config = ReplayStorageConfig::new(device_strategy);
     let mut agent = DQNAgent::builder()
         .dtype(DType::F32)
         .action_space(action_space)
-        .observation_space(Box::new(BoxSpace::new(
-            Tensor::zeros((FRAME_STACK, 84, 84), DType::U8, &Device::Cpu).unwrap(),
-            Tensor::full(u8::MAX, (FRAME_STACK, 84, 84), &Device::Cpu).unwrap(),
-        )))
+        .observation_space(observation_space)
         .online_q_network(online_q_network)
-        .target_q_network(target_q_network)
-        .online_vars(&online_vars)
-        .target_vars(&mut target_vars)
         .optimizer(optimizer)
+        .learning_rate(LEARNING_RATE)
         .replay_capacity(REPLAY_CAPACITY)
         .batch_size(BATCH_SIZE)
         .gamma(GAMMA)
@@ -328,13 +138,10 @@ fn main() {
         .logger(&mut grapher)
         .replay_storage_config(replay_storage_config)
         .build()
-        .expect("invalid DQN configuration");
-
+        .unwrap();
     println!(
         "training CleanRL-style DQN for {TRAINING_TIMESTEPS} transitions across {NUM_ENVS} environments"
     );
-    agent
-        .learn(&mut envs, TRAINING_TIMESTEPS)
-        .expect("DQN learning failed");
+    agent.learn(&mut envs, TRAINING_TIMESTEPS).unwrap();
     grapher.display();
 }
