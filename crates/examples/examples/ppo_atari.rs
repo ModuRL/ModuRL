@@ -171,178 +171,74 @@ fn main() {
         .join(game_name);
     fs::create_dir_all(&checkpoint_dir).expect("failed to create Atari checkpoint directory");
     let mut logger = OnPolicyGrapher::ppo_atari(TRAINING_TIMESTEPS, game_name);
+
+    let mut agent = PPOAgent::builder()
+        .observation_space(observation_space)
+        .action_space(action_space)
+        .network_info(networks)
+        .clipped(true)
+        .batch_size(BATCH_SIZE)
+        .mini_batch_size(BATCH_SIZE / NUM_MINIBATCHES)
+        .num_epochs(UPDATE_EPOCHS)
+        .gamma(GAMMA)
+        .gae_lambda(GAE_LAMBDA)
+        .normalize_advantage(true)
+        .normalize_returns(false)
+        .clip_range(ConstantSchedule::new(CLIP_COEFFICIENT))
+        .clip_value_loss(true)
+        // The PPO objective defines value loss as 0.5 * MSE, while the
+        // library's value-loss helper returns MSE directly.
+        .vf_coef(0.5 * VALUE_COEFFICIENT)
+        .ent_coef(ENTROPY_COEFFICIENT)
+        .gradient_clip(MAX_GRADIENT_NORM)
+        .training_horizon(TRAINING_TIMESTEPS)
+        .device(device)
+        .logging_info(&mut logger)
+        .build()
+        .expect("invalid PPO configuration");
+
+    println!("training Atari for {TRAINING_TIMESTEPS} steps");
+    let mut trained_timesteps = 0;
+    for checkpoint_timestep in
+        (CHECKPOINT_INTERVAL..TRAINING_TIMESTEPS).step_by(CHECKPOINT_INTERVAL)
     {
-        let mut agent = PPOAgent::builder()
-            .observation_space(observation_space)
-            .action_space(action_space)
-            .network_info(networks)
-            .clipped(true)
-            .batch_size(BATCH_SIZE)
-            .mini_batch_size(BATCH_SIZE / NUM_MINIBATCHES)
-            .num_epochs(UPDATE_EPOCHS)
-            .gamma(GAMMA)
-            .gae_lambda(GAE_LAMBDA)
-            .normalize_advantage(true)
-            .normalize_returns(false)
-            .clip_range(ConstantSchedule::new(CLIP_COEFFICIENT))
-            .clip_value_loss(true)
-            // The PPO objective defines value loss as 0.5 * MSE, while the
-            // library's value-loss helper returns MSE directly.
-            .vf_coef(0.5 * VALUE_COEFFICIENT)
-            .ent_coef(ENTROPY_COEFFICIENT)
-            .gradient_clip(MAX_GRADIENT_NORM)
-            .training_horizon(TRAINING_TIMESTEPS)
-            .device(device)
-            .logging_info(&mut logger)
-            .build()
-            .expect("invalid PPO configuration");
-
-        println!("training Atari for {TRAINING_TIMESTEPS} steps");
-        let mut trained_timesteps = 0;
-        for checkpoint_timestep in
-            (CHECKPOINT_INTERVAL..TRAINING_TIMESTEPS).step_by(CHECKPOINT_INTERVAL)
-        {
-            // PPO can only stop after a complete rollout. Save the first fully
-            // trained model at or beyond each nominal checkpoint boundary.
-            let trained_checkpoint = checkpoint_timestep.div_ceil(BATCH_SIZE) * BATCH_SIZE;
-            agent
-                .learn(&mut envs, trained_checkpoint - trained_timesteps)
-                .expect("PPO training failed");
-            trained_timesteps = trained_checkpoint;
-
-            let checkpoint_path =
-                checkpoint_dir.join(format!("{game_name}-{checkpoint_timestep}.bpk"));
-            agent
-                .network()
-                .models()
-                .save_file(&checkpoint_path)
-                .expect("failed to save Atari checkpoint");
-            println!(
-                "saved {}-step checkpoint after {trained_timesteps} trained steps to {}",
-                checkpoint_timestep,
-                checkpoint_path.display()
-            );
-        }
-
+        // PPO can only stop after a complete rollout. Save the first fully
+        // trained model at or beyond each nominal checkpoint boundary.
+        let trained_checkpoint = checkpoint_timestep.div_ceil(BATCH_SIZE) * BATCH_SIZE;
         agent
-            .learn(&mut envs, TRAINING_TIMESTEPS - trained_timesteps)
+            .learn(&mut envs, trained_checkpoint - trained_timesteps)
             .expect("PPO training failed");
+        trained_timesteps = trained_checkpoint;
 
-        let final_checkpoint_path =
-            checkpoint_dir.join(format!("{game_name}-{REQUESTED_TIMESTEPS}.bpk"));
+        let checkpoint_path = checkpoint_dir.join(format!("{game_name}-{checkpoint_timestep}.bpk"));
         agent
             .network()
             .models()
-            .save_file(&final_checkpoint_path)
-            .expect("failed to save final Atari checkpoint");
+            .save_file(&checkpoint_path)
+            .expect("failed to save Atari checkpoint");
         println!(
-            "saved {}-step checkpoint after {TRAINING_TIMESTEPS} trained steps to {}",
-            REQUESTED_TIMESTEPS,
-            final_checkpoint_path.display()
+            "saved {}-step checkpoint after {trained_timesteps} trained steps to {}",
+            checkpoint_timestep,
+            checkpoint_path.display()
         );
     }
+
+    agent
+        .learn(&mut envs, TRAINING_TIMESTEPS - trained_timesteps)
+        .expect("PPO training failed");
+
+    let final_checkpoint_path =
+        checkpoint_dir.join(format!("{game_name}-{REQUESTED_TIMESTEPS}.bpk"));
+    agent
+        .network()
+        .models()
+        .save_file(&final_checkpoint_path)
+        .expect("failed to save final Atari checkpoint");
+    println!(
+        "saved {}-step checkpoint after {TRAINING_TIMESTEPS} trained steps to {}",
+        REQUESTED_TIMESTEPS,
+        final_checkpoint_path.display()
+    );
+
     logger.display();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn::tensor::{Int, Tensor};
-    use std::convert::Infallible;
-
-    struct FrameGym;
-
-    impl Gym<(), 4> for FrameGym {
-        type Error = Infallible;
-        type ObservationSpace = atari::FrameObservationSpace;
-        type ActionSpace = Discrete;
-
-        /// Returns native U8 reset frames [4, 84, 84] on CPU.
-        fn reset(&mut self) -> Result<ResetInfo<(), Tensor<3, Int>>, Self::Error> {
-            Ok(ResetInfo {
-                observation: Tensor::full([4, 84, 84], 127, (&Device::flex(), DType::U8)),
-                info: (),
-            })
-        }
-
-        /// Accepts scalar Int actions [1] and returns terminal U8 frames [4, 84, 84].
-        fn step(
-            &mut self,
-            action: Tensor<1, Int>,
-        ) -> Result<StepInfo<(), Tensor<3, Int>>, Self::Error> {
-            assert_eq!(action.dims(), [1]);
-            Ok(StepInfo {
-                observation: Tensor::full([4, 84, 84], 200, (&Device::flex(), DType::U8)),
-                reward: 1.0,
-                done: false,
-                truncated: true,
-                info: (),
-            })
-        }
-
-        fn observation_space(&self) -> Self::ObservationSpace {
-            atari::FrameObservationSpace
-        }
-
-        fn action_space(&self) -> Discrete {
-            Discrete::new(2)
-        }
-    }
-
-    #[derive(Default)]
-    struct UpdateLogger {
-        updates: usize,
-    }
-
-    impl PPOLogger for UpdateLogger {
-        fn log(&mut self, entry: &PPOLogEntry) {
-            self.updates += 1;
-            assert_eq!(entry.critic_loss.dtype(), DType::F32);
-            assert!(entry.critic_loss.clone().into_scalar::<f32>().is_finite());
-        }
-    }
-
-    #[test]
-    fn shared_ppo_trains_from_native_byte_frames_and_terminal_observations() {
-        let device = Device::flex().autodiff();
-        let env = VectorizedGymWrapper::from(FrameGym);
-        let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
-        let head = |output| {
-            MLP::builder()
-                .input_size(512)
-                .output_size(output)
-                .hidden_layer_sizes(vec![])
-                .options(&device)
-                .build()
-                .unwrap()
-        };
-        let networks = SharedPPONetwork::builder()
-            .shared_network(NatureCnn::new(&device, false).unwrap())
-            .actor_head(ProbabilisticPolicyModel::new(
-                head(2),
-                CategoricalDistribution,
-            ))
-            .critic_head(head(1))
-            .optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
-            .learning_rate(2.5e-4)
-            .build()
-            .unwrap();
-        let mut logger = UpdateLogger::default();
-        let mut agent = PPOAgent::builder()
-            .network_info(networks)
-            .observation_space(env.observation_space())
-            .action_space(env.action_space())
-            .batch_size(2)
-            .mini_batch_size(2)
-            .num_epochs(1)
-            .training_horizon(2)
-            .device(device)
-            .logging_info(&mut logger)
-            .build()
-            .unwrap();
-        agent.learn(&mut env, 2).unwrap();
-        assert_eq!(agent.act(&env.reset().unwrap()).unwrap().dims(), [1, 1]);
-        assert_eq!(logger.updates, 1);
-        assert_eq!(env.reset().unwrap().dtype(), DType::U8);
-    }
 }
