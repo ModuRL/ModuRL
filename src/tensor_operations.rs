@@ -1,9 +1,23 @@
 use burn::{
     module::{Module, ModuleVisitor, Param, ParamId},
     optim::GradientsParams,
-    tensor::{DType, Tensor, TensorReadError},
+    tensor::{Bool, DType, Device, Tensor, TensorReadError},
 };
 use std::collections::HashSet;
+
+/// Transfers Bool tensors of rank D, preserving shape and values with the destination's Boolean storage dtype.
+/// Replay flags such as [batch_size, 1] remain Bool before and after transfer.
+/// Integer transport avoids incompatible Boolean data representations between execution backends.
+pub(crate) fn transfer_bool_tensor<const D: usize>(
+    tensor: Tensor<D, Bool>,
+    device: &Device,
+) -> Tensor<D, Bool> {
+    if tensor.device() == *device {
+        tensor
+    } else {
+        tensor.int().to_device(device).bool()
+    }
+}
 
 /// Clamps rank-D Float values to `[min, max]`, preserving shape, dtype, and device.
 /// Splits gradients equally with each bound at equality; coincident bounds therefore retain one quarter of the input gradient.
