@@ -14,6 +14,9 @@ mod atari;
 mod nature_cnn;
 use nature_cnn::{NatureCnn, NatureCnnError};
 
+#[cfg(feature = "tracing")]
+mod profile;
+
 const SEED: u64 = 42;
 const PPO_ENV_COUNT: usize = 32;
 const PPO_ROLLOUT_SIZE: usize = PPO_ENV_COUNT * 128;
@@ -24,6 +27,9 @@ const DQN_TRAINING_START: usize = 80_000;
 struct Args {
     algorithm: String,
     device: String,
+    backend: String,
+    trace: Option<PathBuf>,
+    trace_sync: bool,
     rom: PathBuf,
     steps: usize,
     warmup_steps: usize,
@@ -34,6 +40,9 @@ impl Args {
     fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut algorithm = "ppo".to_owned();
         let mut device = "cuda".to_owned();
+        let mut backend = "native".to_owned();
+        let mut trace = None;
+        let mut trace_sync = false;
         let mut rom = None;
         let mut steps = None;
         let mut warmup_steps = None;
@@ -46,6 +55,13 @@ impl Args {
             match flag.as_str() {
                 "--algorithm" => algorithm = value,
                 "--device" => device = value,
+                "--backend" => backend = value,
+                "--trace" => trace = Some(PathBuf::from(value)),
+                "--trace-sync" => {
+                    trace_sync = value
+                        .parse()
+                        .map_err(|_| "--trace-sync requires true or false")?
+                }
                 "--rom" => rom = Some(PathBuf::from(value)),
                 "--steps" => steps = Some(value.parse().map_err(|_| "invalid --steps")?),
                 "--warmup-steps" => {
@@ -63,6 +79,9 @@ impl Args {
         let parsed = Self {
             algorithm,
             device,
+            backend,
+            trace,
+            trace_sync,
             rom: rom.ok_or("--rom requires a Breakout ROM path")?,
             steps: steps.unwrap_or(default_steps),
             warmup_steps: warmup_steps.unwrap_or(default_warmup),
@@ -70,6 +89,15 @@ impl Args {
         };
         if parsed.threads == 0 || parsed.steps == 0 {
             return Err("--threads and --steps must be nonzero".to_owned());
+        }
+        if parsed.trace.is_some() && parsed.algorithm != "ppo" {
+            return Err("--trace requires --algorithm ppo".to_owned());
+        }
+        if parsed.trace_sync && parsed.trace.is_none() {
+            return Err("--trace-sync requires --trace".to_owned());
+        }
+        if parsed.trace.is_some() && !cfg!(feature = "tracing") {
+            return Err("--trace requires --features tracing".to_owned());
         }
         if parsed.warmup_steps != default_warmup {
             return Err(format!(
@@ -92,7 +120,28 @@ impl Args {
     }
 }
 
-fn select_device(name: &str) -> Result<Device, String> {
+fn select_device(name: &str, backend: &str) -> Result<Device, String> {
+    if backend == "libtorch" {
+        #[cfg(feature = "libtorch")]
+        {
+            return match name {
+                "cuda" => Ok(Device::new(burn::backend::DispatchDevice::LibTorch(
+                    tch::Device::Cuda(0).into(),
+                ))),
+                "cpu" => Ok(Device::new(burn::backend::DispatchDevice::LibTorch(
+                    tch::Device::Cpu.into(),
+                ))),
+                _ => Err("LibTorch benchmarks require --device cpu or cuda".to_owned()),
+            };
+        }
+        #[cfg(not(feature = "libtorch"))]
+        {
+            return Err("LibTorch requires --features libtorch".to_owned());
+        }
+    }
+    if backend != "native" {
+        return Err(format!("unsupported backend: {backend}"));
+    }
     match name {
         "cpu" => Ok(Device::flex()),
         "cuda" => {
@@ -251,6 +300,12 @@ fn ppo(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
     )?;
     debug_result(agent.learn(&mut envs, args.warmup_steps))?;
     device.sync()?;
+    #[cfg(feature = "tracing")]
+    if let Some(path) = &args.trace {
+        return profile::record(path, device, args.trace_sync, || {
+            debug_result(agent.learn(&mut envs, args.steps))
+        });
+    }
     let start = Instant::now();
     debug_result(agent.learn(&mut envs, args.steps))?;
     device.sync()?;
@@ -330,10 +385,18 @@ fn dqn(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
 fn main() -> Result<(), Box<dyn Error>> {
     let args =
         Args::parse(env::args().skip(1)).map_err(|error| format!("argument error: {error}"))?;
+    #[cfg(feature = "libtorch")]
+    if args.backend == "libtorch" {
+        tch::set_num_threads(i32::try_from(args.threads)?);
+        if args.device == "cuda" && (!tch::Cuda::is_available() || !tch::Cuda::cudnn_is_available())
+        {
+            return Err("LibTorch CUDA benchmarks require CUDA and cuDNN".into());
+        }
+    }
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
         .build_global()?;
-    let device = select_device(&args.device)?.autodiff();
+    let device = select_device(&args.device, &args.backend)?.autodiff();
     Device::flex().seed(SEED);
     device.seed(SEED);
     let workloads: Value = serde_json::from_str(include_str!("../workloads.json"))?;
@@ -343,8 +406,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         _ => unreachable!(),
     };
     let output = json!({ "algorithm": args.algorithm, "framework": "modurl", "framework_version": "0.1.0 (workspace)",
-        "backend": "burn 0.22.0", "device": args.device, "threads": args.threads,
-        "fusion": if args.device == "cpu" { "unavailable: CPU Flex" } else { "enabled" },
+        "backend": format!("burn 0.22.0 ({})", args.backend), "device": args.device, "threads": args.threads,
+        "autotuning": if args.backend == "libtorch" || args.device == "cpu" { "not applicable" } else if cfg!(feature = "cuda") { "enabled" } else { "disabled" },
+        "trace": args.trace,
+        "timing_mode": if args.trace_sync { "synchronized trace" } else if args.trace.is_some() { "host trace" } else { "untraced" },
+        "fusion": if args.backend == "libtorch" { "unavailable: LibTorch" } else if args.device == "cpu" { "unavailable: CPU Flex" } else { "enabled" },
         "environment_workers": if args.algorithm == "ppo" { 32 } else { 0 },
         "worker_kind": if args.algorithm == "ppo" { "threads" } else { "none" },
         "measured_steps": args.steps, "warmup_steps": args.warmup_steps, "elapsed_seconds": elapsed,
@@ -357,6 +423,31 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_backend_enables_fusion_and_autotuning() {
+        assert!(std::any::type_name::<burn_cubecl::Cube>().contains("Fusion<"));
+        assert!(matches!(
+            burn_cubecl::kernel::conv::ConvStrategy::default(),
+            burn_cubecl::kernel::conv::ConvStrategy::Autotune
+        ));
+    }
+
+    #[cfg(feature = "libtorch")]
+    #[test]
+    fn libtorch_preserves_cpu_byte_inputs_and_model_gradients() {
+        let device = select_device("cpu", "libtorch").unwrap().autodiff();
+        let model = AtariQNetwork::new(&device).unwrap();
+        let observations = Tensor::<4, Int>::zeros([2, 4, 84, 84], (&Device::flex(), DType::U8))
+            .to_device(&device);
+        assert_eq!(observations.dtype(), DType::U8);
+        let output = model.forward(observations).unwrap();
+        assert_eq!(output.dims(), [2, 4]);
+        assert_eq!(output.dtype(), DType::F32);
+        let gradients = burn::optim::GradientsParams::from_grads(output.mean().backward(), &model);
+        assert!(!gradients.is_empty());
+    }
 
     #[cfg(feature = "cuda")]
     struct ByteGym;

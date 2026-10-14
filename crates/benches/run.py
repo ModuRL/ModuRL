@@ -29,6 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--algorithm", choices=("ppo", "dqn", "all"), default="ppo")
     parser.add_argument("--rom", type=Path, required=True, help="Path to a locally supplied Breakout ROM.")
     parser.add_argument("--device", choices=("cpu", "cuda", "metal"), default="cuda")
+    parser.add_argument("--backend", choices=("native", "libtorch"), default="native",
+                        help="Tensor backend for ModuRL; Python runners keep using PyTorch.")
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--steps", type=int)
     parser.add_argument("--warmup-steps", type=int)
@@ -41,6 +43,8 @@ def parse_args() -> argparse.Namespace:
         help="Run only this framework; repeat the flag to select several.",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--trace-dir", type=Path, help="Write measured PPO performance traces for ModuRL.")
+    parser.add_argument("--trace-sync", action="store_true", help="Synchronize the device at trace boundaries; changes timing.")
     parser.add_argument(
         "--python",
         type=Path,
@@ -48,6 +52,12 @@ def parse_args() -> argparse.Namespace:
         help="Python executable containing the pinned benchmark packages.",
     )
     args = parser.parse_args()
+    if args.backend == "libtorch" and args.device == "metal":
+        parser.error("LibTorch benchmarks require --device cpu or cuda")
+    if args.trace_dir is not None and args.algorithm != "ppo":
+        parser.error("--trace-dir requires --algorithm ppo")
+    if args.trace_sync and args.trace_dir is None:
+        parser.error("--trace-sync requires --trace-dir")
     default_steps, default_warmup = {
         "ppo": (40_960, 4_096),
         "dqn": (4_096, 80_004),
@@ -110,9 +120,20 @@ def command_for(framework: str, args: argparse.Namespace) -> list[str]:
     ]
     if framework == "modurl":
         command = ["cargo", "run", "--locked", "--release", "-p", "modurl-benches"]
-        if args.device != "cpu":
-            command.extend(["--features", args.device])
-        command.extend(["--", *common])
+        features = []
+        if args.backend == "libtorch":
+            features.append("libtorch")
+        elif args.device != "cpu":
+            features.append(args.device)
+        if args.trace_dir is not None:
+            features.append("tracing")
+        if features:
+            command.extend(["--features", ",".join(features)])
+        command.extend(["--", "--backend", args.backend, *common])
+        if args.trace_dir is not None:
+            mode = "sync" if args.trace_sync else "host"
+            trace = args.trace_dir / f"{args.algorithm}-{args.backend}-{args.device}-{mode}-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}.json"
+            command.extend(["--trace", str(trace), "--trace-sync", str(args.trace_sync).lower()])
         return command
     return [
         str(args.python),
@@ -139,7 +160,7 @@ def run_one(framework: str, args: argparse.Namespace) -> dict[str, Any]:
     )
     log_directory = WORKSPACE / "target" / "benchmark-logs"
     log_directory.mkdir(parents=True, exist_ok=True)
-    log_path = log_directory / f"{args.algorithm}-{framework}-{args.device}-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}.log"
+    log_path = log_directory / f"{args.algorithm}-{framework}-{args.backend}-{args.device}-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}.log"
     log_path.write_text(completed.stdout, encoding="utf-8")
     if completed.returncode:
         print(completed.stdout, end="")
@@ -234,7 +255,7 @@ def run_algorithm(args: argparse.Namespace) -> None:
         raise RuntimeError("runners reported different benchmark configurations")
     summary = summarize(samples)
     framework_metadata: dict[str, dict[str, str | int]] = {}
-    raw_samples: dict[str, list[dict[str, float | int]]] = {}
+    raw_samples: dict[str, list[dict[str, float | int | str | None]]] = {}
     for sample in samples:
         framework = sample["framework"]
         framework_metadata[framework] = {
@@ -244,6 +265,8 @@ def run_algorithm(args: argparse.Namespace) -> None:
             "environment_workers": sample["environment_workers"],
             "ale_version": sample.get("ale_version", "0.6 (bundled)"),
             "fusion": sample["fusion"],
+            "autotuning": sample.get("autotuning", "not reported"),
+            "timing_mode": sample.get("timing_mode", "untraced"),
         }
         raw_samples.setdefault(framework, []).append(
             {
@@ -251,6 +274,7 @@ def run_algorithm(args: argparse.Namespace) -> None:
                 "elapsed_seconds": sample["elapsed_seconds"],
                 "steps_per_second": sample["steps_per_second"],
                 "optimizer_steps": sample["optimizer_steps"],
+                "trace": sample.get("trace"),
             }
         )
     for rows in raw_samples.values():
@@ -298,8 +322,9 @@ def run_algorithm(args: argparse.Namespace) -> None:
     }
     output = args.output
     if output is None:
+        backend_suffix = "-libtorch" if args.backend == "libtorch" else ""
         output = BENCH_DIR / "results" / (
-            f"{args.algorithm}-breakout-{args.device}-{platform.system().lower()}-{generated_at:%Y%m%d}.json"
+            f"{args.algorithm}-breakout-{args.device}{backend_suffix}-{platform.system().lower()}-{generated_at:%Y%m%d}.json"
         )
     if not output.is_absolute():
         output = WORKSPACE / output

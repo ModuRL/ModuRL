@@ -36,9 +36,51 @@ CUDA is the default benchmark target for all three frameworks.
 Metal requires macOS and PyTorch MPS support.
 The orchestrator enables the matching Cargo feature. Missing accelerators produce errors rather than a CPU fallback.
 Accelerator features enable model operation fusion in ModuRL.
+The CUDA feature also enables kernel autotuning. CubeCL uses balanced tuning effort by default.
 Python runners compile their CNN encoders with PyTorch Inductor when a CUDA-compatible Triton installation is available.
 They report fusion as unavailable when that compiler is missing, including standard Windows PyTorch installations.
 Compiler setup occurs during warmup; reports record each runner's fusion status.
+
+### LibTorch comparison
+
+Use `--backend libtorch` to run ModuRL with LibTorch instead of its native backend.
+Python runners continue to use their installed PyTorch version. Existing commands select the native backend.
+The workload, U8 observations, model architecture, and optimizer settings remain the same.
+Reports identify the selected backend. LibTorch reports fusion as unavailable.
+Default LibTorch result filenames include `-libtorch` to preserve native results.
+
+The pinned bindings require LibTorch 2.9.0. Use its CUDA 12.8 distribution for CUDA comparisons.
+Set `LIBTORCH` to the extracted library directory containing `include` and `lib`.
+On Windows, add its `lib` directory to `PATH` before building or running:
+
+```powershell
+$env:LIBTORCH = (Resolve-Path target/libtorch-download/libtorch).Path
+$env:PATH = "$env:LIBTORCH/lib;$env:PATH"
+python crates/benches/run.py --algorithm ppo --device cuda --backend libtorch --framework modurl --rom roms/breakout.bin
+```
+
+On Linux, add the library directory to `LD_LIBRARY_PATH` instead.
+The runner requires CUDA and cuDNN for LibTorch CUDA runs; it does not fall back to CPU.
+Burn 0.22.0 deprecates the LibTorch backend. This option supports backend comparisons with the pinned version.
+
+### PPO performance tracing
+
+Use `--trace-dir` to record ModuRL's measured PPO interval after warmup:
+
+```console
+python crates/benches/run.py --algorithm ppo --device cuda --backend libtorch --framework modurl --rom roms/breakout.bin --repeats 1 --trace-dir target/ppo-traces --output target/ppo-traced.json
+```
+
+The orchestrator enables the `tracing` Cargo feature and creates a separate trace file for each sample.
+Open the JSON trace in Perfetto to inspect nested spans. Each file also contains a `summary` array.
+`inclusive_seconds` includes child spans. `self_seconds` excludes their durations. Do not sum nested inclusive times.
+The runner prints the largest self times in its captured log under `target/benchmark-logs`.
+The report records trace paths and timing mode.
+
+Normal traces measure host elapsed time. GPU work can complete during a later span that waits for results.
+Add `--trace-sync` for a diagnostic run that waits for the device at each span boundary.
+Synchronization reduces overlap and changes throughput. Compare synchronized traces only as diagnostic measurements.
+Neither trace mode records individual GPU kernel events.
 
 ## Shared workload
 
