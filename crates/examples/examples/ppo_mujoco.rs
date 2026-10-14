@@ -123,28 +123,28 @@ fn main() {
         .unwrap();
 
     let mut grapher = OnPolicyGrapher::ppo_mujoco(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
-    {
-        let mut agent = PPOAgent::builder()
-            .observation_space(observation_space)
-            .action_space(action_space)
-            .network_info(networks)
-            .batch_size(2_048)
-            .mini_batch_size(64)
-            .num_epochs(10)
-            .normalize_advantage(true)
-            .clip_range(ConstantSchedule::new(0.2))
-            .clip_value_loss(true)
-            .gamma(0.99)
-            .gae_lambda(0.95)
-            .ent_coef(0.0)
-            .vf_coef(0.5)
-            .training_horizon(TOTAL_TIMESTEPS)
-            .logging_info(&mut grapher)
-            .device(device)
-            .build()
-            .unwrap();
 
-        agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
-    }
+    let mut agent = PPOAgent::builder()
+        .observation_space(observation_space)
+        .action_space(action_space)
+        .network_info(networks)
+        .batch_size(2_048)
+        .mini_batch_size(64)
+        .num_epochs(10)
+        .normalize_advantage(true)
+        .clip_range(ConstantSchedule::new(0.2))
+        .clip_value_loss(true)
+        .gamma(0.99)
+        .gae_lambda(0.95)
+        .ent_coef(0.0)
+        .vf_coef(0.5)
+        .training_horizon(TOTAL_TIMESTEPS)
+        .logging_info(&mut grapher)
+        .device(device)
+        .build()
+        .unwrap();
+
+    agent.learn(&mut env, TOTAL_TIMESTEPS).unwrap();
+
     grapher.display();
 }
