@@ -7,6 +7,7 @@ use crate::buffers::experience_replay::{
     AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
     ReplayStorageError, TensorReplayColumn, replay_index_tensor,
 };
+use crate::tensor_operations::transfer_bool_tensor;
 
 /// Invalid replay configuration or transition data.
 #[derive(Debug, thiserror::Error)]
@@ -311,7 +312,7 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
         self.rewards
             .write(start, transitions.rewards.to_device(&device).cast(dtype))?;
         self.terminated
-            .write(start, transitions.terminated.to_device(&device))?;
+            .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
         Ok(count)
     }
 

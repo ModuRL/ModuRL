@@ -5,18 +5,20 @@ edition = "2024"
 publish = false
 autobins = false
 
-[lib]
+[[bin]]
+name = "modurl-benches"
 path = "src/main.rs"
 
 [dependencies]
-candle-core = "0.11.0"
-candle-nn = "0.11.0"
-modurl = { path = "../.." }
-modurl_gym = { path = "../modurl_gym" }
+burn = { version = "=0.22.0", default-features = false, features = ["std", "flex", "autodiff", "optim"] }
+burn-cubecl = { version = "=0.22.0", default-features = false, features = ["fusion"], optional = true }
+modurl = { path = "../..", features = ["multithreading"] }
+modurl_ale = { path = "../modurl_ale" }
 rayon = "1.12.0"
 serde_json = "1.0"
 
 [features]
 default = []
-cuda = ["candle-core/cuda"]
-metal = ["candle-core/metal"]
+cuda = ["burn/cuda", "dep:burn-cubecl"]
+metal = ["burn/metal", "dep:burn-cubecl"]
+rendering = ["modurl_ale/rendering"]
