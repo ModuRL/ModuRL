@@ -21,6 +21,7 @@ use crate::{
     models::Forward,
     parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
     spaces::{Discrete, ObservationSpace, SpaceError},
+    tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, PrevRank},
 };
 
@@ -353,8 +354,10 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             start,
             transitions.rewards.to_device(&self.device).cast(DType::F32),
         )?;
-        self.next_dones
-            .write(start, transitions.next_dones.to_device(&self.device))?;
+        self.next_dones.write(
+            start,
+            transfer_bool_tensor(transitions.next_dones, &self.device),
+        )?;
         Ok(count)
     }
 
@@ -600,7 +603,7 @@ where
             .rewards
             .to_device(&optimization_device)
             .cast(self.dtype);
-        let next_dones = batch.next_dones.to_device(&optimization_device);
+        let next_dones = transfer_bool_tensor(batch.next_dones, &optimization_device);
         let target_next_q_values = self
             .target_q_network
             .forward(next_observations.clone())

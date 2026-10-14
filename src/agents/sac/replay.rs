@@ -4,6 +4,7 @@ use crate::buffers::experience_replay::{
     AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
     ReplayStorageError, TensorReplayColumn, replay_index_tensor,
 };
+use crate::tensor_operations::transfer_bool_tensor;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SACReplayError {
@@ -272,7 +273,7 @@ where
                 .cast(statistics_dtype),
         )?;
         self.terminated
-            .write(start, transitions.terminated.to_device(&device))?;
+            .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
 
         self.collection_policy_entropies.write(
             start,

@@ -1,0 +1,29 @@
+{
+  "ppo": {
+    "environment": "Breakout", "environments": 32, "vectorization": "parallel-workers",
+    "observation_shape": [4, 84, 84], "observation_dtype": "uint8", "compute_dtype": "float32",
+    "frame_skip": 4, "noop_max": 30, "sticky_action_probability": 0.0,
+    "episodic_life": true, "fire_reset": true, "reward_clipping": true, "max_episode_frames": 400000,
+    "architecture": "shared-nature-cnn", "trainable_parameters": 1686693,
+    "steps_per_environment": 128, "rollout_size": 4096, "mini_batch_size": 1024, "ppo_epochs": 4,
+    "learning_rate": 0.00025, "adam_epsilon": 0.00001, "gamma": 0.99, "gae_lambda": 0.95,
+    "clip_range": 0.1, "value_loss_clipping": "maximum-of-clipped-and-unclipped-mse",
+    "advantage_normalization": "per-mini-batch-sample-standard-deviation",
+    "entropy_coefficient": 0.01, "value_coefficient": 0.25, "max_gradient_norm": 0.5,
+    "seed": 42
+  },
+  "dqn": {
+    "environment": "Breakout", "environments": 1, "vectorization": "synchronous",
+    "observation_shape": [4, 84, 84], "observation_dtype": "uint8", "compute_dtype": "float32",
+    "frame_skip": 4, "noop_max": 30, "sticky_action_probability": 0.0,
+    "episodic_life": true, "fire_reset": true, "reward_clipping": true, "max_episode_frames": 108000,
+    "architecture": "nature-cnn", "trainable_parameters": 1686180,
+    "replay_capacity": 1000000, "replay_storage": "cpu", "replay_layout": "shared-next-stack",
+    "replay_sampling": "without-replacement", "batch_size": 32, "training_start": 80000,
+    "update_frequency": 4, "target_update_interval": 1000,
+    "learning_rate": 0.0001, "adam_epsilon": 0.00000001, "gamma": 0.99,
+    "epsilon_initial": 1.0, "epsilon_final": 0.01, "epsilon_annealing_steps": 1000000,
+    "target": "vanilla", "loss": "mse", "gradient_clipping": false, "n_step_return": 1,
+    "seed": 42
+  }
+}

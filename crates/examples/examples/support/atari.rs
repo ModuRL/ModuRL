@@ -4,7 +4,9 @@ use modurl_ale::{
     AtariGym, AtariInfo, RgbScreen,
     wrappers::{EpisodicLifeGym, FireResetGym, FireResetGymError, NoopResetGym, WarpGym},
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Mutex};
+
+static ATARI_INITIALIZATION: Mutex<()> = Mutex::new(());
 
 /// Four CPU U8 frames per observation, with batches [batch_size, 4, 84, 84].
 #[derive(Clone, Debug)]
@@ -90,6 +92,11 @@ pub(crate) fn make_atari_env(
     ActionSpace = Discrete,
     Error: Send + Sync + std::fmt::Debug,
 > {
+    // ALE constructors change process-wide I/O buffers and cartridge metadata.
+    // Serialize startup; each environment remains on its worker for parallel stepping.
+    let _initialization = ATARI_INITIALIZATION
+        .lock()
+        .expect("Atari environment initialization failed");
     let builder = AtariGym::<RgbScreen>::builder()
         .rom_path(rom_path)
         .random_seed(seed)

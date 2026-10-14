@@ -26,6 +26,7 @@ use crate::{
     objectives::{bellman_targets, clipped_value_loss},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::{ActionMap, ObservationSpace},
+    tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, PrevRank},
 };
 
@@ -1010,7 +1011,7 @@ where
         batch.observations = batch.observations.to_device(&device);
         batch.next_observations = batch.next_observations.to_device(&device);
         batch.actions = batch.actions.to_device(&device);
-        batch.terminated = batch.terminated.to_device(&device);
+        batch.terminated = transfer_bool_tensor(batch.terminated, &device);
         batch.rewards = batch.rewards.to_device(&device);
         batch.collection_policy_entropies = batch.collection_policy_entropies.to_device(&device);
         batch.entropy_change_weights = batch.entropy_change_weights.to_device(&device);
