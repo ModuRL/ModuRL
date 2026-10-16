@@ -615,7 +615,7 @@ mod schedule_tests {
             .unwrap();
         let mut observations = agent.prepare_rollout_collection(&mut env).unwrap();
         assert!(matches!(
-            agent.collect_rollout(&mut env, &mut observations),
+            agent.collect_rollout(&agent.network_info.valid(), &mut env, &mut observations),
             Err(PPOError::CriticRewardDTypeMismatch {
                 critic: DType::F64,
                 reward: DType::F32,
@@ -623,7 +623,9 @@ mod schedule_tests {
         ));
         assert_eq!(agent.rollout_buffer.len(), 0);
         use_f64_rewards.set(true);
-        agent.collect_rollout(&mut env, &mut observations).unwrap();
+        agent
+            .collect_rollout(&agent.network_info.valid(), &mut env, &mut observations)
+            .unwrap();
         let transition = &agent.rollout_buffer.get_raw()[0];
         assert!(matches!(transition.observations.dtype(), DType::Bool(_)));
         assert_eq!(
@@ -641,11 +643,13 @@ mod schedule_tests {
         assert!(
             (transition.training_rewards.clone().into_scalar::<f64>() - expected).abs() < 1e-12
         );
-        agent.add_advantages_and_returns().unwrap();
+        let explained_variance = agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
         let prepared = agent.rollout_buffer.get_raw()[0].prepared.as_ref().unwrap();
         assert_eq!(prepared.returns.dtype(), DType::F64);
         assert!((prepared.returns.clone().into_scalar::<f64>() - expected).abs() < 1e-12);
-        agent.optimize().unwrap();
+        agent.optimize(explained_variance).unwrap();
         assert_eq!(
             agent.act_deterministic(&observations).unwrap().dims(),
             [1, 1]
@@ -890,7 +894,11 @@ mod schedule_tests {
             .unwrap();
         let mut next_observations = agent.prepare_rollout_collection(&mut env).unwrap();
         agent
-            .collect_rollout(&mut env, &mut next_observations)
+            .collect_rollout(
+                &agent.network_info.valid(),
+                &mut env,
+                &mut next_observations,
+            )
             .unwrap();
         assert_eq!(
             next_observations.into_data().try_to_vec::<f32>().unwrap(),
@@ -924,7 +932,9 @@ mod schedule_tests {
                 .abs()
                 < 1e-6
         );
-        agent.add_advantages_and_returns().unwrap();
+        agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
         let returns = agent.rollout_buffer.get_raw()[0]
             .prepared
             .as_ref()
@@ -1069,6 +1079,7 @@ mod schedule_tests {
         let observations = Tensor::zeros([2, 4], (&device, DType::F32));
         let actual = agent
             .bootstrap_truncated_rewards(
+                &agent.network_info.valid(),
                 Tensor::zeros([2, 1], (&device, DType::F32)),
                 &observations,
                 &[true, false],
@@ -1078,6 +1089,7 @@ mod schedule_tests {
         assert_eq!(actual.into_data().try_to_vec::<f32>().unwrap(), [0.0, 0.99]);
         assert!(matches!(
             agent.bootstrap_truncated_rewards(
+                &agent.network_info.valid(),
                 Tensor::zeros([2, 1], (&device, DType::F64)),
                 &observations,
                 &[true, false],
