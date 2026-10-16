@@ -72,7 +72,7 @@ impl Args {
             }
         }
         let (default_steps, default_warmup) = match algorithm.as_str() {
-            "ppo" => (40_960, PPO_ROLLOUT_SIZE),
+            "ppo" => (40_960, PPO_ROLLOUT_SIZE * 10),
             "dqn" => (4_096, DQN_TRAINING_START + 4),
             _ => return Err(format!("unsupported algorithm: {algorithm}")),
         };
@@ -99,7 +99,14 @@ impl Args {
         if parsed.trace.is_some() && !cfg!(feature = "tracing") {
             return Err("--trace requires --features tracing".to_owned());
         }
-        if parsed.warmup_steps != default_warmup {
+        if parsed.algorithm == "ppo"
+            && (parsed.warmup_steps == 0 || !parsed.warmup_steps.is_multiple_of(PPO_ROLLOUT_SIZE))
+        {
+            return Err(format!(
+                "PPO --warmup-steps must be a positive multiple of {PPO_ROLLOUT_SIZE}"
+            ));
+        }
+        if parsed.algorithm == "dqn" && parsed.warmup_steps != default_warmup {
             return Err(format!(
                 "{} requires --warmup-steps {default_warmup}",
                 parsed.algorithm
@@ -423,6 +430,43 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ppo_defaults_to_ten_warmup_rollouts() {
+        let args = Args::parse(
+            ["--rom", concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(args.warmup_steps, 40_960);
+    }
+
+    #[test]
+    fn ppo_warmup_requires_complete_nonzero_rollouts() {
+        for (warmup, accepted) in [
+            ("4096", true),
+            ("16384", true),
+            ("0", false),
+            ("16000", false),
+        ] {
+            let result = Args::parse(
+                [
+                    "--algorithm",
+                    "ppo",
+                    "--rom",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+                    "--steps",
+                    "4096",
+                    "--warmup-steps",
+                    warmup,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+            assert_eq!(result.is_ok(), accepted, "warmup {warmup}");
+        }
+    }
 
     #[cfg(feature = "cuda")]
     #[test]

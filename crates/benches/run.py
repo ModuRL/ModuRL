@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     if args.trace_sync and args.trace_dir is None:
         parser.error("--trace-sync requires --trace-dir")
     default_steps, default_warmup = {
-        "ppo": (40_960, 4_096),
+        "ppo": (40_960, 40_960),
         "dqn": (4_096, 80_004),
         "all": (None, None),
     }[args.algorithm]
@@ -219,11 +219,10 @@ def run_algorithm(args: argparse.Namespace) -> None:
         raise ValueError("--repeats must be at least 1")
     if args.steps < 1 or args.warmup_steps < 1:
         raise ValueError("--steps and --warmup-steps must be at least 1")
-    required_warmup = {"ppo": 4_096, "dqn": 80_004}[args.algorithm]
-    if args.warmup_steps != required_warmup:
-        raise ValueError(
-            f"{args.algorithm.upper()} requires --warmup-steps {required_warmup}"
-        )
+    if args.algorithm == "ppo" and args.warmup_steps % 4_096:
+        raise ValueError("PPO --warmup-steps must be a positive multiple of 4096")
+    if args.algorithm == "dqn" and args.warmup_steps != 80_004:
+        raise ValueError("DQN requires --warmup-steps 80004")
     if args.algorithm == "ppo" and args.steps % 4_096:
         raise ValueError("PPO --steps must be a multiple of 4096")
     if args.algorithm == "dqn" and args.steps % 4:
@@ -343,7 +342,7 @@ def main() -> None:
         raise ValueError("--output requires one algorithm; omit it for separate dated reports")
     for algorithm in algorithms:
         selected = argparse.Namespace(**{**vars(args), "algorithm": algorithm})
-        default_steps, default_warmup = {"ppo": (40960, 4096), "dqn": (4096, 80004)}[algorithm]
+        default_steps, default_warmup = {"ppo": (40960, 40960), "dqn": (4096, 80004)}[algorithm]
         selected.steps = default_steps if selected.steps is None else selected.steps
         selected.warmup_steps = default_warmup if selected.warmup_steps is None else selected.warmup_steps
         run_algorithm(selected)
