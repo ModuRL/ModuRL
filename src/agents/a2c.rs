@@ -23,6 +23,7 @@ use burn::{
     optim::ModuleOptimizer,
     tensor::{DType, Device, Tensor, TensorReadError, kind::Autodiff},
 };
+use std::sync::Arc;
 
 pub use super::ppo::{
     PPOCollectionLogEntry as A2CCollectionLogEntry, PPOEpisodeLogEntry as A2CEpisodeLogEntry,
@@ -92,7 +93,7 @@ pub struct SharedA2CNetwork<T: Module, A: Module, C: Module> {
 #[bon]
 impl<T: Module, A: Module, C: Module> SharedA2CNetwork<T, A, C> {
     /// Owns the models and optimizer. Model shapes, dtype, and device must meet the PPO network contract.
-    /// Rejects nonpositive or non-finite learning rates.
+    /// Rejects nonpositive or non-finite learning rates. Learning-rate schedules must implement `Send + Sync`.
     #[builder]
     pub fn new(
         #[builder(into)] optimizer: ModuleOptimizer,
@@ -100,8 +101,8 @@ impl<T: Module, A: Module, C: Module> SharedA2CNetwork<T, A, C> {
         shared_network: T,
         critic_head: C,
         actor_head: A,
-        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
-        lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
     ) -> Result<Self, PPOConfigurationError> {
         Ok(Self {
             inner: SharedPPONetwork::builder()
@@ -126,7 +127,7 @@ pub struct SeparateA2CNetwork<A: Module, C: Module> {
 #[bon]
 impl<A: Module, C: Module> SeparateA2CNetwork<A, C> {
     /// Owns the models and optimizers. Models must meet the separate PPO network contract.
-    /// Rejects nonpositive or non-finite learning rates.
+    /// Rejects nonpositive or non-finite learning rates. Learning-rate schedules must implement `Send + Sync`.
     #[builder]
     pub fn new(
         #[builder(into)] actor_optimizer: ModuleOptimizer,
@@ -135,10 +136,10 @@ impl<A: Module, C: Module> SeparateA2CNetwork<A, C> {
         critic_learning_rate: f64,
         actor_network: A,
         critic_network: C,
-        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
-        actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
-        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
-        critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        actor_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        critic_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
         #[builder(default = false)] combined_loss: bool,
     ) -> Result<Self, PPOConfigurationError> {
         Ok(Self {
@@ -378,7 +379,7 @@ mod tests {
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
     };
     use burn::{optim::SgdConfig, tensor::DType};
-    use std::{cell::RefCell, rc::Rc};
+    use std::sync::Mutex;
 
     #[derive(Default)]
     struct RecordingLogger {
@@ -495,21 +496,21 @@ mod tests {
     #[test]
     fn network_builders_forward_custom_schedules_to_ppo() {
         struct RecordingSchedule {
-            progress: Rc<RefCell<Vec<f64>>>,
+            progress: Arc<Mutex<Vec<f64>>>,
         }
 
         impl ParameterSchedule for RecordingSchedule {
             fn value(&self, progress: f64) -> f64 {
-                self.progress.borrow_mut().push(progress);
+                self.progress.lock().unwrap().push(progress);
                 1e-3 * (1.0 - progress)
             }
         }
 
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
-        let shared_progress = Rc::new(RefCell::new(Vec::new()));
-        let actor_progress = Rc::new(RefCell::new(Vec::new()));
-        let critic_progress = Rc::new(RefCell::new(Vec::new()));
+        let shared_progress = Arc::new(Mutex::new(Vec::new()));
+        let actor_progress = Arc::new(Mutex::new(Vec::new()));
+        let critic_progress = Arc::new(Mutex::new(Vec::new()));
         let mut shared = SharedA2CNetwork::builder()
             .shared_network(model(4, &device))
             .actor_head(ProbabilisticPolicyModel::new(
@@ -546,8 +547,8 @@ mod tests {
         progress.advance_steps(2);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut shared.inner, &progress);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut separate.inner, &progress);
-        assert_eq!(*shared_progress.borrow(), [0.25]);
-        assert_eq!(*actor_progress.borrow(), [0.25]);
-        assert_eq!(*critic_progress.borrow(), [0.25]);
+        assert_eq!(*shared_progress.lock().unwrap(), [0.25]);
+        assert_eq!(*actor_progress.lock().unwrap(), [0.25]);
+        assert_eq!(*critic_progress.lock().unwrap(), [0.25]);
     }
 }

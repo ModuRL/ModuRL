@@ -1,13 +1,13 @@
 use bon::bon;
 use burn::{
-    module::{Module, ModuleVisitor, Param},
+    module::{Module, ModuleMapper, ModuleVisitor, Param},
     optim::{GradientsParams, ModuleOptimizer},
     tensor::{
-        Float, Tensor, TensorReadError,
+        Device, Float, Tensor, TensorReadError,
         kind::{Autodiff, Basic},
     },
 };
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use super::PPOConfigurationError;
 use crate::{
@@ -33,13 +33,65 @@ impl ModuleVisitor for PPOGradientSelection<'_> {
 
 /// Owns a shared model whose output feeds both actor and critic heads.
 /// One optimizer updates all three models using one learning rate and schedule.
+/// Module operations affect the models. Validation snapshots clone optimizer state and share schedules.
+/// Learning-rate schedules must implement `Send + Sync`.
+#[derive(Clone)]
 pub struct SharedPPONetwork<T: Module, A: Module, C: Module> {
     optimizer: ModuleOptimizer,
     learning_rate: f64,
-    shared_network: T,
-    critic_head: C,
-    actor_head: A,
-    lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+    model: (T, A, C),
+    lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
+}
+
+impl<T: Module, A: Module, C: Module> std::fmt::Debug for SharedPPONetwork<T, A, C> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SharedPPONetwork")
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: Module, A: Module, C: Module> Module for SharedPPONetwork<T, A, C> {
+    fn collect_devices(&self, devices: Vec<Device>) -> Vec<Device> {
+        self.model.collect_devices(devices)
+    }
+
+    fn fork(mut self, device: &Device) -> Self {
+        self.model = self.model.fork(device);
+        self
+    }
+
+    fn to_device(mut self, device: &Device) -> Self {
+        self.model = self.model.to_device(device);
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor>(&self, visitor: &mut Visitor) {
+        self.model.visit(visitor);
+    }
+
+    fn map<Mapper: ModuleMapper>(mut self, mapper: &mut Mapper) -> Self {
+        self.model = self.model.map(mapper);
+        self
+    }
+
+    fn train(mut self) -> Self {
+        self.model = self.model.train();
+        self
+    }
+
+    fn valid(&self) -> Self {
+        Self {
+            model: self.model.valid(),
+            ..self.clone()
+        }
+    }
+
+    fn materialize(mut self) -> Self {
+        self.model = self.model.materialize();
+        self
+    }
 }
 
 #[bon]
@@ -47,11 +99,7 @@ impl<T: Module, A: Module, C: Module> SharedPPONetwork<T, A, C> {
     /// Returns a snapshot of the shared model, actor head, and critic head, in that order.
     /// Parameter tensors retain their shape, dtype, device, and current values.
     pub fn models(&self) -> (T, A, C) {
-        (
-            self.shared_network.clone(),
-            self.actor_head.clone(),
-            self.critic_head.clone(),
-        )
+        self.model.clone()
     }
 
     /// Owns the models and optimizer, and enables training on the models.
@@ -64,8 +112,8 @@ impl<T: Module, A: Module, C: Module> SharedPPONetwork<T, A, C> {
         shared_network: T,
         critic_head: C,
         actor_head: A,
-        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
-        lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
     ) -> Result<Self, PPOConfigurationError> {
         if !learning_rate.is_finite() || learning_rate <= 0.0 {
             return Err(PPOConfigurationError::InvalidLearningRate);
@@ -73,9 +121,7 @@ impl<T: Module, A: Module, C: Module> SharedPPONetwork<T, A, C> {
         Ok(Self {
             optimizer,
             learning_rate,
-            shared_network: shared_network.train(),
-            critic_head: critic_head.train(),
-            actor_head: actor_head.train(),
+            model: (shared_network, actor_head, critic_head).train(),
             lr_scheduler,
         })
     }
@@ -83,16 +129,69 @@ impl<T: Module, A: Module, C: Module> SharedPPONetwork<T, A, C> {
 
 /// Owns separate actor and critic models with independently configurable optimizers, rates, and schedules.
 /// `combined_loss` selects a shared gradient-clipping norm instead of independent actor and critic norms.
+/// Module operations affect the models. Validation snapshots clone optimizer state and share schedules.
+/// Learning-rate schedules must implement `Send + Sync`.
+#[derive(Clone)]
 pub struct SeparatePPONetwork<A: Module, C: Module> {
     actor_optimizer: ModuleOptimizer,
     critic_optimizer: ModuleOptimizer,
     actor_learning_rate: f64,
     critic_learning_rate: f64,
-    actor_network: A,
-    critic_network: C,
-    actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
-    critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+    model: (A, C),
+    actor_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
+    critic_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
     combined_loss: bool,
+}
+
+impl<A: Module, C: Module> std::fmt::Debug for SeparatePPONetwork<A, C> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SeparatePPONetwork")
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<A: Module, C: Module> Module for SeparatePPONetwork<A, C> {
+    fn collect_devices(&self, devices: Vec<Device>) -> Vec<Device> {
+        self.model.collect_devices(devices)
+    }
+
+    fn fork(mut self, device: &Device) -> Self {
+        self.model = self.model.fork(device);
+        self
+    }
+
+    fn to_device(mut self, device: &Device) -> Self {
+        self.model = self.model.to_device(device);
+        self
+    }
+
+    fn visit<Visitor: ModuleVisitor>(&self, visitor: &mut Visitor) {
+        self.model.visit(visitor);
+    }
+
+    fn map<Mapper: ModuleMapper>(mut self, mapper: &mut Mapper) -> Self {
+        self.model = self.model.map(mapper);
+        self
+    }
+
+    fn train(mut self) -> Self {
+        self.model = self.model.train();
+        self
+    }
+
+    fn valid(&self) -> Self {
+        Self {
+            model: self.model.valid(),
+            ..self.clone()
+        }
+    }
+
+    fn materialize(mut self) -> Self {
+        self.model = self.model.materialize();
+        self
+    }
 }
 
 #[bon]
@@ -100,7 +199,7 @@ impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
     /// Returns a snapshot of the actor and critic models, in that order.
     /// Parameter tensors retain their shape, dtype, device, and current values.
     pub fn models(&self) -> (A, C) {
-        (self.actor_network.clone(), self.critic_network.clone())
+        self.model.clone()
     }
 
     /// Owns the models and optimizers, and enables training on both models.
@@ -114,10 +213,10 @@ impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
         critic_learning_rate: f64,
         actor_network: A,
         critic_network: C,
-        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
-        actor_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
-        #[builder(with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
-        critic_lr_scheduler: Option<Box<dyn ParameterSchedule>>,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        actor_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        critic_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
         #[builder(default = false)] combined_loss: bool,
     ) -> Result<Self, PPOConfigurationError> {
         if !actor_learning_rate.is_finite()
@@ -132,8 +231,7 @@ impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
             critic_optimizer,
             actor_learning_rate,
             critic_learning_rate,
-            actor_network: actor_network.train(),
-            critic_network: critic_network.train(),
+            model: (actor_network, critic_network).train(),
             actor_lr_scheduler,
             critic_lr_scheduler,
             combined_loss,
@@ -143,7 +241,8 @@ impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
 
 /// Executes an owned PPO network configuration with native tensor kinds and explicit batch ranks.
 /// Rank O describes environment observations, H describes head inputs, and L describes policy actions.
-pub trait PPONetwork<const O: usize, const H: usize, const L: usize> {
+/// Validation inputs must have autodiff removed explicitly.
+pub trait PPONetwork<const O: usize, const H: usize, const L: usize>: Module {
     type InputKind: Autodiff;
     type LatentKind: Basic;
     type Error: std::fmt::Debug;
@@ -161,7 +260,8 @@ pub trait PPONetwork<const O: usize, const H: usize, const L: usize> {
     ) -> Result<Tensor<H, Self::LatentKind>, Self::Error>;
 
     /// Returns Float values [batch_size, 1] from head inputs [batch_size, ...model_input_shape].
-    /// The critic determines dtype and preserves model gradients. Inputs and model parameters must share a device.
+    /// The critic determines dtype. Training retains model gradients; validation views disable autodiff.
+    /// Inputs and model parameters must share a device.
     fn forward_values(
         &self,
         observations: Tensor<H, Self::LatentKind>,
@@ -176,7 +276,7 @@ pub trait PPONetwork<const O: usize, const H: usize, const L: usize> {
     fn mode(&self, observations: Tensor<H, Self::LatentKind>) -> Result<Tensor<L>, Self::Error>;
 
     /// Evaluates Float policy actions [batch_size, ...action_shape] for head inputs [batch_size, ...model_input_shape].
-    /// Returns log probabilities and entropy [batch_size, 1], preserving policy gradients and dtype.
+    /// Returns log probabilities and entropy [batch_size, 1], preserving dtype and training gradients.
     fn log_prob_and_entropy(
         &self,
         observations: Tensor<H, Self::LatentKind>,
@@ -209,51 +309,50 @@ where
     P: Module + ProbabilisticPolicy<H, L, ObservationKind = Float, Error: std::fmt::Debug>,
     C: Module + Forward<H, 2, InputKind = Float, OutputKind = Float, Error: std::fmt::Debug>,
 {
+    type ModelGroup = PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<H>, Tensor<L>>;
+
     type InputKind = T::InputKind;
     type LatentKind = Float;
     type Error = PPONetworkError<P::Error, C::Error, T::Error>;
-    type ModelGroup = PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<H>, Tensor<L>>;
 
     /// Forwards native rank-O observations through the shared model into Float rank-H head inputs, preserving batch size.
     /// Both tensors have shape `[batch_size, ...features]`; the shared model defines the remaining axes, dtype, and device.
+    /// Retains the model gradient graph.
     fn forward_observations(
         &self,
         observations: Tensor<O, Self::InputKind>,
     ) -> Result<Tensor<H>, Self::Error> {
-        self.shared_network
-            .forward(observations)
-            .map_err(PPONetworkError::Shared)
+        let model = &self.model.0;
+        model.forward(observations).map_err(PPONetworkError::Shared)
     }
 
-    /// Returns Float critic values [batch_size, 1] from Float rank-H head inputs, preserving critic dtype and gradients.
+    /// Returns Float critic values [batch_size, 1] from Float rank-H head inputs, preserving critic dtype and training gradients.
     fn forward_values(&self, observations: Tensor<H>) -> Result<Tensor<2>, Self::Error> {
-        self.critic_head
-            .forward(observations)
-            .map_err(PPONetworkError::Critic)
+        let model = &self.model.2;
+        model.forward(observations).map_err(PPONetworkError::Critic)
     }
 
     /// Samples rank-L Float actions from rank-H Float head inputs, each shaped `[batch_size, ...item_shape]`. Preserves policy dtype.
     fn sample(&self, observations: Tensor<H>) -> Result<Tensor<L>, Self::Error> {
-        self.actor_head
-            .sample(observations)
-            .map_err(PPONetworkError::Policy)
+        let model = &self.model.1;
+        model.sample(observations).map_err(PPONetworkError::Policy)
     }
 
     /// Returns rank-L modal Float actions from rank-H Float head inputs, each shaped `[batch_size, ...item_shape]`. Preserves policy dtype.
     fn mode(&self, observations: Tensor<H>) -> Result<Tensor<L>, Self::Error> {
-        self.actor_head
-            .mode(observations)
-            .map_err(PPONetworkError::Policy)
+        let model = &self.model.1;
+        model.mode(observations).map_err(PPONetworkError::Policy)
     }
 
     /// Evaluates rank-L Float actions for rank-H Float head inputs, returning policy statistics [batch_size, 1].
-    /// Retains policy gradients and dtype; input and action batch sizes and devices must match.
+    /// Retains training gradients and dtype; input and action batch sizes and devices must match.
     fn log_prob_and_entropy(
         &self,
         observations: Tensor<H>,
         actions: Tensor<L>,
     ) -> Result<(Tensor<2>, Tensor<2>), Self::Error> {
-        self.actor_head
+        let model = &self.model.1;
+        model
             .log_prob_and_entropy(observations, actions)
             .map_err(PPONetworkError::Policy)
     }
@@ -266,18 +365,12 @@ where
         gradient_clip: f32,
     ) -> Result<(), TensorReadError> {
         let total_loss = actor_loss + critic_loss;
-        let models = (
-            self.shared_network.clone(),
-            self.actor_head.clone(),
-            self.critic_head.clone(),
-        );
-        let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &models);
+        let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &self.model);
         let _total_grad_norm =
-            crate::tensor_operations::clip_gradients(&models, &mut total_grad, gradient_clip)?;
-        let (trunk, actor, critic) = self.optimizer.step(self.learning_rate, models, total_grad);
-        self.shared_network = trunk;
-        self.actor_head = actor;
-        self.critic_head = critic;
+            crate::tensor_operations::clip_gradients(&self.model, &mut total_grad, gradient_clip)?;
+        self.model = self
+            .optimizer
+            .step(self.learning_rate, self.model.clone(), total_grad);
         Ok(())
     }
 
@@ -301,11 +394,12 @@ where
     C: Module
         + Forward<O, 2, InputKind = P::ObservationKind, OutputKind = Float, Error: std::fmt::Debug>,
 {
+    type ModelGroup =
+        PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<O, Self::LatentKind>, Tensor<L>>;
+
     type InputKind = P::ObservationKind;
     type LatentKind = P::ObservationKind;
     type Error = PPONetworkError<P::Error, C::Error>;
-    type ModelGroup =
-        PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<O, Self::LatentKind>, Tensor<L>>;
 
     /// Returns native rank-O observations `[batch_size, ...observation_shape]` unchanged, preserving kind, dtype, device, and gradients.
     fn forward_observations(
@@ -315,28 +409,25 @@ where
         Ok(observations)
     }
 
-    /// Returns Float critic values [batch_size, 1] from native rank-O observations, preserving critic dtype and gradients.
+    /// Returns Float critic values [batch_size, 1] from native rank-O observations, preserving critic dtype and training gradients.
     fn forward_values(
         &self,
         observations: Tensor<O, Self::LatentKind>,
     ) -> Result<Tensor<2>, Self::Error> {
-        self.critic_network
-            .forward(observations)
-            .map_err(PPONetworkError::Critic)
+        let model = &self.model.1;
+        model.forward(observations).map_err(PPONetworkError::Critic)
     }
 
     /// Samples rank-L Float actions from native rank-O observations, each shaped `[batch_size, ...item_shape]`. Preserves policy dtype.
     fn sample(&self, observations: Tensor<O, Self::LatentKind>) -> Result<Tensor<L>, Self::Error> {
-        self.actor_network
-            .sample(observations)
-            .map_err(PPONetworkError::Policy)
+        let model = &self.model.0;
+        model.sample(observations).map_err(PPONetworkError::Policy)
     }
 
     /// Returns rank-L modal Float actions from native rank-O observations, each shaped `[batch_size, ...item_shape]`. Preserves policy dtype.
     fn mode(&self, observations: Tensor<O, Self::LatentKind>) -> Result<Tensor<L>, Self::Error> {
-        self.actor_network
-            .mode(observations)
-            .map_err(PPONetworkError::Policy)
+        let model = &self.model.0;
+        model.mode(observations).map_err(PPONetworkError::Policy)
     }
 
     /// Evaluates rank-L Float actions for native rank-O observations, returning policy statistics [batch_size, 1].
@@ -346,7 +437,8 @@ where
         observations: Tensor<O, Self::LatentKind>,
         actions: Tensor<L>,
     ) -> Result<(Tensor<2>, Tensor<2>), Self::Error> {
-        self.actor_network
+        let model = &self.model.0;
+        model
             .log_prob_and_entropy(observations, actions)
             .map_err(PPONetworkError::Policy)
     }
@@ -361,7 +453,7 @@ where
         match self.combined_loss {
             true => {
                 let total_loss = actor_loss + critic_loss;
-                let models = (self.actor_network.clone(), self.critic_network.clone());
+                let models = self.model.clone();
                 let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &models);
                 let _total_grad_norm = crate::tensor_operations::clip_gradients(
                     &models,
@@ -372,42 +464,42 @@ where
                     gradients: &total_grad,
                     selected: GradientsParams::new(),
                 };
-                self.actor_network.visit(&mut actor_gradients);
-                self.actor_network = self.actor_optimizer.step(
+                self.model.0.visit(&mut actor_gradients);
+                self.model.0 = self.actor_optimizer.step(
                     self.actor_learning_rate,
-                    self.actor_network.clone(),
+                    self.model.0.clone(),
                     actor_gradients.selected,
                 );
-                self.critic_network = self.critic_optimizer.step(
+                self.model.1 = self.critic_optimizer.step(
                     self.critic_learning_rate,
-                    self.critic_network.clone(),
+                    self.model.1.clone(),
                     total_grad,
                 );
             }
             false => {
                 let mut actor_grad =
-                    GradientsParams::from_grads(actor_loss.backward(), &self.actor_network);
+                    GradientsParams::from_grads(actor_loss.backward(), &self.model.0);
                 let _actor_grad_norm = crate::tensor_operations::clip_gradients(
-                    &self.actor_network,
+                    &self.model.0,
                     &mut actor_grad,
                     gradient_clip,
                 )?;
-                self.actor_network = self.actor_optimizer.step(
+                self.model.0 = self.actor_optimizer.step(
                     self.actor_learning_rate,
-                    self.actor_network.clone(),
+                    self.model.0.clone(),
                     actor_grad,
                 );
 
                 let mut critic_grad =
-                    GradientsParams::from_grads(critic_loss.backward(), &self.critic_network);
+                    GradientsParams::from_grads(critic_loss.backward(), &self.model.1);
                 let _critic_grad_norm = crate::tensor_operations::clip_gradients(
-                    &self.critic_network,
+                    &self.model.1,
                     &mut critic_grad,
                     gradient_clip,
                 )?;
-                self.critic_network = self.critic_optimizer.step(
+                self.model.1 = self.critic_optimizer.step(
                     self.critic_learning_rate,
-                    self.critic_network.clone(),
+                    self.model.1.clone(),
                     critic_grad,
                 );
             }
@@ -474,8 +566,8 @@ where
 #[cfg(test)]
 mod tests {
     use burn::{
-        module::{Module, ModuleVisitor, Param},
-        nn::{Initializer, Linear, LinearConfig, Relu},
+        module::{Module, ModuleVisitor, Param, ParamGroup},
+        nn::{Dropout, DropoutConfig, Initializer, Linear, LinearConfig, Relu},
         optim::{AdamConfig, GradientsParams, SgdConfig},
         tensor::{DType, Device, Tensor},
     };
@@ -484,12 +576,12 @@ mod tests {
         PPOAgent,
         tests::{NoopLogger, TwoStepTestGym, assert_close, mlp},
     };
-    use super::{PPOConfigurationError, SeparatePPONetwork, SharedPPONetwork};
+    use super::{PPOConfigurationError, PPONetwork, SeparatePPONetwork, SharedPPONetwork};
     use crate::{
         agents::Agent,
         distributions::{CategoricalDistribution, GaussianDistribution},
         gym::{MultiGym, VectorizedGymWrapper},
-        models::probabilistic_model::ProbabilisticPolicyModel,
+        models::{Forward, probabilistic_model::ProbabilisticPolicyModel},
         parameter_schedule::LinearSchedule,
         spaces::BoxSpace,
     };
@@ -500,6 +592,306 @@ mod tests {
             .with_initializer(Initializer::Constant { value: 0.5 })
             .init(device)
             .valid()
+    }
+
+    #[derive(Module, Debug)]
+    struct DropoutTrunk {
+        dropout: Dropout,
+    }
+
+    impl Forward<2, 2> for DropoutTrunk {
+        type InputKind = burn::tensor::Float;
+        type OutputKind = burn::tensor::Float;
+        type Error = Infallible;
+
+        /// Applies dropout to `[batch_size, features]`, preserving shape, dtype, and device.
+        fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+            Ok(self.dropout.forward(observations))
+        }
+    }
+
+    #[test]
+    fn networks_traverse_and_map_parameters() {
+        let device = Device::flex().autodiff();
+        let shared = SharedPPONetwork::builder()
+            .shared_network(layer(&device))
+            .actor_head(layer(&device))
+            .critic_head(layer(&device))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        assert_eq!(shared.num_params(), 18);
+        assert_eq!(shared.devices(), vec![device.clone()]);
+        let frozen = shared.freeze_group(ParamGroup::from_path("1.weight"));
+        assert!(!frozen.model.1.weight.is_require_grad());
+        assert!(frozen.model.0.weight.is_require_grad());
+        assert!(frozen.model.2.weight.is_require_grad());
+
+        let separate = SeparatePPONetwork::builder()
+            .actor_network(layer(&device))
+            .critic_network(layer(&device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(0.01)
+            .critic_learning_rate(0.01)
+            .build()
+            .unwrap();
+        assert_eq!(separate.num_params(), 12);
+        let frozen = separate.freeze_group(ParamGroup::from_path("1.weight"));
+        assert!(frozen.model.0.weight.is_require_grad());
+        assert!(!frozen.model.1.weight.is_require_grad());
+    }
+
+    #[test]
+    fn validation_networks_share_captured_schedules() {
+        let start = 0.01;
+        let shared = SharedPPONetwork::builder()
+            .shared_network(Relu)
+            .actor_head(Relu)
+            .critic_head(Relu)
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(start)
+            .lr_scheduler(move |progress| start * (1.0 - progress))
+            .build()
+            .unwrap();
+        let validation = shared.valid();
+        assert!(std::sync::Arc::ptr_eq(
+            shared.lr_scheduler.as_ref().unwrap(),
+            validation.lr_scheduler.as_ref().unwrap(),
+        ));
+        assert_eq!(validation.lr_scheduler.as_ref().unwrap().value(0.5), 0.005);
+
+        let separate = SeparatePPONetwork::builder()
+            .actor_network(Relu)
+            .critic_network(Relu)
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(start)
+            .critic_learning_rate(start)
+            .actor_lr_scheduler(move |progress| start * (1.0 - progress))
+            .critic_lr_scheduler(move |progress| start * (1.0 - progress))
+            .build()
+            .unwrap();
+        let validation = separate.valid();
+        assert!(std::sync::Arc::ptr_eq(
+            separate.actor_lr_scheduler.as_ref().unwrap(),
+            validation.actor_lr_scheduler.as_ref().unwrap(),
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            separate.critic_lr_scheduler.as_ref().unwrap(),
+            validation.critic_lr_scheduler.as_ref().unwrap(),
+        ));
+    }
+
+    #[test]
+    fn validation_views_preserve_training_flags_and_frozen_parameters() {
+        let device = Device::flex().autodiff().gradient_checkpointing();
+        let network = SharedPPONetwork::builder()
+            .shared_network(DropoutTrunk {
+                dropout: DropoutConfig::new(0.5).init(),
+            })
+            .actor_head(ProbabilisticPolicyModel::new(
+                layer(&device),
+                CategoricalDistribution,
+            ))
+            .critic_head(
+                LinearConfig::new(2, 1)
+                    .with_initializer(Initializer::Constant { value: 0.5 })
+                    .init(&device)
+                    .no_grad(),
+            )
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        let critic_id = network.model.2.weight.id;
+        let observations = Tensor::<2>::ones([2, 2], &device);
+
+        {
+            let validation = Module::valid(&network);
+            assert!(!validation.model.0.dropout.training.is_enabled());
+            assert!(network.model.0.dropout.training.is_enabled());
+            assert_eq!(validation.model.2.weight.id, critic_id);
+            assert_eq!(
+                validation.model.2.weight.val().to_data(),
+                network.model.2.weight.val().to_data(),
+            );
+            let latent = validation
+                .forward_observations(observations.without_autodiff())
+                .unwrap();
+            assert!(!latent.device().is_autodiff());
+            assert_eq!(latent.to_data().try_to_vec::<f32>().unwrap(), [1.0; 4]);
+        }
+
+        assert!(network.model.0.dropout.training.is_enabled());
+        assert!(!network.model.2.weight.is_require_grad());
+        assert_eq!(network.model.2.weight.id, critic_id);
+        assert_eq!(
+            network
+                .model
+                .2
+                .weight
+                .val()
+                .device()
+                .gradient_checkpointing_strategy(),
+            device.gradient_checkpointing_strategy(),
+        );
+    }
+
+    #[test]
+    fn shared_validation_views_disable_gradients_and_refresh_after_updates() {
+        let device = Device::flex().autodiff();
+        let mut network = SharedPPONetwork::builder()
+            .shared_network(layer(&device))
+            .actor_head(ProbabilisticPolicyModel::new(
+                layer(&device),
+                CategoricalDistribution,
+            ))
+            .critic_head(
+                LinearConfig::new(2, 1)
+                    .with_initializer(Initializer::Constant { value: 0.5 })
+                    .init(&device),
+            )
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        let observations = Tensor::from_data([[1.0f32, 2.0], [3.0, 4.0]], &device);
+
+        let previous = {
+            let validation = Module::valid(&network);
+            let latent = PPONetwork::<2, 2, 2>::forward_observations(
+                &validation,
+                observations.clone().without_autodiff(),
+            )
+            .unwrap();
+            let values =
+                PPONetwork::<2, 2, 2>::forward_values(&validation, latent.clone()).unwrap();
+            let actions = PPONetwork::<2, 2, 2>::mode(&validation, latent.clone()).unwrap();
+            let (log_probs, entropy) =
+                PPONetwork::<2, 2, 2>::log_prob_and_entropy(&validation, latent.clone(), actions)
+                    .unwrap();
+            assert!(!latent.device().is_autodiff());
+            assert!(!values.is_require_grad());
+            assert!(!log_probs.is_require_grad());
+            assert!(!entropy.is_require_grad());
+            let previous = values.to_data().try_to_vec::<f32>().unwrap();
+            assert!(network.models().0.weight.is_require_grad());
+
+            previous
+        };
+
+        let latent =
+            PPONetwork::<2, 2, 2>::forward_observations(&network, observations.clone()).unwrap();
+        let values = PPONetwork::<2, 2, 2>::forward_values(&network, latent.clone()).unwrap();
+        let actions = PPONetwork::<2, 2, 2>::mode(&network, latent.clone()).unwrap();
+        let (log_probs, _) =
+            PPONetwork::<2, 2, 2>::log_prob_and_entropy(&network, latent, actions).unwrap();
+        assert!(values.device().is_autodiff());
+        assert!(log_probs.device().is_autodiff());
+        PPONetwork::<2, 2, 2>::backpropagate_loss(
+            &mut network,
+            -log_probs.mean(),
+            values.square().mean(),
+            1.0,
+        )
+        .unwrap();
+
+        let validation = Module::valid(&network);
+        let latent = PPONetwork::<2, 2, 2>::forward_observations(
+            &validation,
+            observations.without_autodiff(),
+        )
+        .unwrap();
+        let current = PPONetwork::<2, 2, 2>::forward_values(&validation, latent)
+            .unwrap()
+            .to_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert!(
+            previous
+                .iter()
+                .zip(current)
+                .any(|(before, after)| (before - after).abs() > 1e-6)
+        );
+    }
+
+    #[test]
+    fn separate_validation_views_preserve_training_models_and_gradient_flow() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut network = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                layer(&device),
+                CategoricalDistribution,
+            ))
+            .critic_network(LinearConfig::new(2, 1).init(&device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(0.01)
+            .critic_learning_rate(0.01)
+            .build()
+            .unwrap();
+        let observations = Tensor::from_data([[1.0f32, 2.0], [3.0, 4.0]], &device);
+
+        {
+            let validation = Module::valid(&network);
+            let values = PPONetwork::<2, 2, 2>::forward_values(
+                &validation,
+                observations.clone().without_autodiff(),
+            )
+            .unwrap();
+            let actions =
+                PPONetwork::<2, 2, 2>::mode(&validation, observations.clone().without_autodiff())
+                    .unwrap();
+            let (log_probs, entropy) = PPONetwork::<2, 2, 2>::log_prob_and_entropy(
+                &validation,
+                observations.clone().without_autodiff(),
+                actions,
+            )
+            .unwrap();
+            assert!(!values.device().is_autodiff());
+            assert!(!log_probs.is_require_grad());
+            assert!(!entropy.is_require_grad());
+            assert!(network.models().1.weight.is_require_grad());
+        }
+
+        let values = PPONetwork::<2, 2, 2>::forward_values(&network, observations.clone()).unwrap();
+        let actions = PPONetwork::<2, 2, 2>::mode(&network, observations.clone()).unwrap();
+        let (log_probs, _) =
+            PPONetwork::<2, 2, 2>::log_prob_and_entropy(&network, observations, actions).unwrap();
+        assert!(values.device().is_autodiff());
+        assert!(log_probs.device().is_autodiff());
+        let before = network
+            .models()
+            .1
+            .weight
+            .val()
+            .to_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        PPONetwork::<2, 2, 2>::backpropagate_loss(
+            &mut network,
+            -log_probs.mean(),
+            values.square().mean(),
+            1.0,
+        )
+        .unwrap();
+        let after = network
+            .models()
+            .1
+            .weight
+            .val()
+            .to_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert!(
+            before
+                .iter()
+                .zip(after)
+                .any(|(before, after)| (before - after).abs() > 1e-6)
+        );
     }
 
     #[test]
@@ -516,17 +908,13 @@ mod tests {
             .unwrap();
         let mut network = network;
 
-        assert!(network.shared_network.weight.val().is_require_grad());
-        assert!(network.actor_head.weight.val().is_require_grad());
-        assert!(network.critic_head.weight.val().is_require_grad());
+        assert!(network.model.0.weight.val().is_require_grad());
+        assert!(network.model.1.weight.val().is_require_grad());
+        assert!(network.model.2.weight.val().is_require_grad());
         assert_eq!(network.learning_rate, 0.001);
         assert_eq!(network.lr_scheduler.as_ref().unwrap().value(0.5), 0.0005);
 
-        let models = (
-            network.shared_network,
-            network.actor_head,
-            network.critic_head,
-        );
+        let models = (network.model.0, network.model.1, network.model.2);
         let loss =
             models.0.weight.val().sum() + models.1.weight.val().sum() + models.2.weight.val().sum();
         let gradients = GradientsParams::from_grads(loss.backward(), &models);
@@ -558,8 +946,8 @@ mod tests {
             .unwrap();
         let mut network = network;
 
-        assert!(network.actor_network.weight.val().is_require_grad());
-        assert!(network.critic_network.weight.val().is_require_grad());
+        assert!(network.model.0.weight.val().is_require_grad());
+        assert!(network.model.1.weight.val().is_require_grad());
         assert_eq!(network.actor_learning_rate, 0.001);
         assert_eq!(network.critic_learning_rate, 0.002);
         assert_eq!(
@@ -573,21 +961,21 @@ mod tests {
         assert!(network.combined_loss);
 
         let actor_gradients = GradientsParams::from_grads(
-            network.actor_network.weight.val().sum().backward(),
-            &network.actor_network,
+            network.model.0.weight.val().sum().backward(),
+            &network.model.0,
         );
         let critic_gradients = GradientsParams::from_grads(
-            network.critic_network.weight.val().sum().backward(),
-            &network.critic_network,
+            network.model.1.weight.val().sum().backward(),
+            &network.model.1,
         );
         let actor = network.actor_optimizer.step(
             network.actor_learning_rate,
-            network.actor_network,
+            network.model.0,
             actor_gradients,
         );
         let critic = network.critic_optimizer.step(
             network.critic_learning_rate,
-            network.critic_network,
+            network.model.1,
             critic_gradients,
         );
         assert!(
@@ -692,8 +1080,8 @@ mod tests {
             let network = &agent.network_info;
             let mut after_actor = Parameters(Vec::new());
             let mut after_critic = Parameters(Vec::new());
-            network.actor_network.visit(&mut after_actor);
-            network.critic_network.visit(&mut after_critic);
+            network.model.0.visit(&mut after_actor);
+            network.model.1.visit(&mut after_critic);
             assert_ne!(before_actor.0, after_actor.0);
             assert_ne!(before_critic.0, after_critic.0);
             updates.push((after_actor.0, after_critic.0));
