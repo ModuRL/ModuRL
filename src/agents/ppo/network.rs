@@ -284,7 +284,7 @@ pub trait PPONetwork<const O: usize, const H: usize, const L: usize>: Module {
     ) -> Result<(Tensor<2>, Tensor<2>), Self::Error>;
 
     /// Updates owned parameters from actor and critic losses [1], preserving the configuration's clipping and optimizer behavior.
-    /// Reading gradient norm contributions can fail. Losses must come from the owned models on their device.
+    /// Losses must come from the owned models on their device.
     fn backpropagate_loss(
         &mut self,
         actor_loss: Tensor<1>,
@@ -366,8 +366,7 @@ where
     ) -> Result<(), TensorReadError> {
         let total_loss = actor_loss + critic_loss;
         let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &self.model);
-        let _total_grad_norm =
-            crate::tensor_operations::clip_gradients(&self.model, &mut total_grad, gradient_clip)?;
+        crate::tensor_operations::clip_gradients(&self.model, &mut total_grad, gradient_clip);
         self.model = self
             .optimizer
             .step(self.learning_rate, self.model.clone(), total_grad);
@@ -455,11 +454,7 @@ where
                 let total_loss = actor_loss + critic_loss;
                 let models = self.model.clone();
                 let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &models);
-                let _total_grad_norm = crate::tensor_operations::clip_gradients(
-                    &models,
-                    &mut total_grad,
-                    gradient_clip,
-                )?;
+                crate::tensor_operations::clip_gradients(&models, &mut total_grad, gradient_clip);
                 let mut actor_gradients = PPOGradientSelection {
                     gradients: &total_grad,
                     selected: GradientsParams::new(),
@@ -479,11 +474,11 @@ where
             false => {
                 let mut actor_grad =
                     GradientsParams::from_grads(actor_loss.backward(), &self.model.0);
-                let _actor_grad_norm = crate::tensor_operations::clip_gradients(
+                crate::tensor_operations::clip_gradients(
                     &self.model.0,
                     &mut actor_grad,
                     gradient_clip,
-                )?;
+                );
                 self.model.0 = self.actor_optimizer.step(
                     self.actor_learning_rate,
                     self.model.0.clone(),
@@ -492,11 +487,11 @@ where
 
                 let mut critic_grad =
                     GradientsParams::from_grads(critic_loss.backward(), &self.model.1);
-                let _critic_grad_norm = crate::tensor_operations::clip_gradients(
+                crate::tensor_operations::clip_gradients(
                     &self.model.1,
                     &mut critic_grad,
                     gradient_clip,
-                )?;
+                );
                 self.model.1 = self.critic_optimizer.step(
                     self.critic_learning_rate,
                     self.model.1.clone(),
