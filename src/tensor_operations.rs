@@ -1,7 +1,7 @@
 use burn::{
     module::{Module, ModuleVisitor, Param, ParamId},
     optim::GradientsParams,
-    tensor::{Bool, DType, Device, Tensor, TensorReadError},
+    tensor::{Bool, DType, Device, Tensor},
 };
 use std::collections::HashSet;
 
@@ -41,38 +41,44 @@ pub(crate) fn clamp_with_boundary_gradients<const D: usize>(
 /// Clips one global norm across the model's parameter gradients, preserving every parameter shape, dtype, and device.
 /// Gradients must come from this model's backward pass. Missing gradients are skipped; shared parameters count once.
 /// A tuple of models shares one norm. Gradients outside those models remain unchanged.
-/// Returns the original norm as a host `f32`; reading norm contributions can fail.
-pub(crate) fn clip_gradients<M: Module>(
-    model: &M,
-    gradients: &mut GradientsParams,
-    max_norm: f32,
-) -> Result<f32, TensorReadError> {
+/// Computes the norm and clipping factor with tensors, without reading values to the host.
+/// For models on multiple devices, scalar contributions move to the first gradient's device.
+pub(crate) fn clip_gradients<M: Module>(model: &M, gradients: &mut GradientsParams, max_norm: f32) {
     let mut norms = GradientNorms {
         gradients,
         visited: HashSet::new(),
         groups: Vec::new(),
     };
     model.visit(&mut norms);
-    let mut norm_sqrs = Vec::new();
-    for group in norms.groups {
-        // Read each device's scalar contributions together to limit device-to-host transfers.
-        norm_sqrs.extend(
-            Tensor::<1>::cat(group, 0)
-                .try_into_data_as::<f64>()?
-                .try_to_vec::<f64>()?,
-        );
-    }
-    // Sort contributions because parameter traversal order must not change floating-point accumulation.
-    norm_sqrs.sort_by(f64::total_cmp);
-    let total_norm = norm_sqrs.into_iter().sum::<f64>().sqrt();
-    if total_norm > f64::from(max_norm) {
-        model.visit(&mut GradientScale {
-            gradients,
-            visited: HashSet::new(),
-            scale: f64::from(max_norm) / (total_norm + 1e-6),
-        });
-    }
-    Ok(total_norm as f32)
+    let Some(first) = norms.groups.first() else {
+        return;
+    };
+    let device = first[0].device();
+    let devices = norms
+        .groups
+        .iter()
+        .map(|group| group[0].device())
+        .collect::<Vec<_>>();
+    let contributions = norms
+        .groups
+        .into_iter()
+        .map(|group| Tensor::<1>::cat(group, 0).to_device(&device))
+        .collect();
+
+    // Sort contributions so parameter traversal order does not change the reduction.
+    let total_norm = Tensor::<1>::cat(contributions, 0).sort(0).sum().sqrt();
+    let scale = total_norm.ones_like();
+    let clipped_scale = scale.clone() * f64::from(max_norm) / (total_norm.clone() + 1e-6);
+    let scale = scale.mask_where(total_norm.greater_elem(max_norm), clipped_scale);
+    let scales = devices
+        .iter()
+        .map(|device| scale.clone().to_device(device))
+        .collect();
+    model.visit(&mut GradientScale {
+        gradients,
+        visited: HashSet::new(),
+        scales,
+    });
 }
 
 struct GradientNorms<'a> {
@@ -107,17 +113,25 @@ impl ModuleVisitor for GradientNorms<'_> {
 struct GradientScale<'a> {
     gradients: &'a mut GradientsParams,
     visited: HashSet<ParamId>,
-    scale: f64,
+    scales: Vec<Tensor<1>>,
 }
 
 impl ModuleVisitor for GradientScale<'_> {
-    /// Scales a parameter gradient of rank `D`, preserving its shape, dtype, and device.
+    /// Broadcasts a clipping factor `[1]` over a rank-D gradient, preserving its shape, dtype, and device.
     fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
         if !self.visited.insert(param.id) {
             return;
         }
         if let Some(gradient) = self.gradients.remove::<D>(param.id) {
-            self.gradients.register(param.id, gradient * self.scale);
+            let Some(scale) = self
+                .scales
+                .iter()
+                .find(|scale| scale.device() == gradient.device())
+            else {
+                unreachable!("each gradient device has a clipping factor");
+            };
+            let scale = scale.clone().cast(gradient.dtype()).reshape([1; D]);
+            self.gradients.register(param.id, gradient * scale);
         }
     }
 }
@@ -258,7 +272,7 @@ mod tests {
             let loss = variable.val().square().sum();
             let mut gradients = GradientsParams::from_grads(loss.backward(), &variable);
             let gradient_device = gradients.get::<1>(variable.id).unwrap().device();
-            let original_norm = clip_gradients(&variable, &mut gradients, 5.0).unwrap();
+            clip_gradients(&variable, &mut gradients, 5.0);
             let clipped = gradients.get::<1>(variable.id).unwrap();
             assert_eq!(clipped.dims(), [2]);
             assert_eq!(clipped.dtype(), dtype);
@@ -269,9 +283,29 @@ mod tests {
                 .try_to_vec::<f64>()
                 .unwrap();
             let expected_scale = 5.0 / (10.0 + 1e-6);
-            assert!((original_norm - 10.0).abs() < 1e-6);
             assert!((clipped[0] - 6.0 * expected_scale).abs() < 1e-6);
             assert!((clipped[1] - 8.0 * expected_scale).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn gradient_clipping_preserves_gradients_at_or_below_the_limit() {
+        let device = Device::flex().autodiff();
+        for dtype in [DType::F32, DType::F64] {
+            for coefficients in [[0.0f64, 0.0], [1.0, 2.0], [3.0, 4.0]] {
+                let parameter = Param::from_tensor(Tensor::<1>::ones([2], (&device, dtype)));
+                let loss =
+                    (parameter.val() * Tensor::from_data(coefficients, (&device, dtype))).sum();
+                let mut gradients = GradientsParams::from_grads(loss.backward(), &parameter);
+                let before = gradients.get::<1>(parameter.id).unwrap().into_data();
+
+                clip_gradients(&parameter, &mut gradients, 5.0);
+
+                assert_eq!(
+                    gradients.get::<1>(parameter.id).unwrap().into_data(),
+                    before
+                );
+            }
         }
     }
 
@@ -282,7 +316,7 @@ mod tests {
         let operand = Tensor::<1>::ones([2], &device).require_grad().detach();
         let loss = (parameter.val() * operand).sum();
         let mut gradients = GradientsParams::from_grads(loss.backward(), &parameter);
-        let original_norm = clip_gradients(&parameter, &mut gradients, 1.0).unwrap();
+        clip_gradients(&parameter, &mut gradients, 1.0);
         let clipped = gradients
             .get::<1>(parameter.id)
             .unwrap()
@@ -292,7 +326,6 @@ mod tests {
         let expected_norm = 2.0f32.sqrt();
         let expected_scale = 1.0 / (expected_norm + 1e-6);
 
-        assert!((original_norm - expected_norm).abs() < 1e-6);
         assert!((clipped[0] - expected_scale).abs() < 1e-6);
         assert!((clipped[1] - expected_scale).abs() < 1e-6);
     }
@@ -305,7 +338,7 @@ mod tests {
         let models = (first.clone(), second.clone(), first.clone());
         let loss = first.val().sum() * 3.0 + second.val().sum() * 4.0;
         let mut gradients = GradientsParams::from_grads(loss.backward(), &models);
-        assert_eq!(clip_gradients(&models, &mut gradients, 4.0).unwrap(), 5.0);
+        clip_gradients(&models, &mut gradients, 4.0);
         let scale = 4.0 / (5.0 + 1e-6);
         assert!(
             (gradients.get::<1>(first.id).unwrap().into_scalar::<f64>() - 3.0 * scale).abs() < 1e-6
@@ -349,8 +382,8 @@ mod tests {
                 _ => unreachable!(),
             }
             let mut gradients = GradientsParams::from_grads(loss.backward(), &models);
-            let norm = clip_gradients(&models.clone(), &mut gradients, 0.5).unwrap();
-            let clipped = parameters
+            clip_gradients(&models, &mut gradients, 0.5);
+            parameters
                 .iter()
                 .map(|parameter| {
                     gradients
@@ -359,8 +392,7 @@ mod tests {
                         .into_scalar::<f64>()
                         .to_bits()
                 })
-                .collect::<Vec<_>>();
-            (norm.to_bits(), clipped)
+                .collect::<Vec<_>>()
         };
 
         let expected = evaluate(0);
@@ -382,18 +414,15 @@ mod tests {
             loss.backward(),
             &(selected.clone(), unused.clone(), other.clone()),
         );
-        assert_eq!(
-            clip_gradients(&(selected.clone(), unused.clone()), &mut gradients, 2.0).unwrap(),
-            3.0
-        );
+        clip_gradients(&(selected.clone(), unused.clone()), &mut gradients, 2.0);
         assert!(gradients.get::<1>(unused.id).is_none());
         assert_eq!(
             gradients.get::<1>(other.id).unwrap().into_scalar::<f32>(),
             100.0
         );
-        assert_eq!(clip_gradients(&unused, &mut gradients, 2.0).unwrap(), 0.0);
+        clip_gradients(&unused, &mut gradients, 2.0);
         let before = gradients.get::<1>(selected.id).unwrap().into_data();
-        clip_gradients(&selected, &mut gradients, 10.0).unwrap();
+        clip_gradients(&selected, &mut gradients, 10.0);
         assert_eq!(gradients.get::<1>(selected.id).unwrap().into_data(), before);
     }
 }
