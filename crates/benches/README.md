@@ -30,6 +30,9 @@ The default runs all three frameworks, with five fresh-process samples each and 
 `--algorithm all` runs PPO, then DQN, sequentially and writes a separate report for each.
 `--steps` sets measured transitions, `--repeats` sets samples, and `--threads` sets tensor compute threads.
 PPO still uses 32 environment workers when `--threads 1` is selected.
+PPO `--steps` and `--warmup-steps` must be positive multiples of 4,096 transitions.
+The default PPO warmup is ten rollouts: 40,960 transitions and 160 optimizer updates.
+Use `--steps 4096` to measure one rollout after warmup. Override warmup with `--warmup-steps`.
 
 CUDA requires an NVIDIA driver and a CUDA-enabled PyTorch installation.
 CUDA is the default benchmark target for all three frameworks.
@@ -94,7 +97,7 @@ Neither trace mode records individual GPU kernel events.
 | Updates | Four epochs; four 1,024-transition minibatches per epoch | One 32-transition update per four steps |
 | Replay | Not applicable | 1M transitions on CPU; sampled batches move to the training device |
 | Adam | Rate `2.5e-4`, epsilon `1e-5` | Rate `1e-4`, epsilon `1e-8` |
-| Warmup | One complete rollout and update | 80,000 collection steps, then four steps and one update |
+| Warmup | Ten complete rollouts and updates by default | 80,000 collection steps, then four steps and one update |
 | Measured sample | 40,960 transitions; 160 optimizer steps | 4,096 transitions; 1,024 optimizer steps |
 
 Environment output, rollout storage, and replay samples remain U8.

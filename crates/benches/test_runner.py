@@ -1,16 +1,26 @@
 import argparse
+import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import run
 
 
 class BackendCommandTests(unittest.TestCase):
+    def test_default_ppo_warmup_is_ten_rollouts_and_explicit_override_still_works(self):
+        arguments = ["run.py", "--rom", str(Path(__file__))]
+        with mock.patch.object(sys, "argv", arguments):
+            self.assertEqual(run.parse_args().warmup_steps, 40960)
+        with mock.patch.object(sys, "argv", arguments + ["--warmup-steps", "16384"]):
+            self.assertEqual(run.parse_args().warmup_steps, 16384)
+
     def arguments(self, backend):
         return argparse.Namespace(
             algorithm="ppo", device="cuda", backend=backend, steps=40960,
             warmup_steps=4096, threads=1, rom=Path("breakout.bin"), python=Path("python"),
             trace_dir=None, trace_sync=False,
+            repeats=1, frameworks=["modurl"],
         )
 
     def test_libtorch_selects_its_feature_and_preserves_the_cuda_workload(self):
@@ -39,6 +49,23 @@ class BackendCommandTests(unittest.TestCase):
                 run.command_for(framework, self.arguments("libtorch")),
                 run.command_for(framework, self.arguments("native")),
             )
+
+    def test_longer_ppo_warmup_reaches_the_runner(self):
+        args = self.arguments("native")
+        args.steps = 4096
+        args.warmup_steps = 16384
+        with mock.patch.object(run, "run_one", side_effect=RuntimeError("validated warmup")) as runner:
+            with self.assertRaisesRegex(RuntimeError, "validated warmup"):
+                run.run_algorithm(args)
+            runner.assert_called_once_with("modurl", args)
+
+    def test_ppo_warmup_rejects_incomplete_rollouts_and_zero_steps(self):
+        for warmup in (0, 16000):
+            with self.subTest(warmup=warmup):
+                args = self.arguments("native")
+                args.warmup_steps = warmup
+                with self.assertRaises(ValueError):
+                    run.run_algorithm(args)
 
 
 if __name__ == "__main__":
