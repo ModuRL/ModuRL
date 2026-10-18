@@ -638,6 +638,7 @@ where
                     .call()?;
 
                 self.backpropagate_loss(ppo_losses.clone())?;
+                device.flush().map_err(TensorReadError::from)?;
             }
         }
 
