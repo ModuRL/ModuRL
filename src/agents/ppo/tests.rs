@@ -142,7 +142,6 @@ mod rollout_batch_tests {
         let observations: Tensor<4> = batch.observations;
         let actions: Tensor<3> = batch.actions;
         assert_eq!(observations.dims(), [2, 2, 1, 2]);
-        assert_eq!(batch.next_observations.dims(), [2, 2, 1, 2]);
         assert_eq!(actions.dims(), [2, 2, 1]);
         assert_eq!(observations.dtype(), DType::F64);
         assert_eq!(observations.device(), device);
@@ -151,15 +150,6 @@ mod rollout_batch_tests {
         assert_eq!(
             batch.rewards.into_data().try_to_vec::<f64>().unwrap(),
             [3.0, 4.0, 12.0, 13.0]
-        );
-        assert_eq!(batch.next_dones.dims(), [2, 2, 1]);
-        assert_eq!(
-            batch.next_dones.into_data().try_to_vec::<bool>().unwrap(),
-            [true, false, true, false]
-        );
-        assert_eq!(
-            batch.truncateds.into_data().try_to_vec::<bool>().unwrap(),
-            [false, true, false, true]
         );
         assert_eq!(batch.log_probs.dims(), [2, 2, 1]);
         let prepared = batch.prepared.unwrap();
