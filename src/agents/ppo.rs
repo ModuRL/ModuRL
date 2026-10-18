@@ -134,11 +134,8 @@ struct PPOPreparedRolloutBatch {
 
 struct PPORolloutBatch<O: NextRank, A: NextRank> {
     observations: O::Next,
-    next_observations: O::Next,
     actions: A::Next,
     rewards: Tensor<3>,
-    next_dones: Tensor<3, Bool>,
-    truncateds: Tensor<3, Bool>,
     log_probs: Tensor<3>,
     prepared: Option<PPOPreparedRolloutBatch>,
 }
@@ -224,18 +221,12 @@ where
     type Error = ExperienceBatchError;
 
     /// Adds a leading time axis to rank-O observations and rank-A actions, producing tensors with one additional axis.
-    /// Scalar statistics and Bool flags become `[time, environment_count, 1]` without changing environment order.
+    /// Training statistics become `[time, environment_count, 1]` without changing environment order.
     /// Each tensor field must share shape, dtype, and device across time. Preserves gradient connections.
     fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
-        let first = experiences
-            .first()
-            .ok_or(ExperienceBatchError::EmptyBatch)?;
         Ok(PPORolloutBatch {
             observations: experience::stack_tensor_field(experiences, |experience| {
                 experience.observations.clone()
-            })?,
-            next_observations: experience::stack_tensor_field(experiences, |experience| {
-                experience.next_observations.clone()
             })?,
             actions: experience::stack_tensor_field(experiences, |experience| {
                 experience.actions.clone()
@@ -243,16 +234,6 @@ where
             rewards: experience::stack_tensor_field(experiences, |experience| {
                 experience.rewards.clone()
             })?,
-            next_dones: experience::stack_bool_field(
-                experiences,
-                |experience| &experience.next_dones,
-                &first.observations.device(),
-            )?,
-            truncateds: experience::stack_bool_field(
-                experiences,
-                |experience| &experience.truncateds,
-                &first.observations.device(),
-            )?,
             log_probs: experience::stack_tensor_field(experiences, |experience| {
                 experience.log_probs.clone()
             })?,
@@ -656,35 +637,33 @@ where
         )
     )]
     /// Returns explained variance `[1]` and prepares detached statistics `[time, env_count, 1]`.
-    /// Temporarily combines time and environment axes for rank-O observation evaluation, then restores both axes.
-    /// The supplied validation view disables autodiff for these fixed value estimates.
-    fn add_advantages_and_returns<const BO: usize, const BL: usize>(
+    /// Evaluates flattened rollout observations and the final next-observation batch without autodiff.
+    fn add_advantages_and_returns<const BO: usize>(
         &mut self,
         validation: &N,
     ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>>
     where
         Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
-        Tensor<L>: NextRank<Next = Tensor<BL>>,
     {
-        let batch = PPOExperience::<OS::Batch, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
-        let observations = batch.observations;
-        let (batch_size, env_count) = (observations.dims()[0], observations.dims()[1]);
-        let observations = observations.flatten::<O>(0, 1);
+        let experiences = self.rollout_buffer.get_raw();
+        let observations: Tensor<BO, OS::Kind> =
+            experience::stack_tensor_field(experiences, |experience| {
+                experience.observations.clone()
+            })?;
+        let [steps, env_count] = [observations.dims()[0], observations.dims()[1]];
+        let final_experience = experiences.last().ok_or(ExperienceBatchError::EmptyBatch)?;
         let latent_observations = validation
-            .forward_observations(observations.without_autodiff())
+            .forward_observations(observations.flatten::<O>(0, 1).without_autodiff())
             .map_err(PPOError::NetworkError)?;
-
         let values_tensor = self
-            .critic_network_forward(validation, &latent_observations, batch.rewards.dtype())?
-            .detach();
-
-        // Unflatten back to [batch_size, env_count, ...].
-        let values_tensor = values_tensor.reshape([batch_size, env_count, 1]);
-
-        let next_observations_tensor = batch.next_observations;
-        let bootstrapped_observations = next_observations_tensor
-            .slice_dim(0, batch_size - 1..batch_size)
-            .squeeze_dim::<O>(0);
+            .critic_network_forward(
+                validation,
+                &latent_observations,
+                final_experience.rewards.dtype(),
+            )?
+            .detach()
+            .reshape([steps, env_count, 1]);
+        let bootstrapped_observations = final_experience.next_observations.clone();
         let latent_bootstrapped_observations = validation
             .forward_observations(bootstrapped_observations.without_autodiff())
             .map_err(PPOError::NetworkError)?;
@@ -693,20 +672,29 @@ where
             .critic_network_forward(
                 validation,
                 &latent_bootstrapped_observations,
-                batch.rewards.dtype(),
+                final_experience.rewards.dtype(),
             )?
             .detach(); // shape [env_count, 1]
 
-        let training_rewards =
-            experience::stack_tensor_field(self.rollout_buffer.get_raw(), |experience| {
-                experience.training_rewards.clone()
-            })?;
+        let training_rewards = experience::stack_tensor_field(experiences, |experience| {
+            experience.training_rewards.clone()
+        })?;
+        let next_dones = experience::stack_bool_field(
+            experiences,
+            |experience| &experience.next_dones,
+            &values_tensor.device(),
+        )?;
+        let truncateds = experience::stack_bool_field(
+            experiences,
+            |experience| &experience.truncateds,
+            &values_tensor.device(),
+        )?;
         let advantages = self
             .compute_gae(
                 &training_rewards,
                 &values_tensor,
-                &batch.next_dones,
-                &batch.truncateds,
+                &next_dones,
+                &truncateds,
                 &bootstrapped_values,
             )
             .detach();
