@@ -4325,6 +4325,7 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "burn",
+ "burn-std",
  "cmake",
  "minifb",
  "modurl",
