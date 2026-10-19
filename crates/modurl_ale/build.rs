@@ -54,6 +54,11 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", library_dir.display());
     println!("cargo:rustc-link-search=native={}", destination.display());
     println!("cargo:rustc-link-lib=static=ale_c_static");
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("linux") => println!("cargo:rustc-link-lib=dylib=stdc++"),
+        Ok("macos") => println!("cargo:rustc-link-lib=dylib=c++"),
+        _ => {}
+    }
     println!("cargo:rerun-if-changed=native/ale/CMakeLists.txt");
     println!("cargo:rerun-if-changed=native/ale/src");
     println!("cargo:rerun-if-changed=native/ale/ale_py");
