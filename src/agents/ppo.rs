@@ -117,6 +117,7 @@ struct PPOExperience<O: NextRank = Tensor<2>, A: NextRank = Tensor<2>> {
     next_dones: Vec<bool>,
     truncateds: Vec<bool>,
     log_probs: Tensor<2>,
+    values: Tensor<2>,
     prepared: Option<PPOPreparedExperience>,
 }
 
@@ -124,6 +125,7 @@ struct PPOCollectionAction<AS: TensorBatchTypes, const L: usize> {
     policy_actions: Tensor<L>,
     environment_actions: AS::Batch,
     log_probs: Tensor<2>,
+    values: Tensor<2>,
 }
 
 struct PPOPreparedRolloutBatch {
@@ -181,8 +183,8 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
     /// Creates one vectorized rollout transition.
     ///
     /// `observations` and `next_observations` are `[env_count, ...observation_shape]`.
-    /// `actions` is `[env_count, ...action_shape]`; `rewards`
-    /// and `log_probs` are `[env_count, 1]`. `rewards` preserves the environment values for logging.
+    /// `actions` is `[env_count, ...action_shape]`; `rewards`, `log_probs`, and detached collection `values` are `[env_count, 1]`.
+    /// `rewards` preserves the environment values for logging.
     /// Training rewards [env_count, 1] include terminal-value corrections for nonterminal truncations and retain the reward dtype.
     /// Observations preserve their native kind and dtype. Other fields preserve their Float dtype and device; collection detaches stored experience.
     /// PPO training data is added internally after rollout collection.
@@ -196,6 +198,7 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
         next_dones: Vec<bool>,
         truncateds: Vec<bool>,
         log_probs: Tensor<2>,
+        values: Tensor<2>,
     ) -> Self {
         Self {
             observations,
@@ -206,6 +209,7 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
             next_dones,
             truncateds,
             log_probs,
+            values,
             prepared: None,
         }
     }
@@ -637,32 +641,17 @@ where
         )
     )]
     /// Returns explained variance `[1]` and prepares detached statistics `[time, env_count, 1]`.
-    /// Evaluates flattened rollout observations and the final next-observation batch without autodiff.
-    fn add_advantages_and_returns<const BO: usize>(
+    /// Reuses stored collection values and evaluates only the final next-observation batch without autodiff.
+    fn add_advantages_and_returns(
         &mut self,
         validation: &N,
-    ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>>
-    where
-        Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
-    {
+    ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>> {
         let experiences = self.rollout_buffer.get_raw();
-        let observations: Tensor<BO, OS::Kind> =
-            experience::stack_tensor_field(experiences, |experience| {
-                experience.observations.clone()
-            })?;
-        let [steps, env_count] = [observations.dims()[0], observations.dims()[1]];
+        let values_tensor: Tensor<3> =
+            experience::stack_tensor_field(experiences, |experience| experience.values.clone())?;
         let final_experience = experiences.last().ok_or(ExperienceBatchError::EmptyBatch)?;
-        let latent_observations = validation
-            .forward_observations(observations.flatten::<O>(0, 1).without_autodiff())
-            .map_err(PPOError::NetworkError)?;
-        let values_tensor = self
-            .critic_network_forward(
-                validation,
-                &latent_observations,
-                final_experience.rewards.dtype(),
-            )?
-            .detach()
-            .reshape([steps, env_count, 1]);
+        let values_tensor =
+            values_tensor.reshape([experiences.len(), final_experience.rewards.dims()[0], 1]);
         let bootstrapped_observations = final_experience.next_observations.clone();
         let latent_bootstrapped_observations = validation
             .forward_observations(bootstrapped_observations.without_autodiff())
@@ -803,13 +792,22 @@ where
         let values = network
             .forward_values(observations.clone())
             .map_err(PPOError::NetworkError)?;
+        Self::check_critic_dtype(&values, reward_dtype)?;
+        Ok(values)
+    }
+
+    /// Checks critic values `[batch, 1]` against the environment reward dtype without changing the tensor.
+    fn check_critic_dtype(
+        values: &Tensor<2>,
+        reward_dtype: DType,
+    ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
         if values.dtype() != reward_dtype {
             return Err(PPOError::CriticRewardDTypeMismatch {
                 critic: values.dtype(),
                 reward: reward_dtype,
             });
         }
-        Ok(values)
+        Ok(())
     }
 
     /// Adds discounted terminal values to rewards [environment_count, 1] for nonterminal truncated rows.
@@ -1034,7 +1032,7 @@ where
     }
 
     /// Samples rank-L policy actions and maps them to rank-A environment actions from native rank-O observations.
-    /// All tensors preserve the leading environment axis; log probabilities are detached `[environment_count, 1]`.
+    /// All tensors preserve the leading environment axis; log probabilities and critic values are detached `[environment_count, 1]`.
     fn sample_collection_action(
         &mut self,
         validation: &N,
@@ -1050,6 +1048,9 @@ where
             .action_space
             .tensor_from_neurons(policy_actions.clone())
             .map_err(PPOError::SpaceError)?;
+        let values = validation
+            .forward_values(latent_observations.clone())
+            .map_err(PPOError::NetworkError)?;
         let (log_probs, _) = validation
             .log_prob_and_entropy(latent_observations, policy_actions.clone())
             .map_err(PPOError::NetworkError)?;
@@ -1058,6 +1059,7 @@ where
             environment_actions,
             // Do not retain the collection forward graph in the rollout buffer.
             log_probs: log_probs.detach(),
+            values: values.detach(),
         })
     }
 
@@ -1203,6 +1205,7 @@ where
                 truncateds,
                 terminal_observations: _,
             } = step_info;
+            Self::check_critic_dtype(&collection_action.values, collection_rewards.dtype())?;
             let first_collection_timestep = self
                 .schedule_progress
                 .elapsed_steps()
@@ -1231,6 +1234,7 @@ where
                     .next_dones(next_dones)
                     .truncateds(truncateds)
                     .log_probs(collection_action.log_probs)
+                    .values(collection_action.values)
                     .build(),
             );
             *next_observations = reset_or_next_observations;
