@@ -293,10 +293,18 @@ where
 {
     /// Reads ALE bytes as CPU U8 observations of rank D with the mode's item shape; adds no batch axis.
     fn observation(&mut self) -> Tensor<D, Int> {
+        if const { M::FORMAT == 1 } {
+            return Tensor::from_data(
+                TensorData::from_bytes(
+                    self.ale.screen_rgb_bytes(),
+                    self.observation_space.shape(),
+                    DType::U8,
+                ),
+                (&Device::flex(), DType::U8),
+            );
+        }
         if const { M::FORMAT == 0 } {
             self.ale.get_ram(&mut self.buffer_bytes);
-        } else if const { M::FORMAT == 1 } {
-            self.ale.get_screen_rgb(&mut self.buffer_bytes);
         } else {
             self.ale.get_screen_grayscale(&mut self.buffer_bytes);
         }

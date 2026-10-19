@@ -9,6 +9,7 @@ mod atari;
 mod bindings;
 #[cfg(feature = "rendering")]
 mod renderer;
+mod rgb_frame;
 pub mod wrappers;
 
 pub use atari::{
