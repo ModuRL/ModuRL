@@ -124,6 +124,7 @@ mod rollout_batch_tests {
             .next_dones(vec![true, false])
             .truncateds(vec![false, true])
             .log_probs(Tensor::zeros([2, 1], (device, DType::F64)))
+            .values(Tensor::zeros([2, 1], (device, DType::F64)))
             .build()
     }
 
@@ -265,6 +266,104 @@ mod schedule_tests {
                 assert_eq!(input.dtype(), DType::F32);
             }
             self.model.forward(FloatDType::cast(input, dtype))
+        }
+    }
+
+    #[test]
+    fn collection_values_reuse_shared_features_and_remain_detached() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        #[derive(Module, Debug)]
+        struct CountingTrunk {
+            #[module(skip)]
+            calls: Arc<AtomicUsize>,
+        }
+
+        impl Forward<2, 2> for CountingTrunk {
+            type InputKind = Float;
+            type OutputKind = Float;
+            type Error = Infallible;
+
+            /// Returns observations `[batch, 4]` unchanged and counts encoder calls.
+            fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(observations)
+            }
+        }
+
+        #[derive(Module, Debug)]
+        struct ConstantCritic {
+            value: Param<Tensor<1>>,
+        }
+
+        impl Forward<2, 2> for ConstantCritic {
+            type InputKind = Float;
+            type OutputKind = Float;
+            type Error = Infallible;
+
+            /// Expands the learned value `[1]` to `[batch, 1]` for observations `[batch, 4]`.
+            fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+                Ok(self
+                    .value
+                    .val()
+                    .reshape([1, 1])
+                    .expand([observations.dims()[0], 1]))
+            }
+        }
+
+        let device = Device::flex().autodiff();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> =
+            TwoStepTestGym::new(device.clone(), false).into();
+        let network = SharedPPONetwork::builder()
+            .shared_network(CountingTrunk {
+                calls: calls.clone(),
+            })
+            .actor_head(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_head(ConstantCritic {
+                value: Param::from_tensor(Tensor::ones([1], &device)),
+            })
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(network)
+            .batch_size(2)
+            .mini_batch_size(2)
+            .clip_value_loss(true)
+            .training_horizon(2)
+            .device(device)
+            .build()
+            .unwrap();
+        let mut observations = agent.prepare_rollout_collection(&mut env).unwrap();
+        let validation = agent.network_info.valid();
+        agent
+            .collect_rollout(&validation, &mut env, &mut observations)
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        for transition in agent.rollout_buffer.get_raw() {
+            assert!(!transition.values.is_require_grad());
+            assert_eq!(transition.values.clone().into_scalar::<f32>(), 1.0);
+        }
+
+        agent.add_advantages_and_returns(&validation).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        for (transition, expected) in agent.rollout_buffer.get_raw().iter().zip([1.99f32, 1.0]) {
+            let prepared = transition.prepared.as_ref().unwrap();
+            let old_values = prepared.old_values.as_ref().unwrap();
+            assert!(!old_values.is_require_grad());
+            assert_eq!(old_values.clone().into_scalar::<f32>(), 1.0);
+            assert!((prepared.returns.clone().into_scalar::<f32>() - expected).abs() < 1e-6);
         }
     }
 
