@@ -705,16 +705,9 @@ where
                     .slice_dim(0, i..i + 1)
                     .squeeze_dim(0)
                     .detach(),
-                // values_tensor comes from the pre-update network, i.e. the
-                // collection-time values PPO2 clips the new values against.
+                // Value-loss clipping compares current values with fixed collection values.
                 old_values: if self.clip_value_loss {
-                    Some(
-                        values_tensor
-                            .clone()
-                            .slice_dim(0, i..i + 1)
-                            .squeeze_dim(0)
-                            .detach(),
-                    )
+                    Some(experience.values.clone())
                 } else {
                     None
                 },
