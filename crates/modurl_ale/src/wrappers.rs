@@ -440,7 +440,7 @@ impl<G, const O: usize> WarpGym<G, O> {
     /// Preserves U8 Int or F32 Float data; reads input to the host and returns a CPU tensor with no batch axis.
     fn preprocess_observation<K: Basic, E, const D: usize>(
         &self,
-        observation: &Tensor<D, K>,
+        observation: Tensor<D, K>,
     ) -> Result<Tensor<2, K>, WarpGymError<E>> {
         const {
             assert!(
@@ -463,20 +463,18 @@ impl<G, const O: usize> WarpGym<G, O> {
             return Err(WarpGymError::Device);
         }
         let (height, width) = (dims[0], dims[1]);
-        let data = observation
-            .clone()
-            .try_into_data()
-            .map_err(TensorReadError::from)?;
-        if observation.dtype() == DType::U8 {
-            let bytes = data.try_to_vec::<u8>().map_err(TensorReadError::from)?;
+        let dtype = observation.dtype();
+        let data = observation.try_into_data().map_err(TensorReadError::from)?;
+        if dtype == DType::U8 {
+            let bytes = data.as_slice::<u8>().map_err(TensorReadError::from)?;
             if const { D == 3 } && (height, width) == (210, 160) {
                 return Ok(Tensor::from_data(
-                    TensorData::new(Self::resize_atari_rgb_u8(&bytes, height, width), [84, 84]),
+                    TensorData::new(Self::resize_atari_rgb_u8(bytes, height, width), [84, 84]),
                     (&Device::flex(), DType::U8),
                 ));
             }
             let luminance: Vec<f32> = if const { D == 2 } {
-                bytes.into_iter().map(f32::from).collect()
+                bytes.iter().copied().map(f32::from).collect()
             } else {
                 bytes
                     .as_chunks::<3>()
@@ -496,8 +494,8 @@ impl<G, const O: usize> WarpGym<G, O> {
                 (&Device::flex(), DType::U8),
             ));
         }
-        if observation.dtype() != DType::F32 {
-            return Err(WarpGymError::DType(observation.dtype()));
+        if dtype != DType::F32 {
+            return Err(WarpGymError::DType(dtype));
         }
         let values = data.try_to_vec::<f32>().map_err(TensorReadError::from)?;
         let luminance = if const { D == 2 } {
@@ -535,7 +533,7 @@ where
     fn reset(&mut self) -> Result<ResetInfo<I, Tensor<2, K>>, Self::Error> {
         let reset = self.gym.reset().map_err(WarpGymError::GymError)?;
         Ok(ResetInfo {
-            observation: self.preprocess_observation(&reset.observation)?,
+            observation: self.preprocess_observation(reset.observation)?,
             info: reset.info,
         })
     }
@@ -544,7 +542,7 @@ where
     fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo<I, Tensor<2, K>>, Self::Error> {
         let step = self.gym.step(action).map_err(WarpGymError::GymError)?;
         Ok(StepInfo {
-            observation: self.preprocess_observation(&step.observation)?,
+            observation: self.preprocess_observation(step.observation)?,
             reward: step.reward,
             done: step.done,
             truncated: step.truncated,
@@ -760,7 +758,7 @@ mod tests {
         let rgb = Tensor::<3, Int>::zeros([210, 160, 3], (&Device::flex(), DType::U8));
 
         let warped = wrapper
-            .preprocess_observation::<_, std::convert::Infallible, 3>(&rgb)
+            .preprocess_observation::<_, std::convert::Infallible, 3>(rgb)
             .unwrap();
 
         assert_eq!(warped.dtype(), DType::U8);
@@ -772,7 +770,7 @@ mod tests {
         let wrapper = WarpGym::<_, 3>::new(ScriptGym::new(vec![]));
         let bytes = Tensor::<2, Int>::full([84, 84], 37, (&Device::flex(), DType::U8));
         let output = wrapper
-            .preprocess_observation::<_, std::convert::Infallible, 2>(&bytes)
+            .preprocess_observation::<_, std::convert::Infallible, 2>(bytes)
             .unwrap();
         assert_eq!(output.dtype(), DType::U8);
         assert_eq!(
@@ -781,7 +779,7 @@ mod tests {
         );
         let values = Tensor::<2>::full([84, 84], 0.5, &Device::flex());
         let output = wrapper
-            .preprocess_observation::<_, std::convert::Infallible, 2>(&values)
+            .preprocess_observation::<_, std::convert::Infallible, 2>(values)
             .unwrap();
         assert_eq!(output.dtype(), DType::F32);
         assert_eq!(
@@ -790,12 +788,12 @@ mod tests {
         );
         let invalid = Tensor::<3, Int>::zeros([84, 84, 2], (&Device::flex(), DType::U8));
         assert!(matches!(
-            wrapper.preprocess_observation::<_, std::convert::Infallible, 3>(&invalid),
+            wrapper.preprocess_observation::<_, std::convert::Infallible, 3>(invalid),
             Err(WarpGymError::Shape(_))
         ));
         let invalid = Tensor::<2>::zeros([84, 84], (&Device::flex(), DType::F64));
         assert!(matches!(
-            wrapper.preprocess_observation::<_, std::convert::Infallible, 2>(&invalid),
+            wrapper.preprocess_observation::<_, std::convert::Infallible, 2>(invalid),
             Err(WarpGymError::DType(DType::F64))
         ));
     }

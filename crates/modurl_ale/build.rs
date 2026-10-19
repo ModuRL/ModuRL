@@ -56,6 +56,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static=ale_c_static");
     println!("cargo:rerun-if-changed=native/ale/CMakeLists.txt");
     println!("cargo:rerun-if-changed=native/ale/src");
+    println!("cargo:rerun-if-changed=native/ale/ale_py");
 }
 
 fn project_root() -> PathBuf {

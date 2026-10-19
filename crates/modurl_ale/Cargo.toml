@@ -32,6 +32,7 @@ include = [
 ]
 
 [dependencies]
+burn-std = { version = "=0.22.0", default-features = false, features = ["std"] }
 bon = "3.7.2"
 burn = { version = "=0.22.0", default-features = false, features = ["std", "flex"] }
 minifb = { version = "0.28.0", optional = true }
