@@ -8,11 +8,11 @@ use modurl::prelude::*;
 use serde_json::{Value, json};
 use std::{env, error::Error, fmt::Debug, path::PathBuf, time::Instant};
 
-#[path = "../../examples/examples/support/atari.rs"]
-mod atari;
-#[path = "../../examples/examples/support/nature_cnn.rs"]
-mod nature_cnn;
-use nature_cnn::{NatureCnn, NatureCnnError};
+mod support;
+use support::{
+    atari,
+    nature_cnn::{NatureCnn, NatureCnnError},
+};
 
 #[cfg(feature = "tracing")]
 mod profile;
