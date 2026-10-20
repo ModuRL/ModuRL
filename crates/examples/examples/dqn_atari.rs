@@ -18,14 +18,12 @@ use burn::{
 };
 use modurl::prelude::*;
 use std::{env, path::PathBuf};
-#[path = "support/atari.rs"]
-mod atari;
-#[path = "support/nature_cnn.rs"]
-mod nature_cnn;
 mod support;
-use atari::make_atari_env;
-use nature_cnn::{NatureCnn, NatureCnnError};
-use support::graphers::DQNGrapher;
+use support::{
+    atari::make_atari_env,
+    graphers::DQNGrapher,
+    nature_cnn::{NatureCnn, NatureCnnError},
+};
 
 const SEED: i32 = 1;
 const NUM_ENVS: usize = 1;
