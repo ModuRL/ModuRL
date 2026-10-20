@@ -1,5 +1,9 @@
-use candle_core::{DType, Device, Tensor, Var};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use burn::module::Param;
+use burn::{
+    nn::{Initializer, Tanh},
+    optim::AdamWConfig,
+    tensor::{DType, Device, Tensor},
+};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
@@ -9,138 +13,79 @@ use support::graphers::SACGrapher;
 const DTYPE: DType = DType::F32;
 
 fn sac_mlp(
-    vb: VarBuilder<'_>,
     input_size: usize,
     output_size: usize,
     output_gain: f64,
-    name: &str,
-) -> candle_core::Result<MLP> {
+    device: &Device,
+) -> Result<MLP, ModelError> {
     MLP::builder()
         .input_size(input_size)
         .output_size(output_size)
-        .vb(vb)
         .hidden_layer_sizes(vec![64, 64])
-        .activation(Tensor::tanh)
-        .initializer(OrthogonalMLPInitializer {
-            hidden_gain: 2.0_f64.sqrt(),
-            output_gain,
+        .activation(Tanh)
+        .hidden_initializer(Initializer::Orthogonal {
+            gain: 2.0_f64.sqrt(),
         })
-        .name(name.to_owned())
+        .output_initializer(Initializer::Orthogonal { gain: output_gain })
+        .options((device, DTYPE))
         .build()
 }
 
-fn discrete_critic<'a>(
-    online_vars: &'a VarMap,
-    target_vars: &'a mut VarMap,
-    observation_size: usize,
-    action_count: usize,
-    optimizer_parameters: &ParamsAdamW,
-    device: &Device,
-) -> Result<SACCritic<'a, AdamW>, SACCriticError> {
-    let online = sac_mlp(
-        VarBuilder::from_varmap(online_vars, DTYPE, device),
-        observation_size,
-        action_count,
-        1.0,
-        "mlp",
-    )?;
-    let target = sac_mlp(
-        VarBuilder::from_varmap(target_vars, DTYPE, device),
-        observation_size,
-        action_count,
-        1.0,
-        "mlp",
-    )?;
-    SACCritic::builder()
-        .online_network(DiscreteVectorHeadCritic::new(online))
-        .target_network(DiscreteVectorHeadCritic::new(target))
-        .online_vars(online_vars)
-        .target_vars(target_vars)
-        .optimizer(AdamW::new(
-            online_vars.all_vars(),
-            optimizer_parameters.clone(),
-        )?)
-        .build()
-}
-
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_timesteps = std::env::var("MODURL_SAC_TIMESTEPS")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(100_000);
-    let device = Device::cuda_if_available(0).unwrap();
-    println!("Using device: {device:?}");
-    let env = VectorizedGymWrapper::from(vec![
-        CartPoleV1::builder().rng_device(&device).build().unwrap(),
-    ]);
-    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    let device = Device::flex();
+    #[cfg(feature = "cuda")]
+    let device = Device::cuda(0);
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
+    let device = device.autodiff();
+    let environment_device = Device::flex();
+    let env = VectorizedGymWrapper::from(
+        CartPoleV1::builder()
+            .rng_device(&environment_device)
+            .build()?,
+    );
+    let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let observation_size = observation_space.shape()[0];
-    let action_count = action_space.shape()[0];
-    let optimizer_parameters = ParamsAdamW {
-        lr: 3e-4,
-        // Candle exposes AdamW rather than Adam; zero decay matches the
-        // optimizer used by standard SAC implementations.
-        weight_decay: 0.0,
-        ..Default::default()
-    };
-
-    let actor_vars = VarMap::new();
-    let actor = sac_mlp(
-        VarBuilder::from_varmap(&actor_vars, DTYPE, &device),
-        observation_size,
-        action_count,
-        0.01,
-        "actor",
-    )
-    .unwrap();
-    let actor_optimizer = AdamW::new(actor_vars.all_vars(), optimizer_parameters.clone()).unwrap();
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor);
-
-    let online_vars_1 = VarMap::new();
-    let mut target_vars_1 = VarMap::new();
-    let critic_1 = discrete_critic(
-        &online_vars_1,
-        &mut target_vars_1,
-        observation_size,
-        action_count,
-        &optimizer_parameters,
-        &device,
-    )
-    .unwrap();
-
-    let online_vars_2 = VarMap::new();
-    let mut target_vars_2 = VarMap::new();
-    let critic_2 = discrete_critic(
-        &online_vars_2,
-        &mut target_vars_2,
-        observation_size,
-        action_count,
-        &optimizer_parameters,
-        &device,
-    )
-    .unwrap();
-
-    let log_alpha = Var::zeros((), DTYPE, &device).unwrap();
-    let alpha_optimizer =
-        AdamW::new(vec![log_alpha.clone()], optimizer_parameters.clone()).unwrap();
-    // Begin near the categorical default, then let the ordinary parameter
-    // schedule make the policy increasingly deterministic.
-    let maximum_entropy = (action_count as f64).ln();
-    let target_entropy = LinearSchedule::new(0.98 * maximum_entropy, 0.3 * maximum_entropy);
-    let entropy = SACEntropyConfiguration::automatic_with_target_schedule(
-        log_alpha,
-        alpha_optimizer,
-        target_entropy,
+    let action_count = action_space.get_possible_values();
+    let policy = ProbabilisticPolicyModel::new(
+        sac_mlp(observation_size, action_count, 0.01, &device)?,
+        CategoricalDistribution,
     );
+    let mut critics = Vec::new();
+    for _ in 0..2 {
+        critics.push(
+            SACCritic::builder()
+                .online_network(DiscreteVectorHeadCritic::new(sac_mlp(
+                    observation_size,
+                    action_count,
+                    1.0,
+                    &device,
+                )?))
+                .optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+                .learning_rate(3e-4)
+                .build()?,
+        );
+    }
+    let entropy = SACEntropyConfiguration::automatic_with_target_schedule(
+        Param::from_tensor(Tensor::zeros([1], (&device, DTYPE))),
+        AdamWConfig::new().with_weight_decay(0.0).init(),
+        3e-4,
+        move |progress| (1.0 - progress) * (action_count as f64).ln(),
+    )?;
     let mut grapher = SACGrapher::new();
-
     let mut agent = SACAgent::builder()
         .dtype(DTYPE)
         .policy(policy)
-        .actor_optimizer(actor_optimizer)
-        .critics(vec![critic_1, critic_2])
+        .actor_optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+        .actor_learning_rate(3e-4)
+        .critics(critics)
         .entropy_configuration(entropy)
         .action_space(action_space)
         .observation_space(observation_space)
@@ -153,9 +98,8 @@ fn main() {
         .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
             device,
         )))
-        .build()
-        .unwrap();
-
-    agent.learn(&mut env, total_timesteps).unwrap();
+        .build()?;
+    agent.learn(&mut env, total_timesteps)?;
     grapher.display();
+    Ok(())
 }

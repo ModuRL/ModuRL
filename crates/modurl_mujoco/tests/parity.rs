@@ -1,13 +1,11 @@
-use candle_core::{Device, Tensor};
-use modurl::gym::Gym;
+use burn::tensor::{Device, Tensor, TensorData};
+use modurl::{gym::Gym, spaces::BoxSpace};
 use modurl_mujoco::{
     AntV5, AntV5Info, HalfCheetahV5, HopperV5, HumanoidV5, HumanoidV5Info, MujocoError, Walker2dV5,
 };
 use serde::Deserialize;
 
 const PARITY_STEPS: usize = 64;
-
-type SetState<E> = fn(&mut E, &[f64], &[f64]) -> Result<Tensor, MujocoError>;
 
 #[derive(Deserialize)]
 struct Fixture {
@@ -41,17 +39,18 @@ struct ExpectedStep {
 /// velocities shaped `[nv]`, and returns the resulting observation as a flat
 /// `[observation_dim]` tensor.
 #[bon::builder]
-fn check_parity<I, E>(
+fn check_parity<I, E, F>(
     fixture_json: &str,
     expected_environment_id: &str,
     mut environment: E,
-    set_state: SetState<E>,
+    set_state: F,
     observation_tolerance: f64,
     reward_tolerance: f64,
     relaxed_observation_tolerance: Option<(usize, f64)>,
     contact_observation_start: Option<usize>,
 ) where
-    E: Gym<I, Error = MujocoError>,
+    F: Fn(&mut E, &[f64], &[f64]) -> Result<Tensor<1>, MujocoError>,
+    E: Gym<I, Error = MujocoError, ObservationSpace = BoxSpace<2>, ActionSpace = BoxSpace<2>>,
 {
     let fixture: Fixture = serde_json::from_str(fixture_json).unwrap();
     assert_eq!(fixture.gymnasium_version, "1.2.1");
@@ -78,9 +77,12 @@ fn check_parity<I, E>(
         let state = &fixture.states[index];
         let expected = &fixture.outputs[index];
         set_state(&mut environment, &state.qpos, &state.qvel).unwrap();
-        let action = Tensor::from_vec(action.clone(), action.len(), &Device::Cpu).unwrap();
+        let action = Tensor::from_data(
+            TensorData::new(action.clone(), [action.len()]),
+            &Device::flex(),
+        );
         let step = <E as Gym<I>>::step(&mut environment, action).unwrap();
-        let observation = step.state.to_vec1::<f32>().unwrap();
+        let observation = step.observation.into_data().try_to_vec::<f32>().unwrap();
 
         assert_eq!(observation.len(), expected.observation.len());
         for (component, (actual, expected)) in
@@ -133,7 +135,7 @@ fn check_parity<I, E>(
 
 #[test]
 fn ant() {
-    check_parity::<AntV5Info, _>()
+    check_parity::<AntV5Info, _, _>()
         .fixture_json(include_str!("../python_tests/ant/trajectory.json"))
         .expected_environment_id("Ant-v5")
         .environment(AntV5::builder().build().unwrap())
@@ -146,7 +148,7 @@ fn ant() {
 
 #[test]
 fn half_cheetah() {
-    check_parity::<(), _>()
+    check_parity::<(), _, _>()
         .fixture_json(include_str!("../python_tests/half_cheetah/trajectory.json"))
         .expected_environment_id("HalfCheetah-v5")
         .environment(HalfCheetahV5::builder().build().unwrap())
@@ -158,7 +160,7 @@ fn half_cheetah() {
 
 #[test]
 fn hopper() {
-    check_parity::<(), _>()
+    check_parity::<(), _, _>()
         .fixture_json(include_str!("../python_tests/hopper/trajectory.json"))
         .expected_environment_id("Hopper-v5")
         .environment(HopperV5::builder().build().unwrap())
@@ -170,7 +172,7 @@ fn hopper() {
 
 #[test]
 fn humanoid() {
-    check_parity::<HumanoidV5Info, _>()
+    check_parity::<HumanoidV5Info, _, _>()
         .fixture_json(include_str!("../python_tests/humanoid/trajectory.json"))
         .expected_environment_id("Humanoid-v5")
         .environment(HumanoidV5::builder().build().unwrap())
@@ -183,7 +185,7 @@ fn humanoid() {
 
 #[test]
 fn walker2d() {
-    check_parity::<(), _>()
+    check_parity::<(), _, _>()
         .fixture_json(include_str!("../python_tests/walker2d/trajectory.json"))
         .expected_environment_id("Walker2d-v5")
         .environment(Walker2dV5::builder().build().unwrap())

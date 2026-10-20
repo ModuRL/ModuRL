@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use candle_core::{Device, Tensor};
+use burn::tensor::{Device, Tensor, TensorData, TensorReadError};
 use modurl::gym::Gym;
 
 pub(crate) const PARITY_STEPS: usize = 64;
@@ -36,11 +36,15 @@ impl Tolerances {
 pub(crate) fn check_discrete_parity<T, E>(
     folder: &str,
     mut environment: T,
-    reset: fn(&mut T) -> Result<Tensor, candle_core::Error>,
-    set_state: fn(&mut T, Tensor, Option<serde_json::Value>),
+    reset: fn(&mut T) -> Result<Tensor<1>, TensorReadError>,
+    set_state: fn(&mut T, Tensor<1>, Option<serde_json::Value>),
     tolerances: Option<Tolerances>,
 ) where
-    T: Gym<Error = E>,
+    T: Gym<
+            Error = E,
+            ObservationSpace = modurl::spaces::BoxSpace<2>,
+            ActionSpace = modurl::spaces::Discrete,
+        >,
     E: std::fmt::Debug,
 {
     let tolerances = tolerances.unwrap_or(Tolerances {
@@ -77,8 +81,7 @@ pub(crate) fn check_discrete_parity<T, E>(
 
     for i in 0..inputs.len() {
         let action = inputs[i];
-        let action_tensor = Tensor::from_vec(vec![action], vec![], &Device::Cpu)
-            .expect("Failed to create action tensor");
+        let action_tensor = Tensor::from_data(TensorData::new(vec![action], [1]), &Device::flex());
 
         if i == 0 || expected_outputs[i - 1].done || expected_outputs[i - 1].truncated {
             reset(&mut environment).expect("Failed to reset environment");
@@ -86,12 +89,10 @@ pub(crate) fn check_discrete_parity<T, E>(
             let state_dim = expected_outputs[i - 1].observation.len();
             set_state(
                 &mut environment,
-                Tensor::from_vec(
-                    expected_outputs[i - 1].observation.clone(),
-                    vec![state_dim],
-                    &Device::Cpu,
-                )
-                .expect("Failed to set state from previous output"),
+                Tensor::from_data(
+                    TensorData::new(expected_outputs[i - 1].observation.clone(), [state_dim]),
+                    &Device::flex(),
+                ),
                 expected_outputs[i - 1].info.clone(),
             );
         }
@@ -104,8 +105,10 @@ pub(crate) fn check_discrete_parity<T, E>(
 
         // Get the actual observation as a vector
         let actual_obs = step_info
-            .state
-            .to_vec1::<f32>()
+            .observation
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
             .expect("Failed to convert state to vector");
 
         assert_eq!(

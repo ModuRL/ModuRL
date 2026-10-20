@@ -9,6 +9,10 @@ mod atari;
 mod bindings;
 #[cfg(feature = "rendering")]
 mod renderer;
+mod rgb_frame;
 pub mod wrappers;
 
-pub use atari::{AtariGym, AtariGymError, AtariInfo, AtariObsType};
+pub use atari::{
+    AtariGym, AtariGymError, AtariInfo, AtariObservationMode, AtariObservationSpace,
+    GrayscaleScreen, Ram, RgbScreen,
+};

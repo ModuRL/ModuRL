@@ -1,4 +1,4 @@
-use candle_core::{DType, Device};
+use burn::tensor::Device;
 
 /// Strategy for selecting devices used by replay-based agents.
 ///
@@ -17,32 +17,15 @@ pub enum ReplayDeviceStrategy {
     },
 }
 
-/// Configuration for the representation and placement of replay observations.
-///
-/// Other replay columns retain the dtype appropriate to their values. Sampled
-/// observations are converted to the agent's compute dtype before optimization.
+/// Configuration for replay storage and optimization devices.
 pub struct ReplayStorageConfig {
     device_strategy: ReplayDeviceStrategy,
-    observation_dtype: DType,
 }
 
 impl ReplayStorageConfig {
-    /// Creates replay storage using `F32` observations.
+    /// Selects devices for replay storage and optimization.
     pub fn new(device_strategy: ReplayDeviceStrategy) -> Self {
-        Self {
-            device_strategy,
-            observation_dtype: DType::F32,
-        }
-    }
-
-    /// Sets the dtype used by observations while retained in replay.
-    pub fn with_observation_dtype(mut self, observation_dtype: DType) -> Self {
-        assert!(
-            observation_dtype.is_float() || observation_dtype == DType::U8,
-            "replay observation dtype must be floating-point or u8"
-        );
-        self.observation_dtype = observation_dtype;
-        self
+        Self { device_strategy }
     }
 
     pub(crate) fn storage_device(&self) -> Device {
@@ -51,10 +34,6 @@ impl ReplayStorageConfig {
 
     pub(crate) fn optimization_device(&self) -> Device {
         self.device_strategy.optimization_device()
-    }
-
-    pub(crate) fn observation_dtype(&self) -> DType {
-        self.observation_dtype
     }
 }
 
@@ -74,5 +53,32 @@ impl ReplayDeviceStrategy {
                 ..
             } => optimization_device.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hybrid_keeps_storage_separate_from_autodiff_optimization() {
+        let storage = Device::flex();
+        let optimization = storage.clone().autodiff();
+        let config = ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
+            optimization_device: optimization.clone(),
+            storage_device: storage.clone(),
+        });
+        assert_eq!(config.storage_device(), storage);
+        assert_eq!(config.optimization_device(), optimization);
+        assert!(!config.storage_device().is_autodiff());
+        assert!(config.optimization_device().is_autodiff());
+    }
+
+    #[test]
+    fn one_device_keeps_storage_and_optimization_together() {
+        let device = Device::flex();
+        let config = ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(device.clone()));
+        assert_eq!(config.storage_device(), device);
+        assert_eq!(config.optimization_device(), device);
     }
 }

@@ -1,6 +1,6 @@
-use candle_core::Device;
+use burn::tensor::{DType, Device, Tensor};
 use modurl::gym::Gym;
-use modurl_mujoco::{CustomMujoco, MujocoState, MujocoTask, TaskStep};
+use modurl_mujoco::{CustomMujoco, MujocoError, MujocoState, MujocoTask, TaskStep};
 
 struct SlideTask;
 
@@ -29,11 +29,11 @@ fn xml_path_and_task_reward_work() {
         .build()
         .unwrap();
     assert_eq!(env.actuator_count(), 1);
-    assert_eq!(env.reset().unwrap().state.dims(), &[2]);
-    let action = candle_core::Tensor::new(&[1.0_f32], &Device::Cpu).unwrap();
+    assert_eq!(env.reset().unwrap().observation.dims(), [2]);
+    let action = Tensor::from_data([1.0_f32], &Device::flex());
     let step = env.step(action).unwrap();
     assert!(step.reward > 0.0);
-    assert_eq!(step.state.dims(), &[2]);
+    assert_eq!(step.observation.dims(), [2]);
 }
 
 struct ContactTask;
@@ -68,7 +68,13 @@ fn exposes_robot_self_contacts() {
         .observation_dim(1)
         .build()
         .unwrap();
-    let obs = env.reset().unwrap().state.to_vec1::<f32>().unwrap();
+    let obs = env
+        .reset()
+        .unwrap()
+        .observation
+        .into_data()
+        .try_to_vec::<f32>()
+        .unwrap();
     assert_eq!(obs, vec![1.0]);
 }
 
@@ -102,8 +108,14 @@ fn exposes_ground_contact_force_vector() {
         .build()
         .unwrap();
     env.reset().unwrap();
-    let action = candle_core::Tensor::new(&[0.0_f32], &Device::Cpu).unwrap();
-    let force = env.step(action).unwrap().state.to_vec1::<f32>().unwrap();
+    let action = Tensor::from_data([0.0_f32], &Device::flex());
+    let force = env
+        .step(action)
+        .unwrap()
+        .observation
+        .into_data()
+        .try_to_vec::<f32>()
+        .unwrap();
     assert!(
         force[2] > 0.0,
         "floor reaction should point upward: {force:?}"
@@ -139,7 +151,7 @@ fn builder_defaults_work() {
         .unwrap();
     env.reset().unwrap();
     assert!(
-        env.step(candle_core::Tensor::new(&[1.0_f32], &Device::Cpu).unwrap())
+        env.step(Tensor::from_data([1.0_f32], &Device::flex()))
             .unwrap()
             .reward
             > 0.0
@@ -179,7 +191,7 @@ fn invalid_action_does_not_apply_pre_step_disturbance() {
         .build()
         .unwrap();
     env.reset().unwrap();
-    let invalid = candle_core::Tensor::new(&[f32::NAN], &Device::Cpu).unwrap();
+    let invalid = Tensor::from_data([f32::NAN], &Device::flex());
     assert!(env.step(invalid).is_err());
     assert_eq!(calls.get(), 0);
 }
@@ -194,7 +206,7 @@ fn runtime_model_edits_change_dynamics_and_persist_across_reset() {
         .build()
         .unwrap();
     env.reset().unwrap();
-    let action = candle_core::Tensor::new(&[1.0_f32], &Device::Cpu).unwrap();
+    let action = Tensor::from_data([1.0_f32], &Device::flex());
     let normal = env.step(action.clone()).unwrap();
     env.edit_model(|model| {
         model.body_mass_mut()[1] *= 2.0;
@@ -206,4 +218,60 @@ fn runtime_model_edits_change_dynamics_and_persist_across_reset() {
     let heavier = env.step(action).unwrap();
     assert!(heavier.reward > 0.0 && heavier.reward < normal.reward);
     assert_eq!(env.model().body_mass()[1], 2.0);
+}
+
+struct MappedTask {
+    reject: bool,
+}
+
+impl MujocoTask for MappedTask {
+    fn action_dim(&self) -> Option<usize> {
+        Some(2)
+    }
+
+    /// Maps Float policy actions `[2]` to controls `[1]`, preserving dtype and device.
+    fn map_action(&self, action: &Tensor<1>) -> Result<Tensor<1>, MujocoError> {
+        if self.reject {
+            return Err(MujocoError::InvalidInput("task rejected the action".into()));
+        }
+        Ok(action.clone().slice_dim(0, 0..1))
+    }
+
+    fn observation(&self, state: &MujocoState) -> Vec<f64> {
+        [state.qpos.as_slice(), state.qvel.as_slice()].concat()
+    }
+
+    fn transition(&mut self, _: &MujocoState, _: &MujocoState, action: &[f64]) -> TaskStep {
+        TaskStep {
+            reward: action[1] as f32,
+            done: false,
+            truncated: false,
+        }
+    }
+}
+
+#[test]
+fn native_action_mapping_preserves_original_policy_actions_and_task_errors() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/assets/slide.xml");
+    for reject in [false, true] {
+        let mut environment = CustomMujoco::builder()
+            .path(path)
+            .task(MappedTask { reject })
+            .observation_dim(2)
+            .build()
+            .unwrap();
+        environment.reset().unwrap();
+        let action = Tensor::from_data([0.5_f64, 0.75], (&Device::flex(), DType::F64));
+        let result = environment.step(action);
+        if reject {
+            assert!(
+                matches!(result, Err(MujocoError::InvalidInput(message)) if message == "task rejected the action")
+            );
+        } else {
+            let step = result.unwrap();
+            assert_eq!(step.reward, 0.75);
+            assert_eq!(step.observation.dims(), [2]);
+            assert_eq!(step.observation.dtype(), DType::F32);
+        }
+    }
 }

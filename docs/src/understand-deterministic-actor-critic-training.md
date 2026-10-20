@@ -17,26 +17,27 @@ logger can therefore support both algorithms:
 ```rust,ignore
 use modurl::prelude::*;
 
-struct ConsoleLogger;
+pub struct ConsoleLogger;
 
 fn log_update(entry: &DeterministicActorCriticLogEntry) {
-    if entry.update_index % 1_000 != 0 {
+    if !entry.update_index.is_multiple_of(1_000) {
         return;
     }
 
     let critic_loss = entry.critic_losses[0]
-        .to_scalar::<f32>()
-        .expect("critic loss must be scalar");
-    let actor_loss = entry.actor_loss
-        .as_ref()
-        .map(|loss| loss.to_scalar::<f32>().expect("actor loss must be scalar"));
+        .clone()
+        .cast(burn::tensor::DType::F32)
+        .into_scalar::<f32>();
+    let actor_loss = entry.actor_loss.as_ref().map(|loss| {
+        loss.clone()
+            .cast(burn::tensor::DType::F32)
+            .into_scalar::<f32>()
+    });
 
     println!(
         "step={} update={} critic_loss={critic_loss:.4} \
-         actor_updated={} actor_loss={actor_loss:?}",
-        entry.collection_timestep,
-        entry.update_index,
-        entry.actor_updated,
+     actor_updated={} actor_loss={actor_loss:?}",
+        entry.collection_timestep, entry.update_index, entry.actor_updated,
     );
 }
 
@@ -59,10 +60,7 @@ impl<I> DDPGLogger<I> for ConsoleLogger {
         log_update(entry);
     }
 
-    fn log_collection(
-        &mut self,
-        entry: &DeterministicActorCriticCollectionLogEntry<I>,
-    ) {
+    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
         log_collection(entry);
     }
 }
@@ -72,10 +70,7 @@ impl<I> TD3Logger<I> for ConsoleLogger {
         log_update(entry);
     }
 
-    fn log_collection(
-        &mut self,
-        entry: &DeterministicActorCriticCollectionLogEntry<I>,
-    ) {
+    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
         log_collection(entry);
     }
 }
@@ -102,13 +97,13 @@ values held by the concrete logger, as the terminal graph examples do.
 | Field | Meaning and shape |
 | --- | --- |
 | `critic_losses` | One scalar mean-squared Bellman loss per critic |
-| `critic_q_values` | One `[batch_size]` replay-action Q tensor per critic |
+| `critic_q_values` | One `[batch_size, 1]` replay-action Q tensor per critic |
 | `actor_loss` | Scalar negative mean policy Q, or `None` on a delayed update |
-| `policy_q_values` | `[batch_size]` actor-objective Q values, or `None` |
+| `policy_q_values` | `[batch_size, 1]` actor-objective Q values, or `None` |
 | `policy_actions` | `[batch_size, ...action_shape]`, or `None` |
 | `replay_actions` | Sampled replay actions `[batch_size, ...action_shape]` |
-| `bellman_targets` | Detached target Q values `[batch_size]` |
-| `replay_rewards` | Sampled rewards `[batch_size]` |
+| `bellman_targets` | Detached target Q values `[batch_size, 1]` |
+| `replay_rewards` | Sampled rewards `[batch_size, 1]` |
 | `actor_learning_rate` | Current actor optimizer learning rate |
 | `critic_learning_rates` | Current learning rate for each critic optimizer |
 | `exploration_noise_standard_deviation` | Collection-noise setting |

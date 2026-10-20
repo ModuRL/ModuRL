@@ -1,8 +1,8 @@
 use bon::bon;
-use candle_core::{Device, Tensor};
+use burn::tensor::{DType, Device, Distribution, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::{self, Space},
+    spaces,
 };
 
 use crate::EnvironmentError;
@@ -27,7 +27,7 @@ pub struct CartPoleV1 {
     steps_beyond_terminated: Option<usize>,
     action_space: spaces::Discrete,
     observation_space: spaces::BoxSpace,
-    state: Tensor,
+    state: Tensor<1>,
     steps_since_reset: usize,
     sutton_barto_reward: bool,
     #[cfg(feature = "rendering")]
@@ -39,8 +39,8 @@ impl CartPoleV1 {
     #[builder]
     pub fn new(
         /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = &Device::Cpu)]
-        rng_device: &Device,
+        #[builder(default = Device::flex(), with = |device: &Device| device.clone())]
+        rng_device: Device,
         #[builder(default = false)] sutton_barto_reward: bool,
         #[builder(default = true)] is_euler: bool,
         #[cfg(feature = "rendering")]
@@ -67,11 +67,11 @@ impl CartPoleV1 {
             f32::INFINITY,
         ];
         let low = high.iter().map(|x| -x).collect::<Vec<_>>();
-        let high = Tensor::from_vec(high, vec![4], &Device::Cpu)?;
-        let low = Tensor::from_vec(low, vec![4], &Device::Cpu)?;
+        let high: Tensor<1> = Tensor::from_data(TensorData::new(high, [4]), &Device::flex());
+        let low: Tensor<1> = Tensor::from_data(TensorData::new(low, [4]), &Device::flex());
 
         let action_space = spaces::Discrete::new(2);
-        let observation_space = spaces::BoxSpace::new(low, high);
+        let observation_space = spaces::BoxSpace::new(low.unsqueeze::<2>(), high.unsqueeze::<2>());
 
         Ok(Self {
             gravity,
@@ -88,7 +88,7 @@ impl CartPoleV1 {
             action_space,
             observation_space,
             rng_device: rng_device.clone(),
-            state: Tensor::zeros(vec![4], candle_core::DType::F32, &Device::Cpu)?,
+            state: Tensor::zeros([4], (&Device::flex(), DType::F32)),
             steps_since_reset: 0,
             sutton_barto_reward,
             #[cfg(feature = "rendering")]
@@ -107,7 +107,9 @@ impl CartPoleV1 {
 
             let state_vec = self
                 .state
-                .to_vec1::<f32>()
+                .clone()
+                .try_into_data_as::<f32>()
+                .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
                 .expect("CartPole state is always a rank-one f32 tensor");
             let cart_position = state_vec[0];
             let pole_angle = state_vec[2];
@@ -234,13 +236,18 @@ impl CartPoleV1 {
 
 impl Gym for CartPoleV1 {
     type Error = EnvironmentError;
-    type SpaceError = candle_core::Error;
+    type ObservationSpace = spaces::BoxSpace;
+    type ActionSpace = spaces::Discrete;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.steps_beyond_terminated = None;
-        let state = Tensor::rand(-0.05, 0.05, vec![4], &self.rng_device)?
-            .to_device(&Device::Cpu)?
-            .to_dtype(candle_core::DType::F32)?;
+        let state = Tensor::<1>::random(
+            [4],
+            Distribution::Uniform(-0.05, 0.05),
+            (&self.rng_device, DType::F64),
+        )
+        .to_device(&Device::flex())
+        .cast(DType::F32);
         self.state = state;
         self.steps_since_reset = 0;
 
@@ -248,23 +255,27 @@ impl Gym for CartPoleV1 {
         self.render()?;
 
         Ok(ResetInfo {
-            state: self.state.clone(),
+            observation: self.state.clone(),
             info: (),
         })
     }
 
-    /// Steps with one scalar discrete action shaped `[]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        if !self.action_space.contains(&action) {
+    /// Steps with one scalar Int action shaped `[1]`.
+    fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
+        if !self.action_space.contains(&action.clone().unsqueeze::<2>()) {
             return Err(EnvironmentError::InvalidAction(
-                "CartPole actions must be scalar u32 values in 0..2",
+                "CartPole actions must be Int tensors shaped [1] in 0..2",
             ));
         }
-        let state_vec = self.state.to_vec1::<f32>()?;
+        let state_vec = self
+            .state
+            .clone()
+            .try_into_data_as::<f32>()
+            .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))?;
         let (mut x, mut x_dot, mut theta, mut theta_dot) =
             (state_vec[0], state_vec[1], state_vec[2], state_vec[3]);
 
-        let action_vec = action.to_vec0::<u32>()?;
+        let action_vec = action.clone().try_into_scalar::<i32>()?;
         let force = if action_vec == 0 {
             -self.force_mag
         } else {
@@ -292,7 +303,10 @@ impl Gym for CartPoleV1 {
             theta_dot += 0.5 * self.tau * (thetaacc + temp);
         }
 
-        self.state = Tensor::from_vec(vec![x, x_dot, theta, theta_dot], vec![4], &Device::Cpu)?;
+        self.state = Tensor::from_data(
+            TensorData::new(vec![x, x_dot, theta, theta_dot], [4]),
+            &Device::flex(),
+        );
         let terminated = x < -self.x_threshold
             || x > self.x_threshold
             || theta < -self.theta_threshold_radians
@@ -303,7 +317,7 @@ impl Gym for CartPoleV1 {
             // Consider it done if it has lasted 500 steps.
             self.steps_beyond_terminated = Some(0);
             return Ok(StepInfo {
-                state: self.state.clone(),
+                observation: self.state.clone(),
                 reward: 1.0,
                 done: false,
                 truncated: true,
@@ -317,7 +331,7 @@ impl Gym for CartPoleV1 {
             let reward = if self.sutton_barto_reward { 0.0 } else { 1.0 };
 
             Ok(StepInfo {
-                state: self.state.clone(),
+                observation: self.state.clone(),
                 reward,
                 done: false,
                 truncated: false,
@@ -329,7 +343,7 @@ impl Gym for CartPoleV1 {
             let reward = if self.sutton_barto_reward { -1.0 } else { 1.0 };
 
             Ok(StepInfo {
-                state: self.state.clone(),
+                observation: self.state.clone(),
                 reward,
                 done: true,
                 truncated: false,
@@ -349,7 +363,7 @@ impl Gym for CartPoleV1 {
             self.steps_beyond_terminated = Some(steps_beyond_terminated + 1);
 
             Ok(StepInfo {
-                state: self.state.clone(),
+                observation: self.state.clone(),
                 reward,
                 done: true,
                 truncated: false,
@@ -358,12 +372,12 @@ impl Gym for CartPoleV1 {
         }
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(self.observation_space.clone())
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(self.action_space.clone())
+    fn action_space(&self) -> Self::ActionSpace {
+        self.action_space.clone()
     }
 }
 
@@ -372,38 +386,27 @@ mod tests {
     use super::*;
     use crate::testing::check_discrete_parity;
     use Gym;
+    #[cfg(feature = "rendering")]
+    use modurl::spaces::ActionSpace;
 
     #[test]
     fn test_cartpole() {
         let mut env = CartPoleV1::builder().build().unwrap();
         let state = env.reset().expect("Failed to reset environment.");
-        assert_eq!(
-            state
-                .state
-                .shape()
-                .dim(0)
-                .expect("Failed to get state dim."),
-            4
-        );
+        assert_eq!(state.observation.dims()[0], 4);
         let StepInfo {
-            state: next_state,
+            observation: next_state,
             reward,
             done,
             truncated: _truncated,
             ..
         } = env
-            .step(
-                Tensor::from_vec(vec![0_u32], vec![], &Device::Cpu)
-                    .expect("Failed to create tensor."),
-            )
+            .step(Tensor::from_data(
+                TensorData::new(vec![0_u32], [1]),
+                &Device::flex(),
+            ))
             .expect("Failed to step environment.");
-        assert_eq!(
-            next_state
-                .shape()
-                .dim(0)
-                .expect("Failed to get next state dim."),
-            4
-        );
+        assert_eq!(next_state.dims()[0], 4);
         assert!(reward == 1.0);
         assert!(!done);
     }
@@ -413,7 +416,10 @@ mod tests {
         let mut env = CartPoleV1::builder().build().unwrap();
         let _state = env.reset();
         let error = env
-            .step(Tensor::from_vec(vec![1_u32], vec![1], &Device::Cpu).unwrap())
+            .step(Tensor::from_data(
+                TensorData::new(vec![1_u32, 1], [2]),
+                &Device::flex(),
+            ))
             .unwrap_err();
         assert!(matches!(error, EnvironmentError::InvalidAction(_)));
     }
@@ -422,9 +428,9 @@ mod tests {
     fn reward_is_one_when_not_terminated() {
         let mut env = CartPoleV1::builder().build().unwrap();
         env.reset().unwrap();
-        let action = Tensor::from_vec(vec![1u32], vec![], &Device::Cpu).unwrap();
+        let action = Tensor::from_data(TensorData::new(vec![1u32], [1]), &Device::flex());
         let StepInfo {
-            state: _state,
+            observation: _state,
             reward,
             done,
             truncated: _truncated,
@@ -435,12 +441,11 @@ mod tests {
 
         let mut done = false;
         for _ in 0..50 {
-            let action = Tensor::from_vec(vec![1u32], vec![], &Device::Cpu).unwrap();
+            let action = Tensor::from_data(TensorData::new(vec![1u32], [1]), &Device::flex());
             let StepInfo {
-                state: _,
+                observation: _,
                 reward: _,
                 done: d,
-                truncated: _,
                 ..
             } = env.step(action).unwrap();
             done = d;
@@ -452,15 +457,18 @@ mod tests {
     }
 
     impl CartPoleV1 {
-        fn reset_deterministic(&mut self) -> Result<Tensor, candle_core::Error> {
+        fn reset_deterministic(&mut self) -> Result<Tensor<1>, TensorReadError> {
             self.steps_beyond_terminated = None;
             self.steps_since_reset = 0;
-            self.state = Tensor::from_vec(vec![0.0f32, 0.0, 0.0, 0.0], vec![4], &Device::Cpu)?;
+            self.state = Tensor::from_data(
+                TensorData::new(vec![0.0f32, 0.0, 0.0, 0.0], [4]),
+                &Device::flex(),
+            );
             Ok(self.state.clone())
         }
 
         /// Restores one CartPole state shaped `[4]`.
-        fn set_state(&mut self, state: Tensor, _: Option<serde_json::Value>) {
+        fn set_state(&mut self, state: Tensor<1>, _: Option<serde_json::Value>) {
             self.state = state;
         }
     }
@@ -484,12 +492,11 @@ mod tests {
         let action_space = env.action_space();
         for _ in 0..200 {
             let action = action_space
-                .sample_batch(1, &Device::Cpu)
+                .sample_batch(1, &Device::flex())
                 .unwrap()
-                .squeeze(0)
-                .unwrap();
+                .squeeze_dims::<1>(&[0]);
             let StepInfo {
-                state: _,
+                observation: _,
                 reward: _,
                 done,
                 truncated: _,

@@ -2,7 +2,7 @@
 //!
 //! This prelude re-exports the traits users need for method resolution and the
 //! high-use ModuRL types that appear in most examples. External crates such as
-//! Candle and ModuRL Gym are intentionally left explicit.
+//! the tensor framework and ModuRL Gym are intentionally left explicit.
 
 pub use crate::agents::{
     Agent, ReplayDeviceStrategy, ReplayStorageConfig,
@@ -10,19 +10,26 @@ pub use crate::agents::{
         A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
         A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
     },
+    action_value_critic::{
+        ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
+        ActionValueCriticNetwork,
+    },
     deterministic_actor_critic::{
         DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
         DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
-        DeterministicActorCriticLogEntry, DeterministicActorCriticResult, DeterministicCritic,
+        DeterministicActorCriticLogEntry, DeterministicActorCriticModelGroup,
+        DeterministicActorCriticModelTypes,
         ddpg::{DDPGAgent, DDPGLogger},
         td3::{TD3Agent, TD3Logger},
     },
     ppo::{
         PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
-        PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
+        PPOLogEntry, PPOLogger, PPOModelGroup, PPOModelTypes, PPONetwork, PPONetworkError,
+        SeparatePPONetwork, SharedPPONetwork,
     },
     q_learning::{
-        QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError, QLogEntry,
+        QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError,
+        QLearningReplayError, QLogEntry,
         ddqn::{DDQNAgent, DDQNLogger},
         dqn::{DQNAgent, DQNLogger},
     },
@@ -30,14 +37,14 @@ pub use crate::agents::{
         DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
         SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
         SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
-        ScalarStateActionCritic,
+        SACModelGroup, SACModelTypes, SACReplayError, ScalarStateActionCritic,
     },
 };
 pub use crate::distributions::{
     AffineTransform, AffineTransformError, CategoricalDistribution, CategoricalDistributionError,
-    DifferentiableExpectation, DistEval, Distribution, DistributionTransform, ExpectationTerms,
-    GaussianDistribution, GaussianDistributionError, TanhTransform, TransformedDistribution,
-    TransformedDistributionError,
+    DifferentiableExpectation, DistEval, Distribution, DistributionTensorError,
+    DistributionTransform, ExpectationTerms, GaussianDistribution, GaussianDistributionError,
+    TanhTransform, TransformedDistribution, TransformedDistributionError,
 };
 pub use crate::gym::{
     Gym, MultiGym, MultiGymStepInfo, ResetInfo, StackedMultiGym, StackedMultiGymError, StepInfo,
@@ -46,8 +53,8 @@ pub use crate::gym::{
 #[cfg(feature = "multithreading")]
 pub use crate::gym::{MultithreadedStackedMultiGym, MultithreadedVectorizedGymWrapper};
 pub use crate::models::{
-    DefaultMLPInitializer, DuelingMLP, MLP, MLPInitializer, OrthogonalMLPInitializer,
-    probabilistic_model::ExpectationPolicy, probabilistic_model::ProbabilisticPolicy,
+    DuelingMLP, Forward, MLP, ModelError, probabilistic_model::ExpectationPolicy,
+    probabilistic_model::PolicyTypes, probabilistic_model::ProbabilisticPolicy,
     probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
@@ -55,7 +62,8 @@ pub use crate::objectives::{bellman_targets, clipped_value_loss};
 pub use crate::parameter_schedule::{
     ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
 };
-pub use crate::spaces::{BoxSpace, Discrete, Space};
+pub use crate::spaces::{ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace, SpaceError};
+pub use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 pub use crate::wrappers::{
     ClipRewardGym, ClipRewardGymError, DeviceMultiGymWrapper, EpisodeStatistics,
     EpisodeStatisticsInfo, FrameStackGym, FrameStackGymError, InputMapMultiGymWrapper,

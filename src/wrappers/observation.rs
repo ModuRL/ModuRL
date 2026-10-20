@@ -1,32 +1,46 @@
 //! Wrappers that transform observations.
 
-use std::collections::VecDeque;
-
-use candle_core::Tensor;
-
 use crate::gym::{Gym, ResetInfo, StepInfo};
-use crate::spaces::{BoxSpace, Space};
+use crate::spaces::{ActionSpace, BoxSpace, ObservationSpace};
+use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
+use burn::tensor::{
+    Tensor,
+    kind::{Basic, Ordered},
+};
+use std::collections::VecDeque;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrameStackGymError<E> {
     #[error("wrapped gym error: {0}")]
     GymError(#[source] E),
-    #[error("failed to stack observation frames: {0}")]
-    CandleError(#[source] candle_core::Error),
 }
 
-/// Stacks the most recent observations along a leading frame dimension.
-pub struct FrameStackGym<G> {
+/// Stacks recent observations along a leading frame axis, preserving kind, dtype, and device.
+/// `BF` is the stacked batch rank. Two `PrevRank` mappings determine the inner single rank `O`.
+/// The intermediate rank `F` is shared by inner batches and stacked single observations.
+/// All observations require `F = O + 1` and `BF = F + 1`.
+/// Scalar observations use `O = 1`, `F = 2`, and `BF = 3`, producing `[stack_size, 1]`.
+/// Supported stacked batch ranks are 3 through 1025, as defined by `PrevRank`.
+pub struct FrameStackGym<G, const BF: usize = 3, S = BoxSpace<BF>>
+where
+    S: ObservationSpace<BF, Item: PrevRank>,
+{
     gym: G,
     stack_size: usize,
-    frames: VecDeque<Tensor>,
-    observation_space: BoxSpace,
+    frames: VecDeque<<S::Item as PrevRank>::Prev>,
+    observation_space: S,
 }
 
-impl<G> FrameStackGym<G> {
-    /// Creates a frame stack whose declared observation space already includes
-    /// the leading `stack_size` dimension.
-    pub fn new(gym: G, stack_size: usize, observation_space: BoxSpace) -> Self {
+impl<G, const O: usize, const F: usize, const BF: usize, S, K: Basic> FrameStackGym<G, BF, S>
+where
+    S: ObservationSpace<BF, Kind = K, Item = Tensor<F, K>>,
+    Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
+    Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
+{
+    /// Creates a frame stack with a declared space shaped `[stack_size, ...inner_observation_shape]` per item.
+    /// Scalars use `[stack_size, 1]`. `BoxSpace` bounds include a separate size-one batch axis.
+    pub fn new(gym: G, stack_size: usize, observation_space: S) -> Self {
         assert!(stack_size > 0, "stack_size must be at least 1");
         assert_eq!(
             observation_space.shape().first().copied(),
@@ -36,50 +50,76 @@ impl<G> FrameStackGym<G> {
         Self {
             gym,
             stack_size,
-            frames: VecDeque::new(),
+            frames: VecDeque::with_capacity(stack_size),
             observation_space,
         }
     }
+
+    /// Adds a frame axis to rank-`O` observations, returning rank `F` with `[frame_count, ...observation_shape]`.
+    /// Scalar `[1]` frames stack into `[frame_count, 1]`. Preserves kind, dtype, device, and gradients.
+    fn stacked_observation(&self) -> Tensor<F, K> {
+        let frames = self.frames.iter().cloned().collect::<Vec<_>>();
+        Tensor::stack(frames, 0)
+    }
 }
 
-impl<G, I> Gym<I> for FrameStackGym<G>
+impl<G, I, const O: usize, const BA: usize, const F: usize, const BF: usize, S, K: Basic, AK: Basic>
+    Gym<I, BF, BA> for FrameStackGym<G, BF, S>
 where
-    G: Gym<I, SpaceError = candle_core::Error>,
+    G: Gym<I, F, BA>,
+    G::ObservationSpace: ObservationSpace<F, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    S: ObservationSpace<BF, Kind = K, Item = Tensor<F, K>> + Clone,
+    Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
+    Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
 {
-    type Error = FrameStackGymError<<G as Gym<I>>::Error>;
-    type SpaceError = <G as Gym<I>>::SpaceError;
+    type Error = FrameStackGymError<G::Error>;
+    type ObservationSpace = S;
+    type ActionSpace = G::ActionSpace;
 
-    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
-        let mut reset = self.gym.reset().map_err(FrameStackGymError::GymError)?;
-        self.frames = std::iter::repeat_with(|| reset.state.clone())
-            .take(self.stack_size)
-            .collect();
-        let frames = self.frames.iter().cloned().collect::<Vec<_>>();
-        reset.state = Tensor::stack(&frames, 0).map_err(FrameStackGymError::CandleError)?;
-        Ok(reset)
+    /// Repeats the unbatched rank-`O` reset observation to fill `[stack_size, ...observation_shape]` of rank `F`.
+    /// Scalar inputs `[1]` produce `[stack_size, 1]`; all outputs preserve kind, dtype, and device.
+    fn reset(&mut self) -> Result<ResetInfo<I, Tensor<F, K>>, Self::Error> {
+        let reset = self.gym.reset().map_err(FrameStackGymError::GymError)?;
+        self.frames.clear();
+        self.frames
+            .extend(std::iter::repeat_with(|| reset.observation.clone()).take(self.stack_size));
+        Ok(ResetInfo {
+            observation: self.stacked_observation(),
+            info: reset.info,
+        })
     }
 
-    /// Forwards one unbatched environment action shaped `action_shape`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
-        let mut info = self
+    /// Forwards an unbatched rank-`BA - 1` action and appends the rank-`O` observation after dropping the oldest full-stack frame.
+    /// Returns rank `F` with `[frame_count, ...observation_shape]`, or `[frame_count, 1]` for scalars, preserving kind, dtype, and device.
+    fn step(
+        &mut self,
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
+    ) -> Result<StepInfo<I, Tensor<F, K>>, Self::Error> {
+        let step = self
             .gym
             .step(action)
             .map_err(FrameStackGymError::GymError)?;
         if self.frames.len() >= self.stack_size {
             self.frames.pop_front();
         }
-        self.frames.push_back(info.state.clone());
-        let frames = self.frames.iter().cloned().collect::<Vec<_>>();
-        info.state = Tensor::stack(&frames, 0).map_err(FrameStackGymError::CandleError)?;
-        Ok(info)
+        self.frames.push_back(step.observation);
+        Ok(StepInfo {
+            observation: self.stacked_observation(),
+            reward: step.reward,
+            done: step.done,
+            truncated: step.truncated,
+            info: step.info,
+        })
     }
 
-    fn action_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
-        Box::new(self.observation_space.clone())
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 }
 
@@ -87,8 +127,6 @@ where
 pub enum MaxAndSkipGymError<E> {
     #[error("wrapped gym error: {0}")]
     GymError(#[source] E),
-    #[error("failed to process skipped observations: {0}")]
-    CandleError(#[source] candle_core::Error),
 }
 
 /// Repeats each action, sums its rewards, and max-pools the final two observations.
@@ -104,89 +142,190 @@ impl<G> MaxAndSkipGym<G> {
     }
 }
 
-impl<G, I> Gym<I> for MaxAndSkipGym<G>
+impl<G, I, const O: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic> Gym<I, BO, BA>
+    for MaxAndSkipGym<G>
 where
-    G: Gym<I>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+    K: Ordered,
 {
-    type Error = MaxAndSkipGymError<<G as Gym<I>>::Error>;
-    type SpaceError = <G as Gym<I>>::SpaceError;
+    type Error = MaxAndSkipGymError<G::Error>;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = G::ActionSpace;
 
-    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
+    /// Returns the inner gym's unbatched rank-`O` observation, preserving its shape, kind, dtype, and device.
+    fn reset(&mut self) -> Result<ResetInfo<I, Tensor<O, K>>, Self::Error> {
         self.gym.reset().map_err(MaxAndSkipGymError::GymError)
     }
 
-    /// Forwards one unbatched environment action shaped `action_shape`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
+    /// Repeats an unbatched rank-`BA - 1` action and max-pools the final two unbatched rank-`O` observations.
+    /// Preserves item axes, numeric kind, dtype, and device; scalars use `[1]`. Stops on termination or truncation.
+    fn step(
+        &mut self,
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
+    ) -> Result<StepInfo<I, Tensor<O, K>>, Self::Error> {
+        let mut step = self
+            .gym
+            .step(action.clone())
+            .map_err(MaxAndSkipGymError::GymError)?;
         let mut total_reward = 0.0;
-        let mut last_observation = None;
+        total_reward += step.reward;
         let mut second_last_observation = None;
-        let mut final_step = None;
-
-        for _ in 0..self.skip {
-            let step = self
+        for _ in 1..self.skip {
+            if step.done || step.truncated {
+                break;
+            }
+            second_last_observation = Some(step.observation);
+            step = self
                 .gym
                 .step(action.clone())
                 .map_err(MaxAndSkipGymError::GymError)?;
             total_reward += step.reward;
-            second_last_observation = last_observation;
-            last_observation = Some(step.state.clone());
-            let finished = step.done || step.truncated;
-            final_step = Some(step);
-            if finished {
-                break;
-            }
         }
-
-        let mut step = final_step.expect("skip is validated to be at least one");
-        step.state = match second_last_observation {
-            Some(second_last) => Tensor::maximum(
-                last_observation
-                    .as_ref()
-                    .expect("at least one step was taken"),
-                &second_last,
-            )
-            .map_err(MaxAndSkipGymError::CandleError)?,
-            None => last_observation.expect("at least one step was taken"),
-        };
+        if let Some(second_last) = second_last_observation {
+            step.observation = step.observation.max_pair(second_last);
+        }
         step.reward = total_reward;
         Ok(step)
     }
 
-    fn action_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::tensor_rank::TensorBatchTypes;
     use crate::{
         gym::Gym,
-        spaces::BoxSpace,
+        spaces::{BoxSpace, ObservationSpace},
+        tensor_rank::PrevRank,
         wrappers::test_support::{TestGym, action, scalar},
     };
+    use burn::tensor::{Bool, DType, Device, Int, Tensor, kind::Basic};
+    use std::marker::PhantomData;
 
     use super::{FrameStackGym, MaxAndSkipGym};
+
+    #[derive(Clone)]
+    struct TypedSpace<const D: usize, K> {
+        shape: [usize; D],
+        kind: PhantomData<K>,
+    }
+
+    impl<const D: usize, K: Basic> TensorBatchTypes for TypedSpace<D, K>
+    where
+        Tensor<D, K>: PrevRank,
+    {
+        type Kind = K;
+        type Item = <Tensor<D, K> as PrevRank>::Prev;
+        type Batch = Tensor<D, K>;
+    }
+
+    impl<const D: usize, K: Basic> ObservationSpace<D> for TypedSpace<D, K>
+    where
+        Tensor<D, K>: PrevRank,
+    {
+        /// Checks the rank-`D` batch's item axes against the declared item shape without inspecting values.
+        fn contains(&self, values: &Tensor<D, K>) -> bool {
+            values.dims()[1..] == self.shape[1..]
+        }
+
+        fn shape(&self) -> Vec<usize> {
+            self.shape[1..].to_vec()
+        }
+    }
+
+    #[test]
+    fn frame_stack_adds_an_axis_to_vector_observations() {
+        let device = Device::flex();
+        let gym = crate::agents::test_support::FixedEnv::new(device.clone());
+        let space = BoxSpace::new_unbounded([1, 2, 4], &device);
+        let mut wrapper: FrameStackGym<_> = FrameStackGym::new(gym, 2, space);
+        let reset = wrapper.reset().unwrap();
+        assert_eq!(reset.observation.dims(), [2, 4]);
+        assert_eq!(wrapper.step(action()).unwrap().observation.dims(), [2, 4]);
+        assert_eq!(wrapper.observation_space().shape(), vec![2, 4]);
+    }
+
+    #[test]
+    fn frame_stack_preserves_integer_and_boolean_frames() {
+        let device = Device::flex();
+        let mut integers = FrameStackGym::<_, 4, _>::new(
+            (),
+            2,
+            TypedSpace::<4, Int> {
+                shape: [1, 2, 1, 2],
+                kind: PhantomData,
+            },
+        );
+        integers
+            .frames
+            .push_back(Tensor::from_data([[1i32, 2]], (&device, DType::I64)));
+        integers
+            .frames
+            .push_back(Tensor::from_data([[3i32, 4]], (&device, DType::I64)));
+        let stacked = integers.stacked_observation();
+        assert_eq!(stacked.dims(), [2, 1, 2]);
+        assert_eq!(stacked.dtype(), DType::I64);
+        assert_eq!(stacked.device(), device);
+        assert_eq!(
+            stacked.into_data().try_to_vec::<i64>().unwrap(),
+            vec![1, 2, 3, 4]
+        );
+        let mut booleans = FrameStackGym::<_, 3, _>::new(
+            (),
+            2,
+            TypedSpace::<3, Bool> {
+                shape: [1, 2, 1],
+                kind: PhantomData,
+            },
+        );
+        booleans
+            .frames
+            .push_back(Tensor::from_data([true], &device));
+        booleans
+            .frames
+            .push_back(Tensor::from_data([false], &device));
+        let stacked = booleans.stacked_observation();
+        assert_eq!(stacked.dims(), [2, 1]);
+        assert_eq!(
+            stacked.into_data().try_to_vec::<bool>().unwrap(),
+            vec![true, false]
+        );
+    }
 
     #[test]
     fn frame_stack_duplicates_reset_observation_and_rolls_on_step() {
         let gym = TestGym::new([TestGym::step(2.0, 0.0, false, false, 1)]);
-        let observation_space =
-            BoxSpace::new_with_universal_bounds(vec![4], -100.0, 100.0, &candle_core::Device::Cpu);
-        let mut wrapper = FrameStackGym::new(gym, 4, observation_space);
+        let observation_space = BoxSpace::new_with_universal_bounds(
+            [1, 4, 1],
+            -100.0,
+            100.0,
+            &burn::tensor::Device::flex(),
+        );
+        let mut wrapper = FrameStackGym::<_, 3>::new(gym, 4, observation_space);
 
         let reset = wrapper.reset().unwrap();
         let step = wrapper.step(action()).unwrap();
 
         let observation_space = wrapper.observation_space();
-        assert_eq!(observation_space.shape(), vec![4]);
-        assert!(observation_space.contains(&reset.state));
-        assert_eq!(reset.state.to_vec1::<f32>().unwrap(), vec![100.0; 4]);
+        assert_eq!(observation_space.shape(), vec![4, 1]);
+        assert!(observation_space.contains(&reset.observation.clone().unsqueeze::<3>()));
         assert_eq!(
-            step.state.to_vec1::<f32>().unwrap(),
+            reset.observation.into_data().try_to_vec::<f32>().unwrap(),
+            vec![100.0; 4]
+        );
+        assert_eq!(
+            step.observation.into_data().try_to_vec::<f32>().unwrap(),
             vec![100.0, 100.0, 100.0, 2.0]
         );
         assert_eq!(step.info.sequence, 1);
@@ -204,7 +343,7 @@ mod tests {
 
         let step = wrapper.step(action()).unwrap();
 
-        assert_eq!(scalar(&step.state), 3.0);
+        assert_eq!(scalar(&step.observation), 3.0);
         assert_eq!(step.reward, 1.0);
         assert_eq!(step.info.sequence, 4);
     }
@@ -220,7 +359,7 @@ mod tests {
 
         let step = wrapper.step(action()).unwrap();
 
-        assert_eq!(scalar(&step.state), 2.0);
+        assert_eq!(scalar(&step.observation), 2.0);
         assert_eq!(step.reward, 0.5);
         assert!(step.truncated);
         assert_eq!(step.info.sequence, 2);

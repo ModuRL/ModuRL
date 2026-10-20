@@ -8,14 +8,24 @@ algorithm-defining settings cannot be changed through the A2C builder.
 The remaining defaults follow Stable-Baselines3 A2C: `gamma` is `0.99`,
 `gae_lambda` is `1.0`, advantages and returns are not normalized, `vf_coef` is
 `0.5`, `ent_coef` is `0.0`, and gradient clipping is `0.5`. The application
-still supplies the optimizer as part of its network configuration.
+supplies Burn models, optimizers, and explicit learning rates as part of its network configuration.
 
 Use `SharedA2CNetwork` when the actor and critic share a model, or
 `SeparateA2CNetwork` when they have independent models and optimizers. Wrap the
-result with `A2CNetworkInfo::shared` or `A2CNetworkInfo::separate` before
+successful build result with `A2CNetworkInfo::shared` or `A2CNetworkInfo::separate` before
 building the agent. A2C also provides typed errors, log entries, and the
 `A2CLogger` trait. Pass an A2C logger directly to the agent's `logging_info`
 builder field.
+
+Both network builders return `Result` and own concrete Burn models.
+The separate builder requires `actor_learning_rate` and `critic_learning_rate`;
+the shared builder requires `learning_rate`.
+Learning-rate schedules must implement `Send + Sync`.
+The agent builder requires both `observation_space` and `action_space`.
+A2C has no `dtype` setting. Models preserve native observations and must produce
+critic values with the environment reward dtype.
+`reset_current_observations()` clears observations retained between training calls.
+Scalar actions and statistics use `[batch_size, 1]`.
 
 `batch_size` is the total number of transitions in one rollout, across every
 vectorized environment. Choose a value divisible by the environment count so
