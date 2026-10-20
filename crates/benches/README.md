@@ -143,7 +143,6 @@ They retain the shared clipped value objective and use the same replay adapter a
 Logging, evaluation, checkpointing, and learning-rate annealing are excluded.
 
 The suite measures throughput, not final reward or sample efficiency.
-Historical CartPole and Pendulum reports remain under `results`; their timings do not describe these Atari workloads.
 `requirements-cpu-windows.txt` records the historical Python environment and is not the Atari installation list.
 
 ## Results and checks
