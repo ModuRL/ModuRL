@@ -18,14 +18,12 @@ use burn::{
 };
 use modurl::prelude::*;
 
-#[path = "support/atari.rs"]
-mod atari;
-#[path = "support/nature_cnn.rs"]
-mod nature_cnn;
 mod support;
-use atari::make_atari_env;
-use nature_cnn::NatureCnn;
-use support::graphers::OnPolicyGrapher;
+use support::{
+    atari::{self, make_atari_env},
+    graphers::OnPolicyGrapher,
+    nature_cnn::NatureCnn,
+};
 
 const NUM_ENVS: usize = 8;
 const NUM_STEPS: usize = 128;
