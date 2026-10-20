@@ -11,7 +11,7 @@ use modurl::models::{Forward, MLP, ModelError};
 /// Encodes four 84-by-84 grayscale frames into 512 features with the Nature CNN architecture.
 /// Inputs use U8 Int tensors; explicit normalization produces F32 values on the parameter device.
 #[derive(Module, Debug)]
-pub(crate) struct NatureCnn {
+pub struct NatureCnn {
     conv1: Conv2d,
     conv2: Conv2d,
     conv3: Conv2d,
@@ -20,7 +20,7 @@ pub(crate) struct NatureCnn {
 
 impl NatureCnn {
     /// Builds the fixed encoder with PPO orthogonal weights when orthogonal is true, or DQN fan-in uniform weights otherwise.
-    pub(crate) fn new(device: &Device, orthogonal: bool) -> Result<Self, ModelError> {
+    pub fn new(device: &Device, orthogonal: bool) -> Result<Self, ModelError> {
         let hidden_initializer = if orthogonal {
             Initializer::Orthogonal {
                 gain: 2.0f64.sqrt(),
@@ -118,7 +118,7 @@ impl Forward<4, 2> for NatureCnn {
 }
 
 #[derive(Debug)]
-pub(crate) enum NatureCnnError {
+pub enum NatureCnnError {
     InputShape([usize; 4]),
     Model(ModelError),
 }

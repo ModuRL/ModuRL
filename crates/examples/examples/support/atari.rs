@@ -10,7 +10,7 @@ static ATARI_INITIALIZATION: Mutex<()> = Mutex::new(());
 
 /// Four CPU U8 frames per observation, with batches [batch_size, 4, 84, 84].
 #[derive(Clone, Debug)]
-pub(crate) struct FrameObservationSpace;
+pub struct FrameObservationSpace;
 
 impl TensorBatchTypes for FrameObservationSpace {
     type Kind = Int;
@@ -80,7 +80,7 @@ where
 
 /// Builds the standard Atari preprocessing stack on CPU with native U8 observations [4, 84, 84].
 /// The time limit counts emulator frames. Actions are CPU Int [1]; raw metrics cover complete games.
-pub(crate) fn make_atari_env(
+pub fn make_atari_env(
     rom_path: PathBuf,
     seed: i32,
     max_episode_frames: u32,
