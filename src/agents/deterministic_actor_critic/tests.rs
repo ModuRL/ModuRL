@@ -333,10 +333,11 @@ impl Gym for EpisodeEnv {
     }
 
     /// Returns Float observation [1] after resetting the episode counter on the CPU device.
+    /// Uses nonzero observations so every replay sample can update the linear actor.
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.steps = 0;
         Ok(ResetInfo {
-            observation: Tensor::zeros([1], (&self.device, DType::F64)),
+            observation: Tensor::ones([1], (&self.device, DType::F64)),
             info: (),
         })
     }
