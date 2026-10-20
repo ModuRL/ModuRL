@@ -46,26 +46,19 @@ fn main() -> Result<(), EnvironmentError> {
 
 The example uses the CPU by default. [Additional examples](crates/examples/examples) cover other algorithms and environments.
 
-## End-to-end training throughput
+## Atari training benchmarks
 
-ModuRL completed the matched PPO, DQN, and SAC workloads faster than all three Python runners in this CPU benchmark.
+The current benchmark suite measures end-to-end Breakout PPO and DQN throughput in ModuRL, Stable-Baselines3, and adapted CleanRL runners. It uses matched Atari preprocessing and training workloads with U8 observations.
 
-> [!NOTE]
-> These benchmarks use small 2x64 networks on CartPole (PPO and DQN) and Pendulum (SAC). ModuRL's speed advantage is expected to be smaller with larger networks, where neural-network computation dominates runtime.
+The latest PPO comparison processed 40,960 Breakout transitions:
 
-| Algorithm | ModuRL median | vs. SB3 runner | vs. CleanRL runner | vs. Tianshou runner |
-| --- | ---: | ---: | ---: | ---: |
-| PPO | 2.102 s | 4.54x | 4.47x | 6.19x |
-| DQN | 0.242 s | 6.49x | 3.97x | 15.50x |
-| SAC | 1.396 s | 2.63x | 2.29x | 4.47x |
+| Runner | Time | Throughput |
+| --- | ---: | ---: |
+| ModuRL | 6.86 s | 6,000 transitions/s |
+| Stable-Baselines3 | 10.96 s | 3,737 transitions/s |
+| CleanRL | 9.8 s | 4,178 transitions/s |
 
-These CPU results were measured on a 12th Gen Intel Core i7-1255U with one compute thread. Each value is the median of five fresh-process samples.
-
-The CleanRL runners adapt upstream reference scripts. The DQN Stable-Baselines3 and Tianshou runners also use documented adaptations so all frameworks perform the matched workload.
-
-Compare frameworks within one algorithm. The algorithms perform different amounts of optimizer work per transition. These measurements do not cover sample efficiency, reward, or large-model performance. CUDA and Metal were not measured.
-
-See the [benchmark workloads, fairness controls, and accelerator commands](crates/benches/README.md), plus the raw [PPO](crates/benches/results/ppo-cpu-windows-20260810.json), [DQN](crates/benches/results/dqn-cpu-windows-20260820.json), and [SAC](crates/benches/results/sac-cpu-windows-20260820.json) samples.
+The suite measures throughput, not final reward or sample efficiency. Emulator versions differ across frameworks, so trajectories and rewards are not expected to match. See the [benchmark workloads, adaptations, fairness controls, and run commands](crates/benches/README.md).
 
 ## What ModuRL includes
 
@@ -130,7 +123,7 @@ Agents train against these contracts instead of concrete environment, network, o
 | [`modurl_ale`](crates/modurl_ale) | Arcade Learning Environment integration and Atari wrappers | No; builds bundled C++ | [GPL-2.0-only](crates/modurl_ale/LICENSE); [third-party notices](crates/modurl_ale/THIRD_PARTY_LICENSES.md) |
 | [`modurl_logger`](crates/modurl_logger) | Terminal graphs and TensorBoard event logging | Yes | MIT |
 | [`examples`](crates/examples/Cargo.toml) | Runnable training programs; not published as a crate | Mixed; depends on the example | MIT |
-| [`modurl-benches`](crates/benches/Cargo.toml) | Reproducible cross-framework throughput benchmarks; not published as a crate | Mixed; includes Python runners | MIT |
+| [`modurl-benches`](crates/benches/Cargo.toml) | Atari PPO and DQN cross-framework throughput benchmarks; not published as a crate | Mixed; includes Python runners | MIT |
 
 The core `modurl` crate has no default Cargo features. Enable its
 `multithreading` feature for multithreaded vectorized and stacked environments.
