@@ -1,5 +1,3 @@
-#![cfg(any())]
-
 use candle_core::{Device, Tensor};
 use modurl::gym::{Gym, MultiGym, VectorizedGymWrapper};
 use modurl::wrappers::DeviceMultiGymWrapper;
