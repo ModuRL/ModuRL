@@ -12,7 +12,7 @@ documentation = "https://docs.rs/modurl_ale"
 readme = "README.md"
 keywords = ["reinforcement", "atari", "ale"]
 categories = ["artificial-intelligence", "science", "simulation", "emulators"]
-build = false
+build = "build.rs"
 include = [
     "/src/**",
     "/tests/**",
