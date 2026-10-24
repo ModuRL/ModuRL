@@ -20,6 +20,7 @@ builder field.
 Both network builders return `Result` and own concrete Burn models.
 The separate builder requires `actor_learning_rate` and `critic_learning_rate`;
 the shared builder requires `learning_rate`.
+Learning-rate schedules must implement `Send + Sync`.
 The agent builder requires both `observation_space` and `action_space`.
 A2C has no `dtype` setting. Models preserve native observations and must produce
 critic values with the environment reward dtype.

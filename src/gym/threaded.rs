@@ -169,10 +169,17 @@ where
     /// Splits rank-`A` actions `[total_size, ...action_shape]` into rank-`A` group batches and steps them concurrently.
     /// Returns concatenated rank-`O` observations `[total_size, ...observation_shape]` and rewards `[total_size, 1]`.
     /// Inputs must meet the inner gyms' dtype, device, and item-shape contracts.
+    /// Rejects an action-row count mismatch before any group advances.
     fn step(
         &mut self,
         action: Tensor<A, AK>,
     ) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, Self::Error> {
+        let expected = self.num_envs();
+        let actual = action.dims()[0];
+        if actual != expected {
+            return Err(StackedMultiGymError::InvalidActionBatch { expected, actual });
+        }
+
         // Prepare every action group before dispatch so a slicing failure cannot advance only part of the stack.
         let actions: Vec<_> = self
             .group_offsets
@@ -358,10 +365,17 @@ where
     /// Concatenates rank-`BO` observations `[1, ...observation_shape]` and F32 rewards `[1]` in environment order.
     /// Terminal observations remain unbatched rank `O`; scalar terminal observations use `[1]`.
     /// Inputs must match the environments' dtype and device contracts; the batch axis is preserved.
+    /// Rejects an action-row count mismatch before any environment advances.
     fn step(
         &mut self,
         action: Tensor<BA, AK>,
     ) -> Result<MultiGymStepInfo<I, Tensor<O, K>>, Self::Error> {
+        let expected = self.num_envs();
+        let actual = action.dims()[0];
+        if actual != expected {
+            return Err(VectorizedGymError::InvalidActionBatch { expected, actual });
+        }
+
         let actions: Vec<_> = (0..self.envs.len())
             .map(|index| action.clone().slice([Slice::from(index..index + 1)]))
             .collect();
@@ -443,6 +457,67 @@ mod tests {
     use super::*;
     use crate::spaces::{BoxSpace, Discrete};
     use burn::tensor::{Device, Int};
+
+    #[test]
+    fn invalid_threaded_vectorized_batches_do_not_advance_workers() {
+        let mut env = MultithreadedVectorizedGymWrapper::new(
+            vec![|| CounterEnv::new(0), || CounterEnv::new(1)],
+            BoxSpace::new_unbounded([1, 2], &Device::flex()),
+            Discrete::new(10),
+        )
+        .unwrap();
+
+        for actual in [1, 3] {
+            assert!(matches!(
+                env.step(Tensor::<2, Int>::zeros([actual, 1], &Device::flex())),
+                Err(VectorizedGymError::InvalidActionBatch {
+                    expected: 2,
+                    actual: count,
+                }) if count == actual
+            ));
+        }
+        let step = env
+            .step(Tensor::<2, Int>::zeros([2, 1], &Device::flex()))
+            .unwrap();
+        assert!(step.infos.iter().all(|info| info.step == 1));
+    }
+
+    #[test]
+    fn invalid_threaded_stacked_batches_do_not_step_groups() {
+        let factories: Vec<_> = [(10, 2), (20, 3)]
+            .into_iter()
+            .map(|(id, count)| {
+                move || {
+                    let mut gym = GroupEnv::new(id, count);
+                    gym.fail_next = id == 20;
+                    gym
+                }
+            })
+            .collect();
+        let mut env = MultithreadedStackedMultiGym::new(
+            factories,
+            BoxSpace::new_unbounded([1, 3], &Device::flex()),
+            BoxSpace::new_unbounded([1, 1], &Device::flex()),
+        )
+        .unwrap();
+
+        for actual in [4, 6] {
+            assert!(matches!(
+                env.step(Tensor::zeros([actual, 1], &Device::flex())),
+                Err(StackedMultiGymError::InvalidActionBatch {
+                    expected: 5,
+                    actual: count,
+                }) if count == actual
+            ));
+        }
+        assert!(matches!(
+            env.step(Tensor::zeros([5, 1], &Device::flex())),
+            Err(StackedMultiGymError::Inner {
+                gym_index: 1,
+                error: TestError::Forced,
+            })
+        ));
+    }
 
     #[test]
     fn threaded_scalar_batches_preserve_item_axes_and_terminals() {

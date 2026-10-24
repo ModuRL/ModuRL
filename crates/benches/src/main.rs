@@ -1,497 +1,638 @@
-#![cfg(any())]
-
-use std::{env, error::Error, fmt::Debug, time::Instant};
-
-use candle_core::{DType, Device, Module, Tensor, Var};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use burn::{
+    module::Module,
+    nn::Initializer,
+    optim::AdamWConfig,
+    tensor::{DType, Device, Float, Int, Tensor},
+};
 use modurl::prelude::*;
-use modurl_gym::classic_control::{cartpole::CartPoleV1, pendulum::PendulumV1};
 use serde_json::{Value, json};
+use std::{env, error::Error, fmt::Debug, path::PathBuf, time::Instant};
+
+mod support;
+use support::{
+    atari,
+    nature_cnn::{NatureCnn, NatureCnnError},
+};
+
+#[cfg(feature = "tracing")]
+mod profile;
 
 const SEED: u64 = 42;
-const PPO_ENV_COUNT: usize = 8;
-const PPO_STEPS_PER_ENV: usize = 256;
-const PPO_ROLLOUT_SIZE: usize = PPO_ENV_COUNT * PPO_STEPS_PER_ENV;
-const PPO_MINI_BATCH_SIZE: usize = 64;
-const PPO_EPOCHS: usize = 10;
-const PPO_PARAMETERS: usize = 9_155;
-const DQN_BATCH_SIZE: usize = 64;
-const DQN_REPLAY_CAPACITY: usize = 10_000;
-const DQN_UPDATE_FREQUENCY: usize = 4;
-const DQN_TARGET_UPDATE_INTERVAL: usize = 1_000;
-const DQN_PARAMETERS: usize = 4_610;
-const SAC_BATCH_SIZE: usize = 64;
-const SAC_REPLAY_CAPACITY: usize = 10_000;
-const SAC_PARAMETERS: usize = 13_637;
+const PPO_ENV_COUNT: usize = 32;
+const PPO_ROLLOUT_SIZE: usize = PPO_ENV_COUNT * 128;
+const DQN_REPLAY_CAPACITY: usize = 1_000_000;
+const DQN_TRAINING_START: usize = 80_000;
 
 #[derive(Debug)]
 struct Args {
     algorithm: String,
     device: String,
-    measured_steps: Option<usize>,
-    warmup_steps: Option<usize>,
+    backend: String,
+    trace: Option<PathBuf>,
+    trace_sync: bool,
+    rom: PathBuf,
+    steps: usize,
+    warmup_steps: usize,
     threads: usize,
 }
 
 impl Args {
-    fn parse() -> Result<Self, String> {
-        let mut parsed = Self {
-            algorithm: "ppo".to_owned(),
-            device: "cpu".to_owned(),
-            measured_steps: None,
-            warmup_steps: None,
-            threads: 1,
-        };
-        let mut args = env::args().skip(1);
-        while let Some(flag) = args.next() {
-            let value = args
+    fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Self, String> {
+        let mut algorithm = "ppo".to_owned();
+        let mut device = "cuda".to_owned();
+        let mut backend = "native".to_owned();
+        let mut trace = None;
+        let mut trace_sync = false;
+        let mut rom = None;
+        let mut steps = None;
+        let mut warmup_steps = None;
+        let mut threads = 1;
+        let mut arguments = arguments.into_iter();
+        while let Some(flag) = arguments.next() {
+            let value = arguments
                 .next()
                 .ok_or_else(|| format!("missing value after {flag}"))?;
             match flag.as_str() {
-                "--algorithm" => parsed.algorithm = value,
-                "--device" => parsed.device = value,
-                "--steps" => {
-                    parsed.measured_steps = Some(
-                        value
-                            .parse()
-                            .map_err(|_| format!("invalid --steps value: {value}"))?,
-                    )
-                }
-                "--warmup-steps" => {
-                    parsed.warmup_steps = Some(
-                        value
-                            .parse()
-                            .map_err(|_| format!("invalid --warmup-steps value: {value}"))?,
-                    )
-                }
-                "--threads" => {
-                    parsed.threads = value
+                "--algorithm" => algorithm = value,
+                "--device" => device = value,
+                "--backend" => backend = value,
+                "--trace" => trace = Some(PathBuf::from(value)),
+                "--trace-sync" => {
+                    trace_sync = value
                         .parse()
-                        .map_err(|_| format!("invalid --threads value: {value}"))?
+                        .map_err(|_| "--trace-sync requires true or false")?
                 }
+                "--rom" => rom = Some(PathBuf::from(value)),
+                "--steps" => steps = Some(value.parse().map_err(|_| "invalid --steps")?),
+                "--warmup-steps" => {
+                    warmup_steps = Some(value.parse().map_err(|_| "invalid --warmup-steps")?)
+                }
+                "--threads" => threads = value.parse().map_err(|_| "invalid --threads")?,
                 _ => return Err(format!("unknown argument: {flag}")),
             }
         }
-        if !matches!(parsed.algorithm.as_str(), "ppo" | "dqn" | "sac") {
-            return Err(format!("unsupported algorithm: {}", parsed.algorithm));
+        let (default_steps, default_warmup) = match algorithm.as_str() {
+            "ppo" => (40_960, PPO_ROLLOUT_SIZE * 10),
+            "dqn" => (4_096, DQN_TRAINING_START + 4),
+            _ => return Err(format!("unsupported algorithm: {algorithm}")),
+        };
+        let parsed = Self {
+            algorithm,
+            device,
+            backend,
+            trace,
+            trace_sync,
+            rom: rom.ok_or("--rom requires a Breakout ROM path")?,
+            steps: steps.unwrap_or(default_steps),
+            warmup_steps: warmup_steps.unwrap_or(default_warmup),
+            threads,
+        };
+        if parsed.threads == 0 || parsed.steps == 0 {
+            return Err("--threads and --steps must be nonzero".to_owned());
         }
-        if parsed.threads == 0 {
-            return Err("--threads must be at least 1".to_owned());
+        if parsed.trace.is_some() && parsed.algorithm != "ppo" {
+            return Err("--trace requires --algorithm ppo".to_owned());
         }
-        let (steps, warmup) = parsed.resolved_steps();
-        if steps == 0 || warmup == 0 {
-            return Err("--steps and --warmup-steps must be nonzero".to_owned());
+        if parsed.trace_sync && parsed.trace.is_none() {
+            return Err("--trace-sync requires --trace".to_owned());
+        }
+        if parsed.trace.is_some() && !cfg!(feature = "tracing") {
+            return Err("--trace requires --features tracing".to_owned());
         }
         if parsed.algorithm == "ppo"
-            && (!steps.is_multiple_of(PPO_ROLLOUT_SIZE) || !warmup.is_multiple_of(PPO_ROLLOUT_SIZE))
+            && (parsed.warmup_steps == 0 || !parsed.warmup_steps.is_multiple_of(PPO_ROLLOUT_SIZE))
         {
             return Err(format!(
-                "PPO --steps and --warmup-steps must be multiples of {PPO_ROLLOUT_SIZE}"
+                "PPO --warmup-steps must be a positive multiple of {PPO_ROLLOUT_SIZE}"
             ));
+        }
+        if parsed.algorithm == "dqn" && parsed.warmup_steps != default_warmup {
+            return Err(format!(
+                "{} requires --warmup-steps {default_warmup}",
+                parsed.algorithm
+            ));
+        }
+        let interval = if parsed.algorithm == "ppo" {
+            PPO_ROLLOUT_SIZE
+        } else {
+            4
+        };
+        if !parsed.steps.is_multiple_of(interval) {
+            return Err(format!("--steps must be a multiple of {interval}"));
+        }
+        if !parsed.rom.is_file() {
+            return Err(format!("ROM file does not exist: {}", parsed.rom.display()));
         }
         Ok(parsed)
     }
-
-    fn resolved_steps(&self) -> (usize, usize) {
-        let defaults = match self.algorithm.as_str() {
-            "ppo" => (20_480, 2_048),
-            "dqn" => (4_096, 1_024),
-            "sac" => (1_024, 256),
-            _ => unreachable!(),
-        };
-        (
-            self.measured_steps.unwrap_or(defaults.0),
-            self.warmup_steps.unwrap_or(defaults.1),
-        )
-    }
 }
 
-fn select_device(name: &str) -> Result<Device, String> {
+fn select_device(name: &str, backend: &str) -> Result<Device, String> {
+    if backend == "libtorch" {
+        #[cfg(feature = "libtorch")]
+        {
+            return match name {
+                "cuda" => Ok(Device::new(burn::backend::DispatchDevice::LibTorch(
+                    tch::Device::Cuda(0).into(),
+                ))),
+                "cpu" => Ok(Device::new(burn::backend::DispatchDevice::LibTorch(
+                    tch::Device::Cpu.into(),
+                ))),
+                _ => Err("LibTorch benchmarks require --device cpu or cuda".to_owned()),
+            };
+        }
+        #[cfg(not(feature = "libtorch"))]
+        {
+            return Err("LibTorch requires --features libtorch".to_owned());
+        }
+    }
+    if backend != "native" {
+        return Err(format!("unsupported backend: {backend}"));
+    }
     match name {
-        "cpu" => Ok(Device::Cpu),
+        "cpu" => Ok(Device::flex()),
         "cuda" => {
             #[cfg(feature = "cuda")]
             {
-                Device::new_cuda(0).map_err(|error| format!("CUDA is unavailable: {error}"))
+                Ok(Device::cuda(0))
             }
             #[cfg(not(feature = "cuda"))]
             {
-                Err("CUDA requires `--features cuda`".to_owned())
+                Err("CUDA requires --features cuda".to_owned())
             }
         }
         "metal" => {
             #[cfg(feature = "metal")]
             {
-                Device::new_metal(0).map_err(|error| format!("Metal is unavailable: {error}"))
+                Ok(Device::metal(burn::tensor::DeviceKind::DefaultDevice))
             }
             #[cfg(not(feature = "metal"))]
             {
-                Err("Metal requires `--features metal`".to_owned())
+                Err("Metal requires --features metal".to_owned())
             }
         }
         _ => Err(format!("unsupported device: {name}")),
     }
 }
 
-fn adam(lr: f64) -> ParamsAdamW {
-    ParamsAdamW {
-        lr,
-        beta1: 0.9,
-        beta2: 0.999,
-        eps: 1e-5,
-        weight_decay: 0.0,
-    }
-}
-
-fn parameter_count<'a>(maps: impl IntoIterator<Item = &'a VarMap>) -> usize {
-    maps.into_iter()
-        .flat_map(VarMap::all_vars)
-        .map(|variable| variable.elem_count())
-        .sum()
-}
-
 fn debug_result<T, E: Debug>(result: Result<T, E>) -> Result<T, Box<dyn Error>> {
     result.map_err(|error| format!("{error:?}").into())
 }
 
-fn ppo(
-    args: &Args,
-    device: &Device,
-    measured_steps: usize,
+#[derive(Module, Debug)]
+struct AtariQNetwork {
+    encoder: NatureCnn,
+    head: MLP,
+}
+
+struct DQNTimingLogger {
+    device: Device,
     warmup_steps: usize,
-) -> Result<Value, Box<dyn Error>> {
-    let envs = debug_result(
-        (0..PPO_ENV_COUNT)
-            .map(|_| CartPoleV1::builder().rng_device(device).build())
-            .collect::<Result<Vec<_>, _>>(),
-    )?;
-    let env: VectorizedGymWrapper<CartPoleV1> = envs.into();
-    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
-    let action_space = env.action_space();
-    let actor_vars = VarMap::new();
+    start: Option<Instant>,
+    sync_error: Option<burn::tensor::ExecutionError>,
+    updates: usize,
+}
+
+impl<I> DQNLogger<I> for DQNTimingLogger {
+    fn log(&mut self, _entry: &QLogEntry) {
+        self.updates += 1;
+    }
+
+    fn log_collection(&mut self, entry: &QCollectionLogEntry<I>) {
+        if entry.collection_timestep == self.warmup_steps {
+            match self.device.sync() {
+                Ok(()) => self.start = Some(Instant::now()),
+                Err(error) => self.sync_error = Some(error),
+            }
+        }
+    }
+}
+
+impl AtariQNetwork {
+    fn new(device: &Device) -> Result<Self, ModelError> {
+        let bound = 1.0 / 512.0f64.sqrt();
+        Ok(Self {
+            encoder: NatureCnn::new(device, false)?,
+            head: MLP::builder()
+                .input_size(512)
+                .output_size(4)
+                .hidden_layer_sizes(vec![])
+                .output_initializer(Initializer::Uniform {
+                    min: -bound,
+                    max: bound,
+                })
+                .options((device, DType::F32))
+                .build()?,
+        })
+    }
+}
+
+impl Forward<4, 2> for AtariQNetwork {
+    type InputKind = Int;
+    type OutputKind = Float;
+    type Error = NatureCnnError;
+
+    /// Maps U8 [batch_size, 4, 84, 84] to F32 Q values [batch_size, 4] on the model device.
+    /// The encoder converts and normalizes observations; both model stages preserve gradients.
+    fn forward(&self, observations: Tensor<4, Int>) -> Result<Tensor<2>, Self::Error> {
+        Ok(self.head.forward(self.encoder.forward(observations)?)?)
+    }
+}
+
+fn ppo(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
+    let action_space = Discrete::new(4);
+    let constructors = (0..PPO_ENV_COUNT)
+        .map(|index| {
+            let rom = args.rom.clone();
+            move || atari::make_atari_env(rom, (SEED + index as u64) as i32, 400_000, false)
+        })
+        .collect();
+    let envs = debug_result(MultithreadedVectorizedGymWrapper::new(
+        constructors,
+        atari::FrameObservationSpace,
+        action_space.clone(),
+    ))?;
+    let mut envs = DeviceMultiGymWrapper::new(envs, Device::flex(), device.clone());
+    let cnn = NatureCnn::new(device, true)?;
     let actor = MLP::builder()
-        .input_size(4)
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, device))
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .initializer(OrthogonalMLPInitializer {
-            hidden_gain: 2.0_f64.sqrt(),
-            output_gain: 0.01,
-        })
-        .name("actor".to_owned())
+        .input_size(512)
+        .output_size(4)
+        .hidden_layer_sizes(vec![])
+        .output_initializer(Initializer::Orthogonal { gain: 0.01 })
+        .options((device, DType::F32))
         .build()?;
-    let critic_vars = VarMap::new();
     let critic = MLP::builder()
-        .input_size(4)
+        .input_size(512)
         .output_size(1)
-        .vb(VarBuilder::from_varmap(&critic_vars, DType::F32, device))
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .initializer(OrthogonalMLPInitializer {
-            hidden_gain: 2.0_f64.sqrt(),
-            output_gain: 1.0,
-        })
-        .name("critic".to_owned())
+        .hidden_layer_sizes(vec![])
+        .output_initializer(Initializer::Orthogonal { gain: 1.0 })
+        .options((device, DType::F32))
         .build()?;
-    assert_eq!(parameter_count([&actor_vars, &critic_vars]), PPO_PARAMETERS);
-    let networks = SeparatePPONetwork::builder()
-        .actor_network(ProbabilisticPolicyModel::new(
+    assert_eq!(
+        cnn.num_params() + actor.num_params() + critic.num_params(),
+        1_686_693
+    );
+    let optimizer = AdamWConfig::new()
+        .with_epsilon(1e-5)
+        .with_weight_decay(0.0)
+        .init();
+    let networks = SharedPPONetwork::builder()
+        .shared_network(cnn)
+        .actor_head(ProbabilisticPolicyModel::new(
             actor,
             CategoricalDistribution,
         ))
-        .critic_network(critic)
-        .actor_optimizer(AdamW::new(actor_vars.all_vars(), adam(3e-4))?)
-        .critic_optimizer(AdamW::new(critic_vars.all_vars(), adam(3e-4))?)
-        .combined_loss(true)
-        .build();
+        .critic_head(critic)
+        .optimizer(optimizer)
+        .learning_rate(2.5e-4)
+        .build()?;
     let mut agent = debug_result(
         PPOAgent::builder()
+            .observation_space(envs.observation_space())
             .action_space(action_space)
             .network_info(networks)
             .batch_size(PPO_ROLLOUT_SIZE)
-            .mini_batch_size(PPO_MINI_BATCH_SIZE)
-            .num_epochs(PPO_EPOCHS)
-            .normalize_advantage(true)
-            .ent_coef(0.0)
+            .mini_batch_size(PPO_ROLLOUT_SIZE / 4)
+            .num_epochs(4)
             .gamma(0.99)
             .gae_lambda(0.95)
-            .vf_coef(0.5)
+            .clip_range(ConstantSchedule::new(0.1))
+            .clip_value_loss(true)
+            .vf_coef(0.25)
+            .ent_coef(0.01)
             .gradient_clip(0.5)
-            .clip_range(ConstantSchedule::new(0.2))
-            .clip_value_loss(false)
-            .training_horizon(warmup_steps + measured_steps)
+            .training_horizon(args.warmup_steps + args.steps)
             .device(device.clone())
             .build(),
     )?;
-    debug_result(agent.learn(&mut env, warmup_steps))?;
-    device.synchronize()?;
+    debug_result(agent.learn(&mut envs, args.warmup_steps))?;
+    device.sync()?;
+    #[cfg(feature = "tracing")]
+    if let Some(path) = &args.trace {
+        return profile::record(path, device, args.trace_sync, || {
+            debug_result(agent.learn(&mut envs, args.steps))
+        });
+    }
     let start = Instant::now();
-    debug_result(agent.learn(&mut env, measured_steps))?;
-    device.synchronize()?;
-    let elapsed = start.elapsed().as_secs_f64();
-    Ok(result(
-        args,
-        "ppo",
-        measured_steps,
-        warmup_steps,
-        elapsed,
-        json!({
-            "environment": "CartPole-v1", "environments": PPO_ENV_COUNT,
-            "steps_per_environment": PPO_STEPS_PER_ENV, "rollout_size": PPO_ROLLOUT_SIZE,
-            "hidden_layers": [64, 64], "trainable_parameters": PPO_PARAMETERS,
-            "activation": "tanh", "dtype": "float32", "mini_batch_size": PPO_MINI_BATCH_SIZE,
-            "ppo_epochs": PPO_EPOCHS, "learning_rate": 3e-4, "adam_epsilon": 1e-5,
-            "gamma": 0.99, "gae_lambda": 0.95, "clip_range": 0.2,
-            "value_loss_clipping": false, "advantage_normalization": "per-mini-batch",
-            "entropy_coefficient": 0.0, "value_coefficient": 0.5,
-            "max_gradient_norm": 0.5, "seed": SEED
-        }),
-    ))
+    debug_result(agent.learn(&mut envs, args.steps))?;
+    device.sync()?;
+    Ok(start.elapsed().as_secs_f64())
 }
 
-fn dqn(
-    args: &Args,
-    device: &Device,
-    measured_steps: usize,
-    warmup_steps: usize,
-) -> Result<Value, Box<dyn Error>> {
-    let cartpole = debug_result(CartPoleV1::builder().rng_device(device).build())?;
-    let env = VectorizedGymWrapper::from(vec![cartpole]);
-    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
-    let observation_space = env.observation_space();
-    let online_vars = VarMap::new();
-    let online = MLP::builder()
-        .input_size(4)
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(&online_vars, DType::F32, device))
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .name("q".to_owned())
-        .build()?;
-    let mut target_vars = VarMap::new();
-    let target = MLP::builder()
-        .input_size(4)
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(&target_vars, DType::F32, device))
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .name("q".to_owned())
-        .build()?;
-    assert_eq!(parameter_count([&online_vars]), DQN_PARAMETERS);
+fn dqn(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
+    let envs = debug_result(VectorizedGymWrapper::new(vec![atari::make_atari_env(
+        args.rom.clone(),
+        SEED as i32,
+        108_000,
+        false,
+    )]))?;
+    let mut envs = DeviceMultiGymWrapper::new(envs, Device::flex(), device.clone());
+    if envs.action_space().get_possible_values() != 4 {
+        return Err("Breakout requires its four-action minimal action set".into());
+    }
+    let online = AtariQNetwork::new(device)?;
+    assert_eq!(online.num_params(), 1_686_180);
+    let horizon = args.warmup_steps + args.steps;
+    let mut logger = DQNTimingLogger {
+        device: device.clone(),
+        warmup_steps: args.warmup_steps,
+        start: None,
+        sync_error: None,
+        updates: 0,
+    };
+    let optimizer = AdamWConfig::new()
+        .with_epsilon(1e-8)
+        .with_weight_decay(0.0)
+        .init();
     let mut agent = debug_result(
         DQNAgent::builder()
             .dtype(DType::F32)
-            .action_space(Discrete::new(2))
-            .observation_space(observation_space)
+            .action_space(envs.action_space())
+            .observation_space(envs.observation_space())
             .online_q_network(online)
-            .target_q_network(target)
-            .online_vars(&online_vars)
-            .target_vars(&mut target_vars)
-            .optimizer(AdamW::new(online_vars.all_vars(), adam(2.5e-4))?)
+            .logger(&mut logger)
+            .optimizer(optimizer)
+            .learning_rate(1e-4)
             .replay_capacity(DQN_REPLAY_CAPACITY)
-            .batch_size(DQN_BATCH_SIZE)
-            .training_start(warmup_steps + 1)
-            .update_frequency(DQN_UPDATE_FREQUENCY)
-            .target_update_interval(DQN_TARGET_UPDATE_INTERVAL)
-            .training_horizon(warmup_steps + measured_steps)
-            .epsilon_schedule(ConstantSchedule::new(0.1))
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device.clone(),
-            )))
-            .build(),
-    )?;
-    debug_result(agent.learn(&mut env, warmup_steps))?;
-    device.synchronize()?;
-    let start = Instant::now();
-    debug_result(agent.learn(&mut env, measured_steps))?;
-    device.synchronize()?;
-    let elapsed = start.elapsed().as_secs_f64();
-    Ok(result(
-        args,
-        "dqn",
-        measured_steps,
-        warmup_steps,
-        elapsed,
-        json!({
-            "environment": "CartPole-v1", "environments": 1, "hidden_layers": [64, 64],
-            "trainable_parameters": DQN_PARAMETERS, "activation": "tanh", "dtype": "float32",
-            "replay_capacity": DQN_REPLAY_CAPACITY, "batch_size": DQN_BATCH_SIZE,
-            "training_start": warmup_steps, "updates_per_transition": 0.25,
-            "update_frequency": DQN_UPDATE_FREQUENCY, "target_update_interval": DQN_TARGET_UPDATE_INTERVAL,
-            "learning_rate": 2.5e-4, "adam_epsilon": 1e-5, "gamma": 0.99,
-            "epsilon": 0.1, "target": "vanilla", "loss": "mse", "gradient_clipping": false,
-            "n_step_return": 1, "seed": SEED
-        }),
-    ))
-}
-
-struct GaussianActor {
-    network: MLP,
-}
-
-impl Module for GaussianActor {
-    /// Maps observations `[batch, 3]` to Gaussian parameters `[batch, 2]`.
-    fn forward(&self, observations: &Tensor) -> candle_core::Result<Tensor> {
-        let output = self.network.forward(observations)?;
-        let mean = output.narrow(1, 0, 1)?;
-        let log_std = output.narrow(1, 1, 1)?.clamp(-20.0, 2.0)?;
-        Tensor::cat(&[mean, log_std], 1)
-    }
-}
-
-fn sac_critic<'a>(
-    online_vars: &'a VarMap,
-    target_vars: &'a mut VarMap,
-    device: &Device,
-) -> Result<SACCritic<'a, AdamW>, Box<dyn Error>> {
-    let online = MLP::builder()
-        .input_size(4)
-        .output_size(1)
-        .vb(VarBuilder::from_varmap(online_vars, DType::F32, device))
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .name("critic".to_owned())
-        .build()?;
-    let target = MLP::builder()
-        .input_size(4)
-        .output_size(1)
-        .vb(VarBuilder::from_varmap(target_vars, DType::F32, device))
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .name("critic".to_owned())
-        .build()?;
-    debug_result(
-        SACCritic::builder()
-            .online_network(ScalarStateActionCritic::new(online))
-            .target_network(ScalarStateActionCritic::new(target))
-            .online_vars(online_vars)
-            .target_vars(target_vars)
-            .optimizer(AdamW::new(online_vars.all_vars(), adam(3e-4))?)
-            .build(),
-    )
-}
-
-fn sac(
-    args: &Args,
-    device: &Device,
-    measured_steps: usize,
-    warmup_steps: usize,
-) -> Result<Value, Box<dyn Error>> {
-    let pendulum = debug_result(PendulumV1::builder().rng_device(device).build())?;
-    let env = VectorizedGymWrapper::from(vec![TimeLimitGym::new(pendulum, 200)]);
-    let mut env = DeviceMultiGymWrapper::new(env, Device::Cpu, device.clone());
-    let observation_space = env.observation_space();
-    let action_space = env.action_space();
-    let actor_vars = VarMap::new();
-    let actor = MLP::builder()
-        .input_size(3)
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(&actor_vars, DType::F32, device))
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .name("actor".to_owned())
-        .build()?;
-    let distribution = TransformedDistribution::new(
-        debug_result(GaussianDistribution::new(vec![1]))?,
-        TanhTransform,
-    );
-    let policy = ProbabilisticPolicyModel::new(GaussianActor { network: actor }, distribution);
-    let critic_vars_1 = VarMap::new();
-    let mut target_vars_1 = VarMap::new();
-    let critic_1 = sac_critic(&critic_vars_1, &mut target_vars_1, device)?;
-    let critic_vars_2 = VarMap::new();
-    let mut target_vars_2 = VarMap::new();
-    let critic_2 = sac_critic(&critic_vars_2, &mut target_vars_2, device)?;
-    let log_alpha = Var::zeros((), DType::F32, device)?;
-    assert_eq!(
-        parameter_count([&actor_vars, &critic_vars_1, &critic_vars_2]) + 1,
-        SAC_PARAMETERS
-    );
-    let entropy = SACEntropyConfiguration::automatic_with_target_schedule(
-        log_alpha.clone(),
-        AdamW::new(vec![log_alpha], adam(3e-4))?,
-        ConstantSchedule::new(-1.0),
-    );
-    let mut agent = debug_result(
-        SACAgent::builder()
-            .dtype(DType::F32)
-            .policy(policy)
-            .actor_optimizer(AdamW::new(actor_vars.all_vars(), adam(3e-4))?)
-            .critics(vec![critic_1, critic_2])
-            .entropy_configuration(entropy)
-            .action_space(action_space)
-            .observation_space(observation_space)
-            .aggregation_mode(SACCriticAggregationMode::Min)
-            .replay_capacity(SAC_REPLAY_CAPACITY)
-            .batch_size(SAC_BATCH_SIZE)
-            .training_start(warmup_steps + 1)
+            .batch_size(32)
+            .training_start(DQN_TRAINING_START + 1)
+            .update_frequency(4)
+            .target_update_interval(1_000)
             .gamma(0.99)
-            .tau(0.005)
-            .training_horizon(warmup_steps + measured_steps)
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device.clone(),
-            )))
+            .training_horizon(horizon)
+            .epsilon_schedule(move |progress: f64| {
+                1.0 - 0.99 * (progress * horizon as f64 / 1_000_000.0).min(1.0)
+            })
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
+                storage_device: Device::flex(),
+                optimization_device: device.clone(),
+            }))
             .build(),
     )?;
-    debug_result(agent.learn(&mut env, warmup_steps))?;
-    device.synchronize()?;
-    let start = Instant::now();
-    debug_result(agent.learn(&mut env, measured_steps))?;
-    device.synchronize()?;
+    debug_result(agent.learn(&mut envs, horizon))?;
+    device.sync()?;
+    if let Some(error) = logger.sync_error {
+        return Err(error.into());
+    }
+    let start = logger
+        .start
+        .ok_or("DQN did not reach its warmup boundary")?;
     let elapsed = start.elapsed().as_secs_f64();
-    Ok(result(
-        args,
-        "sac",
-        measured_steps,
-        warmup_steps,
-        elapsed,
-        json!({
-            "environment": "Pendulum-v1", "time_limit": 200, "environments": 1,
-            "actor_hidden_layers": [64, 64], "critic_hidden_layers": [64, 64],
-            "trainable_parameters": SAC_PARAMETERS, "activation": "tanh", "dtype": "float32",
-            "state_dependent_log_std": true, "log_std_bounds": [-20.0, 2.0],
-            "replay_capacity": SAC_REPLAY_CAPACITY, "batch_size": SAC_BATCH_SIZE,
-            "training_start": warmup_steps, "updates_per_transition": 1,
-            "learning_rate": 3e-4, "adam_epsilon": 1e-5, "gamma": 0.99, "tau": 0.005,
-            "critics": 2, "critic_aggregation": "min", "automatic_entropy_tuning": true,
-            "initial_alpha": 1.0, "target_entropy": -1.0, "n_step_return": 1, "seed": SEED
-        }),
-    ))
-}
-
-fn result(
-    args: &Args,
-    algorithm: &str,
-    steps: usize,
-    warmup: usize,
-    elapsed: f64,
-    config: Value,
-) -> Value {
-    json!({
-        "algorithm": algorithm, "framework": "modurl", "framework_version": "0.1.0 (workspace)",
-        "backend": "candle 0.11.0", "device": args.device, "threads": args.threads,
-        "measured_steps": steps, "warmup_steps": warmup, "elapsed_seconds": elapsed,
-        "steps_per_second": steps as f64 / elapsed, "config": config
-    })
+    if logger.updates != args.steps / 4 + 1 {
+        return Err(format!(
+            "DQN performed {} updates, expected {}",
+            logger.updates,
+            args.steps / 4 + 1
+        )
+        .into());
+    }
+    Ok(elapsed)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse().map_err(|error| format!("argument error: {error}"))?;
+    let args =
+        Args::parse(env::args().skip(1)).map_err(|error| format!("argument error: {error}"))?;
+    #[cfg(feature = "libtorch")]
+    if args.backend == "libtorch" {
+        tch::set_num_threads(i32::try_from(args.threads)?);
+        if args.device == "cuda" && (!tch::Cuda::is_available() || !tch::Cuda::cudnn_is_available())
+        {
+            return Err("LibTorch CUDA benchmarks require CUDA and cuDNN".into());
+        }
+    }
     rayon::ThreadPoolBuilder::new()
         .num_threads(args.threads)
         .build_global()?;
-    let device = select_device(&args.device)?;
-    if !matches!(device, Device::Cpu) {
-        device.set_seed(SEED)?;
-    }
-    let (measured_steps, warmup_steps) = args.resolved_steps();
-    let output = match args.algorithm.as_str() {
-        "ppo" => ppo(&args, &device, measured_steps, warmup_steps)?,
-        "dqn" => dqn(&args, &device, measured_steps, warmup_steps)?,
-        "sac" => sac(&args, &device, measured_steps, warmup_steps)?,
+    let device = select_device(&args.device, &args.backend)?.autodiff();
+    Device::flex().seed(SEED);
+    device.seed(SEED);
+    let workloads: Value = serde_json::from_str(include_str!("../workloads.json"))?;
+    let elapsed = match args.algorithm.as_str() {
+        "ppo" => ppo(&args, &device)?,
+        "dqn" => dqn(&args, &device)?,
         _ => unreachable!(),
     };
+    let output = json!({ "algorithm": args.algorithm, "framework": "modurl", "framework_version": "0.1.0 (workspace)",
+        "backend": format!("burn 0.22.0 ({})", args.backend), "device": args.device, "threads": args.threads,
+        "autotuning": if args.backend == "libtorch" || args.device == "cpu" { "not applicable" } else if cfg!(feature = "cuda") { "enabled" } else { "disabled" },
+        "trace": args.trace,
+        "timing_mode": if args.trace_sync { "synchronized trace" } else if args.trace.is_some() { "host trace" } else { "untraced" },
+        "fusion": if args.backend == "libtorch" { "unavailable: LibTorch" } else if args.device == "cpu" { "unavailable: CPU Flex" } else { "enabled" },
+        "environment_workers": if args.algorithm == "ppo" { 32 } else { 0 },
+        "worker_kind": if args.algorithm == "ppo" { "threads" } else { "none" },
+        "measured_steps": args.steps, "warmup_steps": args.warmup_steps, "elapsed_seconds": elapsed,
+        "optimizer_steps": if args.algorithm == "ppo" { args.steps / PPO_ROLLOUT_SIZE * 16 } else { args.steps / 4 },
+        "steps_per_second": args.steps as f64 / elapsed, "config": workloads[&args.algorithm] });
     println!("BENCH_RESULT={output}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ppo_defaults_to_ten_warmup_rollouts() {
+        let args = Args::parse(
+            ["--rom", concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(args.warmup_steps, 40_960);
+    }
+
+    #[test]
+    fn ppo_warmup_requires_complete_nonzero_rollouts() {
+        for (warmup, accepted) in [
+            ("4096", true),
+            ("16384", true),
+            ("0", false),
+            ("16000", false),
+        ] {
+            let result = Args::parse(
+                [
+                    "--algorithm",
+                    "ppo",
+                    "--rom",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+                    "--steps",
+                    "4096",
+                    "--warmup-steps",
+                    warmup,
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+            assert_eq!(result.is_ok(), accepted, "warmup {warmup}");
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_backend_enables_fusion_and_autotuning() {
+        assert!(std::any::type_name::<burn_cubecl::Cube>().contains("Fusion<"));
+        assert!(matches!(
+            burn_cubecl::kernel::conv::ConvStrategy::default(),
+            burn_cubecl::kernel::conv::ConvStrategy::Autotune
+        ));
+    }
+
+    #[cfg(feature = "libtorch")]
+    #[test]
+    fn libtorch_preserves_cpu_byte_inputs_and_model_gradients() {
+        let device = select_device("cpu", "libtorch").unwrap().autodiff();
+        let model = AtariQNetwork::new(&device).unwrap();
+        let observations = Tensor::<4, Int>::zeros([2, 4, 84, 84], (&Device::flex(), DType::U8))
+            .to_device(&device);
+        assert_eq!(observations.dtype(), DType::U8);
+        let output = model.forward(observations).unwrap();
+        assert_eq!(output.dims(), [2, 4]);
+        assert_eq!(output.dtype(), DType::F32);
+        let gradients = burn::optim::GradientsParams::from_grads(output.mean().backward(), &model);
+        assert!(!gradients.is_empty());
+    }
+
+    #[cfg(feature = "cuda")]
+    struct ByteGym;
+
+    #[cfg(feature = "cuda")]
+    impl Gym<(), 4, 2> for ByteGym {
+        type Error = std::convert::Infallible;
+        type ObservationSpace = atari::FrameObservationSpace;
+        type ActionSpace = Discrete;
+
+        /// Returns a CPU U8 item [4, 84, 84].
+        fn reset(&mut self) -> Result<ResetInfo<(), Tensor<3, Int>>, Self::Error> {
+            Ok(ResetInfo {
+                observation: Tensor::zeros([4, 84, 84], (&Device::flex(), DType::U8)),
+                info: (),
+            })
+        }
+
+        /// Accepts CPU Int actions [1] and returns a CPU U8 item [4, 84, 84] with a scalar F32 reward.
+        fn step(
+            &mut self,
+            action: Tensor<1, Int>,
+        ) -> Result<StepInfo<(), Tensor<3, Int>>, Self::Error> {
+            assert_eq!(action.device(), Device::flex());
+            Ok(StepInfo {
+                observation: Tensor::full([4, 84, 84], 127, (&Device::flex(), DType::U8)),
+                reward: 1.0,
+                done: false,
+                truncated: true,
+                info: (),
+            })
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            atari::FrameObservationSpace
+        }
+
+        fn action_space(&self) -> Discrete {
+            Discrete::new(4)
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_dqn_trains_from_cpu_byte_replay_and_boolean_flags() {
+        assert!(std::any::type_name::<burn_cubecl::Cube>().contains("Fusion<"));
+        let device = Device::cuda(0).autodiff();
+        let envs = VectorizedGymWrapper::new(vec![ByteGym]).unwrap();
+        let mut envs = DeviceMultiGymWrapper::new(envs, Device::flex(), device.clone());
+        let model = AtariQNetwork::new(&device).unwrap();
+        let mut logger = DQNTimingLogger {
+            device: device.clone(),
+            warmup_steps: 2,
+            start: None,
+            sync_error: None,
+            updates: 0,
+        };
+        let mut agent = DQNAgent::builder()
+            .action_space(envs.action_space())
+            .observation_space(envs.observation_space())
+            .online_q_network(model)
+            .optimizer(AdamWConfig::new().init())
+            .learning_rate(1e-4)
+            .replay_capacity(8)
+            .batch_size(2)
+            .training_start(1)
+            .update_frequency(1)
+            .target_update_interval(2)
+            .training_horizon(4)
+            .logger(&mut logger)
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
+                storage_device: Device::flex(),
+                optimization_device: device.clone(),
+            }))
+            .build()
+            .unwrap();
+        agent.learn(&mut envs, 4).unwrap();
+        device.sync().unwrap();
+        assert_eq!(logger.updates, 3);
+        assert!(logger.start.is_some());
+        assert!(logger.sync_error.is_none());
+    }
+
+    /// Checks U8 CPU observations [32, 4, 84, 84] and Int actions [32, 1] across native workers.
+    #[test]
+    fn parallel_native_workers_preserve_byte_frame_stacks() {
+        let Some(rom) = env::var_os("MODURL_ALE_TEST_ROM") else {
+            eprintln!("skipping: MODURL_ALE_TEST_ROM is not set");
+            return;
+        };
+        let constructors = (0..PPO_ENV_COUNT)
+            .map(|index| {
+                let rom = PathBuf::from(rom.clone());
+                move || atari::make_atari_env(rom, (SEED + index as u64) as i32, 400_000, false)
+            })
+            .collect();
+        let mut envs = MultithreadedVectorizedGymWrapper::new(
+            constructors,
+            atari::FrameObservationSpace,
+            Discrete::new(4),
+        )
+        .unwrap();
+        let observations = envs.reset().unwrap();
+        assert_eq!(observations.dims(), [PPO_ENV_COUNT, 4, 84, 84]);
+        assert_eq!(observations.dtype(), DType::U8);
+        assert_eq!(observations.device(), Device::flex());
+        for _ in 0..4 {
+            let step = envs
+                .step(Tensor::<2, Int>::zeros(
+                    [PPO_ENV_COUNT, 1],
+                    (&Device::flex(), DType::U32),
+                ))
+                .unwrap();
+            assert_eq!(step.observations.dtype(), DType::U8);
+            assert_eq!(step.observations.dims(), [PPO_ENV_COUNT, 4, 84, 84]);
+            assert_eq!(step.observations.device(), Device::flex());
+        }
+    }
+
+    #[test]
+    fn workload_preserves_native_observations_and_cpu_replay() {
+        let workloads: Value = serde_json::from_str(include_str!("../workloads.json")).unwrap();
+        assert_eq!(workloads["ppo"]["environments"], PPO_ENV_COUNT);
+        assert_eq!(workloads["ppo"]["rollout_size"], PPO_ROLLOUT_SIZE);
+        assert_eq!(workloads["dqn"]["replay_capacity"], DQN_REPLAY_CAPACITY);
+        assert_eq!(workloads["dqn"]["training_start"], DQN_TRAINING_START);
+        assert_eq!(workloads["dqn"]["replay_storage"], "cpu");
+        for algorithm in ["ppo", "dqn"] {
+            assert_eq!(workloads[algorithm]["observation_dtype"], "uint8");
+        }
+    }
+
+    #[test]
+    fn dqn_module_converts_byte_inputs_and_has_expected_parameter_count() {
+        let device = Device::flex();
+        let model = AtariQNetwork::new(&device).unwrap();
+        assert_eq!(model.num_params(), 1_686_180);
+        let observations = Tensor::<4, Int>::zeros([1, 4, 84, 84], (&device, DType::U8));
+        let output = model.forward(observations.clone()).unwrap();
+        assert_eq!(observations.dtype(), DType::U8);
+        assert_eq!(output.dtype(), DType::F32);
+        assert_eq!(output.dims(), [1, 4]);
+    }
 }

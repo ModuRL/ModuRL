@@ -18,14 +18,12 @@ use burn::{
 };
 use modurl::prelude::*;
 use std::{env, path::PathBuf};
-#[path = "support/atari.rs"]
-mod atari;
-#[path = "support/nature_cnn.rs"]
-mod nature_cnn;
 mod support;
-use atari::make_atari_env;
-use nature_cnn::{NatureCnn, NatureCnnError};
-use support::graphers::DQNGrapher;
+use support::{
+    atari::make_atari_env,
+    graphers::DQNGrapher,
+    nature_cnn::{NatureCnn, NatureCnnError},
+};
 
 const SEED: i32 = 1;
 const NUM_ENVS: usize = 1;
@@ -94,7 +92,7 @@ fn main() {
     let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
     let device = device.autodiff();
     device.seed(SEED as u64);
-    let mut envs = VectorizedGymWrapper::new(
+    let envs = VectorizedGymWrapper::new(
         (0..NUM_ENVS)
             .map(|index| {
                 make_atari_env(
@@ -107,6 +105,7 @@ fn main() {
             .collect(),
     )
     .unwrap();
+    let mut envs = DeviceMultiGymWrapper::new(envs, Device::flex(), device.clone());
     let action_space = envs.action_space();
     let observation_space = envs.observation_space();
     let online_q_network = AtariQNetwork::new(action_space.get_possible_values(), &device).unwrap();

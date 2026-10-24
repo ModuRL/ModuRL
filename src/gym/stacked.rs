@@ -22,6 +22,8 @@ pub enum StackedMultiGymError<E> {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
+    #[error("invalid action batch: expected {expected} rows, got {actual}")]
+    InvalidActionBatch { expected: usize, actual: usize },
     #[error("inner gym {gym_index} failed: {error}")]
     Inner {
         gym_index: usize,
@@ -103,11 +105,18 @@ where
     /// Splits rank-`A` actions `[total_size, ...action_shape]` across groups without removing the batch axis.
     /// Concatenates rank-`O` observations `[group_size, ...observation_shape]` and rewards `[group_size, 1]` in group order.
     /// Input dimensions, dtype, and device must satisfy the inner gyms' contracts.
+    /// Rejects an action-row count mismatch before any group advances.
     fn step(
         &mut self,
         action: <G::ActionSpace as TensorBatchTypes>::Batch,
     ) -> Result<MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error>
     {
+        let expected = self.num_envs();
+        let actual = action.dims()[0];
+        if actual != expected {
+            return Err(StackedMultiGymError::InvalidActionBatch { expected, actual });
+        }
+
         let mut steps = Vec::with_capacity(self.gyms.len());
         for (gym_index, gym) in self.gyms.iter_mut().enumerate() {
             let range = self.group_offsets[gym_index]..self.group_offsets[gym_index + 1];
@@ -246,6 +255,30 @@ mod tests {
                 10.0, 0.0, 0.0, 10.0, 1.0, -1.0, 20.0, 0.0, 2.0, 20.0, 1.0, 3.0, 20.0, 2.0, -4.0
             ]
         );
+    }
+
+    #[test]
+    fn invalid_action_batches_do_not_step_stacked_groups() {
+        let mut failing = GroupEnv::new(20, 3);
+        failing.fail_next = true;
+        let mut env = StackedMultiGym::new(vec![GroupEnv::new(10, 2), failing]).unwrap();
+
+        for actual in [4, 6] {
+            assert!(matches!(
+                env.step(Tensor::zeros([actual, 1], &Device::flex())),
+                Err(StackedMultiGymError::InvalidActionBatch {
+                    expected: 5,
+                    actual: count,
+                }) if count == actual
+            ));
+        }
+        assert!(matches!(
+            env.step(Tensor::zeros([5, 1], &Device::flex())),
+            Err(StackedMultiGymError::Inner {
+                gym_index: 1,
+                error: TestError::Forced,
+            })
+        ));
     }
 
     #[test]

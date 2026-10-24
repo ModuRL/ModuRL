@@ -23,3 +23,10 @@ ale::ALEState* decodeState(const char* serialized, int len) {
 
   return new ale::ALEState(str);
 }
+
+extern "C" void modurl_ale_get_rgb_palette(ale::ALEInterface* ale, unsigned int* colors) {
+  static_assert(sizeof(unsigned int) == 4, "Palette entries require 32-bit integers");
+  for (int index = 0; index < 256; ++index) {
+    colors[index] = ale->theOSystem->colourPalette().getRGB(index);
+  }
+}

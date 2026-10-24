@@ -20,7 +20,11 @@ Pass a `SeparatePPONetwork` or `SharedPPONetwork` directly to `.network_info(net
 The agent infers its model group from `PPONetwork::ModelGroup`.
 Custom `PPONetwork<O, H, L>` implementations must set `ModelGroup` to
 `PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<H, Self::LatentKind>, Tensor<L>>`.
-The built-in shared and separate networks supply this type directly.
+The network must implement `Module`. Its module operations must traverse model parameters and training flags.
+PPO calls `Module::valid()` and removes autodiff from inference observations without changing their kind or dtype.
+It reuses one validation network for collection and fixed value estimates, then releases it before optimizer updates.
+The built-in networks supply these implementations directly. Their learning-rate schedules must implement `Send + Sync`.
+Schedules are shared through `Arc` when a validation network is created.
 Observations keep `[batch_size, ...observation_shape]`, their native kind, and their dtype.
 Models perform any required conversions. Separate models accept observations directly;
 shared trunks produce Float features, and shared heads accept Float inputs. The compiler rejects incompatible kind connections.

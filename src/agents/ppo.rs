@@ -117,6 +117,7 @@ struct PPOExperience<O: NextRank = Tensor<2>, A: NextRank = Tensor<2>> {
     next_dones: Vec<bool>,
     truncateds: Vec<bool>,
     log_probs: Tensor<2>,
+    values: Tensor<2>,
     prepared: Option<PPOPreparedExperience>,
 }
 
@@ -124,6 +125,7 @@ struct PPOCollectionAction<AS: TensorBatchTypes, const L: usize> {
     policy_actions: Tensor<L>,
     environment_actions: AS::Batch,
     log_probs: Tensor<2>,
+    values: Tensor<2>,
 }
 
 struct PPOPreparedRolloutBatch {
@@ -134,11 +136,8 @@ struct PPOPreparedRolloutBatch {
 
 struct PPORolloutBatch<O: NextRank, A: NextRank> {
     observations: O::Next,
-    next_observations: O::Next,
     actions: A::Next,
     rewards: Tensor<3>,
-    next_dones: Tensor<3, Bool>,
-    truncateds: Tensor<3, Bool>,
     log_probs: Tensor<3>,
     prepared: Option<PPOPreparedRolloutBatch>,
 }
@@ -184,8 +183,8 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
     /// Creates one vectorized rollout transition.
     ///
     /// `observations` and `next_observations` are `[env_count, ...observation_shape]`.
-    /// `actions` is `[env_count, ...action_shape]`; `rewards`
-    /// and `log_probs` are `[env_count, 1]`. `rewards` preserves the environment values for logging.
+    /// `actions` is `[env_count, ...action_shape]`; `rewards`, `log_probs`, and detached collection `values` are `[env_count, 1]`.
+    /// `rewards` preserves the environment values for logging.
     /// Training rewards [env_count, 1] include terminal-value corrections for nonterminal truncations and retain the reward dtype.
     /// Observations preserve their native kind and dtype. Other fields preserve their Float dtype and device; collection detaches stored experience.
     /// PPO training data is added internally after rollout collection.
@@ -199,6 +198,7 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
         next_dones: Vec<bool>,
         truncateds: Vec<bool>,
         log_probs: Tensor<2>,
+        values: Tensor<2>,
     ) -> Self {
         Self {
             observations,
@@ -209,6 +209,7 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
             next_dones,
             truncateds,
             log_probs,
+            values,
             prepared: None,
         }
     }
@@ -224,18 +225,12 @@ where
     type Error = ExperienceBatchError;
 
     /// Adds a leading time axis to rank-O observations and rank-A actions, producing tensors with one additional axis.
-    /// Scalar statistics and Bool flags become `[time, environment_count, 1]` without changing environment order.
+    /// Training statistics become `[time, environment_count, 1]` without changing environment order.
     /// Each tensor field must share shape, dtype, and device across time. Preserves gradient connections.
     fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
-        let first = experiences
-            .first()
-            .ok_or(ExperienceBatchError::EmptyBatch)?;
         Ok(PPORolloutBatch {
             observations: experience::stack_tensor_field(experiences, |experience| {
                 experience.observations.clone()
-            })?,
-            next_observations: experience::stack_tensor_field(experiences, |experience| {
-                experience.next_observations.clone()
             })?,
             actions: experience::stack_tensor_field(experiences, |experience| {
                 experience.actions.clone()
@@ -243,16 +238,6 @@ where
             rewards: experience::stack_tensor_field(experiences, |experience| {
                 experience.rewards.clone()
             })?,
-            next_dones: experience::stack_bool_field(
-                experiences,
-                |experience| &experience.next_dones,
-                &first.observations.device(),
-            )?,
-            truncateds: experience::stack_bool_field(
-                experiences,
-                |experience| &experience.truncateds,
-                &first.observations.device(),
-            )?,
             log_probs: experience::stack_tensor_field(experiences, |experience| {
                 experience.log_probs.clone()
             })?,
@@ -572,15 +557,16 @@ where
         feature = "tracing",
         tracing::instrument(name = "ppo.optimize", target = "modurl::performance", skip_all)
     )]
+    /// Updates training models from prepared rollout statistics and explained variance `[1]`.
+    /// Rollout tensors preserve their native observation kind, reward dtype, and device.
     fn optimize<const BO: usize, const BL: usize>(
         &mut self,
+        rollout_explained_variance: Tensor<1>,
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>>
     where
         Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
         Tensor<L>: NextRank<Next = Tensor<BL>>,
     {
-        let rollout_explained_variance = self.add_advantages_and_returns()?;
-
         let batch = PPOExperience::<OS::Batch, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
         let all_observations = batch.observations.flatten::<O>(0, 1);
         let all_actions = batch.actions.flatten::<L>(0, 1);
@@ -637,6 +623,7 @@ where
                     .call()?;
 
                 self.backpropagate_loss(ppo_losses.clone())?;
+                device.flush().map_err(TensorReadError::from)?;
             }
         }
 
@@ -654,51 +641,49 @@ where
         )
     )]
     /// Returns explained variance `[1]` and prepares detached statistics `[time, env_count, 1]`.
-    /// Temporarily combines time and environment axes for rank-O observation evaluation, then restores both axes.
-    fn add_advantages_and_returns<const BO: usize, const BL: usize>(
+    /// Reuses stored collection values and evaluates only the final next-observation batch without autodiff.
+    fn add_advantages_and_returns(
         &mut self,
-    ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>>
-    where
-        Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
-        Tensor<L>: NextRank<Next = Tensor<BL>>,
-    {
-        let batch = PPOExperience::<OS::Batch, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
-        let observations = batch.observations;
-        let (batch_size, env_count) = (observations.dims()[0], observations.dims()[1]);
-        let observations = observations.flatten::<O>(0, 1);
-        let latent_observations = self
-            .latent_observations(observations)
-            .map_err(PPOError::NetworkError)?;
-
-        let values_tensor = self
-            .critic_network_forward(&latent_observations, batch.rewards.dtype())?
-            .detach();
-
-        // Unflatten back to [batch_size, env_count, ...].
-        let values_tensor = values_tensor.reshape([batch_size, env_count, 1]);
-
-        let next_observations_tensor = batch.next_observations;
-        let bootstrapped_observations = next_observations_tensor
-            .slice_dim(0, batch_size - 1..batch_size)
-            .squeeze_dim::<O>(0);
-        let latent_bootstrapped_observations = self
-            .latent_observations(bootstrapped_observations)
+        validation: &N,
+    ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>> {
+        let experiences = self.rollout_buffer.get_raw();
+        let values_tensor: Tensor<3> =
+            experience::stack_tensor_field(experiences, |experience| experience.values.clone())?;
+        let final_experience = experiences.last().ok_or(ExperienceBatchError::EmptyBatch)?;
+        let values_tensor =
+            values_tensor.reshape([experiences.len(), final_experience.rewards.dims()[0], 1]);
+        let bootstrapped_observations = final_experience.next_observations.clone();
+        let latent_bootstrapped_observations = validation
+            .forward_observations(bootstrapped_observations.without_autodiff())
             .map_err(PPOError::NetworkError)?;
 
         let bootstrapped_values = self
-            .critic_network_forward(&latent_bootstrapped_observations, batch.rewards.dtype())?
+            .critic_network_forward(
+                validation,
+                &latent_bootstrapped_observations,
+                final_experience.rewards.dtype(),
+            )?
             .detach(); // shape [env_count, 1]
 
-        let training_rewards =
-            experience::stack_tensor_field(self.rollout_buffer.get_raw(), |experience| {
-                experience.training_rewards.clone()
-            })?;
+        let training_rewards = experience::stack_tensor_field(experiences, |experience| {
+            experience.training_rewards.clone()
+        })?;
+        let next_dones = experience::stack_bool_field(
+            experiences,
+            |experience| &experience.next_dones,
+            &values_tensor.device(),
+        )?;
+        let truncateds = experience::stack_bool_field(
+            experiences,
+            |experience| &experience.truncateds,
+            &values_tensor.device(),
+        )?;
         let advantages = self
             .compute_gae(
                 &training_rewards,
                 &values_tensor,
-                &batch.next_dones,
-                &batch.truncateds,
+                &next_dones,
+                &truncateds,
                 &bootstrapped_values,
             )
             .detach();
@@ -720,16 +705,9 @@ where
                     .slice_dim(0, i..i + 1)
                     .squeeze_dim(0)
                     .detach(),
-                // values_tensor comes from the pre-update network, i.e. the
-                // collection-time values PPO2 clips the new values against.
+                // Value-loss clipping compares current values with fixed collection values.
                 old_values: if self.clip_value_loss {
-                    Some(
-                        values_tensor
-                            .clone()
-                            .slice_dim(0, i..i + 1)
-                            .squeeze_dim(0)
-                            .detach(),
-                    )
+                    Some(experience.values.clone())
                 } else {
                     None
                 },
@@ -799,21 +777,30 @@ where
     /// returns critic values shaped `[batch, 1]`.
     /// Accepts the policy's input kind and rejects outputs that differ from the environment reward dtype; all tensors share a device.
     fn critic_network_forward(
-        &mut self,
+        &self,
+        network: &N,
         observations: &Tensor<H, N::LatentKind>,
         reward_dtype: DType,
     ) -> Result<Tensor<2>, PPOError<N::Error, GE, AS::Error>> {
-        let values = self
-            .network_info
+        let values = network
             .forward_values(observations.clone())
             .map_err(PPOError::NetworkError)?;
+        Self::check_critic_dtype(&values, reward_dtype)?;
+        Ok(values)
+    }
+
+    /// Checks critic values `[batch, 1]` against the environment reward dtype without changing the tensor.
+    fn check_critic_dtype(
+        values: &Tensor<2>,
+        reward_dtype: DType,
+    ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
         if values.dtype() != reward_dtype {
             return Err(PPOError::CriticRewardDTypeMismatch {
                 critic: values.dtype(),
                 reward: reward_dtype,
             });
         }
-        Ok(values)
+        Ok(())
     }
 
     /// Adds discounted terminal values to rewards [environment_count, 1] for nonterminal truncated rows.
@@ -822,6 +809,7 @@ where
     /// True termination suppresses bootstrapping, including transitions that also truncate.
     fn bootstrap_truncated_rewards(
         &mut self,
+        validation: &N,
         rewards: Tensor<2>,
         transition_next_observations: &OS::Batch,
         dones: &[bool],
@@ -851,11 +839,11 @@ where
         let truncated_next_observations = transition_next_observations
             .clone()
             .select(0, truncated_indices.clone());
-        let latent_observations = self
-            .latent_observations(truncated_next_observations)
+        let latent_observations = validation
+            .forward_observations(truncated_next_observations.without_autodiff())
             .map_err(PPOError::NetworkError)?;
         let terminal_values = self
-            .critic_network_forward(&latent_observations, rewards.dtype())?
+            .critic_network_forward(validation, &latent_observations, rewards.dtype())?
             .detach();
         Ok(rewards.select_assign(
             0,
@@ -949,7 +937,8 @@ where
             }
         };
 
-        let values = self.critic_network_forward(&latent_observations, rewards.dtype())?;
+        let values =
+            self.critic_network_forward(&self.network_info, &latent_observations, rewards.dtype())?;
 
         let entropy_loss = entropy.mean();
 
@@ -1036,27 +1025,34 @@ where
     }
 
     /// Samples rank-L policy actions and maps them to rank-A environment actions from native rank-O observations.
-    /// All tensors preserve the leading environment axis; log probabilities are detached `[environment_count, 1]`.
+    /// All tensors preserve the leading environment axis; log probabilities and critic values are detached `[environment_count, 1]`.
     fn sample_collection_action(
         &mut self,
+        validation: &N,
         observations: &OS::Batch,
     ) -> Result<PPOCollectionAction<AS, L>, PPOError<N::Error, GE, AS::Error>> {
-        let latent_observations = self
-            .latent_observations(observations.clone())
+        let latent_observations = validation
+            .forward_observations(observations.clone().without_autodiff())
             .map_err(PPOError::NetworkError)?;
-        let policy_actions = self.act_neurons(&latent_observations)?;
+        let policy_actions = validation
+            .sample(latent_observations.clone())
+            .map_err(PPOError::NetworkError)?;
         let environment_actions = self
             .action_space
             .tensor_from_neurons(policy_actions.clone())
             .map_err(PPOError::SpaceError)?;
-        let (log_probs, _) = self
-            .actor_network_log_prob_and_entropy(&latent_observations, &policy_actions)
+        let values = validation
+            .forward_values(latent_observations.clone())
+            .map_err(PPOError::NetworkError)?;
+        let (log_probs, _) = validation
+            .log_prob_and_entropy(latent_observations, policy_actions.clone())
             .map_err(PPOError::NetworkError)?;
         Ok(PPOCollectionAction {
             policy_actions,
             environment_actions,
             // Do not retain the collection forward graph in the rollout buffer.
             log_probs: log_probs.detach(),
+            values: values.detach(),
         })
     }
 
@@ -1175,8 +1171,10 @@ where
     )]
     /// Fills the rollout buffer, updating `next_observations` shaped
     /// `[environment_count, ...observation_shape]` after each environment step.
+    /// Uses the supplied validation view without changing the training models, including on errors.
     fn collect_rollout<const U: usize>(
         &mut self,
+        validation: &N,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         next_observations: &mut OS::Batch,
     ) -> Result<usize, PPOError<N::Error, GE, AS::Error>>
@@ -1187,7 +1185,7 @@ where
         let environment_count = env.num_envs();
         while self.rollout_buffer.len() * environment_count < self.batch_size {
             let observations = next_observations.clone();
-            let collection_action = self.sample_collection_action(&observations)?;
+            let collection_action = self.sample_collection_action(validation, &observations)?;
             let step_info = env
                 .step(collection_action.environment_actions.clone())
                 .map_err(PPOError::GymError)?;
@@ -1200,6 +1198,7 @@ where
                 truncateds,
                 terminal_observations: _,
             } = step_info;
+            Self::check_critic_dtype(&collection_action.values, collection_rewards.dtype())?;
             let first_collection_timestep = self
                 .schedule_progress
                 .elapsed_steps()
@@ -1212,6 +1211,7 @@ where
                 first_collection_timestep,
             )?;
             let training_rewards = self.bootstrap_truncated_rewards(
+                validation,
                 collection_rewards.clone().detach(),
                 &training_next_observations,
                 &next_dones,
@@ -1227,6 +1227,7 @@ where
                     .next_dones(next_dones)
                     .truncateds(truncateds)
                     .log_probs(collection_action.log_probs)
+                    .values(collection_action.values)
                     .build(),
             );
             *next_observations = reset_or_next_observations;
@@ -1235,9 +1236,11 @@ where
         Ok(self.rollout_buffer.len() * environment_count)
     }
 
+    /// Advances collection progress and trains with explained variance `[1]` from detached rollout values.
     fn train_on_collected_rollout<const BO: usize, const BL: usize>(
         &mut self,
         collected_timesteps: usize,
+        rollout_explained_variance: Tensor<1>,
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>>
     where
         Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
@@ -1248,7 +1251,7 @@ where
         if let Some(logging_info) = &mut self.logging_info {
             logging_info.timestep = self.schedule_progress.elapsed_steps();
         }
-        self.optimize()
+        self.optimize(rollout_explained_variance)
     }
 }
 
@@ -1329,9 +1332,15 @@ where
         let mut next_observations = self.prepare_rollout_collection(env)?;
 
         while elapsed_timesteps < num_timesteps {
-            let collected_timesteps = self.collect_rollout(env, &mut next_observations)?;
+            let (collected_timesteps, rollout_explained_variance) = {
+                let validation = self.network_info.valid();
+                let collected_timesteps =
+                    self.collect_rollout(&validation, env, &mut next_observations)?;
+                let rollout_explained_variance = self.add_advantages_and_returns(&validation)?;
+                (collected_timesteps, rollout_explained_variance)
+            };
             elapsed_timesteps += collected_timesteps;
-            self.train_on_collected_rollout(collected_timesteps)?;
+            self.train_on_collected_rollout(collected_timesteps, rollout_explained_variance)?;
         }
         self.current_observations = Some(next_observations);
         Ok(())
