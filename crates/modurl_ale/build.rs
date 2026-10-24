@@ -50,6 +50,10 @@ fn main() {
             .cxxflag("/O2");
     }
 
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        config.cflag("-DHAVE_UNISTD_H");
+    }
+
     let destination = config.build();
     println!("cargo:rustc-link-search=native={}", library_dir.display());
     println!("cargo:rustc-link-search=native={}", destination.display());
