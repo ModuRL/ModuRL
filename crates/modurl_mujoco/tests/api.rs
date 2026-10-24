@@ -1,5 +1,3 @@
-#![cfg(any())]
-
 use candle_core::{DType, Device, Tensor};
 use modurl::gym::Gym;
 use modurl_mujoco::{AntV5, HalfCheetahV5, HopperV5, HumanoidV5, Walker2dV5};
