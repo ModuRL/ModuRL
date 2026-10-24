@@ -62,39 +62,34 @@ Replay-based agents can keep a large replay buffer on the CPU while running
 models and optimization on an accelerator:
 
 ```rust,ignore
-let optimization_device = Device::new_cuda(0)?;
-let storage_device = Device::Cpu;
+use burn::tensor::Device;
+use modurl::prelude::*;
 
-let env = CartPoleV1::builder()
-    .rng_device(&optimization_device)
-    .build()
-    .unwrap();
+let optimization_device = Device::cuda(0).autodiff();
+let storage_device = Device::flex();
+let env = CartPoleV1::builder().rng_device(&storage_device).build()?;
 let mut envs = DeviceMultiGymWrapper::new(
-    VectorizedGymWrapper::from(vec![env]), Device::Cpu, optimization_device.clone(),
+    VectorizedGymWrapper::from(env), storage_device.clone(), optimization_device.clone(),
 );
-
-let actor_vb = VarBuilder::from_varmap(
-    &actor_vars,
-    candle_core::DType::F32,
-    &optimization_device,
-);
-
-let device_strategy = ReplayDeviceStrategy::Hybrid {
+let replay_storage_config = ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
     optimization_device: optimization_device.clone(),
     storage_device,
-};
-let replay_storage_config = ReplayStorageConfig::new(device_strategy);
+});
 
 let mut agent = SACAgent::builder()
-    // Build the actor, critics, target critics, optimizers, and entropy
-    // variable on optimization_device.
+    .policy(policy)
+    .actor_optimizer(actor_optimizer)
+    .actor_learning_rate(3e-4)
+    .critics(critics)
+    .entropy_configuration(entropy)
+    .action_space(envs.action_space())
+    .observation_space(envs.observation_space())
+    .training_horizon(total_timesteps)
     .replay_storage_config(replay_storage_config)
-    // Keep the remaining SAC configuration unchanged.
     .build()?;
 ```
 
-`ReplayStorageConfig` controls replay observation representation and uses its
-`ReplayDeviceStrategy` to move replay entries and sampled batches. It does not
+`ReplayStorageConfig` selects replay and optimization devices. SAC stores the native observation kind and dtype from the first batch. It does not
 move an environment or model parameters for you.
 
 Build SAC's actor, critics, target critics, optimizers, and automatic entropy

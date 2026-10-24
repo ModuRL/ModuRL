@@ -497,12 +497,10 @@ impl<I> PPOLogger<RawRewardInfo<EpisodeStatisticsInfo<I>>>
 
 const SAC_UPDATE_LOG_INTERVAL: usize = 1_000;
 
-#[cfg(any())]
 pub struct SACGrapher {
     terminal: TerminalLogger,
 }
 
-#[cfg(any())]
 impl SACGrapher {
     pub fn new() -> Self {
         let aggregation = with_episode_smoothing(with_metric_window(
@@ -524,7 +522,6 @@ impl SACGrapher {
     }
 }
 
-#[cfg(any())]
 impl<I> SACLogger<I> for SACGrapher {
     fn log_update(&mut self, entry: &SACLogEntry) {
         if !entry
@@ -533,40 +530,22 @@ impl<I> SACLogger<I> for SACGrapher {
         {
             return;
         }
-        let critic_loss = Tensor::stack(&entry.critic_losses, 0)
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let actor_loss = entry.actor_loss.mean_all().unwrap();
-        let entropy_coefficient = entry.alpha.mean_all().unwrap();
-        let policy_entropy = entry
-            .policy_log_probabilities
-            .mul(&entry.policy_weights)
-            .unwrap()
-            .sum(D::Minus1)
-            .unwrap()
-            .neg()
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let expected_policy_q = entry
-            .policy_q_values
-            .mul(&entry.policy_weights)
-            .unwrap()
-            .sum(D::Minus1)
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let replay_reward = entry.replay_rewards.mean_all().unwrap();
-        let bellman_target = entry.bellman_targets.mean_all().unwrap();
-        let alpha_loss = entry
-            .alpha_loss
-            .as_ref()
-            .map(|loss| loss.mean_all().unwrap());
-        let entropy_change_loss = entry
-            .entropy_change_loss
-            .as_ref()
-            .map(|loss| loss.mean_all().unwrap());
+        let critic_loss = on_policy_metric(&burn::tensor::Tensor::<1>::stack::<2>(
+            entry.critic_losses.clone(),
+            0,
+        ));
+        let actor_loss = on_policy_metric(&entry.actor_loss);
+        let entropy_coefficient = on_policy_metric(&entry.alpha);
+        let policy_entropy = on_policy_metric(
+            &(-(entry.policy_log_probabilities.clone() * entry.policy_weights.clone()).sum_dim(2)),
+        );
+        let expected_policy_q = on_policy_metric(
+            &(entry.policy_q_values.clone() * entry.policy_weights.clone()).sum_dim(2),
+        );
+        let replay_reward = on_policy_metric(&entry.replay_rewards);
+        let bellman_target = on_policy_metric(&entry.bellman_targets);
+        let alpha_loss = entry.alpha_loss.as_ref().map(on_policy_metric);
+        let entropy_change_loss = entry.entropy_change_loss.as_ref().map(on_policy_metric);
         let target_entropy = entry
             .target_entropy
             .map(|value| Tensor::new(value, &Device::Cpu).unwrap());
@@ -599,7 +578,7 @@ impl<I> SACLogger<I> for SACGrapher {
             .collection_timestep
             .is_multiple_of(SAC_UPDATE_LOG_INTERVAL)
         {
-            let mean_step_reward = entry.collection_rewards.mean_all().unwrap();
+            let mean_step_reward = on_policy_metric(&entry.collection_rewards);
             self.terminal
                 .log(
                     entry.collection_timestep,
@@ -940,6 +919,71 @@ mod tests {
                 .unwrap()
                 .1,
             50.5
+        );
+    }
+
+    #[test]
+    fn sac_native_metrics_and_episodes_keep_monotonic_batch_times() {
+        let device = burn::tensor::Device::flex();
+        let mut grapher = SACGrapher::new();
+        SACLogger::<()>::log_update(
+            &mut grapher,
+            &SACLogEntry {
+                critic_losses: vec![
+                    burn::tensor::Tensor::from_data([2.0f32], &device),
+                    burn::tensor::Tensor::from_data([4.0f32], &device),
+                ],
+                actor_loss: burn::tensor::Tensor::from_data([1.0f32], &device),
+                alpha_loss: None,
+                entropy_change_loss: None,
+                target_entropy: None,
+                alpha: burn::tensor::Tensor::from_data([0.2f32], &device),
+                bellman_targets: burn::tensor::Tensor::from_data([[3.0f32]], &device),
+                policy_log_probabilities: burn::tensor::Tensor::from_data(
+                    [[[-1.0f32], [-2.0]]],
+                    &device,
+                ),
+                policy_weights: burn::tensor::Tensor::from_data([[[0.5f32], [0.5]]], &device),
+                policy_q_values: burn::tensor::Tensor::from_data([[[2.0f32], [6.0]]], &device),
+                replay_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
+                update_index: 0,
+                collection_timestep: 1_000,
+            },
+        );
+        grapher.log_collection(&SACCollectionLogEntry {
+            collection_rewards: burn::tensor::Tensor::from_data([[1.0f32], [1.0]], &device),
+            infos: vec![(), ()],
+            collection_timestep: 1_000,
+            replay_len: 1_000,
+            completed_episodes: vec![SACEpisodeLogEntry {
+                environment_index: 0,
+                episode_return: 2.0,
+                episode_length: 1,
+                collection_timestep: 999,
+                terminated: true,
+                truncated: false,
+            }],
+        });
+        grapher.terminal.finish().unwrap();
+        assert_eq!(
+            grapher
+                .terminal
+                .series("Critic Loss")
+                .unwrap()
+                .last()
+                .unwrap()
+                .1,
+            3.0
+        );
+        assert_eq!(
+            grapher
+                .terminal
+                .series(EPISODE_RETURN_METRIC)
+                .unwrap()
+                .last()
+                .unwrap()
+                .0,
+            1_000
         );
     }
 
