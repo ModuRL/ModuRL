@@ -3,7 +3,7 @@ pub mod buffers;
 pub mod distributions;
 #[cfg(any())]
 pub mod gym;
-pub mod init;
+#[cfg(any())]
 pub mod models;
 pub mod objectives;
 pub mod parameter_schedule;
