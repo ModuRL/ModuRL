@@ -279,6 +279,7 @@ mod schedule_tests {
 
     #[test]
     fn shared_model_can_change_observation_rank() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         #[derive(Module, Debug)]
         struct FlattenModel;
 
@@ -470,6 +471,7 @@ mod schedule_tests {
 
     #[test]
     fn shared_models_preserve_boolean_observations_and_use_float_features() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         #[derive(Module, Debug)]
         struct BooleanTrunk;
 
@@ -646,6 +648,7 @@ mod schedule_tests {
 
     #[test]
     fn critic_requires_reward_dtype_and_preserves_observation_dtype() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let env: VectorizedGymWrapper<TwoStepTestGym, usize> =
             TwoStepTestGym::new(device.clone(), false).into();
@@ -799,6 +802,7 @@ mod schedule_tests {
 
     #[test]
     fn truncation_uses_terminal_observations_and_preserves_reset_observations() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         #[derive(Module, Debug)]
         struct ObservationCritic {
             weight: Param<Tensor<1>>,
@@ -1085,6 +1089,7 @@ mod schedule_tests {
 
     #[test]
     fn collection_logs_report_fresh_rewards_and_completed_episodes() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = vec![
             TwoStepTestGym::new(device.clone(), false),
