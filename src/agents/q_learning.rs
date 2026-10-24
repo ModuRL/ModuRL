@@ -401,6 +401,7 @@ struct QCollectedTransitions<'a, const R: usize, K: Autodiff> {
 pub(crate) struct QLearningAgent<M, S, GE, T, const R: usize = 2>
 where
     S: ObservationSpace<R>,
+    Tensor<R, S::Kind>: PrevRank<Prev = S::Observation>,
     S::Kind: Autodiff,
 {
     online_q_network: M,
@@ -429,6 +430,7 @@ where
 impl<M, S, GE, T, const R: usize, K: Autodiff, ME: std::fmt::Debug> QLearningAgent<M, S, GE, T, R>
 where
     S: ObservationSpace<R, Kind = K>,
+    Tensor<R, K>: PrevRank<Prev = S::Observation>,
     M: Module + Forward<R, 2, InputKind = K, OutputKind = Float, Error = ME>,
     GE: std::fmt::Debug,
     T: QLearningTarget,
@@ -536,6 +538,7 @@ where
 impl<M, S, GE, T, const R: usize, K: Autodiff, ME: std::fmt::Debug> QLearningAgent<M, S, GE, T, R>
 where
     S: ObservationSpace<R, Kind = K>,
+    Tensor<R, K>: PrevRank<Prev = S::Observation>,
     M: Module + Forward<R, 2, InputKind = K, OutputKind = Float, Error = ME>,
     GE: std::fmt::Debug,
     T: QLearningTarget,
@@ -707,8 +710,6 @@ where
         Ok(())
     }
 
-    /// Collects native rank-R observations [num_envs, ...observation_shape] and Int actions [num_envs, 1].
-    /// Saves terminal observations before auto-reset replacements. Each call resets environments; schedule and replay progress persist.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
@@ -718,6 +719,9 @@ where
             fields(num_timesteps)
         )
     )]
+    /// Collects native rank-R observations `[num_envs, ...observation_shape]` and Int actions `[num_envs, 1]`.
+    /// Terminal observations omit the batch axis and preserve observation kind, dtype, and device.
+    /// Each call resets environments; schedule and replay progress persist.
     pub(crate) fn learn<I, const U: usize>(
         &mut self,
         env: &mut dyn MultiGym<I, R, 2, Error = GE, ObservationSpace = S, ActionSpace = Discrete>,
@@ -725,6 +729,7 @@ where
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>
     where
+        S: ObservationSpace<R, Kind = K, Observation = Tensor<U, K>>,
         Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
         Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
     {
@@ -1277,8 +1282,12 @@ mod tests {
         pub(super) _kind: PhantomData<K>,
     }
 
-    impl<const R: usize, K: Basic> ObservationSpace<R> for ObservationFixture<R, K> {
+    impl<const R: usize, K: Basic> ObservationSpace<R> for ObservationFixture<R, K>
+    where
+        Tensor<R, K>: PrevRank,
+    {
         type Kind = K;
+        type Observation = <Tensor<R, K> as PrevRank>::Prev;
 
         /// Checks native rank-R observations [batch_size, 1, ...] against size-one item axes.
         fn contains(&self, observations: &Tensor<R, K>) -> bool {

@@ -10,5 +10,5 @@ pub mod graphers;
 #[allow(dead_code)]
 pub mod mujoco;
 
-#[cfg(feature = "atari-environment")]
+#[cfg(any())]
 pub(crate) mod nature_cnn;

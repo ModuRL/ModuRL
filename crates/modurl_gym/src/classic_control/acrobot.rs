@@ -2,10 +2,10 @@ use std::f64::consts::PI;
 
 use crate::EnvironmentError;
 use bon::bon;
-use candle_core::{Device, Tensor};
+use burn::tensor::{DType, Device, Distribution, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::{BoxSpace, Discrete, Space},
+    spaces::{BoxSpace, Discrete},
 };
 
 const MAX_VELOCITY_1: f64 = 4.0 * PI;
@@ -37,8 +37,8 @@ impl AcrobotV1 {
     #[builder]
     pub fn new(
         /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = &Device::Cpu)]
-        rng_device: &Device,
+        #[builder(default = Device::flex(), with = |device: &Device| device.clone())]
+        rng_device: Device,
         #[builder(default = false)] use_nips_dynamics: bool,
         #[builder(default = 0.0)] torque_noise_max: f64,
         #[cfg(feature = "rendering")]
@@ -51,7 +51,7 @@ impl AcrobotV1 {
             ));
         }
         Self::from_config(
-            rng_device,
+            &rng_device,
             use_nips_dynamics,
             torque_noise_max,
             #[cfg(feature = "rendering")]
@@ -81,8 +81,8 @@ impl AcrobotV1 {
             rng_device: rng_device.clone(),
             action_space: Discrete::new(3),
             observation_space: BoxSpace::new(
-                Tensor::from_vec(low, 6, &Device::Cpu)?,
-                Tensor::from_vec(high, 6, &Device::Cpu)?,
+                Tensor::from_data(TensorData::new(low, [1, 6]), &Device::flex()),
+                Tensor::from_data(TensorData::new(high, [1, 6]), &Device::flex()),
             ),
             #[cfg(feature = "rendering")]
             renderer: render
@@ -91,18 +91,21 @@ impl AcrobotV1 {
         })
     }
 
-    fn observation(&self) -> Result<Tensor, candle_core::Error> {
-        Tensor::from_vec(
-            vec![
-                self.state[0].cos() as f32,
-                self.state[0].sin() as f32,
-                self.state[1].cos() as f32,
-                self.state[1].sin() as f32,
-                self.state[2] as f32,
-                self.state[3] as f32,
-            ],
-            6,
-            &Device::Cpu,
+    /// Returns one F32 observation vector on CPU, without a batch axis.
+    fn observation(&self) -> Tensor<1> {
+        Tensor::from_data(
+            TensorData::new(
+                vec![
+                    self.state[0].cos() as f32,
+                    self.state[0].sin() as f32,
+                    self.state[1].cos() as f32,
+                    self.state[1].sin() as f32,
+                    self.state[2] as f32,
+                    self.state[3] as f32,
+                ],
+                [6],
+            ),
+            &Device::flex(),
         )
     }
 
@@ -213,40 +216,51 @@ impl AcrobotV1 {
 
 impl Gym for AcrobotV1 {
     type Error = EnvironmentError;
-    type SpaceError = candle_core::Error;
+    type ObservationSpace = BoxSpace;
+    type ActionSpace = Discrete;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
-        let random = Tensor::rand(-0.1_f32, 0.1, 4, &self.rng_device)?.to_vec1::<f32>()?;
+        let random = Tensor::<1>::random(
+            [4],
+            Distribution::Uniform(f64::from(-0.1_f32), f64::from(0.1_f32)),
+            (&self.rng_device, DType::F32),
+        )
+        .clone()
+        .try_into_data_as::<f32>()
+        .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))?;
         self.state = std::array::from_fn(|index| f64::from(random[index]));
         #[cfg(feature = "rendering")]
         self.render()?;
         Ok(ResetInfo {
-            state: self.observation()?,
+            observation: self.observation(),
             info: (),
         })
     }
 
-    /// Steps with one scalar discrete action shaped `[]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        if !action.dims().is_empty() || action.dtype() != candle_core::DType::U32 {
+    /// Steps with one scalar Int action shaped `[1]`.
+    fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
+        if action.dims() != [1] {
             return Err(EnvironmentError::InvalidAction(
-                "Acrobot actions must be scalar u32 values in 0..3",
+                "Acrobot actions must be Int tensors shaped [1] in 0..3",
             ));
         }
-        let mut torque = f64::from(action.to_vec0::<u32>()?) - 1.0;
+        let mut torque = f64::from(action.clone().try_into_scalar::<i32>()?) - 1.0;
         if !(-1.0..=1.0).contains(&torque) {
             return Err(EnvironmentError::InvalidAction(
-                "Acrobot actions must be scalar u32 values in 0..3",
+                "Acrobot actions must be Int tensors shaped [1] in 0..3",
             ));
         }
         if self.torque_noise_max > 0.0 {
-            let noise = Tensor::rand(
-                -self.torque_noise_max as f32,
-                self.torque_noise_max as f32,
-                (),
-                &self.rng_device,
-            )?
-            .to_vec0::<f32>()?;
+            let noise = Tensor::<1>::random(
+                [1],
+                Distribution::Uniform(
+                    (-self.torque_noise_max as f32) as f64,
+                    (self.torque_noise_max as f32) as f64,
+                ),
+                (&self.rng_device, DType::F32),
+            )
+            .clone()
+            .try_into_scalar::<f32>()?;
             torque += f64::from(noise);
         }
         let integrated = self.integrate([
@@ -266,7 +280,7 @@ impl Gym for AcrobotV1 {
         #[cfg(feature = "rendering")]
         self.render()?;
         Ok(StepInfo {
-            state: self.observation()?,
+            observation: self.observation(),
             reward: if done { 0.0 } else { -1.0 },
             done,
             truncated: false,
@@ -274,12 +288,12 @@ impl Gym for AcrobotV1 {
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(self.observation_space.clone())
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(self.action_space.clone())
+    fn action_space(&self) -> Self::ActionSpace {
+        self.action_space.clone()
     }
 }
 
@@ -317,9 +331,17 @@ mod tests {
         let mut environment = AcrobotV1::builder().build().unwrap();
         for (index, transition) in transitions.iter().enumerate() {
             environment.set_raw_state(transition.state);
-            let action = Tensor::from_vec(vec![transition.action], (), &Device::Cpu).unwrap();
+            let action = Tensor::from_data(
+                TensorData::new(vec![transition.action], [1]),
+                &Device::flex(),
+            );
             let actual = environment.step(action).unwrap();
-            let observation = actual.state.to_vec1::<f32>().unwrap();
+            let observation = actual
+                .observation
+                .clone()
+                .try_into_data_as::<f32>()
+                .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))
+                .unwrap();
             for (component, expected) in transition.observation.iter().enumerate() {
                 assert!(
                     (f64::from(observation[component]) - expected).abs() <= 2e-6,
@@ -336,8 +358,9 @@ mod tests {
     #[test]
     fn default_spaces_match_gymnasium() {
         let mut environment = AcrobotV1::builder().build().unwrap();
-        assert_eq!(environment.reset().unwrap().state.dims(), &[6]);
-        assert_eq!(environment.action_space().shape(), vec![3]);
+        assert_eq!(environment.reset().unwrap().observation.dims(), [6]);
+        assert_eq!(environment.action_space().shape(), vec![1]);
+        assert_eq!(environment.action_space().get_possible_values(), 3);
         assert_eq!(environment.observation_space().shape(), vec![6]);
     }
 

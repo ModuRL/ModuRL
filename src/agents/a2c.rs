@@ -110,7 +110,9 @@ impl<T: Module, A: Module, C: Module> SharedA2CNetwork<T, A, C> {
                 .shared_network(shared_network)
                 .critic_head(critic_head)
                 .actor_head(actor_head)
-                .maybe_lr_scheduler(lr_scheduler)
+                .maybe_lr_scheduler(
+                    lr_scheduler.map(|schedule| move |progress| schedule.value(progress)),
+                )
                 .build()?,
         })
     }
@@ -147,8 +149,12 @@ impl<A: Module, C: Module> SeparateA2CNetwork<A, C> {
                 .critic_learning_rate(critic_learning_rate)
                 .actor_network(actor_network)
                 .critic_network(critic_network)
-                .maybe_actor_lr_scheduler(actor_lr_scheduler)
-                .maybe_critic_lr_scheduler(critic_lr_scheduler)
+                .maybe_actor_lr_scheduler(
+                    actor_lr_scheduler.map(|schedule| move |progress| schedule.value(progress)),
+                )
+                .maybe_critic_lr_scheduler(
+                    critic_lr_scheduler.map(|schedule| move |progress| schedule.value(progress)),
+                )
                 .combined_loss(combined_loss)
                 .build()?,
         })
@@ -212,6 +218,7 @@ impl<
     const A: usize,
     const BO: usize,
     const BL: usize,
+    const U: usize,
 >
     A2CAgent<
         'a,
@@ -224,11 +231,14 @@ impl<
     >
 where
     N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O>,
+    OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
     AS: ActionMap<L, A>,
+    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
+    Tensor<O, OS::Kind>:
+        PrevRank<Prev = Tensor<U, OS::Kind>> + NextRank<Next = Tensor<BO, OS::Kind>>,
+    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
     GE: std::fmt::Debug,
 {
@@ -281,7 +291,7 @@ where
     }
 
     /// Maps rank-O observation batches to rank-A deterministic environment actions, preserving the batch axis.
-    /// Inputs must meet the owned model's dtype and device contract.
+    /// Inputs have shape `[batch_size, ...observation_shape]` and must meet the model's dtype and device contract.
     pub fn act_deterministic(
         &mut self,
         observations: &Tensor<O, OS::Kind>,
@@ -323,8 +333,9 @@ impl<
     >
 where
     N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O>,
+    OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
     AS: ActionMap<L, A>,
+    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
@@ -339,7 +350,7 @@ where
     type ObservationSpace = OS;
     type ActionSpace = AS;
 
-    /// Maps rank-O observation batches to rank-A stochastic actions, preserving the batch axis, native kinds, and device.
+    /// Maps rank-O observations `[batch_size, ...observation_shape]` to rank-A actions `[batch_size, ...action_shape]`, preserving native kinds and device.
     fn act(
         &mut self,
         observations: &Tensor<O, OS::Kind>,
@@ -356,6 +367,8 @@ where
             fields(num_timesteps)
         )
     )]
+    /// Trains with rank-O observation batches `[num_envs, ...observation_shape]`.
+    /// Terminal observations omit the batch axis and preserve the environment observation kind, dtype, and device.
     fn learn(
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
@@ -375,6 +388,7 @@ mod tests {
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
     };
     use burn::{optim::SgdConfig, tensor::DType};
+    use std::{cell::RefCell, rc::Rc};
 
     #[derive(Default)]
     struct RecordingLogger {
@@ -408,11 +422,13 @@ mod tests {
 
     #[test]
     fn public_agent_runs_one_full_rollout_update_and_forwards_actions() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
-        let mut env = VectorizedGymWrapper::from(vec![
+        let mut env = VectorizedGymWrapper::new(vec![
             FixedEnv::new(device.clone()),
             FixedEnv::new(device.clone()),
-        ]);
+        ])
+        .unwrap();
         let network = SeparateA2CNetwork::builder()
             .actor_network(ProbabilisticPolicyModel::new(
                 model(2, &device),
@@ -452,11 +468,13 @@ mod tests {
 
     #[test]
     fn shared_configuration_runs_one_full_rollout_update() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
-        let mut env = VectorizedGymWrapper::from(vec![
+        let mut env = VectorizedGymWrapper::new(vec![
             FixedEnv::new(device.clone()),
             FixedEnv::new(device.clone()),
-        ]);
+        ])
+        .unwrap();
         let network = SharedA2CNetwork::builder()
             .shared_network(model(4, &device))
             .actor_head(ProbabilisticPolicyModel::new(
@@ -482,5 +500,64 @@ mod tests {
         agent.learn(&mut env, 2).unwrap();
         assert_eq!(logger.updates, 1);
         assert_eq!(logger.collections, 1);
+    }
+
+    #[test]
+    fn network_builders_forward_custom_schedules_to_ppo() {
+        struct RecordingSchedule {
+            progress: Rc<RefCell<Vec<f64>>>,
+        }
+
+        impl ParameterSchedule for RecordingSchedule {
+            fn value(&self, progress: f64) -> f64 {
+                self.progress.borrow_mut().push(progress);
+                1e-3 * (1.0 - progress)
+            }
+        }
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let shared_progress = Rc::new(RefCell::new(Vec::new()));
+        let actor_progress = Rc::new(RefCell::new(Vec::new()));
+        let critic_progress = Rc::new(RefCell::new(Vec::new()));
+        let mut shared = SharedA2CNetwork::builder()
+            .shared_network(model(4, &device))
+            .actor_head(ProbabilisticPolicyModel::new(
+                model(2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_head(model(1, &device))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(1e-3)
+            .lr_scheduler(RecordingSchedule {
+                progress: shared_progress.clone(),
+            })
+            .build()
+            .unwrap();
+        let mut separate = SeparateA2CNetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                model(2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(model(1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .actor_lr_scheduler(RecordingSchedule {
+                progress: actor_progress.clone(),
+            })
+            .critic_lr_scheduler(RecordingSchedule {
+                progress: critic_progress.clone(),
+            })
+            .build()
+            .unwrap();
+        let mut progress = crate::parameter_schedule::ScheduleProgress::new(8);
+        progress.advance_steps(2);
+        PPONetwork::<2, 2, 2>::update_learning_rates(&mut shared.inner, &progress);
+        PPONetwork::<2, 2, 2>::update_learning_rates(&mut separate.inner, &progress);
+        assert_eq!(*shared_progress.borrow(), [0.25]);
+        assert_eq!(*actor_progress.borrow(), [0.25]);
+        assert_eq!(*critic_progress.borrow(), [0.25]);
     }
 }

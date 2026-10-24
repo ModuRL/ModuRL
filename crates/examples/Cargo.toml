@@ -5,36 +5,36 @@ edition = "2024"
 publish = false
 autoexamples = false
 
-# [[example]]
-# name = "dqn_cartpole"
-# path = "examples/dqn_cartpole.rs"
+[[example]]
+name = "dqn_cartpole"
+path = "examples/dqn_cartpole.rs"
 
 # [[example]]
 # name = "dqn_atari"
 # path = "examples/dqn_atari.rs"
 # required-features = ["atari-environment"]
 
-# [[example]]
-# name = "ppo_bench"
-# path = "examples/ppo_bench.rs"
+[[example]]
+name = "ppo_bench"
+path = "examples/ppo_bench.rs"
 
-# [[example]]
-# name = "ppo_cartpole"
-# path = "examples/ppo_cartpole.rs"
+[[example]]
+name = "ppo_cartpole"
+path = "examples/ppo_cartpole.rs"
 
 # [[example]]
 # name = "sac_cartpole"
 # path = "examples/sac_cartpole.rs"
 
-# [[example]]
-# name = "ppo_mujoco"
-# path = "examples/ppo_mujoco.rs"
-# required-features = ["mujoco-environment"]
+[[example]]
+name = "ppo_mujoco"
+path = "examples/ppo_mujoco.rs"
+required-features = ["mujoco-environment"]
 
-# [[example]]
-# name = "a2c_mujoco"
-# path = "examples/a2c_mujoco.rs"
-# required-features = ["mujoco-environment"]
+[[example]]
+name = "a2c_mujoco"
+path = "examples/a2c_mujoco.rs"
+required-features = ["mujoco-environment"]
 
 # [[example]]
 # name = "sac_mujoco"
@@ -51,10 +51,10 @@ autoexamples = false
 # path = "examples/td3_mujoco.rs"
 # required-features = ["mujoco-environment"]
 
-# [[example]]
-# name = "rendered_lunar_lander_ppo"
-# path = "examples/rendered_lunar_lander_ppo.rs"
-# required-features = ["rendering"]
+[[example]]
+name = "rendered_lunar_lander_ppo"
+path = "examples/rendered_lunar_lander_ppo.rs"
+required-features = ["rendering"]
 
 # [[example]]
 # name = "ppo_atari"

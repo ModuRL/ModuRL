@@ -21,6 +21,22 @@ DQN, and `DDQNAgent` implements Double DQN.
 An agent coordinates the pieces needed for training: model modules, optimizers,
 schedules, buffers, distributions, and update logic.
 
+An agent's observation space determines its native tensor kind and unbatched
+observation type through `ObservationSpace::Observation`. For `BoxSpace<2>`,
+that type is `Tensor<1>`; for `Discrete`, it is `Tensor<1, Int>`.
+`Gym`, `MultiGym`, and `Agent` use the space's type without separate declarations.
+Custom observation spaces must declare `Observation`, which must equal the
+batch tensor's `PrevRank::Prev` type. Observation batches retain their leading
+batch axis. Dtype and device requirements still follow the environment and model
+contracts.
+
+The action space determines the unbatched environment action type through
+`ActionSpace::Action`. `Discrete` supplies `Tensor<1, Int>`, and `BoxSpace<2>`
+supplies `Tensor<1>`. `Gym::step` accepts this type. Batched interaction keeps
+the leading batch axis. Custom action spaces must declare `Action`, which must
+equal the batch tensor's `PrevRank::Prev` type. Original policy samples retain
+their own layout; `ActionMap` converts them into environment action batches.
+
 ## Environments and Spaces
 
 An environment is the world the agent interacts with.

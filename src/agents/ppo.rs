@@ -460,9 +460,10 @@ where
     N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
     OS: ObservationSpace<O>,
     AS: ActionMap<L, A>,
+    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
+    Tensor<O, OS::Kind>: PrevRank<Prev = OS::Observation> + NextRank<Next = Tensor<BO, OS::Kind>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
     GE: std::fmt::Debug,
 {
@@ -588,8 +589,9 @@ impl<
     >
 where
     N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O>,
+    OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
     AS: ActionMap<L, A>,
+    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
@@ -1291,8 +1293,9 @@ impl<
     >
 where
     N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O>,
+    OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
     AS: ActionMap<L, A>,
+    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
@@ -1331,6 +1334,8 @@ where
             fields(num_timesteps)
         )
     )]
+    /// Trains with rank-O observation batches `[num_envs, ...observation_shape]`.
+    /// Terminal observations omit the batch axis and preserve the environment observation kind, dtype, and device.
     fn learn(
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,

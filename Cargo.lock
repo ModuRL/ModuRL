@@ -4700,7 +4700,7 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "box2d-rs",
- "candle-core",
+ "burn",
  "log",
  "minifb",
  "modurl",
@@ -4726,7 +4726,7 @@ name = "modurl_mujoco"
 version = "0.1.0"
 dependencies = [
  "bon",
- "candle-core",
+ "burn",
  "modurl",
  "mujoco-rs",
  "rand 0.10.3",

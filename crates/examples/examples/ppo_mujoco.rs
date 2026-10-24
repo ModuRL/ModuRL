@@ -1,6 +1,6 @@
 use burn::{
     module::{Module, Param},
-    nn::{Initializer, activation::Activation},
+    nn::{Initializer, Tanh},
     optim::AdamWConfig,
     tensor::{DType, Device, Float, Tensor},
 };
@@ -62,7 +62,7 @@ fn main() {
         0.99,
     )
     .with_clip(10.0);
-    let env = VectorizedGymWrapper::from(vec![env]);
+    let env = VectorizedGymWrapper::new(vec![env]).unwrap();
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let observation_space = env.observation_space();
     let observation_size = observation_space.shape()[0];
@@ -78,7 +78,7 @@ fn main() {
             .output_size(action_size)
             .options((&device, DTYPE))
             .hidden_layer_sizes(vec![64, 64])
-            .activation(Activation::Tanh)
+            .activation(Tanh)
             .hidden_initializer(Initializer::Orthogonal {
                 gain: 2.0_f64.sqrt(),
             })
@@ -94,7 +94,7 @@ fn main() {
         .output_size(1)
         .options((&device, DTYPE))
         .hidden_layer_sizes(vec![64, 64])
-        .activation(Activation::Tanh)
+        .activation(Tanh)
         .hidden_initializer(Initializer::Orthogonal {
             gain: 2.0_f64.sqrt(),
         })
@@ -109,7 +109,7 @@ fn main() {
         // BoxSpace separately clips the action sent to the environment.
         .actor_network(ProbabilisticPolicyModel::new(
             actor,
-            GaussianDistribution::new(action_shape.to_vec()).unwrap(),
+            GaussianDistribution::new([action_size]).unwrap(),
         ))
         .critic_network(critic)
         .actor_optimizer(optimizer_config.init())

@@ -1,5 +1,8 @@
 # modurl_ale
 
+The Atari adapter, integration tests, and native build script are currently disabled.
+This package exports no environment types. The usage below requires restoring the adapter with support for the current Burn APIs.
+
 `modurl_ale` provides Atari 2600 environments for [ModuRL](https://github.com/ModuRL/ModuRL) using the Arcade Learning Environment (ALE).
 
 This is a Rust crate, but it is not a pure-Rust implementation: it builds and links the bundled C++ ALE/Stella emulator code that provides the Atari 2600 backend. The public API and ModuRL integration are Rust; the native emulator is an upstream dependency included in this repository.

@@ -31,8 +31,8 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank,
-    Tensor<BA, AK>: PrevRank,
+    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
+    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     pub fn new(envs: Vec<G>) -> Result<Self, VectorizedGymError<G::Error>> {
         if envs.is_empty() {
@@ -59,8 +59,8 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank,
-    Tensor<BA, AK>: PrevRank,
+    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
+    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     fn from(env: G) -> Self {
         Self {
@@ -76,8 +76,8 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank,
-    Tensor<BA, AK>: PrevRank,
+    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
+    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = VectorizedGymError<G::Error>;
 
@@ -90,8 +90,8 @@ impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize, K: 
     MultiGym<I, BO, BA> for VectorizedGymWrapper<G, I, BO, BA>
 where
     G: Gym<I, BO, BA>,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
-    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Observation = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK, Action = Tensor<A, AK>>,
     Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
     Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,

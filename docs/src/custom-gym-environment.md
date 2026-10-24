@@ -93,7 +93,13 @@ The default `Gym` information type is `()`, so ordinary environments use
 `ResetInfo` and `StepInfo` without an explicit type parameter. Environments
 with additional typed metadata can instead implement `Gym<MyInfo>`.
 The full signature is `Gym<I, O, A>`. Observation and action batch ranks
-`O` and `A` default to 2. `PrevRank` determines each single tensor type.
+`O` and `A` default to 2. `ObservationSpace::Observation` determines the
+unbatched tensor type and must equal the batch tensor's `PrevRank::Prev` type.
+`BoxSpace<2>` supplies `Tensor<1>`, and `Discrete` supplies `Tensor<1, Int>`.
+`Gym`, `MultiGym`, and `Agent` use this type without a separate declaration.
+`ActionSpace::Action` determines the unbatched action tensor type with the same
+rank relationship. `Discrete` supplies `Tensor<1, Int>`, and `BoxSpace<2>`
+supplies `Tensor<1>`. Custom action spaces must declare this associated type.
 Single-environment tensors omit the batch axis. Scalar values use
 `[1]` individually and `[batch_size, 1]` in batches. Space operations use
 batched tensors. The associated spaces determine the native tensor kinds:

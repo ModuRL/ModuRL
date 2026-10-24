@@ -383,6 +383,7 @@ mod schedule_tests {
 
         impl ObservationSpace<2> for BoolSpace {
             type Kind = Bool;
+            type Observation = Tensor<1, Bool>;
 
             /// Accepts Bool observations [batch_size, 1] without changing their dtype, device, or axes.
             fn contains(&self, values: &Tensor<2, Bool>) -> bool {
@@ -507,6 +508,7 @@ mod schedule_tests {
 
         impl ObservationSpace<2> for BooleanSpace {
             type Kind = Bool;
+            type Observation = Tensor<1, Bool>;
 
             /// Checks Bool observations [batch_size, 1] without changing their layout, dtype, or device.
             fn contains(&self, values: &Tensor<2, Bool>) -> bool {
@@ -564,16 +566,13 @@ mod schedule_tests {
         }
         .into();
         let use_f64_rewards = std::cell::Cell::new(false);
-        let mut env = crate::wrappers::OutputMapMultiGymWrapper::new(
-            env,
-            |observations| Ok::<_, Infallible>(observations),
-            |mut step| {
+        let mut env =
+            crate::wrappers::OutputMapMultiGymWrapper::new(env, Ok::<_, Infallible>, |mut step| {
                 if use_f64_rewards.get() {
                     step.rewards = step.rewards.cast(DType::F64);
                 }
                 Ok::<_, Infallible>(step)
-            },
-        );
+            });
         let actor = ProbabilisticPolicyModel::new(
             FloatHead {
                 weight: Param::from_tensor(Tensor::from_data(
@@ -653,16 +652,13 @@ mod schedule_tests {
         let env: VectorizedGymWrapper<TwoStepTestGym, usize> =
             TwoStepTestGym::new(device.clone(), false).into();
         let use_f64_rewards = std::cell::Cell::new(false);
-        let mut env = crate::wrappers::OutputMapMultiGymWrapper::new(
-            env,
-            |observations| Ok::<_, Infallible>(observations),
-            |mut step| {
+        let mut env =
+            crate::wrappers::OutputMapMultiGymWrapper::new(env, Ok::<_, Infallible>, |mut step| {
                 if use_f64_rewards.get() {
                     step.rewards = step.rewards.cast(DType::F64);
                 }
                 Ok::<_, Infallible>(step)
-            },
-        );
+            });
         let model = |output| {
             MLP::builder()
                 .input_size(4)
@@ -1185,7 +1181,7 @@ mod schedule_tests {
         struct ParameterIds(HashSet<ParamId>);
 
         impl ModuleVisitor for ParameterIds {
-            /// Records rank-D parameter IDs without reading their tensor values.
+            /// Records rank-D parameter IDs without reading values or changing tensor shapes.
             fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
                 self.0.insert(param.id);
             }
@@ -1196,7 +1192,7 @@ mod schedule_tests {
         }
 
         impl ModuleVisitor for GradientIds<'_> {
-            /// Records IDs with rank-D gradients, preserving the gradient store.
+            /// Records IDs with rank-D gradients, preserving gradient shapes and the gradient store.
             fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
                 if self.gradients.get::<D>(param.id).is_some() {
                     self.ids.insert(param.id);
@@ -1307,6 +1303,7 @@ mod schedule_tests {
 
     #[test]
     fn gae_matches_scalar_reference_across_environments_and_episode_boundaries() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = (0..3)
             .map(|_| TwoStepTestGym::new(device.clone(), false))

@@ -1,6 +1,5 @@
 use std::{fs, path::Path};
 
-#[cfg(any())]
 #[test]
 fn tensor_parameters_have_shape_documentation() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -23,7 +22,10 @@ fn tensor_parameters_have_shape_documentation() {
             let Some(parameters) = function_parameters(&signature, function_offset) else {
                 continue;
             };
-            if !parameters.contains("Tensor") {
+            if !parameters
+                .split(|character: char| !character.is_alphanumeric() && character != '_')
+                .any(|word| word == "Tensor")
+            {
                 continue;
             }
 

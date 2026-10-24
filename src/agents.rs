@@ -1,9 +1,10 @@
 use crate::{
     gym::MultiGym,
     spaces::{ActionSpace, ObservationSpace},
+    tensor_rank::PrevRank,
 };
 use burn::tensor::Tensor;
-#[cfg(any())]
+
 pub mod a2c;
 #[cfg(any())]
 pub mod deterministic_actor_critic;
@@ -21,11 +22,15 @@ pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
 /// Associated spaces determine the native observation and action kinds.
 pub trait Agent<I = (), const O: usize = 2, const A: usize = 2>
 where
-    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>: crate::tensor_rank::PrevRank,
+    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>:
+        PrevRank<Prev = <Self::ObservationSpace as ObservationSpace<O>>::Observation>,
+    Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>:
+        PrevRank<Prev = <Self::ActionSpace as ActionSpace<A>>::Action>,
 {
     type Error;
     type GymError;
     type SpaceError;
+
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A, Error = Self::SpaceError>;
 
@@ -56,6 +61,7 @@ where
 #[cfg(test)]
 pub(crate) mod test_support {
     use burn::tensor::{DType, Device, Int, Tensor};
+    #[cfg(any())]
     use candle_nn::Optimizer;
     use std::convert::Infallible;
 
@@ -110,11 +116,13 @@ pub(crate) mod test_support {
         }
     }
 
+    #[cfg(any())]
     pub(crate) struct CountingOptimizer {
         pub(crate) steps: usize,
         learning_rate: f64,
     }
 
+    #[cfg(any())]
     impl CountingOptimizer {
         pub(crate) fn with_learning_rate(learning_rate: f64) -> Self {
             Self {
@@ -124,6 +132,7 @@ pub(crate) mod test_support {
         }
     }
 
+    #[cfg(any())]
     impl Optimizer for CountingOptimizer {
         type Config = f64;
 
@@ -264,9 +273,11 @@ mod tests {
         agent.learn(&mut multiple, 2).unwrap();
     }
 
+    #[cfg(any())]
     #[test]
     fn counting_optimizer_counts_whole_updates_with_multiple_parameters() {
         use super::test_support::CountingOptimizer;
+        #[cfg(any())]
         use candle_nn::Optimizer;
 
         let device = candle_core::Device::Cpu;

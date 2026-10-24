@@ -1,5 +1,4 @@
 use burn::{
-    nn::activation::Activation,
     optim::AdamWConfig,
     tensor::{DType, Device},
 };
@@ -28,14 +27,14 @@ fn main() {
             .build()
             .unwrap(),
     ];
-    let env = VectorizedGymWrapper::from(envs);
+    let env = VectorizedGymWrapper::new(envs).unwrap();
     let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let observation_space = env.observation_space();
     let online_q_network = MLP::builder()
         .input_size(observation_space.shape()[0])
         .output_size(env.action_space().get_possible_values())
         .options((&device, DTYPE))
-        .activation(Activation::Tanh)
+        .activation(burn::nn::Tanh)
         .hidden_layer_sizes(vec![64, 64])
         .build()
         .expect("failed to build the online Q-network");

@@ -1,5 +1,8 @@
 # ModuRL framework benchmarks
 
+The Rust benchmark executable is currently excluded from Cargo targets because its consumers use the old tensor APIs.
+The commands below require restoring that target with support for the current Burn APIs. Existing benchmark results remain available.
+
 `modurl-benches` is an unpublished workspace crate for matched end-to-end reinforcement learning benchmarks.
 
 The suite compares ModuRL with runners based on Stable-Baselines3, CleanRL reference implementations, and Tianshou across PPO, DQN, and SAC. It uses documented adaptations where framework defaults would perform different work. It saves every timing sample and reports each Python runner's elapsed time relative to ModuRL.
