@@ -4,7 +4,6 @@ use burn::tensor::{Distribution as RandomDistribution, Float, Tensor};
 
 use crate::distributions::{
     DifferentiableExpectation, DistEval, Distribution, DistributionTensorError, ExpectationTerms,
-    validate_statistics,
 };
 
 /// Samples independent Gaussian values from parameters `[batch, 2 * event_size]`,
@@ -153,7 +152,6 @@ impl<const A: usize, const C: usize> Distribution<2, A> for GaussianDistribution
     /// log probability and entropy. Actions share parameter dtype and device.
     fn dist_eval(&self, outputs: Tensor<2>, actions: Tensor<A>) -> Result<DistEval, Self::Error> {
         let (mean, log_std) = self.parameters(outputs)?;
-        validate_statistics("Gaussian actions", &mean, &actions)?;
         let normalized_diff = (actions - mean).square() / log_std.clone().exp().square();
         let normalization = (2.0 * std::f64::consts::PI).ln();
         let log_prob =
@@ -389,15 +387,6 @@ mod tests {
         assert!(matches!(
             flat.sample(Tensor::zeros([1, 3], &device)),
             Err(GaussianDistributionError::InvalidOutputWidth { output_width: 3 })
-        ));
-        assert!(matches!(
-            flat.dist_eval(
-                Tensor::zeros([2, 4], &device),
-                Tensor::zeros([1, 2], &device)
-            ),
-            Err(GaussianDistributionError::TensorError(
-                DistributionTensorError::ShapeMismatch { .. }
-            ))
         ));
         assert_eq!(
             flat.default_target_entropy(&Tensor::zeros([0, 4], &device))

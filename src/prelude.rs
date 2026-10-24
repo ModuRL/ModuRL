@@ -46,8 +46,8 @@ pub use crate::gym::{
 #[cfg(feature = "multithreading")]
 pub use crate::gym::{MultithreadedStackedMultiGym, MultithreadedVectorizedGymWrapper};
 pub use crate::models::{
-    DefaultMLPInitializer, DuelingMLP, MLP, MLPInitializer, OrthogonalMLPInitializer,
-    probabilistic_model::ExpectationPolicy, probabilistic_model::ProbabilisticPolicy,
+    DuelingMLP, Forward, MLP, ModelError, probabilistic_model::ExpectationPolicy,
+    probabilistic_model::PolicyTypes, probabilistic_model::ProbabilisticPolicy,
     probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
