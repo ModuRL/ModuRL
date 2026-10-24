@@ -153,16 +153,15 @@ fn ppo_cartpole() {
     let critic_optimizer =
         AdamW::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
 
-    let ppo_network_info = modurl::agents::ppo::PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
-                actor_network,
-            ))
-            .critic_network(critic_network)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+    let ppo_network_info = SeparatePPONetwork::builder()
+        .actor_network(ProbabilisticPolicyModel::new(
+            actor_network,
+            CategoricalDistribution,
+        ))
+        .critic_network(critic_network)
+        .actor_optimizer(actor_optimizer)
+        .critic_optimizer(critic_optimizer)
+        .build();
 
     // PPO config
     // Stable baselines3 config:
@@ -210,7 +209,7 @@ fn ppo_cartpole() {
 #[test]
 #[ignore = "slow solve test; run manually for review prep"]
 fn ppo_cartpole_shared() {
-    use modurl::agents::ppo::{FakeOptimizer, PPONetworkInfo, SharedPPONetwork};
+    use modurl::agents::ppo::{FakeOptimizer, SharedPPONetwork};
 
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = Device::Cpu;
@@ -263,22 +262,15 @@ fn ppo_cartpole_shared() {
     // Single optimizer over trunk + both heads, as in the Atari harness
     let optimizer = AdamW::new(var_map.all_vars(), config).expect("Failed to create AdamW");
 
-    let ppo_network_info: PPONetworkInfo<
-        AdamW,
-        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<
-            CategoricalDistributionError,
-        >,
-        FakeOptimizer,
-    > = PPONetworkInfo::Shared(
-        SharedPPONetwork::builder()
-            .actor_head(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
-                actor_head,
-            ))
-            .critic_head(critic_head)
-            .shared_network(shared_network)
-            .optimizer(optimizer)
-            .build(),
-    );
+    let ppo_network_info = SharedPPONetwork::builder()
+        .actor_head(ProbabilisticPolicyModel::new(
+            actor_head,
+            CategoricalDistribution,
+        ))
+        .critic_head(critic_head)
+        .shared_network(shared_network)
+        .optimizer(optimizer)
+        .build();
 
     // Experiment overrides so the shared-path failure can be probed without code edits
     let vf_coef = std::env::var("TEST_VF_COEF")
@@ -344,7 +336,7 @@ fn ppo_cartpole_shared() {
 #[cfg(feature = "multithreading")]
 fn ppo_cartpole_shared_multithreaded() {
     use candle_core::Tensor;
-    use modurl::agents::ppo::{FakeOptimizer, PPONetworkInfo, SharedPPONetwork};
+    use modurl::agents::ppo::{FakeOptimizer, SharedPPONetwork};
     use modurl::gym::MultithreadedVectorizedGymWrapper;
 
     let device = Device::Cpu;
@@ -394,22 +386,15 @@ fn ppo_cartpole_shared_multithreaded() {
     };
     let optimizer = AdamW::new(var_map.all_vars(), config).expect("Failed to create AdamW");
 
-    let ppo_network_info: PPONetworkInfo<
-        AdamW,
-        modurl::models::probabilistic_model::ProbabilisticPolicyModelError<
-            CategoricalDistributionError,
-        >,
-        FakeOptimizer,
-    > = PPONetworkInfo::Shared(
-        SharedPPONetwork::builder()
-            .actor_head(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
-                actor_head,
-            ))
-            .critic_head(critic_head)
-            .shared_network(shared_network)
-            .optimizer(optimizer)
-            .build(),
-    );
+    let ppo_network_info = SharedPPONetwork::builder()
+        .actor_head(ProbabilisticPolicyModel::new(
+            actor_head,
+            CategoricalDistribution,
+        ))
+        .critic_head(critic_head)
+        .shared_network(shared_network)
+        .optimizer(optimizer)
+        .build();
 
     let mut agent = PPOAgent::builder()
         .action_space(Box::new(action_space))

@@ -185,16 +185,14 @@ actions and evaluate their log probabilities:
 
 ```rust,ignore
     let policy =
-        ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
+        ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
 
-    let network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
+    let network_info = SeparatePPONetwork::builder()
             .actor_network(policy)
             .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+            .build();
 ```
 
 `policy` is the probabilistic policy PPO trains. In this configuration, the
@@ -295,16 +293,14 @@ fn main() {
         .expect("failed to build critic optimizer");
 
     let policy =
-        ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
+        ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
 
-    let network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
+    let network_info = SeparatePPONetwork::builder()
             .actor_network(policy)
             .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+            .build();
 
     let mut agent = PPOAgent::builder()
         .action_space(action_space)

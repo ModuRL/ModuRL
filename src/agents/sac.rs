@@ -2194,11 +2194,12 @@ mod tests {
         };
 
         let actor_outputs = Var::from_vec(vec![0.1f32, -0.5], (1, 2), &Device::Cpu).unwrap();
-        let policy = ProbabilisticPolicyModel::<
-            TransformedDistribution<GaussianDistribution, TanhTransform>,
-        >::new(DirectGaussianModule {
-            outputs: actor_outputs.clone(),
-        });
+        let policy = ProbabilisticPolicyModel::new(
+            DirectGaussianModule {
+                outputs: actor_outputs.clone(),
+            },
+            TransformedDistribution::<GaussianDistribution, TanhTransform>::default(),
+        );
         let states = tensor(&[0.25, -0.5, 0.75, 1.0], (4, 1));
 
         let critic_vars = VarMap::new();
@@ -2313,7 +2314,7 @@ mod tests {
             .optimizer(CountingOptimizer::with_learning_rate(1e-3))
             .build()
             .unwrap();
-        let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(IdentityModule);
+        let policy = ProbabilisticPolicyModel::new(IdentityModule, CategoricalDistribution);
         let mut agent = SACAgent::builder()
             .policy(policy)
             .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
@@ -2493,7 +2494,7 @@ mod tests {
             .hidden_layer_sizes(vec![4])
             .build()
             .unwrap();
-        let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor);
+        let policy = ProbabilisticPolicyModel::new(actor, CategoricalDistribution);
         let (actor_optimizer, actor_steps) = SharedCountingOptimizer::new_counter();
 
         let online_vars_1 = VarMap::new();

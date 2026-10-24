@@ -102,7 +102,7 @@ let distribution = TransformedDistribution::new(
     GaussianDistribution::new(action_shape)?,
     TanhTransform,
 );
-let policy = ProbabilisticPolicyModel::with_distribution(
+let policy = ProbabilisticPolicyModel::new(
     GaussianModule { mean, log_std },
     distribution,
 );

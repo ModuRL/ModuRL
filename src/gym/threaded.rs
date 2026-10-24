@@ -656,16 +656,18 @@ mod tests {
             let _ = tx.send(env.step(Tensor::zeros([2, 1], &Device::flex())));
         });
         let (lock, ready) = &*gate;
-        let state = lock.lock().unwrap();
-        let (mut state, _) = ready
-            .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| {
-                state.entered < 2
-            })
-            .unwrap();
-        let entered = state.entered;
-        state.released = true;
-        ready.notify_all();
-        drop(state);
+        let entered = {
+            let state = lock.lock().unwrap();
+            let (mut state, _) = ready
+                .wait_timeout_while(state, std::time::Duration::from_secs(2), |state| {
+                    state.entered < 2
+                })
+                .unwrap();
+            let entered = state.entered;
+            state.released = true;
+            ready.notify_all();
+            entered
+        };
         assert_eq!(entered, 2);
         assert_eq!(
             rx.recv_timeout(std::time::Duration::from_secs(2))

@@ -831,21 +831,24 @@ mod shared_model_tests {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/assets/slide.xml"
         ));
-        let model = shared_path_model(path).unwrap();
-        let weak = Arc::downgrade(&model);
-        let first = MujocoCore::from_xml_path(path, 1, false).unwrap();
-        assert!(std::ptr::eq(model.as_ref(), first.data.model()));
-        let other = std::thread::spawn(move || {
-            let core = MujocoCore::from_xml_path(path, 1, false).unwrap();
-            core.data.model_clone()
-        })
-        .join()
-        .unwrap();
-        assert!(std::ptr::eq(first.data.model(), other.as_ref()));
-        drop(model);
-        drop(first);
-        assert!(weak.upgrade().is_some());
-        drop(other);
+        let weak = {
+            let (weak, _other) = {
+                let model = shared_path_model(path).unwrap();
+                let weak = Arc::downgrade(&model);
+                let first = MujocoCore::from_xml_path(path, 1, false).unwrap();
+                assert!(std::ptr::eq(model.as_ref(), first.data.model()));
+                let other = std::thread::spawn(move || {
+                    let core = MujocoCore::from_xml_path(path, 1, false).unwrap();
+                    core.data.model_clone()
+                })
+                .join()
+                .unwrap();
+                assert!(std::ptr::eq(first.data.model(), other.as_ref()));
+                (weak, other)
+            };
+            assert!(weak.upgrade().is_some());
+            weak
+        };
         assert!(weak.upgrade().is_none());
     }
 

@@ -8,6 +8,8 @@ use std::marker::PhantomData;
 pub enum VectorizedGymError<E> {
     #[error("at least one environment is required")]
     Empty,
+    #[error("invalid action batch: expected {expected} rows, got {actual}")]
+    InvalidActionBatch { expected: usize, actual: usize },
     #[error("single environment failed: {0}")]
     Single(#[source] E),
     #[cfg(feature = "multithreading")]
@@ -103,11 +105,19 @@ where
     /// Stacks unbatched rank-`O` observations into rank `BO` and produces F32 rewards `[num_envs, 1]` on the observation device.
     /// Requires `BO = O + 1` and `BA = A + 1`, including scalar values.
     /// Inputs must meet each environment's dtype and device contract. Flags and metadata stay on the host.
+    /// Rejects an action-row count mismatch before any environment advances.
     fn step(
         &mut self,
         action: Tensor<BA, AK>,
     ) -> Result<MultiGymStepInfo<I, Tensor<O, K>>, Self::Error> {
         let count = self.envs.len();
+        let action_count = action.dims()[0];
+        if action_count != count {
+            return Err(VectorizedGymError::InvalidActionBatch {
+                expected: count,
+                actual: action_count,
+            });
+        }
         let mut observations = Vec::with_capacity(count);
         let mut rewards = Vec::with_capacity(count);
         let mut infos = Vec::with_capacity(count);
@@ -175,6 +185,27 @@ mod tests {
     use super::*;
     use crate::spaces::{BoxSpace, Discrete};
     use burn::tensor::{Device, Int};
+
+    #[test]
+    fn invalid_action_batches_do_not_advance_environments() {
+        let mut env =
+            VectorizedGymWrapper::new(vec![CounterEnv::new(0), CounterEnv::new(1)]).unwrap();
+        for action_count in [1, 3] {
+            let actions = Tensor::<2, Int>::zeros([action_count, 1], &Device::flex());
+            assert!(matches!(
+                env.step(actions),
+                Err(VectorizedGymError::InvalidActionBatch {
+                    expected: 2,
+                    actual,
+                }) if actual == action_count
+            ));
+            assert!(env.envs().iter().all(|env| env.step == 0));
+        }
+        let step = env
+            .step(Tensor::<2, Int>::zeros([2, 1], &Device::flex()))
+            .unwrap();
+        assert!(step.infos.iter().all(|info| info.step == 1));
+    }
 
     #[test]
     fn vectorization_restores_unbatched_observations_and_preserves_metadata() {

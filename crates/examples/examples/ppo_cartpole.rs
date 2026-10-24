@@ -1,5 +1,8 @@
-use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use burn::{
+    nn::{Initializer, activation::Activation},
+    optim::AdamWConfig,
+    tensor::{DType, Device},
+};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
@@ -14,92 +17,86 @@ fn main() {
 
 fn ppo_cartpole() {
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
-    let device = Device::Cpu;
+    let device = Device::flex();
     #[cfg(feature = "cuda")]
-    let device = Device::new_cuda(0).unwrap();
-    #[cfg(feature = "metal")]
-    let device = Device::new_metal(0).unwrap();
+    let device = Device::cuda(0);
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
 
     #[cfg(any(feature = "cuda", feature = "metal"))]
     {
-        device.set_seed(42).unwrap();
+        device.seed(42);
         println!("Setting seed for device {:?}", device);
     }
+    let device = device.autodiff();
     println!("Using device: {:?}", device);
 
     let mut envs = vec![];
     for _ in 0..8 {
-        let env = CartPoleV1::builder().rng_device(&device).build().unwrap();
+        let env = CartPoleV1::builder()
+            .rng_device(&Device::flex())
+            .build()
+            .unwrap();
         envs.push(env);
     }
     let vec_env: VectorizedGymWrapper<CartPoleV1> = envs.into();
-    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::Cpu, device.clone());
+    let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::flex(), device.clone());
 
     let observation_space = vec_env.observation_space();
     let action_space = vec_env.action_space();
-    let var_map = VarMap::new();
-    let vb = VarBuilder::from_varmap(&var_map, DTYPE, &device);
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
         .input_size(observation_space.shape()[0])
-        .output_size(action_space.shape()[0])
-        .vb(vb.clone())
-        .activation(Tensor::tanh)
+        .output_size(action_space.get_possible_values())
+        .options((&device, DTYPE))
+        .activation(Activation::Tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(OrthogonalMLPInitializer {
-            hidden_gain: 2.0f64.sqrt(),
-            output_gain: 0.01,
+        .hidden_initializer(Initializer::Orthogonal {
+            gain: 2.0f64.sqrt(),
         })
-        .name("actor_network".to_string())
+        .output_initializer(Initializer::Orthogonal { gain: 0.01 })
         .build()
         .unwrap();
     // Optimizers: both with lr=3e-4
-    let config = ParamsAdamW {
-        lr: 3e-4,
-        ..Default::default()
-    };
-    let actor_optimizer =
-        AdamW::new(var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
-
-    let critic_var_map = VarMap::new();
-    let critic_vb = VarBuilder::from_varmap(&critic_var_map, DTYPE, &device);
+    let config = AdamWConfig::new().with_weight_decay(0.01);
+    let actor_optimizer = config.init();
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
         .input_size(observation_space.shape()[0])
         .output_size(1)
-        .vb(critic_vb)
-        .activation(Tensor::tanh)
+        .options((&device, DTYPE))
+        .activation(Activation::Tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .initializer(OrthogonalMLPInitializer {
-            hidden_gain: 2.0f64.sqrt(),
-            output_gain: 1.0,
+        .hidden_initializer(Initializer::Orthogonal {
+            gain: 2.0f64.sqrt(),
         })
-        .name("critic_network".to_string())
+        .output_initializer(Initializer::Orthogonal { gain: 1.0 })
         .build()
         .unwrap();
 
-    let critic_optimizer =
-        AdamW::new(critic_var_map.all_vars(), config.clone()).expect("Failed to create AdamW");
+    let critic_optimizer = config.init();
 
     let mut logger = PPOGrapher::new();
 
-    let ppo_network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::<CategoricalDistribution>::new(
-                actor_network,
-            ))
-            .critic_network(critic_network)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+    let ppo_network_info = SeparatePPONetwork::builder()
+        .actor_network(ProbabilisticPolicyModel::new(
+            actor_network,
+            CategoricalDistribution,
+        ))
+        .critic_network(critic_network)
+        .actor_optimizer(actor_optimizer)
+        .critic_optimizer(critic_optimizer)
+        .actor_learning_rate(3e-4)
+        .critic_learning_rate(3e-4)
+        .build()
+        .unwrap();
 
     // PPO config
     // Stable baselines3 config:
     let mut agent = PPOAgent::builder()
-        .dtype(DTYPE)
+        .observation_space(observation_space)
         .action_space(action_space)
         .network_info(ppo_network_info)
         .batch_size(2048)

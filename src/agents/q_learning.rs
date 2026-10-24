@@ -3,7 +3,8 @@ use burn::{
     module::Module,
     optim::{GradientsParams, ModuleOptimizer},
     tensor::{
-        Bool, DType, Device, IndexingUpdateOp, Int, IntDType, Tensor, TensorData, TensorReadError,
+        Bool, DType, Device, Float, IndexingUpdateOp, Int, IntDType, Tensor, TensorData,
+        TensorReadError,
         kind::{Autodiff, Basic},
     },
 };
@@ -428,7 +429,7 @@ where
 impl<M, S, GE, T, const R: usize, K: Autodiff, ME: std::fmt::Debug> QLearningAgent<M, S, GE, T, R>
 where
     S: ObservationSpace<R, Kind = K>,
-    M: Module + Forward<R, 2, K, Error = ME>,
+    M: Module + Forward<R, 2, InputKind = K, OutputKind = Float, Error = ME>,
     GE: std::fmt::Debug,
     T: QLearningTarget,
 {
@@ -535,7 +536,7 @@ where
 impl<M, S, GE, T, const R: usize, K: Autodiff, ME: std::fmt::Debug> QLearningAgent<M, S, GE, T, R>
 where
     S: ObservationSpace<R, Kind = K>,
-    M: Module + Forward<R, 2, K, Error = ME>,
+    M: Module + Forward<R, 2, InputKind = K, OutputKind = Float, Error = ME>,
     GE: std::fmt::Debug,
     T: QLearningTarget,
 {
@@ -900,7 +901,7 @@ mod tests {
         objectives::bellman_targets,
         spaces::BoxSpace,
     };
-    use burn::{module::Param, optim::SgdConfig, tensor::Float};
+    use burn::{module::Param, optim::SgdConfig};
     use std::convert::Infallible;
 
     struct TestTarget;
@@ -928,11 +929,15 @@ mod tests {
     }
 
     #[derive(Module, Debug)]
-    pub(super) struct TestNetwork {
+    pub(super) struct TestNetwork<K: Basic = Float> {
         pub(super) values: Param<Tensor<2>>,
+        #[module(skip)]
+        kind: PhantomData<K>,
     }
 
-    impl<const R: usize, K: Basic> Forward<R, 2, K> for TestNetwork {
+    impl<const R: usize, K: Basic> Forward<R, 2> for TestNetwork<K> {
+        type InputKind = K;
+        type OutputKind = Float;
         type Error = Infallible;
 
         /// Returns Float Q values [batch_size, 2] for native rank-R observations [batch_size, ...observation_shape].
@@ -941,9 +946,10 @@ mod tests {
         }
     }
 
-    pub(super) fn network(device: &Device, dtype: DType) -> TestNetwork {
+    pub(super) fn network<K: Basic>(device: &Device, dtype: DType) -> TestNetwork<K> {
         TestNetwork {
             values: Param::from_tensor(Tensor::from_data([[0.0f64, 1.0]], (device, dtype))),
+            kind: PhantomData,
         }
     }
 

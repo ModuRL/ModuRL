@@ -2,7 +2,7 @@ use bon::bon;
 use burn::{
     module::Module,
     optim::ModuleOptimizer,
-    tensor::{Bool, DType, Int, Tensor, kind::Autodiff},
+    tensor::{Bool, DType, Float, Int, Tensor, kind::Autodiff},
 };
 
 use super::{
@@ -91,7 +91,7 @@ impl<'a, M, S, GE, I, const R: usize, ME: std::fmt::Debug> DDQNAgent<'a, M, S, G
 where
     S: ObservationSpace<R>,
     S::Kind: Autodiff,
-    M: Module + Forward<R, 2, S::Kind, Error = ME>,
+    M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float, Error = ME>,
     GE: std::fmt::Debug,
 {
     /// Creates an agent for native observations [batch_size, ...observation_shape] and Int actions [batch_size, 1].
@@ -158,7 +158,7 @@ impl<M, S, GE, I, const R: usize, const U: usize> Agent<I, R, 2> for DDQNAgent<'
 where
     S: ObservationSpace<R>,
     S::Kind: Autodiff,
-    M: Module + Forward<R, 2, S::Kind>,
+    M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float>,
     M::Error: std::fmt::Debug,
     GE: std::fmt::Debug,
     Tensor<R, S::Kind>: PrevRank<Prev = Tensor<U, S::Kind>>,
@@ -269,7 +269,6 @@ mod tests {
             let updated_parameters = agent.inner.online_q_network.values.val().into_data();
             assert_ne!(initial_parameters, updated_parameters);
             assert_eq!(agent.inner.dtype, dtype);
-            drop(agent);
             assert_eq!(logger.collection_timesteps, [2]);
             assert_eq!(logger.update_timesteps, [1, 2]);
         }

@@ -19,7 +19,8 @@ pub use crate::agents::{
     },
     ppo::{
         PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
-        PPOLogEntry, PPOLogger, PPONetworkInfo, SeparatePPONetwork, SharedPPONetwork,
+        PPOLogEntry, PPOLogger, PPOModelGroup, PPOModelTypes, PPONetwork, PPONetworkError,
+        SeparatePPONetwork, SharedPPONetwork,
     },
     q_learning::{
         QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError,

@@ -7,7 +7,6 @@ use burn::tensor::Tensor;
 pub mod a2c;
 #[cfg(any())]
 pub mod deterministic_actor_critic;
-#[cfg(any())]
 pub mod ppo;
 pub mod q_learning;
 mod replay_device_strategy;

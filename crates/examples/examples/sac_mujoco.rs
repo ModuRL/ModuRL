@@ -115,8 +115,7 @@ fn main() {
         GaussianDistribution::new(action_shape).unwrap(),
         TanhTransform,
     );
-    let policy =
-        ProbabilisticPolicyModel::with_distribution(GaussianModule { mean, log_std }, distribution);
+    let policy = ProbabilisticPolicyModel::new(GaussianModule { mean, log_std }, distribution);
     let actor_optimizer = AdamW::new(actor_vars.all_vars(), optimizer_parameters.clone()).unwrap();
 
     let online_vars_1 = VarMap::new();
