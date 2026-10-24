@@ -1,6 +1,5 @@
 use std::{fs, path::Path};
 
-#[cfg(any())]
 #[test]
 fn tensor_parameters_have_shape_documentation() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
