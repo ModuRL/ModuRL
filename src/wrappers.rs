@@ -1,85 +1,103 @@
 //! Environment-independent wrappers for [`crate::gym::Gym`].
 //!
-//! The modules follow Gymnasium's conventional categories: observation
-//! transformations, reward transformations, and episode-control wrappers.
+//! The modules group observation transformations, reward transformations, and episode controls.
 
-use candle_core::Tensor;
+use burn::tensor::{Device, Slice, Tensor, kind::Basic};
+use std::convert::Infallible;
 
 use crate::{
     gym::{MultiGym, MultiGymStepInfo},
-    spaces::Space,
+    spaces::{ActionSpace, ObservationSpace},
 };
 
-/// An error raised while mapping tensors around a multi-environment gym.
+/// Reports an environment failure or a caller-defined mapping failure.
 #[derive(Debug, thiserror::Error)]
-pub enum TensorMapMultiGymError<E> {
-    /// An error returned by the wrapped environment.
+pub enum TensorMapMultiGymError<E, M = Infallible> {
     #[error("wrapped gym error: {0}")]
     Gym(#[source] E),
-    /// An error returned by either tensor-mapping function.
     #[error("tensor mapping failed: {0}")]
-    Candle(#[source] candle_core::Error),
+    Mapping(#[source] M),
 }
 
-/// Maps batched actions before stepping the wrapped environment.
-/// Reset and all outputs pass through unchanged. Space descriptions are forwarded.
+/// Maps batched actions before dispatch. Reset, outputs, and space descriptions pass through unchanged.
 pub struct InputMapMultiGymWrapper<G, F> {
     gym: G,
     map_input: F,
 }
 
 impl<G, F> InputMapMultiGymWrapper<G, F> {
-    /// Creates a wrapper that transforms batched actions before dispatch.
-    pub fn new<I>(gym: G, map_input: F) -> Self
+    /// Creates a callback for rank-`A` actions `[num_envs, ...action_shape]` in the inner action kind.
+    /// The callback must preserve the layout and meet the inner gym's dtype and device requirements.
+    pub fn new<I, E, const O: usize, const A: usize, const U: usize>(gym: G, map_input: F) -> Self
     where
-        G: MultiGym<I>,
-        F: FnMut(Tensor) -> candle_core::Result<Tensor>,
+        G: MultiGym<I, O, A, U>,
+        F: FnMut(
+            Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
+        ) -> Result<Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>, E>,
     {
         Self { gym, map_input }
     }
+
     pub fn inner(&self) -> &G {
         &self.gym
     }
+
     pub fn inner_mut(&mut self) -> &mut G {
         &mut self.gym
     }
+
     pub fn into_inner(self) -> G {
         self.gym
     }
 }
 
-impl<G, F, I> MultiGym<I> for InputMapMultiGymWrapper<G, F>
+impl<G, F, I, E, const O: usize, const A: usize, const U: usize> MultiGym<I, O, A, U>
+    for InputMapMultiGymWrapper<G, F>
 where
-    G: MultiGym<I>,
-    F: FnMut(Tensor) -> candle_core::Result<Tensor>,
+    G: MultiGym<I, O, A, U>,
+    F: FnMut(
+        Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
+    ) -> Result<Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>, E>,
 {
-    type Error = TensorMapMultiGymError<G::Error>;
-    type SpaceError = G::SpaceError;
+    type Error = TensorMapMultiGymError<G::Error, E>;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = G::ActionSpace;
 
-    /// Maps `action` shaped `[num_envs, ...action_shape]` before dispatch.
-    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
-        let action = (self.map_input)(action).map_err(TensorMapMultiGymError::Candle)?;
+    /// Maps rank-`A` actions `[num_envs, ...action_shape]` and returns rank-`O` observations `[num_envs, ...observation_shape]`.
+    /// Terminal observations keep unbatched rank `U`; rewards keep `[num_envs]`. Output kinds, dtypes, and devices remain unchanged.
+    fn step(
+        &mut self,
+        action: Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>,
+    ) -> Result<
+        MultiGymStepInfo<I, O, <Self::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+        Self::Error,
+    > {
+        let action = (self.map_input)(action).map_err(TensorMapMultiGymError::Mapping)?;
         self.gym.step(action).map_err(TensorMapMultiGymError::Gym)
     }
-    fn reset(&mut self) -> Result<Tensor, Self::Error> {
+
+    /// Returns unchanged rank-`O` observations `[num_envs, ...observation_shape]` in the inner kind, dtype, and device.
+    fn reset(
+        &mut self,
+    ) -> Result<Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
         self.gym.reset().map_err(TensorMapMultiGymError::Gym)
     }
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+
+    fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
     }
+
     fn num_envs(&self) -> usize {
         self.gym.num_envs()
     }
 }
 
-/// Maps each reset or step output with one callback invocation.
-///
-/// Separate callbacks map reset observations and the complete step result.
-/// Actions and space descriptions are forwarded unchanged.
-/// Observation space must be kept consistent with the inner gym.
+/// Maps each reset or complete step output with one callback invocation.
+/// Actions and space descriptions pass through unchanged. Callbacks must keep observations consistent with the declared space.
 pub struct OutputMapMultiGymWrapper<G, FReset, FStep> {
     gym: G,
     map_reset: FReset,
@@ -87,12 +105,26 @@ pub struct OutputMapMultiGymWrapper<G, FReset, FStep> {
 }
 
 impl<G, FReset, FStep> OutputMapMultiGymWrapper<G, FReset, FStep> {
-    /// Creates a wrapper that transforms reset observations and step results.
-    pub fn new<I>(gym: G, map_reset: FReset, map_step: FStep) -> Self
+    /// Creates callbacks for rank-`O` observations `[num_envs, ...observation_shape]` and complete step results.
+    /// Step callbacks also receive rewards `[num_envs]` and unbatched rank-`U` terminal observations.
+    /// Callbacks must preserve layouts and native kinds; they control output dtypes and devices.
+    pub fn new<I, E, const O: usize, const A: usize, const U: usize>(
+        gym: G,
+        map_reset: FReset,
+        map_step: FStep,
+    ) -> Self
     where
-        G: MultiGym<I>,
-        FReset: FnMut(Tensor) -> candle_core::Result<Tensor>,
-        FStep: FnMut(MultiGymStepInfo<I>) -> candle_core::Result<MultiGymStepInfo<I>>,
+        G: MultiGym<I, O, A, U>,
+        FReset: FnMut(
+            Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>,
+        )
+            -> Result<Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>, E>,
+        FStep: FnMut(
+            MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+        ) -> Result<
+            MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+            E,
+        >,
     {
         Self {
             gym,
@@ -100,84 +132,121 @@ impl<G, FReset, FStep> OutputMapMultiGymWrapper<G, FReset, FStep> {
             map_step,
         }
     }
+
     pub fn inner(&self) -> &G {
         &self.gym
     }
+
     pub fn inner_mut(&mut self) -> &mut G {
         &mut self.gym
     }
+
     pub fn into_inner(self) -> G {
         self.gym
     }
 }
 
-impl<G, FReset, FStep, I> MultiGym<I> for OutputMapMultiGymWrapper<G, FReset, FStep>
+impl<G, FReset, FStep, I, E, const O: usize, const A: usize, const U: usize> MultiGym<I, O, A, U>
+    for OutputMapMultiGymWrapper<G, FReset, FStep>
 where
-    G: MultiGym<I>,
-    FReset: FnMut(Tensor) -> candle_core::Result<Tensor>,
-    FStep: FnMut(MultiGymStepInfo<I>) -> candle_core::Result<MultiGymStepInfo<I>>,
+    G: MultiGym<I, O, A, U>,
+    FReset: FnMut(
+        Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>,
+    ) -> Result<Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>, E>,
+    FStep: FnMut(
+        MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+    ) -> Result<
+        MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+        E,
+    >,
 {
-    type Error = TensorMapMultiGymError<G::Error>;
-    type SpaceError = G::SpaceError;
+    type Error = TensorMapMultiGymError<G::Error, E>;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = G::ActionSpace;
 
-    /// Forwards `action` shaped `[num_envs, ...action_shape]` and maps the full output.
-    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
+    /// Forwards rank-`A` actions `[num_envs, ...action_shape]` and maps the complete step result.
+    /// Observations retain rank `O`, rewards retain rank 1, and unbatched terminal observations retain rank `U`.
+    fn step(
+        &mut self,
+        action: Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>,
+    ) -> Result<
+        MultiGymStepInfo<I, O, <Self::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+        Self::Error,
+    > {
         let step = self.gym.step(action).map_err(TensorMapMultiGymError::Gym)?;
-        (self.map_step)(step).map_err(TensorMapMultiGymError::Candle)
+        (self.map_step)(step).map_err(TensorMapMultiGymError::Mapping)
     }
-    fn reset(&mut self) -> Result<Tensor, Self::Error> {
-        let states = self.gym.reset().map_err(TensorMapMultiGymError::Gym)?;
-        (self.map_reset)(states).map_err(TensorMapMultiGymError::Candle)
+
+    /// Maps rank-`O` reset observations `[num_envs, ...observation_shape]` without changing the layout or kind.
+    fn reset(
+        &mut self,
+    ) -> Result<Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
+        let observations = self.gym.reset().map_err(TensorMapMultiGymError::Gym)?;
+        (self.map_reset)(observations).map_err(TensorMapMultiGymError::Mapping)
     }
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+
+    fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
     }
+
     fn num_envs(&self) -> usize {
         self.gym.num_envs()
     }
 }
 
-/// Transfers current and terminal observations together, then restores their shapes.
-fn transfer_batched_observations<I>(
-    step: &mut MultiGymStepInfo<I>,
-    device: &candle_core::Device,
-) -> candle_core::Result<()> {
-    let count = step.states.dim(0)?;
-    let mut parts = vec![step.states.clone()];
-    for state in step.terminal_states.iter().flatten() {
-        parts.push(state.unsqueeze(0)?);
+/// Transfers observations `[num_envs, ...observation_shape]` and unbatched rank-`U` terminal observations in one packed tensor.
+/// Adds and removes the terminal batch axis, preserving kind, dtype, item axes, and gradients; scalar values use `[1]`.
+fn transfer_batched_observations<I, const O: usize, K: Basic, const U: usize>(
+    step: &mut MultiGymStepInfo<I, O, K, U>,
+    device: &Device,
+) {
+    const {
+        assert!(
+            O == U + 1 || (O == 1 && U == 1),
+            "batch observation rank must be single observation rank + 1, except scalar observations"
+        );
     }
-    let terminal_count = parts.len() - 1;
+    let count = step.observations.dims()[0];
+    let terminal_count = step.terminal_observations.iter().flatten().count();
+    let mut parts = Vec::with_capacity(terminal_count + 1);
+    parts.push(step.observations.clone());
+    for observation in step.terminal_observations.iter().flatten() {
+        let mut shape = [1; O];
+        if const { !(O == 1 && U == 1) } {
+            shape[1..].copy_from_slice(&observation.dims());
+        }
+        parts.push(observation.clone().reshape(shape));
+    }
+    // Pack terminal rows with current observations so one transfer supplies both next-observation layouts.
     let packed = if terminal_count == 0 {
         parts.remove(0)
     } else {
-        Tensor::cat(&parts, 0)?
-    };
-    let packed = packed.to_device(device)?;
-    step.states = packed.narrow(0, 0, count)?;
-    for (offset, state) in step.terminal_states.iter_mut().flatten().enumerate() {
-        *state = packed.narrow(0, count + offset, 1)?.squeeze(0)?;
+        Tensor::cat(parts, 0)
     }
-    Ok(())
+    .to_device(device);
+    step.observations = packed.clone().slice([Slice::from(0..count)]);
+    for (offset, observation) in step.terminal_observations.iter_mut().flatten().enumerate() {
+        *observation = packed
+            .clone()
+            .slice([Slice::from(count + offset..count + offset + 1)])
+            .reshape(observation.dims());
+    }
 }
 
-/// Transfers actions and observations at the batch boundary. CPU simulators
-/// should produce CPU observations; their RNG may remain on a separate device.
+/// Transfers actions to the environment device and observations and rewards to the agent device.
+/// Space descriptions stay on the inner gym's device. CPU simulators can keep their own RNG placement.
 pub struct DeviceMultiGymWrapper<G> {
     gym: G,
-    environment_device: candle_core::Device,
-    agent_device: candle_core::Device,
+    environment_device: Device,
+    agent_device: Device,
 }
 
 impl<G> DeviceMultiGymWrapper<G> {
-    pub fn new(
-        gym: G,
-        environment_device: candle_core::Device,
-        agent_device: candle_core::Device,
-    ) -> Self {
+    pub fn new(gym: G, environment_device: Device, agent_device: Device) -> Self {
         Self {
             gym,
             environment_device,
@@ -188,51 +257,64 @@ impl<G> DeviceMultiGymWrapper<G> {
     pub fn inner(&self) -> &G {
         &self.gym
     }
+
     pub fn inner_mut(&mut self) -> &mut G {
         &mut self.gym
     }
+
     pub fn into_inner(self) -> G {
         self.gym
     }
 }
 
-impl<G: MultiGym<I>, I> MultiGym<I> for DeviceMultiGymWrapper<G> {
+impl<G, I, const O: usize, const A: usize, const U: usize> MultiGym<I, O, A, U>
+    for DeviceMultiGymWrapper<G>
+where
+    G: MultiGym<I, O, A, U>,
+{
     type Error = TensorMapMultiGymError<G::Error>;
-    type SpaceError = G::SpaceError;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = G::ActionSpace;
 
-    /// Transfers actions `[num_envs, ...action_shape]` once before dispatch.
-    fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo<I>, Self::Error> {
-        let action = action
-            .to_device(&self.environment_device)
-            .map_err(TensorMapMultiGymError::Candle)?;
+    /// Transfers rank-`A` actions `[num_envs, ...action_shape]` to the environment device.
+    /// Returns rank-`O` observations, rewards `[num_envs]`, and unbatched rank-`U` terminal observations on the agent device.
+    /// Preserves tensor kinds, dtypes, item axes, and gradients.
+    fn step(
+        &mut self,
+        action: Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>,
+    ) -> Result<
+        MultiGymStepInfo<I, O, <Self::ObservationSpace as ObservationSpace<O>>::Kind, U>,
+        Self::Error,
+    > {
+        let action = action.to_device(&self.environment_device);
         let mut step = self.gym.step(action).map_err(TensorMapMultiGymError::Gym)?;
-        let transfer = |step: &mut MultiGymStepInfo<I>| -> candle_core::Result<()> {
-            // Include terminal observations in the same upload as reset states.
-            // Skip packing entirely when no transfer is necessary.
-            if !step.states.device().same_device(&self.agent_device) {
-                transfer_batched_observations(step, &self.agent_device)?;
-            }
-            step.rewards = step.rewards.to_device(&self.agent_device)?;
-            Ok(())
-        };
-        transfer(&mut step).map_err(TensorMapMultiGymError::Candle)?;
+        if step.observations.device() != self.agent_device {
+            transfer_batched_observations(&mut step, &self.agent_device);
+        }
+        step.rewards = step.rewards.to_device(&self.agent_device);
         Ok(step)
     }
 
-    fn reset(&mut self) -> Result<Tensor, Self::Error> {
-        self.gym
+    /// Transfers rank-`O` reset observations `[num_envs, ...observation_shape]` to the agent device, preserving kind and dtype.
+    fn reset(
+        &mut self,
+    ) -> Result<Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
+        Ok(self
+            .gym
             .reset()
             .map_err(TensorMapMultiGymError::Gym)?
-            .to_device(&self.agent_device)
-            .map_err(TensorMapMultiGymError::Candle)
+            .to_device(&self.agent_device))
     }
+
     fn num_envs(&self) -> usize {
         self.gym.num_envs()
     }
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+
+    fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
     }
 }
@@ -256,93 +338,110 @@ pub use time_limit::TimeLimitGym;
 mod tests {
     use super::*;
     use crate::spaces::BoxSpace;
-    use candle_core::Device;
+    use burn::tensor::{Bool, DType, Int};
 
     struct TensorMapTestGym;
 
     impl MultiGym for TensorMapTestGym {
-        type Error = candle_core::Error;
-        type SpaceError = candle_core::Error;
+        type Error = Infallible;
+        type ObservationSpace = BoxSpace<2>;
+        type ActionSpace = BoxSpace<1>;
 
-        /// Steps both test environments with an action tensor of shape `[2]`.
-        fn step(&mut self, action: Tensor) -> Result<MultiGymStepInfo, Self::Error> {
-            let actions = action.flatten_all()?.to_vec1::<f32>()?;
-            let states = Tensor::from_vec(
-                vec![2.0, 0.0, actions[0], 2.0, 1.0, actions[1]],
-                (2, 3),
-                &Device::Cpu,
-            )?;
+        /// Returns Float observations `[2, 3]`, rewards `[2]`, and one terminal observation `[3]` from scalar actions `[2]`.
+        fn step(&mut self, action: Tensor<1>) -> Result<MultiGymStepInfo, Self::Error> {
+            let actions = action.into_data().try_to_vec::<f32>().unwrap();
+            let observations = Tensor::from_data(
+                [[2.0, 0.0, actions[0]], [2.0, 1.0, actions[1]]],
+                &Device::flex(),
+            );
             Ok(MultiGymStepInfo {
-                rewards: Tensor::from_vec(actions, 2, &Device::Cpu)?,
-                terminal_states: vec![None, Some(states.get(1)?)],
-                states,
+                rewards: Tensor::from_data(actions.as_slice(), &Device::flex()),
+                terminal_observations: vec![
+                    None,
+                    Some(observations.clone().slice([Slice::from(1..2)]).reshape([3])),
+                ],
+                observations,
                 infos: vec![(), ()],
                 dones: vec![false, true],
                 truncateds: vec![false, false],
             })
         }
 
-        fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-            Box::new(BoxSpace::new_unbounded(vec![3], &Device::Cpu))
+        fn observation_space(&self) -> Self::ObservationSpace {
+            BoxSpace::new_unbounded([1, 3], &Device::flex())
         }
 
-        fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-            Box::new(BoxSpace::new_unbounded(vec![1], &Device::Cpu))
+        fn action_space(&self) -> Self::ActionSpace {
+            BoxSpace::new_unbounded([1], &Device::flex())
         }
 
         fn num_envs(&self) -> usize {
             2
         }
 
-        fn reset(&mut self) -> Result<Tensor, Self::Error> {
-            Tensor::from_vec(
-                vec![2.0f32, 0.0, -1.0, 2.0, 1.0, -1.0],
-                (2, 3),
-                &Device::Cpu,
-            )
+        /// Returns Float reset observations `[2, 3]` on the fixture device.
+        fn reset(&mut self) -> Result<Tensor<2>, Self::Error> {
+            Ok(Tensor::from_data(
+                [[2.0f32, 0.0, -1.0], [2.0, 1.0, -1.0]],
+                &Device::flex(),
+            ))
         }
     }
+
+    #[derive(Debug, PartialEq, thiserror::Error)]
+    #[error("mapping failed: {0}")]
+    struct MappingError(&'static str);
 
     #[test]
     fn output_mapping_receives_one_complete_output_per_operation() {
         let calls = std::cell::RefCell::new(Vec::new());
-        let input = InputMapMultiGymWrapper::new(TensorMapTestGym, |action: Tensor| action * 2.0);
+        let input = InputMapMultiGymWrapper::new(TensorMapTestGym, |action: Tensor<1>| {
+            Ok::<_, Infallible>(action * 2.0)
+        });
         let mut gym = OutputMapMultiGymWrapper::new(
             input,
-            |states: Tensor| {
+            |observations: Tensor<2>| {
                 calls.borrow_mut().push("reset");
-                states + 10.0
+                Ok::<_, Infallible>(observations + 10.0)
             },
             |mut step: MultiGymStepInfo| {
                 calls.borrow_mut().push("step");
-                step.states = (step.states + 10.0)?;
-                for state in step.terminal_states.iter_mut().flatten() {
-                    *state = (state.clone() + 10.0)?;
+                step.observations = step.observations + 10.0;
+                for observation in step.terminal_observations.iter_mut().flatten() {
+                    *observation = observation.clone() + 10.0;
                 }
                 Ok(step)
             },
         );
         assert_eq!(
-            gym.reset().unwrap().to_vec2::<f32>().unwrap(),
-            vec![vec![12.0, 10.0, 9.0], vec![12.0, 11.0, 9.0]]
+            gym.reset()
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![12.0, 10.0, 9.0, 12.0, 11.0, 9.0]
         );
         let step = gym
-            .step(Tensor::new(&[1.0f32, 2.0], &Device::Cpu).unwrap())
+            .step(Tensor::from_data([1.0f32, 2.0], &Device::flex()))
             .unwrap();
         assert_eq!(
-            step.states.to_vec2::<f32>().unwrap(),
-            vec![vec![12.0, 10.0, 12.0], vec![12.0, 11.0, 14.0]]
+            step.observations.into_data().try_to_vec::<f32>().unwrap(),
+            vec![12.0, 10.0, 12.0, 12.0, 11.0, 14.0]
         );
-        assert_eq!(step.rewards.to_vec1::<f32>().unwrap(), vec![2.0, 4.0]);
+        assert_eq!(
+            step.rewards.into_data().try_to_vec::<f32>().unwrap(),
+            vec![2.0, 4.0]
+        );
         assert_eq!(step.dones, vec![false, true]);
         assert_eq!(step.truncateds, vec![false, false]);
         assert_eq!(step.infos, vec![(), ()]);
-        assert!(step.terminal_states[0].is_none());
+        assert!(step.terminal_observations[0].is_none());
         assert_eq!(
-            step.terminal_states[1]
-                .as_ref()
+            step.terminal_observations[1]
+                .clone()
                 .unwrap()
-                .to_vec1::<f32>()
+                .into_data()
+                .try_to_vec::<f32>()
                 .unwrap(),
             vec![12.0, 11.0, 14.0]
         );
@@ -350,47 +449,115 @@ mod tests {
     }
 
     #[test]
-    fn output_mapping_propagates_callback_errors() {
+    fn mappings_propagate_callback_errors() {
         let mut gym = OutputMapMultiGymWrapper::new(
             TensorMapTestGym,
-            |_| Err(candle_core::Error::Msg("reset mapping failed".into())),
-            |_| Err(candle_core::Error::Msg("step mapping failed".into())),
+            |_| Err(MappingError("reset")),
+            |_| Err(MappingError("step")),
         );
-        assert!(
-            matches!(gym.reset(), Err(TensorMapMultiGymError::Candle(error))
-            if error.to_string() == "reset mapping failed")
+        assert!(matches!(
+            gym.reset(),
+            Err(TensorMapMultiGymError::Mapping(MappingError("reset")))
+        ));
+        assert!(matches!(
+            gym.step(Tensor::from_data([1.0f32, 2.0], &Device::flex())),
+            Err(TensorMapMultiGymError::Mapping(MappingError("step")))
+        ));
+        let mut gym =
+            InputMapMultiGymWrapper::new(TensorMapTestGym, |_| Err(MappingError("input")));
+        assert!(matches!(
+            gym.step(Tensor::from_data([1.0f32, 2.0], &Device::flex())),
+            Err(TensorMapMultiGymError::Mapping(MappingError("input")))
+        ));
+    }
+
+    #[test]
+    fn device_wrapper_preserves_reset_step_and_terminal_observations() {
+        let device = Device::flex();
+        let mut gym = DeviceMultiGymWrapper::new(TensorMapTestGym, device.clone(), device.clone());
+        assert_eq!(gym.reset().unwrap().device(), device);
+        let step = gym.step(Tensor::from_data([1.0f32, 2.0], &device)).unwrap();
+        assert_eq!(step.observations.device(), device);
+        assert_eq!(step.rewards.device(), device);
+        assert_eq!(
+            step.terminal_observations[1].as_ref().unwrap().device(),
+            device
         );
-        assert!(
-            matches!(gym.step(Tensor::new(&[1.0f32, 2.0], &Device::Cpu).unwrap()),
-            Err(TensorMapMultiGymError::Candle(error)) if error.to_string() == "step mapping failed")
+        assert_eq!(
+            step.transition_next_observations()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![2.0, 0.0, 1.0, 2.0, 1.0, 2.0]
         );
     }
 
     #[test]
-    fn device_wrapper_transfers_reset_step_and_terminal_observations() {
-        let device = Device::cuda_if_available(0).unwrap();
-        let mut gym =
-            super::DeviceMultiGymWrapper::new(TensorMapTestGym, Device::Cpu, device.clone());
-        assert!(gym.reset().unwrap().device().same_device(&device));
-        let step = gym
-            .step(Tensor::new(&[1.0f32, 2.0], &device).unwrap())
-            .unwrap();
-        assert!(step.states.device().same_device(&device));
-        assert!(step.rewards.device().same_device(&device));
-        assert!(
-            step.terminal_states[1]
-                .as_ref()
-                .unwrap()
-                .device()
-                .same_device(&device)
+    fn packed_transfer_preserves_scalar_integer_and_boolean_layouts() {
+        let device = Device::flex();
+        let mut integers = MultiGymStepInfo {
+            observations: Tensor::<1, Int>::from_data([4i32, 5], &device),
+            rewards: Tensor::zeros([2], &device),
+            infos: vec![(), ()],
+            dones: vec![false, true],
+            truncateds: vec![false, false],
+            terminal_observations: vec![None, Some(Tensor::from_data([8i32], &device))],
+        };
+        transfer_batched_observations(&mut integers, &device);
+        assert_eq!(integers.observations.dims(), [2]);
+        assert_eq!(
+            integers.terminal_observations[1].as_ref().unwrap().dims(),
+            [1]
         );
         assert_eq!(
-            step.transition_next_states()
-                .unwrap()
-                .to_vec2::<f32>()
+            integers
+                .transition_next_observations()
+                .into_data()
+                .try_to_vec::<i32>()
                 .unwrap(),
-            vec![vec![2.0, 0.0, 1.0], vec![2.0, 1.0, 2.0]]
+            vec![4, 8]
         );
+        let mut booleans = MultiGymStepInfo {
+            observations: Tensor::<2, Bool>::from_data([[true, false], [false, true]], &device),
+            rewards: Tensor::zeros([2], &device),
+            infos: vec![(), ()],
+            dones: vec![false, true],
+            truncateds: vec![false, false],
+            terminal_observations: vec![None, Some(Tensor::from_data([true, true], &device))],
+        };
+        transfer_batched_observations(&mut booleans, &device);
+        assert_eq!(booleans.observations.dims(), [2, 2]);
+        assert_eq!(
+            booleans.terminal_observations[1].as_ref().unwrap().dims(),
+            [2]
+        );
+        assert_eq!(
+            booleans
+                .transition_next_observations()
+                .into_data()
+                .try_to_vec::<bool>()
+                .unwrap(),
+            vec![true, false, true, true]
+        );
+    }
+
+    #[test]
+    fn packed_transfer_preserves_f64_and_handles_no_terminal_observations() {
+        let device = Device::flex();
+        let mut step = TensorMapTestGym.step(Tensor::zeros([2], &device)).unwrap();
+        step.observations = step.observations.cast(DType::F64);
+        for observation in step.terminal_observations.iter_mut().flatten() {
+            *observation = observation.clone().cast(DType::F64);
+        }
+        transfer_batched_observations(&mut step, &device);
+        assert_eq!(step.observations.dtype(), DType::F64);
+        assert_eq!(
+            step.terminal_observations[1].as_ref().unwrap().dtype(),
+            DType::F64
+        );
+        step.terminal_observations = vec![None, None];
+        transfer_batched_observations(&mut step, &device);
+        assert_eq!(step.observations.dims(), [2, 3]);
     }
 }
 
@@ -398,11 +565,12 @@ mod tests {
 mod test_support {
     use std::collections::VecDeque;
 
-    use candle_core::{Device, Tensor};
+    use burn::tensor::{Device, Int, Tensor};
+    use std::convert::Infallible;
 
     use crate::{
         gym::{Gym, ResetInfo, StepInfo},
-        spaces::{BoxSpace, Discrete, Space},
+        spaces::{BoxSpace, Discrete},
     };
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -420,20 +588,21 @@ mod test_support {
         pub(super) fn new(steps: impl IntoIterator<Item = StepInfo<TestInfo>>) -> Self {
             Self {
                 steps: steps.into_iter().collect(),
-                device: Device::Cpu,
+                device: Device::flex(),
                 reset_count: 0,
             }
         }
 
+        /// Creates a transition with one scalar Float observation `[1]`.
         pub(super) fn step(
-            state: f32,
+            observation: f32,
             reward: f32,
             done: bool,
             truncated: bool,
             sequence: u32,
         ) -> StepInfo<TestInfo> {
             StepInfo {
-                state: Tensor::new(state, &Device::Cpu).unwrap(),
+                observation: Tensor::from_data([observation], &Device::flex()),
                 reward,
                 done,
                 truncated,
@@ -442,41 +611,44 @@ mod test_support {
         }
     }
 
-    impl Gym<TestInfo> for TestGym {
-        type Error = candle_core::Error;
-        type SpaceError = candle_core::Error;
+    impl Gym<TestInfo, 1, 1, 1, 1> for TestGym {
+        type Error = Infallible;
+        type ObservationSpace = BoxSpace<1>;
+        type ActionSpace = Discrete;
 
-        /// Steps with one scalar discrete action shaped `[]`.
-        fn step(&mut self, _action: Tensor) -> Result<StepInfo<TestInfo>, Self::Error> {
+        /// Accepts one scalar Int action `[1]` and returns a scalar Float observation `[1]` on the fixture device.
+        fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo<TestInfo>, Self::Error> {
             Ok(self.steps.pop_front().expect("test step script exhausted"))
         }
 
+        /// Returns one scalar Float observation `[1]` on the fixture device.
         fn reset(&mut self) -> Result<ResetInfo<TestInfo>, Self::Error> {
             self.reset_count += 1;
             Ok(ResetInfo {
-                state: Tensor::new(100.0 * self.reset_count as f32, &self.device)?,
+                observation: Tensor::from_data([100.0 * self.reset_count as f32], &self.device),
                 info: TestInfo { sequence: 0 },
             })
         }
 
-        fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-            Box::new(BoxSpace::new(
-                Tensor::new(-10_000.0f32, &self.device).unwrap(),
-                Tensor::new(10_000.0f32, &self.device).unwrap(),
-            ))
+        fn observation_space(&self) -> Self::ObservationSpace {
+            BoxSpace::new(
+                Tensor::from_data([-10_000.0f32], &self.device),
+                Tensor::from_data([10_000.0f32], &self.device),
+            )
         }
 
-        fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-            Box::new(Discrete::new(4))
+        fn action_space(&self) -> Self::ActionSpace {
+            Discrete::new(4)
         }
     }
 
-    pub(super) fn action() -> Tensor {
-        Tensor::new(0u32, &Device::Cpu).unwrap()
+    /// Creates one scalar Int action `[1]` on the fixture device.
+    pub(super) fn action() -> Tensor<1, Int> {
+        Tensor::from_data([0i32], &Device::flex())
     }
 
-    /// Reads one scalar tensor shaped `[]`.
-    pub(super) fn scalar(tensor: &Tensor) -> f32 {
-        tensor.to_scalar::<f32>().unwrap()
+    /// Reads one scalar Float tensor `[1]` to the host.
+    pub(super) fn scalar(tensor: &Tensor<1>) -> f32 {
+        tensor.clone().into_scalar::<f32>()
     }
 }
