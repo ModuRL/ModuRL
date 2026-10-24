@@ -3,10 +3,6 @@ name = "modurl-benches"
 version = "0.0.0"
 edition = "2024"
 publish = false
-autobins = false
-
-[lib]
-path = "src/main.rs"
 
 [dependencies]
 candle-core = "0.11.0"
