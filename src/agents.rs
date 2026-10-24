@@ -1,22 +1,14 @@
-#[cfg(any())]
 use crate::gym::MultiGym;
-#[cfg(any())]
 use candle_core::Tensor;
-#[cfg(any())]
 pub mod a2c;
-#[cfg(any())]
 pub mod deterministic_actor_critic;
-#[cfg(any())]
 pub mod ppo;
-#[cfg(any())]
 pub mod q_learning;
 mod replay_device_strategy;
-#[cfg(any())]
 pub mod sac;
 
 pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
 
-#[cfg(any())]
 pub trait Agent<I = ()> {
     type Error;
     type GymError;
@@ -36,7 +28,6 @@ pub trait Agent<I = ()> {
 }
 
 #[cfg(test)]
-#[cfg(any())]
 pub(crate) mod test_support {
     use candle_core::{DType, Device, Tensor};
     use candle_nn::Optimizer;
