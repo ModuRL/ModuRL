@@ -1,3 +1,5 @@
+#![cfg(any())]
+
 //! CPU classic-control and Box2D environments.
 //!
 //! Observations and space bounds always reside on CPU. Builders expose
