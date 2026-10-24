@@ -1436,9 +1436,9 @@ dependencies = [
 
 [[package]]
 name = "combine"
-version = "4.6.7"
+version = "4.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
+checksum = "cfc320937d09e6de266b31b9afb480f197d7a861be86be7cb2ea7e5d1bfffc5e"
 dependencies = [
  "bytes",
  "memchr",
@@ -2931,13 +2931,12 @@ name = "examples"
 version = "0.0.0"
 dependencies = [
  "burn",
- "candle-core",
- "candle-nn",
  "modurl",
  "modurl_ale",
  "modurl_gym",
  "modurl_logger",
  "modurl_mujoco",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4663,8 +4662,6 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "burn",
- "candle-core",
- "candle-nn",
  "rand 0.10.3",
  "thiserror 2.0.20",
  "tracing",
@@ -4687,7 +4684,7 @@ name = "modurl_ale"
 version = "0.1.0"
 dependencies = [
  "bon",
- "candle-core",
+ "burn",
  "cmake",
  "minifb",
  "modurl",
@@ -4713,7 +4710,7 @@ dependencies = [
 name = "modurl_logger"
 version = "0.1.0"
 dependencies = [
- "candle-core",
+ "burn",
  "console",
  "crc",
  "prost",

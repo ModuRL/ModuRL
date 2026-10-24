@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use candle_core::Tensor;
+use burn::tensor::Tensor;
 use console::Term;
 use textplots::{Chart, LabelBuilder, LabelFormat, Plot, Shape};
 
@@ -151,8 +151,8 @@ impl TerminalLogger {
 impl Logger for TerminalLogger {
     type Error = crate::Error;
 
-    /// Logs named scalar metric tensors, each shaped `[]`.
-    fn log(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) -> Result<()> {
+    /// Logs named scalar metric tensors, each shaped `[1]`.
+    fn log(&mut self, timestep: usize, metrics: &[(&str, &Tensor<1>)]) -> Result<()> {
         if let Some(completed) = self.aggregator.log(timestep, metrics)? {
             self.store(completed);
             if self.live_updates {
