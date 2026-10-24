@@ -3,15 +3,12 @@ use crate::{
     spaces::{ActionSpace, ObservationSpace},
 };
 use burn::tensor::Tensor;
-#[cfg(any())]
+
 pub mod a2c;
-#[cfg(any())]
 pub mod deterministic_actor_critic;
-#[cfg(any())]
 pub mod ppo;
 pub mod q_learning;
 mod replay_device_strategy;
-#[cfg(any())]
 pub mod sac;
 
 pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
