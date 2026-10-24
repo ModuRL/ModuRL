@@ -1,15 +1,18 @@
 pub mod agents;
 pub mod buffers;
 pub mod distributions;
+#[cfg(any())]
 pub mod gym;
 pub mod init;
 pub mod models;
 pub mod objectives;
 pub mod parameter_schedule;
+#[cfg(any())]
 pub mod prelude;
 pub mod sampling;
 pub mod spaces;
 mod tensor_operations;
+#[cfg(any())]
 pub mod wrappers;
 
 #[cfg(test)]
