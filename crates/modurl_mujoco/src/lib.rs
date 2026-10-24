@@ -1,5 +1,3 @@
-#![cfg(any())]
-
 //! Gymnasium-compatible MuJoCo environments for [ModuRL](https://github.com/ModuRL/ModuRL).
 //!
 //! The environments use MuJoCo for physics through [`mujoco_rs`] and expose

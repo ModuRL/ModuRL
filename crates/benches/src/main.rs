@@ -1,5 +1,3 @@
-#![cfg(any())]
-
 use std::{env, error::Error, fmt::Debug, time::Instant};
 
 use candle_core::{DType, Device, Module, Tensor, Var};
