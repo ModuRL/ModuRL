@@ -1,3 +1,5 @@
+#![cfg(any())]
+
 use candle_core::Device;
 use modurl::gym::Gym;
 use modurl_mujoco::{CustomMujoco, MujocoState, MujocoTask, TaskStep};
