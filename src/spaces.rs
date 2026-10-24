@@ -1,5 +1,5 @@
-use crate::tensor_rank::{NextRank, PrevRank};
-use burn::tensor::{DType, Device, Distribution, Float, Int, Tensor, kind::Basic};
+use crate::tensor_rank::{PrevRank, TensorBatchTypes};
+use burn::tensor::{DType, Device, Distribution, Float, Int, Tensor};
 
 /// Checks which rank-`O` observation batches are valid.
 /// A single environment uses a batch of one.
@@ -9,31 +9,26 @@ use burn::tensor::{DType, Device, Distribution, Float, Int, Tensor, kind::Basic}
 ///
 /// ```compile_fail
 /// use burn::tensor::{Float, Tensor};
-/// use modurl::spaces::ObservationSpace;
+/// use modurl::spaces::{BoxSpace, ObservationSpace};
 ///
-/// fn invalid_rank<S: ObservationSpace<2, Kind = Float, Observation = Tensor<2>>>() {}
+/// fn invalid_rank<S: ObservationSpace<2, Kind = Float, Item = Tensor<2>>>() {}
+/// invalid_rank::<BoxSpace<2>>();
 /// ```
 ///
 /// An observation type with a different tensor kind is rejected:
 ///
 /// ```compile_fail
 /// use burn::tensor::{Float, Int, Tensor};
-/// use modurl::spaces::ObservationSpace;
+/// use modurl::spaces::{BoxSpace, ObservationSpace};
 ///
-/// fn invalid_kind<S: ObservationSpace<2, Kind = Float, Observation = Tensor<1, Int>>>() {}
+/// fn invalid_kind<S: ObservationSpace<2, Kind = Float, Item = Tensor<1, Int>>>() {}
+/// invalid_kind::<BoxSpace<2>>();
 /// ```
-pub trait ObservationSpace<const O: usize>
-where
-    Tensor<O, Self::Kind>: PrevRank<Prev = Self::Observation>,
+pub trait ObservationSpace<const O: usize>:
+    TensorBatchTypes<Batch = Tensor<O, <Self as TensorBatchTypes>::Kind>>
 {
-    type Kind: Basic;
-
-    /// The unbatched observation tensor, one rank below `O`, preserving the tensor kind.
-    /// Scalars use `[1]`; dtype and device belong to tensor values.
-    type Observation: NextRank<Next = Tensor<O, Self::Kind>>;
-
     /// Checks observations `[batch, ...self.shape()]` against the shape and bounds.
-    fn contains(&self, values: &Tensor<O, Self::Kind>) -> bool;
+    fn contains(&self, values: &Self::Batch) -> bool;
 
     /// Returns the shape of one environment value, excluding the batch axis.
     fn shape(&self) -> Vec<usize>;
@@ -47,57 +42,45 @@ where
 ///
 /// ```compile_fail
 /// use burn::tensor::{Int, Tensor};
-/// use modurl::spaces::ActionSpace;
+/// use modurl::spaces::{ActionSpace, BoxSpace, Discrete};
 ///
-/// fn invalid_rank<S: ActionSpace<2, Kind = Int, Action = Tensor<2, Int>>>() {}
+/// fn invalid_rank<S: ActionSpace<2, Kind = Int, Item = Tensor<2, Int>>>() {}
+/// invalid_rank::<Discrete>();
 /// ```
 ///
 /// An action type with a different tensor kind is rejected:
 ///
 /// ```compile_fail
 /// use burn::tensor::{Float, Int, Tensor};
-/// use modurl::spaces::ActionSpace;
+/// use modurl::spaces::{ActionSpace, BoxSpace, Discrete};
 ///
-/// fn invalid_kind<S: ActionSpace<2, Kind = Float, Action = Tensor<1, Int>>>() {}
+/// fn invalid_kind<S: ActionSpace<2, Kind = Float, Item = Tensor<1, Int>>>() {}
+/// invalid_kind::<BoxSpace<2>>();
 /// ```
-pub trait ActionSpace<const A: usize>
-where
-    Tensor<A, Self::Kind>: PrevRank<Prev = Self::Action>,
+pub trait ActionSpace<const A: usize>:
+    TensorBatchTypes<Batch = Tensor<A, <Self as TensorBatchTypes>::Kind>>
 {
-    type Kind: Basic;
     type Error;
 
-    /// The unbatched action tensor, one rank below `A`, preserving the tensor kind.
-    /// Scalars use `[1]`; dtype and device belong to tensor values.
-    type Action: NextRank<Next = Tensor<A, Self::Kind>>;
-
     /// Checks actions `[batch, ...self.shape()]` against the shape and bounds.
-    fn contains(&self, values: &Tensor<A, Self::Kind>) -> bool;
+    fn contains(&self, values: &Self::Batch) -> bool;
 
     /// Returns the shape of one environment action, excluding the batch axis.
     fn shape(&self) -> Vec<usize>;
 
     /// Samples actions `[batch_size, ...self.shape()]` using the device RNG.
-    fn sample_batch(
-        &self,
-        batch_size: usize,
-        device: &Device,
-    ) -> Result<Tensor<A, Self::Kind>, Self::Error>;
+    fn sample_batch(&self, batch_size: usize, device: &Device) -> Result<Self::Batch, Self::Error>;
 }
 
 /// Converts original policy samples of rank `L` into environment actions of rank `A`.
-pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A>
-where
-    Tensor<A, Self::Kind>: PrevRank<Prev = Self::Action>,
-{
+pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A> {
     /// Returns the shape of one policy sample, excluding the batch axis.
     fn policy_shape(&self) -> Vec<usize>;
     /// Converts policy samples `[batch, ...self.policy_shape()]` of rank `L`
     /// into environment actions `[batch, ...self.shape()]` of rank `A`.
     /// Continuous actions are clamped; callers retain original samples separately
     /// for probability calculations.
-    fn tensor_from_neurons(&self, neurons: Tensor<L>)
-    -> Result<Tensor<A, Self::Kind>, Self::Error>;
+    fn tensor_from_neurons(&self, neurons: Tensor<L>) -> Result<Self::Batch, Self::Error>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -135,10 +118,13 @@ impl Discrete {
     }
 }
 
-impl ObservationSpace<2> for Discrete {
+impl TensorBatchTypes for Discrete {
     type Kind = Int;
-    type Observation = Tensor<1, Int>;
+    type Item = Tensor<1, Int>;
+    type Batch = Tensor<2, Int>;
+}
 
+impl ObservationSpace<2> for Discrete {
     /// Checks integer indices shaped `[batch_size, 1]` without changing the input.
     fn contains(&self, values: &Tensor<2, Int>) -> bool {
         self.contains(values)
@@ -150,9 +136,7 @@ impl ObservationSpace<2> for Discrete {
 }
 
 impl ActionSpace<2> for Discrete {
-    type Kind = Int;
     type Error = SpaceError;
-    type Action = Tensor<1, Int>;
 
     /// Checks integer indices shaped `[batch_size, 1]` without changing the input.
     fn contains(&self, values: &Tensor<2, Int>) -> bool {
@@ -247,13 +231,19 @@ impl<const R: usize> BoxSpace<R> {
     }
 }
 
-impl<const R: usize> ObservationSpace<R> for BoxSpace<R>
+impl<const R: usize> TensorBatchTypes for BoxSpace<R>
 where
     Tensor<R>: PrevRank,
 {
     type Kind = Float;
-    type Observation = <Tensor<R> as PrevRank>::Prev;
+    type Item = <Tensor<R> as PrevRank>::Prev;
+    type Batch = Tensor<R>;
+}
 
+impl<const R: usize> ObservationSpace<R> for BoxSpace<R>
+where
+    Tensor<R>: PrevRank,
+{
     /// Checks rank-R values `[batch_size, ...self.shape()]` without changing the input.
     fn contains(&self, values: &Tensor<R>) -> bool {
         self.contains(values)
@@ -268,9 +258,7 @@ impl<const R: usize> ActionSpace<R> for BoxSpace<R>
 where
     Tensor<R>: PrevRank,
 {
-    type Kind = Float;
     type Error = SpaceError;
-    type Action = <Tensor<R> as PrevRank>::Prev;
 
     /// Checks rank-R values `[batch_size, ...self.shape()]` without changing the input.
     fn contains(&self, values: &Tensor<R>) -> bool {
@@ -534,13 +522,21 @@ mod tests {
     fn box_sampling_and_clipping_work_through_a_trait_object() {
         let _guard = RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let space: Box<dyn ActionMap<2, 2, Error = SpaceError, Kind = Float, Action = Tensor<1>>> =
-            Box::new(BoxSpace::<2>::new_with_universal_bounds(
-                [1, 2],
-                -1.0,
-                1.0,
-                &device,
-            ));
+        let space: Box<
+            dyn ActionMap<
+                    2,
+                    2,
+                    Error = SpaceError,
+                    Kind = Float,
+                    Item = Tensor<1>,
+                    Batch = Tensor<2>,
+                >,
+        > = Box::new(BoxSpace::<2>::new_with_universal_bounds(
+            [1, 2],
+            -1.0,
+            1.0,
+            &device,
+        ));
         assert_eq!(space.sample_batch(4, &device).unwrap().dims(), [4, 2]);
         let actions = space
             .tensor_from_neurons(Tensor::from_floats([[-2.0, 2.0]], &device))
@@ -582,15 +578,22 @@ mod tests {
     fn observation_and_action_roles_use_independent_ranks() {
         let _guard = RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let observations: Box<dyn ObservationSpace<4, Kind = Float, Observation = Tensor<3>>> =
-            Box::new(BoxSpace::<4>::new_with_universal_bounds(
-                [1, 2, 3, 4],
-                0.0,
-                255.0,
-                &device,
-            ));
+        let observations: Box<
+            dyn ObservationSpace<4, Kind = Float, Item = Tensor<3>, Batch = Tensor<4>>,
+        > = Box::new(BoxSpace::<4>::new_with_universal_bounds(
+            [1, 2, 3, 4],
+            0.0,
+            255.0,
+            &device,
+        ));
         let actions: Box<
-            dyn ActionSpace<2, Kind = Int, Error = SpaceError, Action = Tensor<1, Int>>,
+            dyn ActionSpace<
+                    2,
+                    Kind = Int,
+                    Error = SpaceError,
+                    Item = Tensor<1, Int>,
+                    Batch = Tensor<2, Int>,
+                >,
         > = Box::new(Discrete::new(3));
         assert_eq!(observations.shape(), vec![2, 3, 4]);
         assert!(observations.contains(&Tensor::zeros([5, 2, 3, 4], &device)));

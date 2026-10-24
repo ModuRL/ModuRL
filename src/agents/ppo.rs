@@ -1,3 +1,4 @@
+use crate::tensor_rank::TensorBatchTypes;
 mod network;
 
 pub use network::*;
@@ -119,9 +120,9 @@ struct PPOExperience<O: NextRank = Tensor<2>, A: NextRank = Tensor<2>> {
     prepared: Option<PPOPreparedExperience>,
 }
 
-struct PPOCollectionAction<const L: usize, const A: usize, K: Basic> {
+struct PPOCollectionAction<AS: TensorBatchTypes, const L: usize> {
     policy_actions: Tensor<L>,
-    environment_actions: Tensor<A, K>,
+    environment_actions: AS::Batch,
     log_probs: Tensor<2>,
 }
 
@@ -179,24 +180,20 @@ impl PPOPreparedRolloutBatch {
 }
 
 #[bon]
-impl<const O: usize, const A: usize, K: Basic> PPOExperience<Tensor<O, K>, Tensor<A>>
-where
-    Tensor<O, K>: NextRank,
-    Tensor<A>: NextRank,
-{
+impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
     /// Creates one vectorized rollout transition.
     ///
-    /// Rank-O `observations` and `next_observations` are `[env_count, ...observation_shape]`.
-    /// Rank-A `actions` is `[env_count, ...action_shape]`; `rewards`
+    /// `observations` and `next_observations` are `[env_count, ...observation_shape]`.
+    /// `actions` is `[env_count, ...action_shape]`; `rewards`
     /// and `log_probs` are `[env_count, 1]`. `rewards` preserves the environment values for logging.
     /// Training rewards [env_count, 1] include terminal-value corrections for nonterminal truncations and retain the reward dtype.
     /// Observations preserve their native kind and dtype. Other fields preserve their Float dtype and device; collection detaches stored experience.
     /// PPO training data is added internally after rollout collection.
     #[builder]
     fn new(
-        observations: Tensor<O, K>,
-        next_observations: Tensor<O, K>,
-        actions: Tensor<A>,
+        observations: O,
+        next_observations: O,
+        actions: A,
         rewards: Tensor<2>,
         training_rewards: Tensor<2>,
         next_dones: Vec<bool>,
@@ -226,7 +223,7 @@ where
     type Batch = PPORolloutBatch<Tensor<O, K>, Tensor<A>>;
     type Error = ExperienceBatchError;
 
-    /// Adds a leading time axis to rank-O observations and rank-A actions, producing ranks BO = O + 1 and BA = A + 1.
+    /// Adds a leading time axis to rank-O observations and rank-A actions, producing tensors with one additional axis.
     /// Scalar statistics and Bool flags become `[time, environment_count, 1]` without changing environment order.
     /// Each tensor field must share shape, dtype, and device across time. Preserves gradient connections.
     fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
@@ -429,50 +426,29 @@ impl<G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'_, G, OS, AS, GE
     pub fn network(&self) -> &G::Network {
         &self.network_info
     }
+
+    pub fn get_observation_space(&self) -> &OS {
+        &self.observation_space
+    }
+
+    pub fn get_action_space(&self) -> &AS {
+        &self.action_space
+    }
+
+    pub fn reset_current_observations(&mut self) {
+        self.current_observations = None;
+        self.episode_tracker.clear();
+    }
 }
 
 #[bon]
-impl<
-    'a,
-    N,
-    OS,
-    AS,
-    GE,
-    I,
-    NE: std::fmt::Debug,
-    const O: usize,
-    const H: usize,
-    const L: usize,
-    const A: usize,
-    const BO: usize,
-    const BL: usize,
->
-    PPOAgent<
-        'a,
-        PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
-        OS,
-        AS,
-        GE,
-        I,
-        A,
-    >
-where
-    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O>,
-    AS: ActionMap<L, A>,
-    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
-    AS::Error: std::fmt::Debug,
-    OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>: PrevRank<Prev = OS::Observation> + NextRank<Next = Tensor<BO, OS::Kind>>,
-    Tensor<L>: NextRank<Next = Tensor<BL>>,
-    GE: std::fmt::Debug,
-{
+impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS, GE, I, A> {
     /// Builds PPO for rank-O observation batches and rank-A environment-action batches.
     /// Preserves observation kind and dtype. Policy inputs have rank H; original policy actions have rank L.
     /// Shared trunks produce Float features for Float-input heads. Separate models receive observations directly and require H = O.
     /// Models own input conversions and must share a device. Critic outputs must match reward dtype; tensor kinds must agree at compile time.
     #[builder]
-    pub fn new(
+    pub fn new<N, const O: usize, const H: usize, const L: usize>(
         observation_space: OS,
         action_space: AS,
         network_info: N,
@@ -499,7 +475,17 @@ where
         training_horizon: usize,
         logging_info: Option<&'a mut dyn PPOLogger<I>>,
         device: Device,
-    ) -> Result<Self, PPOConfigurationError> {
+    ) -> Result<Self, PPOConfigurationError>
+    where
+        N: PPONetwork<O, H, L, InputKind = OS::Kind, ModelGroup = G>,
+        G: PPOModelTypes<Network = N, Observation = OS::Batch, Action = Tensor<L>>,
+        OS: ObservationSpace<O>,
+        AS: ActionMap<L, A>,
+        AS::Error: std::fmt::Debug,
+        Tensor<O, OS::Kind>: NextRank,
+        Tensor<L>: NextRank,
+        GE: std::fmt::Debug,
+    {
         const {
             assert!(
                 O >= 2 && A >= 2,
@@ -562,22 +548,7 @@ where
 }
 
 #[bon]
-impl<
-    'a,
-    N,
-    OS,
-    AS,
-    GE,
-    I,
-    NE: std::fmt::Debug,
-    const O: usize,
-    const H: usize,
-    const L: usize,
-    const A: usize,
-    const BO: usize,
-    const BL: usize,
-    const U: usize,
->
+impl<'a, N, OS, AS, GE, I, const O: usize, const H: usize, const L: usize, const A: usize>
     PPOAgent<
         'a,
         PPOModelGroup<N, Tensor<O, OS::Kind>, Tensor<H, N::LatentKind>, Tensor<L>>,
@@ -588,27 +559,29 @@ impl<
         A,
     >
 where
-    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
+    N: PPONetwork<O, H, L, InputKind = OS::Kind>,
+    OS: ObservationSpace<O>,
     AS: ActionMap<L, A>,
-    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
-    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
-    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
-    Tensor<L>: NextRank<Next = Tensor<BL>>,
+    Tensor<O, OS::Kind>: PrevRank + NextRank,
+    Tensor<L>: NextRank,
     GE: std::fmt::Debug,
 {
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(name = "ppo.optimize", target = "modurl::performance", skip_all)
     )]
-    fn optimize(&mut self) -> Result<(), PPOError<NE, GE, AS::Error>> {
+    fn optimize<const BO: usize, const BL: usize>(
+        &mut self,
+    ) -> Result<(), PPOError<N::Error, GE, AS::Error>>
+    where
+        Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
+        Tensor<L>: NextRank<Next = Tensor<BL>>,
+    {
         let rollout_explained_variance = self.add_advantages_and_returns()?;
 
-        let batch =
-            PPOExperience::<Tensor<O, OS::Kind>, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
+        let batch = PPOExperience::<OS::Batch, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
         let all_observations = batch.observations.flatten::<O>(0, 1);
         let all_actions = batch.actions.flatten::<L>(0, 1);
         let all_log_probs = batch.log_probs.flatten::<2>(0, 1);
@@ -682,13 +655,20 @@ where
     )]
     /// Returns explained variance `[1]` and prepares detached statistics `[time, env_count, 1]`.
     /// Temporarily combines time and environment axes for rank-O observation evaluation, then restores both axes.
-    fn add_advantages_and_returns(&mut self) -> Result<Tensor<1>, PPOError<NE, GE, AS::Error>> {
-        let batch =
-            PPOExperience::<Tensor<O, OS::Kind>, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
+    fn add_advantages_and_returns<const BO: usize, const BL: usize>(
+        &mut self,
+    ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>>
+    where
+        Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
+        Tensor<L>: NextRank<Next = Tensor<BL>>,
+    {
+        let batch = PPOExperience::<OS::Batch, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
         let observations = batch.observations;
         let (batch_size, env_count) = (observations.dims()[0], observations.dims()[1]);
         let observations = observations.flatten::<O>(0, 1);
-        let latent_observations = self.latent_observations(observations)?;
+        let latent_observations = self
+            .latent_observations(observations)
+            .map_err(PPOError::NetworkError)?;
 
         let values_tensor = self
             .critic_network_forward(&latent_observations, batch.rewards.dtype())?
@@ -701,8 +681,9 @@ where
         let bootstrapped_observations = next_observations_tensor
             .slice_dim(0, batch_size - 1..batch_size)
             .squeeze_dim::<O>(0);
-        let latent_bootstrapped_observations =
-            self.latent_observations(bootstrapped_observations)?;
+        let latent_bootstrapped_observations = self
+            .latent_observations(bootstrapped_observations)
+            .map_err(PPOError::NetworkError)?;
 
         let bootstrapped_values = self
             .critic_network_forward(&latent_bootstrapped_observations, batch.rewards.dtype())?
@@ -809,11 +790,9 @@ where
     /// Shared models compute latent features; separate models preserve every axis, dtype, and device because O = H.
     fn latent_observations(
         &self,
-        observations: Tensor<O, OS::Kind>,
-    ) -> Result<Tensor<H, N::LatentKind>, PPOError<NE, GE, AS::Error>> {
-        self.network_info
-            .forward_observations(observations)
-            .map_err(PPOError::NetworkError)
+        observations: OS::Batch,
+    ) -> Result<Tensor<H, N::LatentKind>, N::Error> {
+        self.network_info.forward_observations(observations)
     }
 
     /// Forwards latent or raw `observations` shaped `[batch, ...model_input_shape]` of rank H and
@@ -823,7 +802,7 @@ where
         &mut self,
         observations: &Tensor<H, N::LatentKind>,
         reward_dtype: DType,
-    ) -> Result<Tensor<2>, PPOError<NE, GE, AS::Error>> {
+    ) -> Result<Tensor<2>, PPOError<N::Error, GE, AS::Error>> {
         let values = self
             .network_info
             .forward_values(observations.clone())
@@ -844,10 +823,10 @@ where
     fn bootstrap_truncated_rewards(
         &mut self,
         rewards: Tensor<2>,
-        transition_next_observations: &Tensor<O, OS::Kind>,
+        transition_next_observations: &OS::Batch,
         dones: &[bool],
         truncateds: &[bool],
-    ) -> Result<Tensor<2>, PPOError<NE, GE, AS::Error>> {
+    ) -> Result<Tensor<2>, PPOError<N::Error, GE, AS::Error>> {
         if dones.len() != truncateds.len() {
             return Err(PPOError::MismatchedTerminationBatch {
                 dones: dones.len(),
@@ -872,7 +851,9 @@ where
         let truncated_next_observations = transition_next_observations
             .clone()
             .select(0, truncated_indices.clone());
-        let latent_observations = self.latent_observations(truncated_next_observations)?;
+        let latent_observations = self
+            .latent_observations(truncated_next_observations)
+            .map_err(PPOError::NetworkError)?;
         let terminal_values = self
             .critic_network_forward(&latent_observations, rewards.dtype())?
             .detach();
@@ -891,10 +872,9 @@ where
         &mut self,
         observations: &Tensor<H, N::LatentKind>,
         actions: &Tensor<L>,
-    ) -> Result<(Tensor<2>, Tensor<2>), PPOError<NE, GE, AS::Error>> {
+    ) -> Result<(Tensor<2>, Tensor<2>), N::Error> {
         self.network_info
             .log_prob_and_entropy(observations.clone(), actions.clone())
-            .map_err(PPOError::NetworkError)
     }
 
     #[cfg_attr(
@@ -916,7 +896,7 @@ where
     /// Detaches rollout estimates while retaining gradients through current model predictions.
     fn compute_loss(
         &mut self,
-        observations: Tensor<O, OS::Kind>,
+        observations: OS::Batch,
         actions: Tensor<L>,
         old_log_probs: Tensor<2>,
         advantages: Tensor<2>,
@@ -925,7 +905,7 @@ where
         old_values: Option<Tensor<2>>,
         explained_variance: Tensor<1>,
         clip_range: f32,
-    ) -> Result<PPOLosses, PPOError<NE, GE, AS::Error>> {
+    ) -> Result<PPOLosses, PPOError<N::Error, GE, AS::Error>> {
         let advantages = if self.normalize_advantage {
             normalize_tensor(&advantages)
         } else {
@@ -933,10 +913,13 @@ where
         }
         .detach();
 
-        let latent_observations = self.latent_observations(observations)?;
+        let latent_observations = self
+            .latent_observations(observations)
+            .map_err(PPOError::NetworkError)?;
 
-        let (log_probs, entropy) =
-            self.actor_network_log_prob_and_entropy(&latent_observations, &actions)?;
+        let (log_probs, entropy) = self
+            .actor_network_log_prob_and_entropy(&latent_observations, &actions)
+            .map_err(PPOError::NetworkError)?;
 
         let log_ratio = log_probs - old_log_probs.detach();
         let ratio = log_ratio.clone().exp();
@@ -1029,7 +1012,10 @@ where
     )]
     /// Updates model parameters from actor and critic losses `[1]`.
     /// Shared training clips one norm across all models; separate training uses one combined norm or two independent norms.
-    fn backpropagate_loss(&mut self, losses: PPOLosses) -> Result<(), PPOError<NE, GE, AS::Error>> {
+    fn backpropagate_loss(
+        &mut self,
+        losses: PPOLosses,
+    ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
         self.network_info.backpropagate_loss(
             losses.actor_loss,
             losses.critic_loss,
@@ -1043,7 +1029,7 @@ where
     fn act_neurons(
         &mut self,
         observations: &Tensor<H, N::LatentKind>,
-    ) -> Result<Tensor<L>, PPOError<NE, GE, AS::Error>> {
+    ) -> Result<Tensor<L>, PPOError<N::Error, GE, AS::Error>> {
         self.network_info
             .sample(observations.clone())
             .map_err(PPOError::NetworkError)
@@ -1053,16 +1039,19 @@ where
     /// All tensors preserve the leading environment axis; log probabilities are detached `[environment_count, 1]`.
     fn sample_collection_action(
         &mut self,
-        observations: &Tensor<O, OS::Kind>,
-    ) -> Result<PPOCollectionAction<L, A, AS::Kind>, PPOError<NE, GE, AS::Error>> {
-        let latent_observations = self.latent_observations(observations.clone())?;
+        observations: &OS::Batch,
+    ) -> Result<PPOCollectionAction<AS, L>, PPOError<N::Error, GE, AS::Error>> {
+        let latent_observations = self
+            .latent_observations(observations.clone())
+            .map_err(PPOError::NetworkError)?;
         let policy_actions = self.act_neurons(&latent_observations)?;
         let environment_actions = self
             .action_space
             .tensor_from_neurons(policy_actions.clone())
             .map_err(PPOError::SpaceError)?;
-        let (log_probs, _) =
-            self.actor_network_log_prob_and_entropy(&latent_observations, &policy_actions)?;
+        let (log_probs, _) = self
+            .actor_network_log_prob_and_entropy(&latent_observations, &policy_actions)
+            .map_err(PPOError::NetworkError)?;
         Ok(PPOCollectionAction {
             policy_actions,
             environment_actions,
@@ -1123,14 +1112,6 @@ where
         self.network_info.set_learning_rate(lr);
     }
 
-    pub fn get_observation_space(&self) -> &OS {
-        &self.observation_space
-    }
-
-    pub fn get_action_space(&self) -> &AS {
-        &self.action_space
-    }
-
     /// Selects the policy distribution's mode without sampling.
     ///
     /// This is intended for deterministic evaluation. PPO rollouts remain
@@ -1139,9 +1120,11 @@ where
     /// `[batch, ...action_shape]`.
     pub fn act_deterministic(
         &mut self,
-        observation: &Tensor<O, OS::Kind>,
-    ) -> Result<Tensor<A, AS::Kind>, PPOError<NE, GE, AS::Error>> {
-        let latent_observations = self.latent_observations(observation.clone())?;
+        observation: &OS::Batch,
+    ) -> Result<AS::Batch, PPOError<N::Error, GE, AS::Error>> {
+        let latent_observations = self
+            .latent_observations(observation.clone())
+            .map_err(PPOError::NetworkError)?;
         let neurons = self
             .network_info
             .mode(latent_observations)
@@ -1151,18 +1134,13 @@ where
             .map_err(PPOError::SpaceError)
     }
 
-    pub fn reset_current_observations(&mut self) {
-        self.current_observations = None;
-        self.episode_tracker.clear();
-    }
-
     /// Prepares an empty rollout buffer and episode tracking, returning the
     /// observations shaped `[environment_count, ...observation_shape]` from
     /// which collection should resume.
     fn prepare_rollout_collection(
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
-    ) -> Result<Tensor<O, OS::Kind>, PPOError<NE, GE, AS::Error>> {
+    ) -> Result<OS::Batch, PPOError<N::Error, GE, AS::Error>> {
         let observations = if let Some(observations) = self.current_observations.take() {
             observations
         } else {
@@ -1197,11 +1175,15 @@ where
     )]
     /// Fills the rollout buffer, updating `next_observations` shaped
     /// `[environment_count, ...observation_shape]` after each environment step.
-    fn collect_rollout(
+    fn collect_rollout<const U: usize>(
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
-        next_observations: &mut Tensor<O, OS::Kind>,
-    ) -> Result<usize, PPOError<NE, GE, AS::Error>> {
+        next_observations: &mut OS::Batch,
+    ) -> Result<usize, PPOError<N::Error, GE, AS::Error>>
+    where
+        OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
+    {
         let environment_count = env.num_envs();
         while self.rollout_buffer.len() * environment_count < self.batch_size {
             let observations = next_observations.clone();
@@ -1253,10 +1235,14 @@ where
         Ok(self.rollout_buffer.len() * environment_count)
     }
 
-    fn train_on_collected_rollout(
+    fn train_on_collected_rollout<const BO: usize, const BL: usize>(
         &mut self,
         collected_timesteps: usize,
-    ) -> Result<(), PPOError<NE, GE, AS::Error>> {
+    ) -> Result<(), PPOError<N::Error, GE, AS::Error>>
+    where
+        Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
+        Tensor<L>: NextRank<Next = Tensor<BL>>,
+    {
         self.schedule_progress.advance_steps(collected_timesteps);
         self.update_learning_rates();
         if let Some(logging_info) = &mut self.logging_info {
@@ -1273,7 +1259,6 @@ impl<
     AS,
     GE,
     I,
-    NE: std::fmt::Debug,
     const O: usize,
     const H: usize,
     const L: usize,
@@ -1292,19 +1277,19 @@ impl<
         A,
     >
 where
-    N: PPONetwork<O, H, L, InputKind = OS::Kind, Error = NE>,
-    OS: ObservationSpace<O, Observation = Tensor<U, <OS as ObservationSpace<O>>::Kind>>,
+    N: PPONetwork<O, H, L, InputKind = OS::Kind>,
+    OS: ObservationSpace<O, Item = Tensor<U, <OS as crate::tensor_rank::TensorBatchTypes>::Kind>>,
     AS: ActionMap<L, A>,
-    Tensor<A, AS::Kind>: PrevRank<Prev = AS::Action>,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>: PrevRank<Prev = Tensor<U, OS::Kind>>,
-    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
-    Tensor<O, OS::Kind>: PrevRank + NextRank<Next = Tensor<BO, OS::Kind>>,
+    Tensor<O, OS::Kind>: PrevRank + NextRank,
+    Tensor<L>: NextRank,
+    Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
+    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     GE: std::fmt::Debug,
 {
-    type Error = PPOError<NE, GE, AS::Error>;
+    type Error = PPOError<N::Error, GE, AS::Error>;
     type GymError = GE;
     type SpaceError = AS::Error;
     type ObservationSpace = OS;
@@ -1312,11 +1297,10 @@ where
 
     /// Selects environment actions `[batch, ...action_shape]` for observations
     /// `[batch, ...observation_shape]`.
-    fn act(
-        &mut self,
-        observation: &Tensor<O, OS::Kind>,
-    ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
-        let latent_observations = self.latent_observations(observation.clone())?;
+    fn act(&mut self, observation: &OS::Batch) -> Result<AS::Batch, Self::Error> {
+        let latent_observations = self
+            .latent_observations(observation.clone())
+            .map_err(PPOError::NetworkError)?;
         let neurons = self.act_neurons(&latent_observations)?;
         let actions = self
             .action_space
@@ -1340,7 +1324,7 @@ where
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         num_timesteps: usize,
-    ) -> Result<(), PPOError<NE, GE, AS::Error>> {
+    ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_rollout_collection(env)?;
 

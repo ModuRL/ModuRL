@@ -1,4 +1,5 @@
 use super::*;
+use crate::tensor_rank::TensorBatchTypes;
 use crate::{
     gym::{Gym, ResetInfo, StepInfo},
     models::{Forward, MLP},
@@ -381,10 +382,13 @@ mod schedule_tests {
     fn integer_and_boolean_observations_reach_native_models() {
         struct BoolSpace;
 
-        impl ObservationSpace<2> for BoolSpace {
+        impl TensorBatchTypes for BoolSpace {
             type Kind = Bool;
-            type Observation = Tensor<1, Bool>;
+            type Item = Tensor<1, Bool>;
+            type Batch = Tensor<2, Bool>;
+        }
 
+        impl ObservationSpace<2> for BoolSpace {
             /// Accepts Bool observations [batch_size, 1] without changing their dtype, device, or axes.
             fn contains(&self, values: &Tensor<2, Bool>) -> bool {
                 values.dims()[1] == 1
@@ -506,10 +510,13 @@ mod schedule_tests {
 
         struct BooleanSpace;
 
-        impl ObservationSpace<2> for BooleanSpace {
+        impl TensorBatchTypes for BooleanSpace {
             type Kind = Bool;
-            type Observation = Tensor<1, Bool>;
+            type Item = Tensor<1, Bool>;
+            type Batch = Tensor<2, Bool>;
+        }
 
+        impl ObservationSpace<2> for BooleanSpace {
             /// Checks Bool observations [batch_size, 1] without changing their layout, dtype, or device.
             fn contains(&self, values: &Tensor<2, Bool>) -> bool {
                 values.dims()[1] == 1

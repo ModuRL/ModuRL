@@ -1,6 +1,6 @@
 //! Running observation and reward normalization wrappers.
 
-use crate::tensor_rank::{NextRank, PrevRank};
+use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{Tensor, TensorData, TensorReadError, kind::Basic};
 
 use crate::{
@@ -110,11 +110,10 @@ impl<G, I, const O: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic
     for NormalizeObservationGym<G>
 where
     G: Gym<I, BO, BA>,
-    G::ObservationSpace: ObservationSpace<BO, Kind = K, Observation = Tensor<O, K>>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
     Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
-    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = NormalizeObservationGymError<G::Error>;
     type ObservationSpace = G::ObservationSpace;
@@ -136,7 +135,7 @@ where
     /// Normalizes observation values while preserving tensor shapes, kinds, dtypes, and devices.
     fn step(
         &mut self,
-        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
     ) -> Result<StepInfo<I, Tensor<O, K>>, Self::Error> {
         let mut step = self
             .gym
@@ -192,15 +191,15 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
-    Tensor<BO, K>: PrevRank<Prev = <G::ObservationSpace as ObservationSpace<BO>>::Observation>,
-    Tensor<BA, AK>: PrevRank<Prev = <G::ActionSpace as ActionSpace<BA>>::Action>,
 {
     type Error = G::Error;
     type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
 
     /// Returns the inner gym's unbatched rank-`BO - 1` observation, preserving its kind, dtype, device, and item axes.
-    fn reset(&mut self) -> Result<ResetInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
+    fn reset(
+        &mut self,
+    ) -> Result<ResetInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         self.gym.reset()
     }
 
@@ -208,8 +207,8 @@ where
     /// Preserves tensor shapes, kinds, dtypes, and devices, subject to the inner gym's input requirements.
     fn step(
         &mut self,
-        action: <Self::ActionSpace as ActionSpace<BA>>::Action,
-    ) -> Result<StepInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
+    ) -> Result<StepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         let mut step = self.gym.step(action)?;
         self.discounted_reward =
             self.discounted_reward * self.gamma * if step.done { 0.0 } else { 1.0 }
