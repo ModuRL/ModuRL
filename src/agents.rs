@@ -5,8 +5,9 @@ use crate::{
 };
 
 pub mod a2c;
-#[cfg(any())]
+pub mod action_value_critic;
 pub mod deterministic_actor_critic;
+
 pub mod ppo;
 pub mod q_learning;
 mod replay_device_strategy;

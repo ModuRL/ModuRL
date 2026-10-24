@@ -5,20 +5,23 @@
 //! Candle and ModuRL Gym are intentionally left explicit.
 
 pub use crate::agents::{
-    Agent,
-    ReplayDeviceStrategy,
-    ReplayStorageConfig,
+    Agent, ReplayDeviceStrategy, ReplayStorageConfig,
     a2c::{
         A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
         A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
     },
-    // deterministic_actor_critic::{
-    //     DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
-    //     DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
-    //     DeterministicActorCriticLogEntry, DeterministicActorCriticResult, DeterministicCritic,
-    //     ddpg::{DDPGAgent, DDPGLogger},
-    //     td3::{TD3Agent, TD3Logger},
-    // },
+    action_value_critic::{
+        ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
+        ActionValueCriticNetwork,
+    },
+    deterministic_actor_critic::{
+        DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
+        DeterministicActorCriticEpisodeLogEntry, DeterministicActorCriticError,
+        DeterministicActorCriticLogEntry, DeterministicActorCriticModelGroup,
+        DeterministicActorCriticModelTypes,
+        ddpg::{DDPGAgent, DDPGLogger},
+        td3::{TD3Agent, TD3Logger},
+    },
     ppo::{
         PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
         PPOLogEntry, PPOLogger, PPOModelGroup, PPOModelTypes, PPONetwork, PPONetworkError,
@@ -34,7 +37,7 @@ pub use crate::agents::{
         DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
         SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
         SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
-        SACReplayError, ScalarStateActionCritic,
+        SACModelGroup, SACModelTypes, SACReplayError, ScalarStateActionCritic,
     },
 };
 pub use crate::distributions::{

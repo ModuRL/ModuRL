@@ -59,65 +59,24 @@ the global collection timestep used by training and logging.
 
 ## Match the Actor Contract
 
-The online and target actors are ordinary Candle `Module`s. For observations
-shaped `[batch, ...observation_shape]`, each actor must return values shaped
-`[batch, ...action_shape]`.
+DDPG and TD3 use owned models. Each actor implements `Module` and `Forward<O, A>`.
+Observations use `[batch_size, ...observation_shape]`; actions use `[batch_size, ...action_shape]`.
+The agent creates a detached target actor during construction.
+The [DDPG chapter](./ddpg.md) shows the complete builder configuration.
 
-The supplied `BoxSpace` clamps those values to its bounds. The MuJoCo examples
-use `tanh` as the actor's output activation and bounds of `-1.0..=1.0`:
-
-```rust,ignore
-let actor = MLP::builder()
-    .input_size(observation_size)
-    .output_size(action_size)
-    .vb(actor_vb)
-    .hidden_layer_sizes(vec![64, 64])
-    .activation(Tensor::relu)
-    .output_activation(Tensor::tanh)
-    .name("actor".to_owned())
-    .build()?;
-```
-
-Build the online and target actors with separate `VarMap`s and identical
-parameter names. Agent construction copies the online parameters into the
-target map. Construction returns
-`DeterministicActorCriticError::ActorParameterMapMismatch` if the names differ.
-
-The exploration-noise standard deviation is measured in the actor's output
-units. ModuRL adds that noise before `BoxSpace` clamps the action. Use
-`act_deterministic` when evaluating a trained policy without exploration noise.
+The supplied `BoxSpace` clamps policy outputs to its bounds.
+The exploration-noise standard deviation is measured in policy output units.
+The agent adds noise before mapping policy outputs to environment actions.
+Use `act_deterministic` for evaluation without exploration noise.
 
 ## Match the Critic Contract
 
-`DeterministicCritic` is the deterministic-agent name for `SACCritic`. Each
-critic owns:
-
-- an online state-action network
-- a target state-action network
-- separate online and target `VarMap`s
-- an optimizer for the online parameters
-
-A scalar critic receives a state and action and returns one Q value. Wrap a
-module whose input width is `observation_size + action_size` with
-`ScalarStateActionCritic`:
-
-```rust,ignore
-let critic = DeterministicCritic::builder()
-    .online_network(ScalarStateActionCritic::new(
-        online_network,
-    ))
-    .target_network(ScalarStateActionCritic::new(
-        target_network,
-    ))
-    .online_vars(&online_vars)
-    .target_vars(&mut target_vars)
-    .optimizer(critic_optimizer)
-    .build()?;
-```
-
-As with the actors, the online and target critic parameter names must match.
-The constructor initializes the target parameters from the online parameters.
-Each TD3 critic needs its own networks, parameter maps, and optimizer.
+DDPG requires one `ActionValueCritic` with an owned online network and optimizer.
+TD3 accepts a nonempty ensemble of these critics.
+The critic creates a detached target network automatically.
+A scalar critic maps observations and actions to Q values `[batch_size, 1]`.
+Wrap an MLP with input width `observation_size + action_size` in `ScalarStateActionCritic`.
+The [DDPG chapter](./ddpg.md) shows this construction.
 
 ## Keep Replay and Models on the Intended Devices
 
@@ -126,8 +85,9 @@ store replay and run optimization on the same device. A configuration using
 `ReplayDeviceStrategy::Hybrid` can keep detached replay transitions on one
 device, such as the CPU, and move sampled batches to the optimization device.
 
-The strategy does not move models or environments. Build the environment,
-actors, critics, target networks, and optimizers on the optimization device.
+The strategy does not move models or environments. Build actors and critics on the optimization device.
+Target networks inherit their online network device.
+Keep CPU environments on CPU and use `DeviceMultiGymWrapper` for transfers.
 Read [Run on CUDA or Metal](./run-on-cuda-or-metal.md) before splitting replay
 storage from optimization.
 

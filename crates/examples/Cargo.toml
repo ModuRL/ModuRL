@@ -41,15 +41,15 @@ name = "sac_mujoco"
 path = "examples/sac_mujoco.rs"
 required-features = ["mujoco-environment"]
 
-# [[example]]
-# name = "ddpg_mujoco"
-# path = "examples/ddpg_mujoco.rs"
-# required-features = ["mujoco-environment"]
+[[example]]
+name = "ddpg_mujoco"
+path = "examples/ddpg_mujoco.rs"
+required-features = ["mujoco-environment"]
 
-# [[example]]
-# name = "td3_mujoco"
-# path = "examples/td3_mujoco.rs"
-# required-features = ["mujoco-environment"]
+[[example]]
+name = "td3_mujoco"
+path = "examples/td3_mujoco.rs"
+required-features = ["mujoco-environment"]
 
 [[example]]
 name = "rendered_lunar_lander_ppo"
