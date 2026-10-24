@@ -18,10 +18,13 @@ pub mod sac;
 pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
 
 /// Selects native environment actions and trains through batched environment interaction.
-/// Ranks `O` and `A` include the batch axis; `U` is the rank of each unbatched terminal observation.
-/// Requires `O = U + 1`, except scalar observations use `O = U = 1`.
+/// Ranks `O` and `A` include the batch axis; `PrevRank` determines each unbatched terminal observation type.
+/// Scalar observations use `[batch_size, 1]` and terminal observations use `[1]`.
 /// Associated spaces determine the native observation and action kinds.
-pub trait Agent<I = (), const O: usize = 2, const A: usize = 1, const U: usize = 1> {
+pub trait Agent<I = (), const O: usize = 2, const A: usize = 2>
+where
+    Tensor<O, <Self::ObservationSpace as ObservationSpace<O>>::Kind>: crate::tensor_rank::PrevRank,
+{
     type Error;
     type GymError;
     type SpaceError;
@@ -36,7 +39,7 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 1, const U: usize =
     ) -> Result<Tensor<A, <Self::ActionSpace as ActionSpace<A>>::Kind>, Self::Error>;
 
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
-    /// Terminal observations have unbatched rank `U`; scalar terminal observations use `[1]`.
+    /// Terminal observations have rank `O - 1`; scalar terminal observations use `[1]`.
     /// The environment must use the associated space types and meet the agent's dtype and device requirements.
     fn learn(
         &mut self,
@@ -44,7 +47,6 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 1, const U: usize =
             I,
             O,
             A,
-            U,
             Error = Self::GymError,
             ObservationSpace = Self::ObservationSpace,
             ActionSpace = Self::ActionSpace,
@@ -158,7 +160,7 @@ pub(crate) mod test_support {
         }
     }
 
-    impl Gym<(), 1, 1, 2, 2> for FixedContinuousEnv {
+    impl Gym<(), 2, 2> for FixedContinuousEnv {
         type Error = Infallible;
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = BoxSpace<2>;
@@ -212,15 +214,15 @@ mod tests {
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
 
-        /// Returns zero Int actions `[batch_size]` for Float observations `[batch_size, features]` on the observation device.
-        fn act(&mut self, observations: &Tensor<2>) -> Result<Tensor<1, Int>, Self::Error> {
+        /// Returns zero Int actions `[batch_size, 1]` for Float observations `[batch_size, features]` on the observation device.
+        fn act(&mut self, observations: &Tensor<2>) -> Result<Tensor<2, Int>, Self::Error> {
             Ok(Tensor::zeros(
-                [observations.dims()[0]],
+                [observations.dims()[0], 1],
                 &observations.device(),
             ))
         }
 
-        /// Steps observation batches `[num_envs, 4]` with scalar action batches `[num_envs]`.
+        /// Steps observation batches `[num_envs, 4]` with scalar action batches `[num_envs, 1]`.
         fn learn(
             &mut self,
             env: &mut dyn MultiGym<
@@ -257,7 +259,7 @@ mod tests {
         .unwrap();
         let observations = multiple.reset().unwrap();
         let actions = agent.act(&observations).unwrap();
-        assert_eq!(actions.dims(), [2]);
+        assert_eq!(actions.dims(), [2, 1]);
         assert_eq!(actions.device(), device);
         assert_eq!(actions.into_data().try_to_vec::<i32>().unwrap(), vec![0, 0]);
         agent.learn(&mut single, 1).unwrap();
@@ -286,11 +288,11 @@ mod tests {
         let mut discrete = FixedEnv::new(device.clone());
         assert_eq!(discrete.reset().unwrap().observation.dims(), [4]);
         assert_eq!(discrete.observation_space().shape(), vec![4]);
-        assert!(discrete.action_space().shape().is_empty());
+        assert_eq!(discrete.action_space().shape(), vec![1]);
         let mut discrete = VectorizedGymWrapper::from(discrete);
         assert_eq!(discrete.reset().unwrap().dims(), [1, 4]);
         let step = discrete
-            .step(Tensor::<1, Int>::from_data([0i32], &device))
+            .step(Tensor::<2, Int>::from_data([[0i32]], &device))
             .unwrap();
         assert_eq!(step.observations.dims(), [1, 4]);
         assert_eq!(step.observations.dtype(), DType::F32);

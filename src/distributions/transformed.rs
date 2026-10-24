@@ -282,21 +282,21 @@ impl<D, T> TransformedDistribution<D, T> {
     }
 }
 
-/// Sums values over the trailing event axes and removes those axes.
-/// Rank `P` counts the leading axes to keep. Ranks must satisfy `R >= P >= 1`.
-/// Rank-`R` input `[batch_size, ...event_shape]` becomes rank-1 output `[batch_size]` when `P = 1`.
-/// Input `[batch_size, candidate_count, ...event_shape]` becomes `[batch_size, candidate_count]` when `P = 2`.
-/// The result keeps the leading axes in order and preserves dtype, device, and gradient paths.
+/// Sums trailing event axes into one size-one scalar axis.
+/// Output rank `P` includes that axis. Ranks must satisfy `R >= P >= 2`.
+/// Rank-`R` input `[batch_size, ...event_shape]` becomes `[batch_size, 1]` when `P = 2`.
+/// Candidate input `[batch_size, candidate_count, ...event_shape]` becomes `[batch_size, candidate_count, 1]` when `P = 3`.
+/// Preserves leading axes, dtype, device, and gradient paths.
 fn sum_event_dimensions<const R: usize, const P: usize>(values: Tensor<R>) -> Tensor<P> {
     const {
-        assert!(P >= 1, "event reduction requires a prefix axis");
+        assert!(P >= 2, "event reduction requires batch and scalar axes");
         assert!(R >= P, "event reduction rank must cover prefix axes");
     }
-    let shape = values.dims();
+    let values_shape = values.dims();
     let mut prefix = [1; P];
-    prefix.copy_from_slice(&shape[..P]);
+    prefix[..P - 1].copy_from_slice(&values_shape[..P - 1]);
     let prefix_size = prefix.iter().product::<usize>();
-    let event_size = shape[P..].iter().product::<usize>();
+    let event_size = values_shape[P - 1..].iter().product::<usize>();
     values
         .reshape([prefix_size, event_size])
         .sum_dim(1)
@@ -343,7 +343,7 @@ where
     /// Rank-`A` actions have shape `[batch_size, ...event_shape]`; batch sizes must match.
     /// The transform changes action spacing and therefore changes probability density.
     /// Sums the transform's log absolute derivatives over event axes, then subtracts that sum from the base action log density.
-    /// Both returned statistics have shape `[batch_size]`. Negative log density at the supplied action gives the entropy estimate.
+    /// Both returned statistics have shape `[batch_size, 1]`. Negative log density at the supplied action gives the entropy estimate.
     /// The transform preserves action dtype and device. Statistics follow the base distribution's dtype and device requirements.
     /// The calculation retains gradient paths through the inverse transform and density correction.
     fn dist_eval(&self, outputs: Tensor<P>, actions: Tensor<A>) -> Result<DistEval, Self::Error> {
@@ -359,7 +359,7 @@ where
             .transform
             .log_abs_det_jacobian(base_actions, actions)
             .map_err(TransformedDistributionError::TransformError)?;
-        let correction: Tensor<1> = sum_event_dimensions(jacobian);
+        let correction: Tensor<2> = sum_event_dimensions(jacobian);
         let log_prob = evaluation.log_prob().clone() - correction;
         // Negative log density estimates entropy when actions are sampled from the distribution.
         let entropy = log_prob.clone().neg();
@@ -378,7 +378,7 @@ where
     /// Transforms continuous candidate actions and adjusts their log densities.
     /// Rank-`P` distribution parameters have shape `[batch_size, ...parameter_shape]`.
     /// Returned rank-`C` actions have shape `[batch_size, candidate_count, ...event_shape]`.
-    /// Log densities and unchanged weights have shape `[batch_size, candidate_count]`.
+    /// Log densities and unchanged weights have shape `[batch_size, candidate_count, 1]`.
     /// Sums log absolute derivatives over event axes and subtracts the sum from each base candidate's log density.
     /// The transform preserves candidate shape, dtype, device, and gradient paths.
     /// Log densities and weights follow the base distribution's dtype and device requirements.
@@ -400,7 +400,7 @@ where
             .transform
             .log_abs_det_jacobian(base_actions, actions.clone())
             .map_err(TransformedDistributionError::TransformError)?;
-        let correction: Tensor<2> = sum_event_dimensions(jacobian);
+        let correction: Tensor<3> = sum_event_dimensions(jacobian);
         let log_probabilities = base_log_probabilities - correction;
         Ok(ExpectationTerms::new(actions, log_probabilities, weights)?)
     }
@@ -546,7 +546,7 @@ mod tests {
         let output = affine.forward(actions.clone()).unwrap();
         assert_eq!(output.dims(), [2, 3]);
         let jacobian = affine.log_abs_det_jacobian(actions, output).unwrap();
-        let corrections: Tensor<1> = sum_event_dimensions(jacobian);
+        let corrections: Tensor<2> = sum_event_dimensions(jacobian);
         for correction in corrections.into_data().try_to_vec::<f32>().unwrap() {
             assert!((f64::from(correction) - adjustment).abs() < 1e-6);
         }
@@ -720,7 +720,7 @@ mod tests {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
         let distribution = TransformedDistribution::new(
-            GaussianDistribution::<6, 7>::new([2, 1, 2, 1, 2]).unwrap(),
+            GaussianDistribution::<6>::new([2, 1, 2, 1, 2]).unwrap(),
             TanhTransform,
         );
         let terms = distribution
@@ -730,7 +730,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(terms.actions().dims(), [2, 3, 2, 1, 2, 1, 2]);
-        assert_eq!(terms.log_probabilities().dims(), [2, 3]);
+        assert_eq!(terms.log_probabilities().dims(), [2, 3, 1]);
         assert!(
             terms
                 .log_probabilities()
@@ -742,12 +742,12 @@ mod tests {
                 .all(|value| value.is_finite())
         );
         let scalar = TransformedDistribution::new(
-            GaussianDistribution::<1, 2>::new([]).unwrap(),
+            GaussianDistribution::<2>::new([1]).unwrap(),
             TanhTransform,
         );
         assert_eq!(
             scalar.mode(Tensor::zeros([2, 2], &device)).unwrap().dims(),
-            [2]
+            [2, 1]
         );
     }
 }

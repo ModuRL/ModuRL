@@ -261,9 +261,9 @@ output layout. A custom `SACCriticNetwork` must follow these contracts:
 
 | Operation | Inputs | Output |
 | --- | --- | --- |
-| `replay_values` | states `[B, ...state]`, actions `[B, ...action]` | `[B]` |
-| `policy_values` | states `[B, ...state]`, candidates `[B, K, ...action]` | `[B, K]` |
-| `actor_values` | states `[B, ...state]`, candidates `[B, K, ...action]` | `[B, K]` |
+| `replay_values` | states `[B, ...state]`, actions `[B, ...action]` | `[B, 1]` |
+| `policy_values` | states `[B, ...state]`, candidates `[B, K, ...action]` | `[B, K, 1]` |
+| `actor_values` | states `[B, ...state]`, candidates `[B, K, ...action]` | `[B, K, 1]` |
 
 `actor_values` must preserve gradients through differentiable candidate
 actions while excluding gradients to critic parameters.

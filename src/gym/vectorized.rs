@@ -1,6 +1,7 @@
 use super::{Gym, MultiGym, MultiGymStepInfo};
 use crate::spaces::{ActionSpace, ObservationSpace};
-use burn::tensor::{DType, Slice, Tensor, TensorData};
+use crate::tensor_rank::{NextRank, PrevRank};
+use burn::tensor::{DType, Slice, Tensor, TensorData, kind::Basic};
 use std::marker::PhantomData;
 
 #[derive(Debug, thiserror::Error)]
@@ -15,39 +16,23 @@ pub enum VectorizedGymError<E> {
 }
 
 /// Batches independent Gym values by adding an observation batch axis and removing the action batch axis for each environment.
-/// Scalars use `[1]` individually and `[num_envs]` when batched.
+/// Scalars use `[1]` individually and `[num_envs, 1]` when batched.
 /// Ended environments reset immediately. Saved terminal observations remain available for transition targets.
 /// Reset after an error because some environments may already have advanced.
-pub struct VectorizedGymWrapper<
-    G,
-    I = (),
-    const O: usize = 1,
-    const A: usize = 1,
-    const BO: usize = 2,
-    const BA: usize = 1,
-> where
-    G: Gym<I, O, A, BO, BA>,
-{
+pub struct VectorizedGymWrapper<G, I = (), const BO: usize = 2, const BA: usize = 2> {
     envs: Vec<G>,
     _info: PhantomData<fn() -> I>,
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize>
-    VectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> VectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank,
+    Tensor<BA, AK>: PrevRank,
 {
     pub fn new(envs: Vec<G>) -> Result<Self, VectorizedGymError<G::Error>> {
-        const {
-            assert!(
-                BO == O + 1 || (BO == 1 && O == 1),
-                "batch observation rank must be single observation rank + 1, except scalar observations"
-            );
-            assert!(
-                BA == A + 1 || (BA == 1 && A == 1),
-                "batch action rank must be single action rank + 1, except scalar actions"
-            );
-        }
         if envs.is_empty() {
             return Err(VectorizedGymError::Empty);
         }
@@ -66,22 +51,16 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> From<G>
-    for VectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> From<G>
+    for VectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank,
+    Tensor<BA, AK>: PrevRank,
 {
     fn from(env: G) -> Self {
-        const {
-            assert!(
-                BO == O + 1 || (BO == 1 && O == 1),
-                "batch observation rank must be single observation rank + 1, except scalar observations"
-            );
-            assert!(
-                BA == A + 1 || (BA == 1 && A == 1),
-                "batch action rank must be single action rank + 1, except scalar actions"
-            );
-        }
         Self {
             envs: vec![env],
             _info: PhantomData,
@@ -89,10 +68,14 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> TryFrom<Vec<G>>
-    for VectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> TryFrom<Vec<G>>
+    for VectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank,
+    Tensor<BA, AK>: PrevRank,
 {
     type Error = VectorizedGymError<G::Error>;
 
@@ -101,26 +84,29 @@ where
     }
 }
 
-impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize> MultiGym<I, BO, BA, O>
-    for VectorizedGymWrapper<G, I, O, A, BO, BA>
+impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic>
+    MultiGym<I, BO, BA> for VectorizedGymWrapper<G, I, BO, BA>
 where
-    G: Gym<I, O, A, BO, BA>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+    Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,
+    Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
 {
     type Error = VectorizedGymError<G::Error>;
     type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
 
     /// Removes the batch axis from rank-`BA` actions `[num_envs, ...action_shape]` before each Gym step, producing rank `A`.
-    /// Stacks unbatched rank-`O` observations into rank `BO` and produces F32 rewards `[num_envs]` on the observation device.
-    /// Requires `BO = O + 1` and `BA = A + 1`; scalar values instead use single and batch ranks of one.
+    /// Stacks unbatched rank-`O` observations into rank `BO` and produces F32 rewards `[num_envs, 1]` on the observation device.
+    /// Requires `BO = O + 1` and `BA = A + 1`, including scalar values.
     /// Inputs must meet each environment's dtype and device contract. Flags and metadata stay on the host.
     fn step(
         &mut self,
-        action: Tensor<BA, <G::ActionSpace as ActionSpace<BA>>::Kind>,
-    ) -> Result<
-        MultiGymStepInfo<I, BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind, O>,
-        Self::Error,
-    > {
+        action: Tensor<BA, AK>,
+    ) -> Result<MultiGymStepInfo<I, Tensor<O, K>>, Self::Error> {
         let count = self.envs.len();
         let mut observations = Vec::with_capacity(count);
         let mut rewards = Vec::with_capacity(count);
@@ -130,11 +116,7 @@ where
         let mut terminal_observations = Vec::with_capacity(count);
         for (index, env) in self.envs.iter_mut().enumerate() {
             let actions = action.clone().slice([Slice::from(index..index + 1)]);
-            let actions = if const { BA == A + 1 } {
-                actions.squeeze_dim::<A>(0)
-            } else {
-                actions.reshape([1; A])
-            };
+            let actions = actions.squeeze_dim::<A>(0);
             let mut step = env.step(actions).map_err(VectorizedGymError::Single)?;
             let ended = step.done || step.truncated;
             terminal_observations.push(ended.then(|| step.observation.clone()));
@@ -148,14 +130,9 @@ where
             dones.push(step.done);
             truncateds.push(step.truncated);
         }
-        let observations: Tensor<BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind> =
-            if const { BO == O + 1 } {
-                Tensor::stack(observations, 0)
-            } else {
-                Tensor::cat(observations, 0).reshape([count; BO])
-            };
+        let observations: Tensor<BO, K> = Tensor::stack(observations, 0);
         let rewards = Tensor::from_data(
-            TensorData::new(rewards, [count]),
+            TensorData::new(rewards, [count, 1]),
             (&observations.device(), DType::F32),
         );
         Ok(MultiGymStepInfo {
@@ -181,20 +158,14 @@ where
     }
 
     /// Stacks unbatched rank-`O` reset observations into `[num_envs, ...observation_shape]` of rank `BO`.
-    /// Requires `BO = O + 1`, except scalar observations use rank one and concatenate to `[num_envs]`.
+    /// Requires `BO = O + 1`, including scalar observations `[num_envs, 1]`.
     /// Observation kind, dtype, device, and item dimensions must match across environments. Gradients are preserved.
-    fn reset(
-        &mut self,
-    ) -> Result<Tensor<BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind>, Self::Error> {
+    fn reset(&mut self) -> Result<Tensor<BO, K>, Self::Error> {
         let mut observations = Vec::with_capacity(self.envs.len());
         for env in &mut self.envs {
             observations.push(env.reset().map_err(VectorizedGymError::Single)?.observation);
         }
-        Ok(if const { BO == O + 1 } {
-            Tensor::stack(observations, 0)
-        } else {
-            Tensor::cat(observations, 0).reshape([self.envs.len(); BO])
-        })
+        Ok(Tensor::stack(observations, 0))
     }
 }
 
@@ -219,7 +190,7 @@ mod tests {
                 .unwrap(),
             vec![0.0, 0.0, 1.0, 0.0]
         );
-        let actions = Tensor::<1, Int>::from_data([3, 4], &Device::flex());
+        let actions = Tensor::<2, Int>::from_data([[3], [4]], &Device::flex());
         let first = env.step(actions.clone()).unwrap();
         assert_eq!(first.observations.dims(), [2, 2]);
         assert_eq!(first.observations.dtype(), DType::F64);
@@ -304,13 +275,16 @@ mod tests {
 
     struct IntegerEnv;
 
-    impl Gym<(), 1, 1, 1, 1> for IntegerEnv {
+    impl Gym<(), 2, 2> for IntegerEnv {
         type Error = TestError;
         type ObservationSpace = Discrete;
         type ActionSpace = Discrete;
 
         /// Returns U64 observations `[1]` from Int actions `[1]` on the fixture CPU device.
-        fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo<(), 1, Int>, Self::Error> {
+        fn step(
+            &mut self,
+            action: Tensor<1, Int>,
+        ) -> Result<StepInfo<(), Tensor<1, Int>>, Self::Error> {
             Ok(StepInfo {
                 observation: action.cast(DType::U64),
                 reward: 1.0,
@@ -321,7 +295,7 @@ mod tests {
         }
 
         /// Returns U64 reset observations `[1]`.
-        fn reset(&mut self) -> Result<ResetInfo<(), 1, Int>, Self::Error> {
+        fn reset(&mut self) -> Result<ResetInfo<(), Tensor<1, Int>>, Self::Error> {
             Ok(ResetInfo {
                 observation: Tensor::zeros([1], (&Device::flex(), DType::U64)),
                 info: (),
@@ -340,9 +314,9 @@ mod tests {
     #[test]
     fn integer_observations_keep_their_kind_and_dtype() {
         let mut env = VectorizedGymWrapper::new(vec![IntegerEnv, IntegerEnv]).unwrap();
-        assert_eq!(env.reset().unwrap().dims(), [2]);
+        assert_eq!(env.reset().unwrap().dims(), [2, 1]);
         let step = env
-            .step(Tensor::from_data([3i32, 4], &Device::flex()))
+            .step(Tensor::from_data([[3i32], [4]], &Device::flex()))
             .unwrap();
         assert_eq!(step.observations.dtype(), DType::U64);
         assert_eq!(
@@ -354,13 +328,16 @@ mod tests {
 
     struct ImageEnv;
 
-    impl Gym<(), 3, 1, 4, 1> for ImageEnv {
+    impl Gym<(), 4, 2> for ImageEnv {
         type Error = TestError;
         type ObservationSpace = BoxSpace<4>;
         type ActionSpace = Discrete;
 
         /// Accepts scalar Int actions `[1]` and returns unbatched F64 image observations `[1, 2, 2]`.
-        fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo<(), 3>, Self::Error> {
+        fn step(
+            &mut self,
+            _action: Tensor<1, Int>,
+        ) -> Result<StepInfo<(), Tensor<3>>, Self::Error> {
             Ok(StepInfo {
                 observation: Tensor::ones([1, 2, 2], (&Device::flex(), DType::F64)),
                 reward: 1.0,
@@ -371,7 +348,7 @@ mod tests {
         }
 
         /// Returns unbatched F64 image observations `[1, 2, 2]`.
-        fn reset(&mut self) -> Result<ResetInfo<(), 3>, Self::Error> {
+        fn reset(&mut self) -> Result<ResetInfo<(), Tensor<3>>, Self::Error> {
             Ok(ResetInfo {
                 observation: Tensor::zeros([1, 2, 2], (&Device::flex(), DType::F64)),
                 info: (),
@@ -392,7 +369,7 @@ mod tests {
         let mut env = VectorizedGymWrapper::new(vec![ImageEnv, ImageEnv]).unwrap();
         assert_eq!(env.reset().unwrap().dims(), [2, 1, 2, 2]);
         let step = env
-            .step(Tensor::zeros([2], (&Device::flex(), DType::I32)))
+            .step(Tensor::zeros([2, 1], (&Device::flex(), DType::I32)))
             .unwrap();
         assert_eq!(step.observations.dims(), [2, 1, 2, 2]);
         assert_eq!(step.observations.dtype(), DType::F64);
@@ -444,5 +421,70 @@ mod tests {
             VectorizedGymWrapper::<CounterEnv, TestInfo>::new(vec![]),
             Err(VectorizedGymError::Empty)
         ));
+    }
+
+    #[test]
+    fn scalar_batches_preserve_item_axes_terminals_and_gradients() {
+        let device = Device::flex().autodiff();
+        let actions =
+            Tensor::<2>::from_data([[2.0f64], [3.0]], (&device, DType::F64)).require_grad();
+        let mut env = VectorizedGymWrapper::new(vec![ScalarEnv, ScalarEnv]).unwrap();
+        assert_eq!(env.reset().unwrap().dims(), [2, 1]);
+        let step = env.step(actions.clone()).unwrap();
+        assert_eq!(step.observations.dims(), [2, 1]);
+        assert_eq!(step.rewards.dims(), [2, 1]);
+        assert_eq!(step.dones, [true, true]);
+        assert_eq!(step.truncateds, [false, false]);
+        assert!(
+            step.terminal_observations
+                .iter()
+                .flatten()
+                .all(|observation| observation.dims() == [1])
+        );
+        let targets = step.transition_next_observations();
+        assert_eq!(targets.dims(), [2, 1]);
+        assert_eq!(targets.dtype(), DType::F64);
+        assert_eq!(
+            targets.clone().into_data().try_to_vec::<f64>().unwrap(),
+            [2.0, 3.0]
+        );
+        let gradients = targets.sum().backward();
+        assert_eq!(
+            actions
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap(),
+            [1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn scalar_frame_stacks_keep_frame_and_item_axes_when_batched() {
+        use crate::wrappers::FrameStackGym;
+
+        let device = Device::flex();
+        let make_env =
+            || FrameStackGym::<_>::new(ScalarEnv, 3, BoxSpace::new_unbounded([1, 3, 1], &device));
+        let mut env = VectorizedGymWrapper::new(vec![make_env(), make_env()]).unwrap();
+        assert_eq!(env.reset().unwrap().dims(), [2, 3, 1]);
+        let step = env
+            .step(Tensor::from_data([[2.0f64], [3.0]], (&device, DType::F64)))
+            .unwrap();
+        assert_eq!(step.observations.dims(), [2, 3, 1]);
+        assert!(
+            step.terminal_observations
+                .iter()
+                .flatten()
+                .all(|observation| observation.dims() == [3, 1])
+        );
+        assert_eq!(
+            step.transition_next_observations()
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap(),
+            [0.0, 0.0, 2.0, 0.0, 0.0, 3.0]
+        );
     }
 }

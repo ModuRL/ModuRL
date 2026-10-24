@@ -10,6 +10,7 @@ pub mod prelude;
 pub mod sampling;
 pub mod spaces;
 mod tensor_operations;
+pub mod tensor_rank;
 pub mod wrappers;
 
 #[cfg(test)]

@@ -299,8 +299,7 @@ fn main() {
     // Use the statistics recorded inside episodic-life and reward-clipping so
     // the reported return is the raw score for a complete game, as in CleanRL.
     let mut grapher = DQNGrapher::atari();
-    let replay_storage_config =
-        ReplayStorageConfig::new(device_strategy).with_observation_dtype(DType::U8);
+    let replay_storage_config = ReplayStorageConfig::new(device_strategy);
     let mut agent = DQNAgent::builder()
         .dtype(DType::F32)
         .action_space(action_space)

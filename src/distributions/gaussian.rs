@@ -5,24 +5,27 @@ use burn::tensor::{Distribution as RandomDistribution, Float, Tensor};
 use crate::distributions::{
     DifferentiableExpectation, DistEval, Distribution, DistributionTensorError, ExpectationTerms,
 };
+use crate::tensor_rank::NextRank;
 
 /// Samples independent Gaussian values from parameters `[batch, 2 * event_size]`,
 /// where `event_size` is the number of values in one action.
 /// Means occupy the first half of the parameter axis, followed by log standard
 /// deviations. Action batches have rank `A`: `[batch, ...action_shape]`.
 /// Drawing multiple samples adds an axis: `[batch, samples, ...action_shape]`,
-/// with rank `C = A + 1`. Vector actions use ranks 2 and 3, respectively.
+/// with rank `A + 1`, inferred through [`NextRank`]. Vector actions use ranks 2 and 3, respectively.
 ///
 /// The default uses vector actions `[batch, features]`. Other action shapes use
-/// `[batch, ...action_shape]`; statistics always reduce to `[batch]`.
+/// `[batch, ...action_shape]`; statistics always reduce to `[batch, 1]`.
+/// Scalar actions use event shape `[1]`, producing `[batch, 1]` and `[batch, samples, 1]`.
+/// Multiple-sample expectations support action ranks 2 through 1024, as defined by `NextRank`.
 /// Samples are not squashed or clipped. A separate action map prepares them
 /// for the environment; probability calculations use the original samples.
 #[derive(Clone, Debug)]
-pub struct GaussianDistribution<const A: usize = 2, const C: usize = 3> {
+pub struct GaussianDistribution<const A: usize = 2> {
     action_shape: Option<[usize; A]>,
 }
 
-impl Default for GaussianDistribution<2, 3> {
+impl Default for GaussianDistribution<2> {
     fn default() -> Self {
         Self { action_shape: None }
     }
@@ -40,16 +43,16 @@ pub enum GaussianDistributionError {
     InvalidOutputWidth { output_width: usize },
 }
 
-impl<const A: usize, const C: usize> GaussianDistribution<A, C> {
+impl<const A: usize> GaussianDistribution<A> {
     /// Sets the shape of one action. Parameters remain `[batch, 2 * event_size]`.
-    /// `action_shape` has `E` axes. Adding batch requires `A = E + 1`;
-    /// adding samples requires `C = A + 1`.
+    /// `action_shape` has `E` axes. Adding batch requires `A = E + 1`.
+    /// Drawing multiple samples adds one axis, inferred through `NextRank`.
     pub fn new<const E: usize>(
         action_shape: [usize; E],
     ) -> Result<Self, GaussianDistributionError> {
         const {
+            assert!(E >= 1, "scalar Gaussian actions require event shape [1]");
             assert!(A == E + 1, "Gaussian action rank must be event rank + 1");
-            assert!(C == A + 1, "Gaussian samples axis requires C == A + 1");
         }
         let event_size = action_shape.iter().try_fold(1usize, |size, dimension| {
             size.checked_mul(*dimension)
@@ -62,37 +65,38 @@ impl<const A: usize, const C: usize> GaussianDistribution<A, C> {
             return Err(GaussianDistributionError::ActionShapeTooLarge);
         }
         // Reserve a batch axis of length one before the action dimensions.
-        let mut shape = [1; A];
-        shape[1..].copy_from_slice(&action_shape);
+        let mut batched_action_shape = [1; A];
+        batched_action_shape[1..].copy_from_slice(&action_shape);
         Ok(Self {
-            action_shape: Some(shape),
+            action_shape: Some(batched_action_shape),
         })
     }
 
     /// Returns the configured action shape without the batch axis.
     pub fn action_shape(&self) -> Option<&[usize]> {
-        self.action_shape.as_ref().map(|shape| &shape[1..])
+        self.action_shape
+            .as_ref()
+            .map(|batched_action_shape| &batched_action_shape[1..])
     }
 
     /// Splits `[batch, 2 * event_size]` into mean and log-standard-deviation
     /// tensors `[batch, ...action_shape]`, both rank `A`, preserving dtype,
-    /// device, and gradients. Adding a samples axis requires `C = A + 1`.
+    /// device, and gradients.
     fn parameters(
         &self,
         outputs: Tensor<2>,
     ) -> Result<(Tensor<A>, Tensor<A>), GaussianDistributionError> {
         const {
-            assert!(A >= 1, "Gaussian actions require a batch axis");
-            assert!(C == A + 1, "Gaussian samples axis requires C == A + 1");
+            assert!(A >= 2, "Gaussian actions require batch and item axes");
         }
         let [batch_size, output_width] = outputs.dims();
         if output_width == 0 || output_width % 2 != 0 {
             return Err(GaussianDistributionError::InvalidOutputWidth { output_width });
         }
         let half = output_width / 2;
-        let mut shape = self.action_shape.unwrap_or([1; A]);
+        let mut batched_action_shape = self.action_shape.unwrap_or([1; A]);
         if self.action_shape.is_some() {
-            let event_size = shape[1..].iter().product::<usize>();
+            let event_size = batched_action_shape[1..].iter().product::<usize>();
             if event_size != half {
                 return Err(DistributionTensorError::ShapeMismatch {
                     field: "Gaussian parameters",
@@ -102,35 +106,32 @@ impl<const A: usize, const C: usize> GaussianDistribution<A, C> {
                 .into());
             }
         } else {
-            shape[A - 1] = half;
+            batched_action_shape[A - 1] = half;
         }
-        shape[0] = batch_size;
+        batched_action_shape[0] = batch_size;
         let mean = outputs
             .clone()
             .slice([0..batch_size, 0..half])
-            .reshape(shape);
+            .reshape(batched_action_shape);
         let log_std = outputs
             .slice([0..batch_size, half..output_width])
-            .reshape(shape);
+            .reshape(batched_action_shape);
         Ok((mean, log_std))
     }
 }
 
 /// Sums the action dimensions of rank-`A` values `[batch, ...action_shape]`,
-/// returning `[batch]` in the same batch order. Scalar actions have no trailing axes.
-fn sum_event_dimensions<const A: usize>(values: Tensor<A>) -> Tensor<1> {
+/// returning `[batch, 1]` in the same batch order. Scalar actions have a trailing axis of size one.
+fn sum_event_dimensions<const A: usize>(values: Tensor<A>) -> Tensor<2> {
     const {
-        assert!(A >= 1, "event reduction requires a batch axis");
+        assert!(A >= 2, "event reduction requires batch and item axes");
     }
     let batch_size = values.dims()[0];
     let event_size = values.dims()[1..].iter().product::<usize>();
-    values
-        .reshape([batch_size, event_size])
-        .sum_dim(1)
-        .squeeze_dim(1)
+    values.reshape([batch_size, event_size]).sum_dim(1)
 }
 
-impl<const A: usize, const C: usize> Distribution<2, A> for GaussianDistribution<A, C> {
+impl<const A: usize> Distribution<2, A> for GaussianDistribution<A> {
     type Error = GaussianDistributionError;
 
     /// Draws actions from parameters `[batch, 2 * event_size]`, returning
@@ -148,7 +149,7 @@ impl<const A: usize, const C: usize> Distribution<2, A> for GaussianDistribution
     }
 
     /// Evaluates rank-`A` actions `[batch, ...action_shape]` under rank-2
-    /// parameters `[batch, 2 * event_size]`, summing action dimensions to `[batch]`
+    /// parameters `[batch, 2 * event_size]`, summing action dimensions to `[batch, 1]`
     /// log probability and entropy. Actions share parameter dtype and device.
     fn dist_eval(&self, outputs: Tensor<2>, actions: Tensor<A>) -> Result<DistEval, Self::Error> {
         let (mean, log_std) = self.parameters(outputs)?;
@@ -163,14 +164,15 @@ impl<const A: usize, const C: usize> Distribution<2, A> for GaussianDistribution
     }
 }
 
-impl<const A: usize, const C: usize> DifferentiableExpectation<2, A, C>
-    for GaussianDistribution<A, C>
+impl<const A: usize, const C: usize> DifferentiableExpectation<2, A, C> for GaussianDistribution<A>
+where
+    Tensor<A>: NextRank<Next = Tensor<C>>,
 {
     type CandidateKind = Float;
 
     /// Draws multiple actions `[batch, samples, ...action_shape]` of rank `C` from
     /// `[batch, 2 * event_size]` parameters. Log probabilities and uniform
-    /// weights are `[batch, samples]`; `C = A + 1` inserts the sample axis.
+    /// weights are `[batch, samples, 1]`; `C = A + 1` inserts the sample axis.
     fn expectation(
         &self,
         outputs: Tensor<2>,
@@ -192,8 +194,8 @@ impl<const A: usize, const C: usize> DifferentiableExpectation<2, A, C>
             actions.push(sample);
         }
         let actions = Tensor::<A>::stack::<C>(actions, 1);
-        let log_probabilities = Tensor::<1>::stack::<2>(log_probabilities, 1);
-        let weights = Tensor::<2>::full(
+        let log_probabilities = Tensor::<2>::stack::<3>(log_probabilities, 1);
+        let weights = Tensor::<3>::full(
             log_probabilities.dims(),
             1.0 / sample_count as f64,
             (&log_probabilities.device(), log_probabilities.dtype()),
@@ -253,14 +255,31 @@ mod tests {
                 .unwrap(),
             vec![0.25, -0.5, 0.75]
         );
-        let scalar = GaussianDistribution::<1, 2>::new([]).unwrap();
+        let scalar = GaussianDistribution::<2>::new([1]).unwrap();
         assert_eq!(
             scalar
                 .mode(Tensor::from_floats([[2.0, 0.0], [3.0, 0.0]], &device))
                 .unwrap()
                 .dims(),
-            [2]
+            [2, 1]
         );
+    }
+
+    #[test]
+    fn scalar_expectation_infers_native_candidate_rank() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let distribution = GaussianDistribution::<2>::new([1]).unwrap();
+        let terms: ExpectationTerms<3> = distribution
+            .expectation(
+                Tensor::zeros([2, 2], &device),
+                NonZeroUsize::new(3).unwrap(),
+            )
+            .unwrap();
+        let actions: Tensor<3> = terms.actions().clone();
+        assert_eq!(actions.dims(), [2, 3, 1]);
+        assert_eq!(terms.log_probabilities().dims(), [2, 3, 1]);
+        assert_eq!(terms.weights().dims(), [2, 3, 1]);
     }
 
     #[test]
@@ -315,7 +334,7 @@ mod tests {
     fn high_rank_events_and_uniform_candidate_weights_are_preserved() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let distribution = GaussianDistribution::<6, 7>::new([2, 1, 2, 1, 2]).unwrap();
+        let distribution = GaussianDistribution::<6>::new([2, 1, 2, 1, 2]).unwrap();
         assert_eq!(
             distribution.action_shape(),
             Some([2, 1, 2, 1, 2].as_slice())
@@ -329,13 +348,13 @@ mod tests {
                 .unwrap()
                 .entropy()
                 .dims(),
-            [3]
+            [3, 1]
         );
-        let terms = distribution
+        let terms: ExpectationTerms<7> = distribution
             .expectation(outputs.clone(), NonZeroUsize::new(4).unwrap())
             .unwrap();
         assert_eq!(terms.actions().dims(), [3, 4, 2, 1, 2, 1, 2]);
-        assert_eq!(terms.log_probabilities().dims(), [3, 4]);
+        assert_eq!(terms.log_probabilities().dims(), [3, 4, 1]);
         assert_eq!(
             terms
                 .weights()
@@ -368,7 +387,7 @@ mod tests {
     #[test]
     fn invalid_shapes_and_empty_batch_entropy_are_handled() {
         let device = Device::flex();
-        let distribution = GaussianDistribution::<3, 4>::new([2, 3]).unwrap();
+        let distribution = GaussianDistribution::<3>::new([2, 3]).unwrap();
         assert!(matches!(
             distribution.mode(Tensor::zeros([1, 10], &device)),
             Err(GaussianDistributionError::TensorError(
@@ -376,11 +395,11 @@ mod tests {
             ))
         ));
         assert!(matches!(
-            GaussianDistribution::<4, 5>::new([2, 0, 3]),
+            GaussianDistribution::<4>::new([2, 0, 3]),
             Err(GaussianDistributionError::ZeroActionDimension)
         ));
         assert!(matches!(
-            GaussianDistribution::<3, 4>::new([usize::MAX, 2]),
+            GaussianDistribution::<3>::new([usize::MAX, 2]),
             Err(GaussianDistributionError::ActionShapeTooLarge)
         ));
         let flat = GaussianDistribution::default();
