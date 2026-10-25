@@ -7,6 +7,7 @@ use burn::tensor::{
 
 use crate::distributions::{
     DifferentiableExpectation, DistEval, Distribution, DistributionTensorError, ExpectationTerms,
+    validate_statistics,
 };
 
 /// Categorical operations over scores (logits) `[batch, categories]`.
@@ -76,6 +77,7 @@ impl Distribution<2, 2> for CategoricalDistribution {
     /// log probability and entropy to `[batch, 1]`. Inputs share dtype and device.
     fn dist_eval(&self, outputs: Tensor<2>, actions: Tensor<2>) -> Result<DistEval, Self::Error> {
         Self::validate(&outputs)?;
+        validate_statistics("categorical latent actions", &outputs, &actions)?;
         let log_probs = log_softmax(outputs.clone(), 1);
         let indices = actions.argmax(1);
         let log_prob = log_probs.clone().gather(1, indices);
@@ -254,11 +256,20 @@ mod tests {
     }
 
     #[test]
-    fn empty_categories_return_errors_and_single_category_entropy_is_zero() {
+    fn invalid_categories_and_latent_shapes_return_errors() {
         let device = Device::flex();
         assert!(matches!(
             CategoricalDistribution.sample(Tensor::zeros([2, 0], &device)),
             Err(CategoricalDistributionError::NoCategories)
+        ));
+        assert!(matches!(
+            CategoricalDistribution.dist_eval(
+                Tensor::zeros([2, 3], &device),
+                Tensor::zeros([1, 3], &device)
+            ),
+            Err(CategoricalDistributionError::TensorError(
+                DistributionTensorError::ShapeMismatch { .. }
+            ))
         ));
         let single = Tensor::<2>::zeros([2, 1], &device);
         let evaluation = CategoricalDistribution
