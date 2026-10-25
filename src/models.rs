@@ -75,8 +75,13 @@ pub enum ModelError {
     ActivationFeatures { expected: usize, actual: usize },
 }
 
-/// Checks distribution arguments before Burn initializes model weights.
-fn validate_initializer(initializer: &Initializer) -> Result<(), ModelError> {
+/// Checks initializer arguments and dtype-cast uniform bounds for a layer.
+fn validate_initializer(
+    initializer: &Initializer,
+    input: usize,
+    output: usize,
+    dtype: DType,
+) -> Result<(), ModelError> {
     let valid = match initializer {
         Initializer::Constant { value } => value.is_finite(),
         Initializer::Uniform { min, max } => min.is_finite() && max.is_finite() && min < max,
@@ -92,6 +97,25 @@ fn validate_initializer(initializer: &Initializer) -> Result<(), ModelError> {
     };
     if !valid {
         return Err(ModelError::InvalidInitializer);
+    }
+    let bounds = match initializer {
+        Initializer::Uniform { min, max } => Some((*min, *max)),
+        Initializer::KaimingUniform { gain, fan_out_only } => {
+            let fan = if *fan_out_only { output } else { input };
+            let bound = 3.0f64.sqrt() * gain / (fan as f64).sqrt();
+            Some((-bound, bound))
+        }
+        Initializer::XavierUniform { gain } => {
+            let fan = input
+                .checked_add(output)
+                .ok_or(ModelError::ShapeTooLarge { input, output })?;
+            let bound = 3.0f64.sqrt() * gain * (2.0 / fan as f64).sqrt();
+            Some((-bound, bound))
+        }
+        _ => None,
+    };
+    if let Some((min, max)) = bounds {
+        validate_uniform_bounds(min, max, dtype)?;
     }
     Ok(())
 }
@@ -166,9 +190,7 @@ impl Forward<2, 2> for Linear {
     }
 }
 
-/// Builds a sequence of native linear layers with the selected weight and bias initializers.
-/// Validates feature counts and weight sizes, and supplies fan counts for Kaiming and Xavier initialization.
-/// Each weight has shape `[input_features, output_features]`; each bias has shape `[output_features]`.
+/// Builds native linear layers, each with validated feature counts, weight size, and initializers.
 fn initialize_hidden_layers(
     input_size: usize,
     output_sizes: &[usize],
@@ -176,7 +198,6 @@ fn initialize_hidden_layers(
     bias_initializer: Option<&Initializer>,
     options: &TensorCreationOptions,
 ) -> Result<(Vec<Linear>, usize), ModelError> {
-    validate_initializer(initializer)?;
     if input_size == 0 {
         return Err(ModelError::ZeroFeatures(input_size));
     }
@@ -195,8 +216,8 @@ fn initialize_hidden_layers(
     Ok((layers, input))
 }
 
-/// Builds a native linear layer after checking feature counts, weight size, and initializer arguments.
-/// Supplies fan counts for weight initialization. Bias uses its own initializer, uniform bounds by default, or zeros for orthogonal weights.
+/// Builds a native linear layer after checking feature counts, weight size, and dtype-aware initializers.
+/// Bias uses its own initializer, uniform bounds by default, or zeros for orthogonal weights.
 /// Weights have shape `[input, output]`. Bias has shape `[output]`.
 fn initialize_linear(
     input: usize,
@@ -205,7 +226,6 @@ fn initialize_linear(
     bias_initializer: Option<&Initializer>,
     options: &TensorCreationOptions,
 ) -> Result<Linear, ModelError> {
-    validate_initializer(initializer)?;
     if input == 0 || output == 0 {
         return Err(ModelError::ZeroFeatures(0));
     }
@@ -222,31 +242,11 @@ fn initialize_linear(
         }
     };
     let bias_initializer = bias_initializer.unwrap_or(&default_bias);
-    validate_initializer(bias_initializer)?;
+    let dtype = options.device.settings().float_dtype.into();
+    validate_initializer(initializer, input, output, dtype)?;
+    validate_initializer(bias_initializer, input, output, dtype)?;
     if matches!(bias_initializer, Initializer::Orthogonal { .. }) {
         return Err(ModelError::InvalidInitializer);
-    }
-    let dtype = options.device.settings().float_dtype.into();
-    for initializer in [initializer, bias_initializer] {
-        let bounds = match initializer {
-            Initializer::Uniform { min, max } => Some((*min, *max)),
-            Initializer::KaimingUniform { gain, fan_out_only } => {
-                let fan = if *fan_out_only { output } else { input };
-                let bound = 3.0f64.sqrt() * gain / (fan as f64).sqrt();
-                Some((-bound, bound))
-            }
-            Initializer::XavierUniform { gain } => {
-                let fan = input
-                    .checked_add(output)
-                    .ok_or(ModelError::ShapeTooLarge { input, output })?;
-                let bound = 3.0f64.sqrt() * gain * (2.0 / fan as f64).sqrt();
-                Some((-bound, bound))
-            }
-            _ => None,
-        };
-        if let Some((min, max)) = bounds {
-            validate_uniform_bounds(min, max, dtype)?;
-        }
     }
     let mut layer = LinearConfig::new(input, output)
         .with_initializer(initializer.clone())
