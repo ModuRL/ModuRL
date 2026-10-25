@@ -15,8 +15,6 @@ pub enum SACReplayError {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
-    #[error("replay observation dtype differs: expected {expected:?}, got {actual:?}")]
-    ObservationDType { expected: DType, actual: DType },
 }
 
 /// Owns SAC's replay ring and aligned observation storage with native observation and action kinds.
@@ -149,24 +147,16 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
         })
     }
 
-    /// Validates observations `[num_envs, ...observation_shape]`, actions `[num_envs, ...action_shape]`, and statistics `[num_envs, 1]`.
-    /// Checks observation dtypes and environment count without changing storage. Returns the number of transitions.
+    /// Validates actions `[num_envs, ...action_shape]` and statistics `[num_envs, 1]`.
+    /// Observation shape and dtype validation is handled by aligned storage. Returns the number of transitions.
     fn validate_insert(
         &self,
         transitions: &SACReplayInsert<O, A, K, L>,
     ) -> Result<usize, SACReplayError> {
         let count = transitions.observations.dims()[0];
-        let mut observation_shape = self.observations.shape();
-        observation_shape[0] = count;
         let mut action_shape = self.actions.tensor().dims();
         action_shape[0] = count;
 
-        validate_shape("observations", &transitions.observations, observation_shape)?;
-        validate_shape(
-            "next observations",
-            &transitions.next_observations,
-            observation_shape,
-        )?;
         validate_shape("actions", &transitions.actions, action_shape)?;
         validate_shape("rewards", &transitions.rewards, [count, 1])?;
         validate_shape("termination", &transitions.terminated, [count, 1])?;
@@ -189,21 +179,6 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
             }
             .into());
         }
-
-        let dtype = self.observations.observations().dtype();
-        for actual in [
-            transitions.observations.dtype(),
-            transitions.next_observations.dtype(),
-        ] {
-            if actual != dtype {
-                return Err(SACReplayError::ObservationDType {
-                    expected: dtype,
-                    actual,
-                });
-            }
-        }
-
-        self.validate_environment_count(count)?;
 
         Ok(count)
     }
@@ -246,7 +221,7 @@ where
 
     /// Inserts observations `[num_envs, ...observation_shape]`, actions `[num_envs, ...action_shape]`, and statistics `[num_envs, 1]`.
     /// Preserves observation kind and first-batch dtype. Explicitly casts actions to their storage dtype and statistics to compute dtype.
-    /// Validates fields before writing; transfers and detaches each tensor on the storage device.
+    /// Validates non-observation fields before writing; aligned storage validates and transfers observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = self.validate_insert(&transitions)?;
         let device = self.rewards.tensor().device();
@@ -255,8 +230,8 @@ where
 
         self.observations.insert(
             start,
-            transitions.observations.to_device(&device),
-            transitions.next_observations.to_device(&device),
+            transitions.observations,
+            transitions.next_observations,
             &transitions.truncateds,
         )?;
         self.actions.write(
@@ -415,10 +390,11 @@ mod tests {
         let invalid = integer_transitions(&device, DType::I32);
         assert!(matches!(
             storage.insert(0, invalid),
-            Err(SACReplayError::ObservationDType {
+            Err(SACReplayError::Storage(ReplayStorageError::DTypeMismatch {
+                field: "observations",
                 expected: DType::I64,
                 actual: DType::I32
-            })
+            }))
         ));
         assert_eq!(
             storage

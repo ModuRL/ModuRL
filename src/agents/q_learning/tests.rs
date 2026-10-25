@@ -287,7 +287,6 @@ fn replay_insert(values: &[f64], device: &Device) -> QLearningInsert<2, Float> {
 fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
     let device = Device::flex();
     let mut storage = QLearningReplayStorage::<2, Float>::new([4, 1], device.clone());
-    storage.initialize_environment_count(2).unwrap();
     storage
         .insert(0, replay_insert(&[1.0, 2.0], &device))
         .unwrap();
@@ -474,10 +473,13 @@ fn matching_replay_rejects_dtype_changes_without_overwriting_existing_rows() {
     changed.next_observations = changed.next_observations.cast(DType::F32);
     assert!(matches!(
         storage.insert(0, changed),
-        Err(QLearningReplayError::ObservationDType {
-            expected: DType::F64,
-            actual: DType::F32
-        })
+        Err(QLearningReplayError::Storage(
+            ReplayStorageError::DTypeMismatch {
+                field: "observations",
+                expected: DType::F64,
+                actual: DType::F32,
+            }
+        ))
     ));
     let retained = storage.gather(&[0, 1]).unwrap();
     assert_eq!(retained.observations.dtype(), DType::F64);
