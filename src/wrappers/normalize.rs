@@ -211,10 +211,11 @@ where
         action: <Tensor<BA, AK> as PrevRank>::Prev,
     ) -> Result<StepInfo<I, <Tensor<BO, K> as PrevRank>::Prev>, Self::Error> {
         let mut step = self.gym.step(action)?;
-        self.discounted_reward =
-            self.discounted_reward * self.gamma * if step.done { 0.0 } else { 1.0 }
-                + f64::from(step.reward);
+        self.discounted_reward = self.discounted_reward * self.gamma + f64::from(step.reward);
         self.statistics.update(&[self.discounted_reward]);
+        if step.done || step.truncated {
+            self.discounted_reward = 0.0;
+        }
 
         let normalized =
             f64::from(step.reward) / (self.statistics.variance[0] + NORMALIZATION_EPSILON).sqrt();
@@ -290,5 +291,22 @@ mod tests {
         let second = wrapper.step(action()).unwrap();
         assert!(second.reward > 1.9 && second.reward < 2.1);
         assert_eq!(second.info.sequence, 2);
+    }
+
+    #[test]
+    fn resets_discounted_reward_after_truncation() {
+        let gym = TestGym::new([
+            TestGym::step(1.0, 1.0, false, false, 1),
+            TestGym::step(2.0, 2.0, false, true, 2),
+            TestGym::step(3.0, 3.0, false, false, 3),
+        ]);
+        let mut wrapper = NormalizeRewardGym::new(gym, 0.99);
+
+        wrapper.step(action()).unwrap();
+        wrapper.step(action()).unwrap();
+        assert_eq!(wrapper.discounted_reward, 0.0);
+
+        wrapper.step(action()).unwrap();
+        assert_eq!(wrapper.discounted_reward, 3.0);
     }
 }
