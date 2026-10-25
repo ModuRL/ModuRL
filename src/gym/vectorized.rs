@@ -7,6 +7,12 @@ use std::marker::PhantomData;
 pub enum VectorizedGymError<E> {
     #[error("at least one environment is required")]
     Empty,
+    /// The supplied action does not have the environment count in dimension zero.
+    #[error("invalid action batch: expected {expected} rows, got {actual:?}")]
+    InvalidActionBatch {
+        expected: usize,
+        actual: Option<usize>,
+    },
     #[error("single environment failed: {0}")]
     Single(#[source] E),
     #[cfg(feature = "multithreading")]
@@ -113,7 +119,8 @@ where
     /// Removes the batch axis from rank-`BA` actions `[num_envs, ...action_shape]` before each Gym step, producing rank `A`.
     /// Stacks unbatched rank-`O` observations into rank `BO` and produces F32 rewards `[num_envs]` on the observation device.
     /// Requires `BO = O + 1` and `BA = A + 1`; scalar values instead use single and batch ranks of one.
-    /// Inputs must meet each environment's dtype and device contract. Flags and metadata stay on the host.
+    /// Rejects an action batch mismatch before stepping. Inputs must meet each environment's dtype and device contract.
+    /// Flags and metadata stay on the host.
     fn step(
         &mut self,
         action: Tensor<BA, <G::ActionSpace as ActionSpace<BA>>::Kind>,
@@ -122,6 +129,13 @@ where
         Self::Error,
     > {
         let count = self.envs.len();
+        let actual = action.dims().first().copied();
+        if actual != Some(count) {
+            return Err(VectorizedGymError::InvalidActionBatch {
+                expected: count,
+                actual,
+            });
+        }
         let mut observations = Vec::with_capacity(count);
         let mut rewards = Vec::with_capacity(count);
         let mut infos = Vec::with_capacity(count);
@@ -204,6 +218,22 @@ mod tests {
     use super::*;
     use crate::spaces::{BoxSpace, Discrete};
     use burn::tensor::{Device, Int};
+
+    #[test]
+    fn vectorized_gym_rejects_short_action_batches_before_stepping() {
+        let mut env =
+            VectorizedGymWrapper::new(vec![CounterEnv::new(0), CounterEnv::new(1)]).unwrap();
+        let actions = Tensor::<1, Int>::zeros([1], &Device::flex());
+
+        assert!(matches!(
+            env.step(actions),
+            Err(VectorizedGymError::InvalidActionBatch {
+                expected: 2,
+                actual: Some(1),
+            })
+        ));
+        assert!(env.envs().iter().all(|env| env.step == 0));
+    }
 
     #[test]
     fn vectorization_restores_unbatched_observations_and_preserves_metadata() {

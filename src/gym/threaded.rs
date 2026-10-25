@@ -1,6 +1,7 @@
 use super::{
     Gym, GymBatchMetadata, MultiGym, MultiGymStepInfo, StackedMultiGymError, VectorizedGymError,
-    VectorizedGymWrapper, batch_metadata, batch_offsets, combine_steps,
+    VectorizedGymWrapper, batch_metadata, batch_offsets, combine_step_outputs, combine_steps,
+    validate_output_shape,
 };
 use crate::spaces::{ActionSpace, ObservationSpace};
 use burn::tensor::{Slice, Tensor, kind::Basic};
@@ -82,6 +83,7 @@ pub struct MultithreadedStackedMultiGym<
     groups: Vec<GymWorker<G, I, O, A, U>>,
     group_offsets: Vec<usize>,
     observation_space: G::ObservationSpace,
+    observation_shape: Vec<usize>,
     action_space: G::ActionSpace,
 }
 
@@ -121,12 +123,14 @@ where
                 _ => return Err(StackedMultiGymError::WorkerDisconnected { gym_index }),
             }
         }
-        let group_offsets =
-            batch_offsets(&metadata, &observation_space.shape(), &action_space.shape())?;
+        let observation_shape = observation_space.shape();
+        let action_shape = action_space.shape();
+        let group_offsets = batch_offsets(&metadata, &observation_shape, &action_shape)?;
         Ok(Self {
             groups,
             group_offsets,
             observation_space,
+            observation_shape,
             action_space,
         })
     }
@@ -155,7 +159,7 @@ where
 
     /// Splits rank-`A` actions `[total_size, ...action_shape]` into rank-`A` group batches and steps them concurrently.
     /// Returns concatenated rank-`O` observations `[total_size, ...observation_shape]` and rewards `[total_size]`.
-    /// Inputs must meet the inner gyms' dtype, device, and item-shape contracts.
+    /// Validates the action batch, each output batch/item shape, and metadata lengths before concatenating. Dtype and device follow the inner gyms' contracts.
     fn step(
         &mut self,
         action: Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
@@ -163,6 +167,11 @@ where
         MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
         Self::Error,
     > {
+        let expected = self.num_envs();
+        let actual = action.dims().first().copied();
+        if actual != Some(expected) {
+            return Err(StackedMultiGymError::InvalidActionBatch { expected, actual });
+        }
         // Prepare every action group before dispatch so a slicing failure cannot advance only part of the stack.
         let actions: Vec<_> = self
             .group_offsets
@@ -200,7 +209,7 @@ where
                 })
                 .collect();
         let steps = replies.into_iter().collect::<Result<Vec<_>, _>>()?;
-        Ok(combine_steps(steps))
+        combine_steps(steps, &self.group_offsets, &self.observation_shape)
     }
 
     fn observation_space(&self) -> Self::ObservationSpace {
@@ -215,8 +224,8 @@ where
         self.group_offsets[self.group_offsets.len() - 1]
     }
 
-    /// Resets groups concurrently, concatenating rank-`O` observations into `[total_size, ...observation_shape]`.
-    /// Groups must share observation kind, dtype, device, and item dimensions. Gradient paths are preserved.
+    /// Resets groups concurrently, validating each reset batch/item shape before concatenating observations.
+    /// Observation kind, dtype, and device follow the supplied space. Gradient paths are preserved.
     fn reset(
         &mut self,
     ) -> Result<Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
@@ -242,6 +251,15 @@ where
                 })
                 .collect();
         let observations = replies.into_iter().collect::<Result<Vec<_>, _>>()?;
+        for (gym_index, observation) in observations.iter().enumerate() {
+            super::validate_group_observations(
+                gym_index,
+                "reset observations",
+                &observation.dims(),
+                super::group_size(&self.group_offsets, gym_index),
+                &self.observation_shape,
+            )?;
+        }
         Ok(Tensor::cat(observations, 0))
     }
 }
@@ -329,7 +347,7 @@ where
     /// Sends rank-`BA` action slices `[1, ...action_shape]` to each worker's vectorizer, which removes the batch axis before Gym execution.
     /// Concatenates rank-`BO` observations `[1, ...observation_shape]` and F32 rewards `[1]` in environment order.
     /// Terminal observations remain unbatched rank `O`; scalar terminal observations use `[1]`.
-    /// Inputs must match the environments' dtype and device contracts; the batch axis is preserved.
+    /// Rejects an action batch mismatch before dispatch. Inputs must match the environments' dtype and device contracts.
     fn step(
         &mut self,
         action: Tensor<BA, <G::ActionSpace as ActionSpace<BA>>::Kind>,
@@ -337,6 +355,11 @@ where
         MultiGymStepInfo<I, BO, <G::ObservationSpace as ObservationSpace<BO>>::Kind, O>,
         Self::Error,
     > {
+        let expected = self.num_envs();
+        let actual = action.dims().first().copied();
+        if actual != Some(expected) {
+            return Err(VectorizedGymError::InvalidActionBatch { expected, actual });
+        }
         let actions: Vec<_> = (0..self.envs.len())
             .map(|index| action.clone().slice([Slice::from(index..index + 1)]))
             .collect();
@@ -369,7 +392,7 @@ where
             })
             .collect();
         let steps = replies.into_iter().collect::<Result<Vec<_>, _>>()?;
-        Ok(combine_steps(steps))
+        Ok(combine_step_outputs(steps))
     }
 
     fn observation_space(&self) -> Self::ObservationSpace {
@@ -507,6 +530,105 @@ mod tests {
             ended.observations.into_data().try_to_vec::<f64>().unwrap(),
             vec![0.0, 0.0, 1.0, 0.0]
         );
+    }
+
+    #[test]
+    fn threaded_vectorized_gym_rejects_short_action_batches_before_stepping() {
+        let env_constructors = (0..3).map(|id| move || CounterEnv::new(id)).collect();
+        let mut env = MultithreadedVectorizedGymWrapper::new(
+            env_constructors,
+            BoxSpace::new_unbounded([1, 2], &Device::flex()),
+            Discrete::new(10),
+        )
+        .unwrap();
+        env.reset().unwrap();
+        assert!(matches!(
+            env.step(Tensor::<1, Int>::zeros([2], &Device::flex())),
+            Err(VectorizedGymError::InvalidActionBatch {
+                expected: 3,
+                actual: Some(2),
+            })
+        ));
+        let valid = env.step(Tensor::<1, Int>::zeros([3], &Device::flex()));
+        assert!(valid.is_ok());
+    }
+
+    #[test]
+    fn threaded_stacked_gym_rejects_invalid_action_batches_before_dispatch() {
+        let factories = (0..2).map(|id| move || GroupEnv::new(id, 1)).collect();
+        let mut env = MultithreadedStackedMultiGym::new(
+            factories,
+            BoxSpace::new_unbounded([1, 3], &Device::flex()),
+            BoxSpace::new_unbounded([1, 1], &Device::flex()),
+        )
+        .unwrap();
+        assert!(matches!(
+            env.step(Tensor::zeros([1, 1], &Device::flex())),
+            Err(StackedMultiGymError::InvalidActionBatch {
+                expected: 2,
+                actual: Some(1),
+            })
+        ));
+    }
+
+    #[test]
+    fn threaded_stacked_gym_validates_step_shapes_and_metadata() {
+        for (malformed_output, field, expected, actual) in [
+            (
+                MalformedGroupOutput::StepObservations,
+                "observations",
+                vec![2, 3],
+                vec![1, 3],
+            ),
+            (MalformedGroupOutput::StepInfos, "infos", vec![2], vec![1]),
+        ] {
+            let factories = vec![move || {
+                let mut env = GroupEnv::new(0, 2);
+                env.malformed_output = Some(malformed_output);
+                env
+            }];
+            let mut env = MultithreadedStackedMultiGym::new(
+                factories,
+                BoxSpace::new_unbounded([1, 3], &Device::flex()),
+                BoxSpace::new_unbounded([1, 1], &Device::flex()),
+            )
+            .unwrap();
+            assert!(matches!(
+                env.step(Tensor::zeros([2, 1], &Device::flex())),
+                Err(StackedMultiGymError::InvalidOutputShape {
+                    gym_index: 0,
+                    field: actual_field,
+                    expected: actual_expected,
+                    actual: actual_shape,
+                }) if actual_field == field
+                    && actual_expected == expected
+                    && actual_shape == actual
+            ));
+        }
+    }
+
+    #[test]
+    fn threaded_stacked_gym_validates_reset_shapes() {
+        let factories = vec![|| {
+            let mut env = GroupEnv::new(0, 2);
+            env.malformed_output = Some(MalformedGroupOutput::ResetObservations);
+            env
+        }];
+        let mut env = MultithreadedStackedMultiGym::new(
+            factories,
+            BoxSpace::new_unbounded([1, 3], &Device::flex()),
+            BoxSpace::new_unbounded([1, 1], &Device::flex()),
+        )
+        .unwrap();
+        assert!(matches!(
+            env.reset(),
+            Err(StackedMultiGymError::InvalidOutputShape {
+                gym_index: 0,
+                field: "reset observations",
+                expected,
+                actual,
+            }) if expected == vec![2, 3] && actual == vec![1, 3]
+        ));
     }
 
     #[test]
