@@ -448,7 +448,7 @@ impl<N: Module> ActionValueCritic<N> {
     /// Owns the model and optimizer, enables online training, and clones the target snapshot.
     /// Rejects a nonpositive or non-finite learning rate.
     #[builder]
-    pub fn builder(
+    pub fn new(
         online_network: N,
         #[builder(into)] optimizer: ModuleOptimizer,
         learning_rate: f64,
