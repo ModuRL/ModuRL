@@ -20,12 +20,6 @@ pub enum DeterministicReplayError {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
-    #[error("replay {field} dtype is {actual:?}, expected {expected:?}")]
-    DType {
-        field: &'static str,
-        expected: DType,
-        actual: DType,
-    },
     #[error("replay {field} dtype {dtype:?} does not match tensor kind {kind:?}")]
     InvalidDType {
         field: &'static str,
@@ -192,15 +186,14 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
             .map_err(Into::into)
     }
 
-    /// Checks observations [num_envs, ...observation_shape], Float actions [num_envs, ...action_shape], and scalars [num_envs, 1].
-    /// Requires the configured observation dtype and environment count without changing storage.
+    /// Checks Float actions [num_envs, ...action_shape] and scalars [num_envs, 1].
+    /// Aligned storage validates observation shape and dtype; this validates environment count without changing storage.
     fn validate_insert(
         &self,
         start: usize,
         transitions: &DeterministicReplayInsert<O, A, K>,
     ) -> Result<usize, DeterministicReplayError> {
         let count = transitions.observations.dims()[0];
-        self.validate_environment_count(count)?;
         if start >= self.capacity() || !start.is_multiple_of(self.environment_count) {
             return Err(DeterministicReplayError::InvalidStart {
                 start,
@@ -208,16 +201,8 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
                 environment_count: self.environment_count,
             });
         }
-        let mut observation_shape = self.observations.shape();
-        observation_shape[0] = count;
         let mut action_shape = self.actions.tensor().dims();
         action_shape[0] = count;
-        validate_shape("observations", &transitions.observations, observation_shape)?;
-        validate_shape(
-            "next observations",
-            &transitions.next_observations,
-            observation_shape,
-        )?;
         validate_shape("actions", &transitions.actions, action_shape)?;
         validate_shape("rewards", &transitions.rewards, [count, 1])?;
         validate_shape("termination", &transitions.terminated, [count, 1])?;
@@ -228,19 +213,6 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
                 actual: transitions.truncateds.len(),
             }
             .into());
-        }
-        let expected = self.observations.observations().dtype();
-        for (field, actual) in [
-            ("observations", transitions.observations.dtype()),
-            ("next observations", transitions.next_observations.dtype()),
-        ] {
-            if actual != expected {
-                return Err(DeterministicReplayError::DType {
-                    field,
-                    expected,
-                    actual,
-                });
-            }
         }
         Ok(count)
     }
@@ -295,16 +267,16 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
     }
 
     /// Stores native observations [num_envs, ...observation_shape], Float actions [num_envs, ...action_shape], and scalars [num_envs, 1].
-    /// Validates all fields before writing. Preserves observation dtype and casts actions and rewards to the configured floating dtype.
-    /// Transfers each tensor to the storage device and removes gradients. Truncations preserve terminal next observations.
+    /// Validates non-observation fields before writing. Preserves observation dtype and casts actions and rewards to the configured floating dtype.
+    /// Aligned storage validates and transfers observations; truncations preserve terminal next observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = self.validate_insert(start, &transitions)?;
         let device = self.rewards.tensor().device();
         let dtype = self.rewards.tensor().dtype();
         self.observations.insert(
             start,
-            transitions.observations.to_device(&device),
-            transitions.next_observations.to_device(&device),
+            transitions.observations,
+            transitions.next_observations,
             &transitions.truncateds,
         )?;
         self.actions
@@ -555,9 +527,23 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert!(
-                matches!(storage.insert(0, transitions), Err(DeterministicReplayError::Shape { field: actual, .. }) if actual == field)
-            );
+            let error = storage.insert(0, transitions);
+            if matches!(field, "observations" | "next observations") {
+                assert!(matches!(
+                    error,
+                    Err(DeterministicReplayError::Storage(
+                        ReplayStorageError::ShapeMismatch {
+                            field: actual,
+                            ..
+                        }
+                    )) if actual == field
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    Err(DeterministicReplayError::Shape { field: actual, .. }) if actual == field
+                ));
+            }
         }
         for next in [false, true] {
             let mut transitions = integer_transitions(&device);
@@ -566,13 +552,20 @@ mod tests {
             } else {
                 transitions.observations = transitions.observations.cast(DType::U32);
             }
+            let field = if next {
+                "next observations"
+            } else {
+                "observations"
+            };
             assert!(matches!(
                 storage.insert(0, transitions),
-                Err(DeterministicReplayError::DType {
-                    expected: DType::U64,
-                    actual: DType::U32,
-                    ..
-                })
+                Err(DeterministicReplayError::Storage(
+                    ReplayStorageError::DTypeMismatch {
+                        field: actual,
+                        expected: DType::U64,
+                        actual: DType::U32,
+                    }
+                )) if actual == field
             ));
         }
         let mut truncateds = integer_transitions(&device);
