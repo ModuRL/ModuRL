@@ -4,6 +4,7 @@ use burn::tensor::{Distribution as RandomDistribution, Float, Tensor};
 
 use crate::distributions::{
     DifferentiableExpectation, DistEval, Distribution, DistributionTensorError, ExpectationTerms,
+    validate_statistics,
 };
 use crate::tensor_rank::NextRank;
 
@@ -153,6 +154,7 @@ impl<const A: usize> Distribution<2, A> for GaussianDistribution<A> {
     /// log probability and entropy. Actions share parameter dtype and device.
     fn dist_eval(&self, outputs: Tensor<2>, actions: Tensor<A>) -> Result<DistEval, Self::Error> {
         let (mean, log_std) = self.parameters(outputs)?;
+        validate_statistics("Gaussian actions", &mean, &actions)?;
         let normalized_diff = (actions - mean).square() / log_std.clone().exp().square();
         let normalization = (2.0 * std::f64::consts::PI).ln();
         let log_prob =
@@ -394,6 +396,16 @@ mod tests {
                 DistributionTensorError::ShapeMismatch { .. }
             ))
         ));
+        let flat = GaussianDistribution::default();
+        assert!(matches!(
+            flat.dist_eval(
+                Tensor::zeros([2, 4], &device),
+                Tensor::zeros([1, 2], &device)
+            ),
+            Err(GaussianDistributionError::TensorError(
+                DistributionTensorError::ShapeMismatch { .. }
+            ))
+        ));
         assert!(matches!(
             GaussianDistribution::<4>::new([2, 0, 3]),
             Err(GaussianDistributionError::ZeroActionDimension)
@@ -402,7 +414,6 @@ mod tests {
             GaussianDistribution::<3>::new([usize::MAX, 2]),
             Err(GaussianDistributionError::ActionShapeTooLarge)
         ));
-        let flat = GaussianDistribution::default();
         assert!(matches!(
             flat.sample(Tensor::zeros([1, 3], &device)),
             Err(GaussianDistributionError::InvalidOutputWidth { output_width: 3 })
