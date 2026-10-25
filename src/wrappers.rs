@@ -475,18 +475,23 @@ mod tests {
     }
 
     #[test]
-    fn device_wrapper_preserves_reset_step_and_terminal_observations() {
-        let device = Device::flex();
-        let mut gym = DeviceMultiGymWrapper::new(TensorMapTestGym, device.clone(), device.clone());
-        assert_eq!(gym.reset().unwrap().device(), device);
+    #[allow(deprecated)]
+    fn device_wrapper_transfers_reset_step_and_terminal_observations() {
+        let environment_device = Device::flex();
+        let agent_device = Device::ndarray();
+        assert_ne!(environment_device, agent_device);
+
+        let mut gym =
+            DeviceMultiGymWrapper::new(TensorMapTestGym, environment_device, agent_device.clone());
+        assert_eq!(gym.reset().unwrap().device(), agent_device);
         let step = gym
-            .step(Tensor::from_data([[1.0f32], [2.0]], &device))
+            .step(Tensor::from_data([[1.0f32], [2.0]], &agent_device))
             .unwrap();
-        assert_eq!(step.observations.device(), device);
-        assert_eq!(step.rewards.device(), device);
+        assert_eq!(step.observations.device(), agent_device);
+        assert_eq!(step.rewards.device(), agent_device);
         assert_eq!(
             step.terminal_observations[1].as_ref().unwrap().device(),
-            device
+            agent_device
         );
         assert_eq!(
             step.transition_next_observations()
