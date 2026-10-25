@@ -47,6 +47,7 @@ burn = { version = "=0.22.0", default-features = false, features = [
     "std",
     "flex",
     "autodiff",
+    "ndarray",
     "optim",
 ] }
 
