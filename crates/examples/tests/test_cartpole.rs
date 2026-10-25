@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use burn::{
     nn::{Initializer, Tanh},
     optim::AdamWConfig,
@@ -5,6 +6,8 @@ use burn::{
 };
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
+
+static RNG_LOCK: Mutex<()> = Mutex::new(());
 
 fn device() -> Device {
     #[cfg(feature = "cuda")]
@@ -61,6 +64,7 @@ where
 #[test]
 #[ignore = "slow solve test; run manually"]
 fn ppo_cartpole() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = device();
     device.seed(42);
     let env = VectorizedGymWrapper::from(CartPoleV1::builder().build().unwrap());
@@ -143,6 +147,7 @@ fn shared_network(
 #[test]
 #[ignore = "slow solve test; run manually"]
 fn ppo_cartpole_shared() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = device();
     device.seed(42);
     let env = VectorizedGymWrapper::new(
@@ -192,6 +197,7 @@ fn ppo_cartpole_shared() {
 #[ignore = "slow solve test; run manually"]
 #[cfg(feature = "multithreading")]
 fn ppo_cartpole_shared_multithreaded() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = device();
     device.seed(42);
     let constructors: Vec<_> = (0..8)
@@ -231,6 +237,7 @@ fn ppo_cartpole_shared_multithreaded() {
 #[test]
 #[ignore = "slow solve test; run manually for review prep"]
 fn dqn_cartpole() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let environment_device = burn::tensor::Device::flex();
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = environment_device.clone().autodiff();
@@ -296,6 +303,7 @@ fn dqn_cartpole() {
 #[test]
 #[ignore = "slow solve test; run manually for review prep"]
 fn ddqn_cartpole() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let environment_device = burn::tensor::Device::flex();
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let device = environment_device.clone().autodiff();
