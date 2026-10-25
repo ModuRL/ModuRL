@@ -691,6 +691,7 @@ mod tests {
 
     #[test]
     fn shared_agent_runs_collection_training_actions_and_observation_reset() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = vec![
             TwoStepTestGym::new(device.clone(), false),
@@ -742,6 +743,7 @@ mod tests {
 
     #[test]
     fn schedules_continue_across_learn_calls() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = vec![
             TwoStepTestGym::new(device.clone(), false),
