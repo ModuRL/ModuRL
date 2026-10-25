@@ -482,7 +482,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
     /// Clones a detached target actor and allocates replay from the first collected batch's observation dtype.
     /// Returns typed errors for invalid configuration, space shapes, or parameter devices.
     #[builder]
-    pub(crate) fn builder<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
+    pub(crate) fn new<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
         online_actor: M,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
         actor_learning_rate: f64,
