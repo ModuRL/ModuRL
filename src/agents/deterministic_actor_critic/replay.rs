@@ -139,7 +139,7 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
     /// Preserves observation dtype; actions and rewards use dtype. All storage is detached on device.
     /// Returns an error for invalid dtypes, zero item dimensions, mismatched capacities, or invalid environment alignment.
     #[builder]
-    pub(super) fn builder(
+    pub(super) fn new(
         observation_shape: [usize; O],
         action_shape: [usize; A],
         observation_dtype: DType,

@@ -96,7 +96,7 @@ where
     /// Replay stores detached observations in their native kind and first-batch dtype.
     /// Construction returns an error for invalid sizes, schedules, learning rate, dtype, or observation rank.
     #[builder]
-    pub fn builder(
+    pub fn new(
         action_space: Discrete,
         observation_space: S,
         online_q_network: M,

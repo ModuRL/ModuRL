@@ -122,7 +122,7 @@ impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
     /// Models must use the optimization device. Models perform any observation dtype conversion explicitly.
     /// Returns typed errors for invalid configuration, space shapes, or model devices.
     #[builder]
-    pub fn builder<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
+    pub fn new<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
         online_actor: M,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
         actor_learning_rate: f64,

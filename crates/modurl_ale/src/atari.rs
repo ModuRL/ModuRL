@@ -161,7 +161,7 @@ impl<M: AtariObservationMode> AtariGym<M> {
     /// Creates CPU U8 observations and a discrete minimal-action space. No ROMs are downloaded.
     /// Rejects unreadable paths and invalid sticky-action or rendering settings before loading the ROM.
     #[builder]
-    pub fn builder<const D: usize, const B: usize>(
+    pub fn new<const D: usize, const B: usize>(
         rom_path: PathBuf,
         random_seed: Option<i32>,
         #[builder(default = 0.25)] repeat_action_probability: f32,

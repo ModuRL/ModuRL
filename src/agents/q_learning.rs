@@ -440,7 +440,7 @@ where
     /// Model parameters must use the optimization device. Replay matches the first observation dtype on its storage device.
     /// Replay storage configuration selects the storage and optimization devices.
     #[builder]
-    pub(crate) fn builder(
+    pub(crate) fn new(
         action_space: Discrete,
         observation_space: S,
         online_q_network: M,
