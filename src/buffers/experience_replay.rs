@@ -825,6 +825,12 @@ mod tests {
             AlignedObservationReplay::<2>::new([usize::MAX - 1, 1], 2, &device),
             Err(ReplayStorageError::CapacityOverflow { .. })
         ));
+        let before = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
         assert!(matches!(
             replay.insert(
                 0,
@@ -838,9 +844,7 @@ mod tests {
             })
         ));
         let after = replay
-            .observations
-            .as_ref()
-            .unwrap()
+            .observations()
             .clone()
             .into_data()
             .try_to_vec::<f32>()
@@ -852,8 +856,14 @@ mod tests {
     fn aligned_observations_reject_dtype_mismatches_without_mutation() {
         let device = Device::flex();
         let options = (&device, DType::F32);
-        let mut replay = AlignedObservationReplay::<2>::new([4, 2], options);
+        let mut replay = AlignedObservationReplay::<2>::new([4, 2], 1, options).unwrap();
         let f64_states = Tensor::zeros([1, 2], (&device, DType::F64));
+        let before = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
         assert!(matches!(
             replay.insert(0, f64_states.clone(), f64_states.clone(), &[false]),
             Err(ReplayStorageError::DTypeMismatch {
@@ -862,8 +872,13 @@ mod tests {
                 actual: DType::F64,
             })
         ));
-        assert!(replay.observations.is_none());
-        assert!(replay.environment_count.is_none());
+        let after = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert_eq!(before, after);
 
         replay
             .insert(
@@ -874,9 +889,7 @@ mod tests {
             )
             .unwrap();
         let before = replay
-            .observations
-            .as_ref()
-            .unwrap()
+            .observations()
             .clone()
             .into_data()
             .try_to_vec::<f32>()
@@ -890,9 +903,7 @@ mod tests {
             })
         ));
         let after = replay
-            .observations
-            .as_ref()
-            .unwrap()
+            .observations()
             .clone()
             .into_data()
             .try_to_vec::<f32>()
