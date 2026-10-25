@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use burn::{
     module::Module,
     nn::Tanh,
@@ -23,6 +24,8 @@ impl Forward<2, 2> for Float64Model {
     }
 }
 
+static RNG_LOCK: Mutex<()> = Mutex::new(());
+
 fn model(input: usize, output: usize, device: &Device) -> Float64Model {
     Float64Model {
         model: MLP::builder()
@@ -42,6 +45,7 @@ fn cartpole() -> VectorizedGymWrapper<CartPoleV1> {
 
 #[test]
 fn dqn_updates_f64_networks_from_native_f32_observations() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut env = cartpole();
     let mut agent = DQNAgent::builder()
@@ -67,6 +71,7 @@ fn dqn_updates_f64_networks_from_native_f32_observations() {
 
 #[test]
 fn ddqn_updates_f64_networks_from_native_f32_observations() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut env = cartpole();
     let mut agent = DDQNAgent::builder()
@@ -92,6 +97,7 @@ fn ddqn_updates_f64_networks_from_native_f32_observations() {
 
 #[test]
 fn ppo_updates_f64_networks_from_native_f32_observations() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut env = OutputMapMultiGymWrapper::new(
         cartpole(),
@@ -130,6 +136,7 @@ fn ppo_updates_f64_networks_from_native_f32_observations() {
 
 #[test]
 fn a2c_updates_f64_networks_from_native_f32_observations() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut env = OutputMapMultiGymWrapper::new(
         cartpole(),
@@ -166,6 +173,7 @@ fn a2c_updates_f64_networks_from_native_f32_observations() {
 
 #[test]
 fn sac_updates_f64_networks_from_native_f32_observations() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut env = cartpole();
     let critic = SACCritic::builder()
@@ -254,6 +262,7 @@ fn continuous_critic(device: &Device) -> ActionValueCritic<Float64ContinuousCrit
 
 #[test]
 fn ddpg_updates_f64_networks_from_native_f32_observations() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut env = VectorizedGymWrapper::from(
         modurl_gym::classic_control::pendulum::PendulumV1::builder()
@@ -289,6 +298,7 @@ fn ddpg_updates_f64_networks_from_native_f32_observations() {
 
 #[test]
 fn td3_updates_f64_networks_from_native_f32_observations() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut env = VectorizedGymWrapper::from(
         modurl_gym::classic_control::pendulum::PendulumV1::builder()
