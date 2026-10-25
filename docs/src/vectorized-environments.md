@@ -136,7 +136,10 @@ let step = env.step(actions)?; // steps each shared game once
 Rows are ordered first by inner gym and then by that gym's own row order.
 `group_offsets()` maps the flattened rows back to their inner gyms. All inner
 gyms must expose the same observation and action shapes, and each inner gym
-keeps responsibility for its own auto-reset behavior.
+keeps responsibility for its own auto-reset behavior. The stack checks action
+batch size before stepping and validates each group's step and reset observation
+shapes, reward shape, and metadata lengths before concatenating. Dtypes and
+devices must still match the spaces and tensors used by each inner gym.
 
 With the `multithreading` feature enabled,
 `MultithreadedStackedMultiGym` runs each inner `MultiGym` on a persistent
