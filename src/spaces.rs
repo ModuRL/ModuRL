@@ -313,10 +313,7 @@ fn finite_limit(dtype: DType) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Flex shares its RNG across devices; seeded checks require exclusive access.
-    static RNG_LOCK: Mutex<()> = Mutex::new(());
+    use crate::sampling::tests::RNG_LOCK;
 
     #[test]
     fn discrete_samples_indices_and_decodes_logits() {
