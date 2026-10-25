@@ -236,10 +236,68 @@ fn batch_offsets<E>(
     Ok(offsets)
 }
 
-/// Concatenates observations `[group_size, ...observation_shape]` and rewards `[group_size, 1]` along the batch axis.
-/// Returns `[total_size, ...observation_shape]` of rank `O` and rewards `[total_size, 1]`, preserving each tensor's kind, dtype, device, and gradients.
-/// Groups must share item dimensions, dtypes, and devices. Metadata, flags, and terminal observations retain group order.
-fn combine_steps<I, const O: usize, K: Basic, const U: usize>(
+fn group_size(group_offsets: &[usize], gym_index: usize) -> usize {
+    group_offsets[gym_index + 1] - group_offsets[gym_index]
+}
+
+fn validate_group_observations<E>(
+    gym_index: usize,
+    field: &'static str,
+    actual: &[usize],
+    group_size: usize,
+    observation_shape: &[usize],
+) -> Result<(), StackedMultiGymError<E>> {
+    let mut expected = Vec::with_capacity(observation_shape.len() + 1);
+    expected.push(group_size);
+    expected.extend_from_slice(observation_shape);
+    validate_output_shape(gym_index, field, actual, expected)
+}
+
+/// Validates group output shapes and metadata lengths, then concatenates observations and rewards in group order.
+/// Output tensor kinds, dtypes, devices, and gradients are preserved.
+fn combine_steps<I, const O: usize, K: Basic, const U: usize, E>(
+    steps: Vec<MultiGymStepInfo<I, Tensor<U, K>>>,
+    group_offsets: &[usize],
+    observation_shape: &[usize],
+) -> Result<MultiGymStepInfo<I, Tensor<U, K>>, StackedMultiGymError<E>>
+where
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+{
+    for (gym_index, step) in steps.iter().enumerate() {
+        let group_size = group_size(group_offsets, gym_index);
+        validate_group_observations(
+            gym_index,
+            "observations",
+            &step.observations.dims(),
+            group_size,
+            observation_shape,
+        )?;
+        validate_output_shape(
+            gym_index,
+            "rewards",
+            &step.rewards.dims(),
+            vec![group_size, 1],
+        )?;
+        validate_output_shape(gym_index, "infos", &[step.infos.len()], vec![group_size])?;
+        validate_output_shape(gym_index, "dones", &[step.dones.len()], vec![group_size])?;
+        validate_output_shape(
+            gym_index,
+            "truncateds",
+            &[step.truncateds.len()],
+            vec![group_size],
+        )?;
+        validate_output_shape(
+            gym_index,
+            "terminal observations",
+            &[step.terminal_observations.len()],
+            vec![group_size],
+        )?;
+    }
+    Ok(combine_step_outputs::<I, O, K, U>(steps))
+}
+
+/// Concatenates observations and rewards from validated groups in order.
+fn combine_step_outputs<I, const O: usize, K: Basic, const U: usize>(
     steps: Vec<MultiGymStepInfo<I, Tensor<U, K>>>,
 ) -> MultiGymStepInfo<I, Tensor<U, K>>
 where
@@ -268,6 +326,23 @@ where
         truncateds,
         terminal_observations,
     }
+}
+
+fn validate_output_shape<E>(
+    gym_index: usize,
+    field: &'static str,
+    actual: &[usize],
+    expected: Vec<usize>,
+) -> Result<(), StackedMultiGymError<E>> {
+    if actual != expected {
+        return Err(StackedMultiGymError::InvalidOutputShape {
+            gym_index,
+            field,
+            expected,
+            actual: actual.to_vec(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
