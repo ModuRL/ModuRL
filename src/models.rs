@@ -325,7 +325,7 @@ impl MLP {
     /// Weights default to Kaiming normal with gain sqrt(2). Biases default to uniform bounds based on input width.
     /// Orthogonal weights use zero biases by default. An explicit bias initializer applies to every linear layer.
     #[builder]
-    pub fn builder(
+    pub fn new(
         input_size: usize,
         output_size: usize,
         #[builder(into)] options: TensorCreationOptions,
@@ -410,7 +410,7 @@ impl DuelingMLP {
     /// Weights default to Kaiming normal with gain sqrt(2). Biases default to uniform bounds based on input width.
     /// Orthogonal weights use zero biases by default. An explicit bias initializer applies to every linear layer.
     #[builder]
-    pub fn builder(
+    pub fn new(
         input_size: usize,
         output_size: usize,
         #[builder(into)] options: TensorCreationOptions,
