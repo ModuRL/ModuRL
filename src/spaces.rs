@@ -78,6 +78,7 @@ impl Discrete {
 impl ObservationSpace<1> for Discrete {
     type Kind = Int;
 
+    /// Tests environment values `values` shaped `[batch_size]`.
     fn contains(&self, values: &Tensor<1, Int>) -> bool {
         self.contains(values)
     }
@@ -90,6 +91,7 @@ impl ActionSpace<1> for Discrete {
     type Kind = Int;
     type Error = SpaceError;
 
+    /// Tests scalar environment actions `values` shaped `[batch_size]`.
     fn contains(&self, values: &Tensor<1, Int>) -> bool {
         self.contains(values)
     }
@@ -184,6 +186,7 @@ impl<const R: usize> BoxSpace<R> {
 impl<const R: usize> ObservationSpace<R> for BoxSpace<R> {
     type Kind = Float;
 
+    /// Tests environment observations `values` shaped `[batch_size, ...self.shape()]`.
     fn contains(&self, values: &Tensor<R>) -> bool {
         self.contains(values)
     }
@@ -196,6 +199,7 @@ impl<const R: usize> ActionSpace<R> for BoxSpace<R> {
     type Kind = Float;
     type Error = SpaceError;
 
+    /// Tests environment actions `values` shaped `[batch_size, ...self.shape()]`.
     fn contains(&self, values: &Tensor<R>) -> bool {
         self.contains(values)
     }
