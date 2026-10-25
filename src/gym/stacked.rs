@@ -21,6 +21,29 @@ pub enum StackedMultiGymError<E> {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
+    /// An inner gym changed its number of batch slots after construction.
+    #[error("inner gym {gym_index} changed batch size from {expected} to {actual}")]
+    ChangedBatchSize {
+        gym_index: usize,
+        expected: usize,
+        actual: usize,
+    },
+    /// The supplied action does not have the combined batch size in dimension zero.
+    #[error("invalid action batch: expected {expected} rows, got {actual:?}")]
+    InvalidActionBatch {
+        expected: usize,
+        actual: Option<usize>,
+    },
+    /// An inner gym returned a tensor or vector that violates the [`MultiGym`] contract.
+    #[error(
+        "inner gym {gym_index} returned invalid {field} shape {actual:?}, expected {expected:?}"
+    )]
+    InvalidOutputShape {
+        gym_index: usize,
+        field: &'static str,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
     #[error("inner gym {gym_index} failed: {error}")]
     Inner {
         gym_index: usize,
@@ -41,6 +64,7 @@ where
 {
     gyms: Vec<G>,
     group_offsets: Vec<usize>,
+    observation_shape: Vec<usize>,
     _info: PhantomData<fn() -> I>,
 }
 
@@ -61,14 +85,13 @@ where
             return Err(StackedMultiGymError::Empty);
         };
         let groups = gyms.iter().map(batch_metadata).collect::<Vec<_>>();
-        let group_offsets = batch_offsets(
-            &groups,
-            &first.observation_space().shape(),
-            &first.action_space().shape(),
-        )?;
+        let observation_shape = first.observation_space().shape();
+        let action_shape = first.action_space().shape();
+        let group_offsets = batch_offsets(&groups, &observation_shape, &action_shape)?;
         Ok(Self {
             gyms,
             group_offsets,
+            observation_shape,
             _info: PhantomData,
         })
     }
@@ -84,6 +107,21 @@ where
 
     pub fn num_groups(&self) -> usize {
         self.gyms.len()
+    }
+
+    fn validate_batch_sizes(&self) -> Result<(), StackedMultiGymError<G::Error>> {
+        for (gym_index, gym) in self.gyms.iter().enumerate() {
+            let expected = super::group_size(&self.group_offsets, gym_index);
+            let actual = gym.num_envs();
+            if actual != expected {
+                return Err(StackedMultiGymError::ChangedBatchSize {
+                    gym_index,
+                    expected,
+                    actual,
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -110,7 +148,7 @@ where
 
     /// Splits rank-`A` actions `[total_size, ...action_shape]` across groups without removing the batch axis.
     /// Concatenates rank-`O` observations `[group_size, ...observation_shape]` and rewards `[group_size]` in group order.
-    /// Input dimensions, dtype, and device must satisfy the inner gyms' contracts.
+    /// Validates the action batch, each output batch/item shape, and metadata lengths before concatenating. Dtype and device follow the inner gyms' contracts.
     fn step(
         &mut self,
         action: Tensor<A, <G::ActionSpace as ActionSpace<A>>::Kind>,
@@ -118,6 +156,12 @@ where
         MultiGymStepInfo<I, O, <G::ObservationSpace as ObservationSpace<O>>::Kind, U>,
         Self::Error,
     > {
+        self.validate_batch_sizes()?;
+        let expected = self.num_envs();
+        let actual = action.dims().first().copied();
+        if actual != Some(expected) {
+            return Err(StackedMultiGymError::InvalidActionBatch { expected, actual });
+        }
         let mut steps = Vec::with_capacity(self.gyms.len());
         for (gym_index, gym) in self.gyms.iter_mut().enumerate() {
             let range = self.group_offsets[gym_index]..self.group_offsets[gym_index + 1];
@@ -127,7 +171,7 @@ where
                     .map_err(|error| StackedMultiGymError::Inner { gym_index, error })?,
             );
         }
-        Ok(combine_steps(steps))
+        combine_steps(steps, &self.group_offsets, &self.observation_shape)
     }
 
     fn observation_space(&self) -> Self::ObservationSpace {
@@ -142,17 +186,25 @@ where
         self.group_offsets[self.group_offsets.len() - 1]
     }
 
-    /// Concatenates reset observations `[group_size, ...observation_shape]` to `[total_size, ...observation_shape]` of rank `O`.
-    /// All groups must share observation kind, dtype, device, and item dimensions. Gradient paths are preserved.
+    /// Validates each reset observation batch/item shape before concatenating to `[total_size, ...observation_shape]`.
+    /// Observation kind, dtype, and device follow the inner gyms. Gradient paths are preserved.
     fn reset(
         &mut self,
     ) -> Result<Tensor<O, <G::ObservationSpace as ObservationSpace<O>>::Kind>, Self::Error> {
+        self.validate_batch_sizes()?;
         let mut observations = Vec::with_capacity(self.gyms.len());
         for (gym_index, gym) in self.gyms.iter_mut().enumerate() {
-            observations.push(
-                gym.reset()
-                    .map_err(|error| StackedMultiGymError::Inner { gym_index, error })?,
-            );
+            let observation = gym
+                .reset()
+                .map_err(|error| StackedMultiGymError::Inner { gym_index, error })?;
+            super::validate_group_observations(
+                gym_index,
+                "reset observations",
+                &observation.dims(),
+                super::group_size(&self.group_offsets, gym_index),
+                &self.observation_shape,
+            )?;
+            observations.push(observation);
         }
         Ok(Tensor::cat(observations, 0))
     }
@@ -234,6 +286,82 @@ mod tests {
             StackedMultiGym::new(vec![GroupEnv::new(0, 1), wrong_action]),
             Err(StackedMultiGymError::IncompatibleActionShape { gym_index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn stacked_multi_gym_rejects_invalid_action_batches_before_stepping() {
+        let mut env = StackedMultiGym::new(vec![GroupEnv::new(0, 2)]).unwrap();
+        assert!(matches!(
+            env.step(Tensor::zeros([3, 1], &Device::flex())),
+            Err(StackedMultiGymError::InvalidActionBatch {
+                expected: 2,
+                actual: Some(3),
+            })
+        ));
+    }
+
+    #[test]
+    fn stacked_multi_gym_validates_step_shapes_and_metadata() {
+        let mut wrong_observations = GroupEnv::new(0, 2);
+        wrong_observations.malformed_output = Some(MalformedGroupOutput::StepObservations);
+        let mut env = StackedMultiGym::new(vec![wrong_observations]).unwrap();
+        assert!(matches!(
+            env.step(Tensor::zeros([2, 1], &Device::flex())),
+            Err(StackedMultiGymError::InvalidOutputShape {
+                gym_index: 0,
+                field: "observations",
+                expected,
+                actual,
+            }) if expected == vec![2, 3] && actual == vec![1, 3]
+        ));
+
+        let mut wrong_infos = GroupEnv::new(0, 2);
+        wrong_infos.malformed_output = Some(MalformedGroupOutput::StepInfos);
+        let mut env = StackedMultiGym::new(vec![wrong_infos]).unwrap();
+        assert!(matches!(
+            env.step(Tensor::zeros([2, 1], &Device::flex())),
+            Err(StackedMultiGymError::InvalidOutputShape {
+                gym_index: 0,
+                field: "infos",
+                expected,
+                actual,
+            }) if expected == vec![2] && actual == vec![1]
+        ));
+    }
+
+    #[test]
+    fn stacked_multi_gym_validates_reset_shapes() {
+        let mut malformed = GroupEnv::new(0, 2);
+        malformed.malformed_output = Some(MalformedGroupOutput::ResetObservations);
+        let mut env = StackedMultiGym::new(vec![malformed]).unwrap();
+        assert!(matches!(
+            env.reset(),
+            Err(StackedMultiGymError::InvalidOutputShape {
+                gym_index: 0,
+                field: "reset observations",
+                expected,
+                actual,
+            }) if expected == vec![2, 3] && actual == vec![1, 3]
+        ));
+    }
+
+    #[test]
+    fn stacked_multi_gym_detects_changed_inner_batch_size() {
+        let mut env = StackedMultiGym::new(vec![GroupEnv::new(0, 2)]).unwrap();
+        env.gyms[0].count = 1;
+        for result in [
+            env.step(Tensor::zeros([2, 1], &Device::flex())).map(|_| ()),
+            env.reset().map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(StackedMultiGymError::ChangedBatchSize {
+                    gym_index: 0,
+                    expected: 2,
+                    actual: 1,
+                })
+            ));
+        }
     }
 
     #[test]

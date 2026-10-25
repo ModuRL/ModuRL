@@ -99,12 +99,20 @@ pub(super) struct SlotInfo {
     pub(super) action: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MalformedGroupOutput {
+    StepObservations,
+    StepInfos,
+    ResetObservations,
+}
+
 pub(super) struct GroupEnv {
     pub(super) group: usize,
     pub(super) count: usize,
     pub(super) observation_width: usize,
     pub(super) action_width: usize,
     pub(super) fail_next: bool,
+    pub(super) malformed_output: Option<MalformedGroupOutput>,
     #[cfg(feature = "multithreading")]
     pub(super) gate: Option<std::sync::Arc<(std::sync::Mutex<GateState>, std::sync::Condvar)>>,
 }
@@ -117,6 +125,7 @@ impl GroupEnv {
             observation_width: 3,
             action_width: 1,
             fail_next: false,
+            malformed_output: None,
             #[cfg(feature = "multithreading")]
             gate: None,
         }
@@ -145,12 +154,19 @@ impl MultiGym<SlotInfo, 2, 2> for GroupEnv {
             }
         }
         let actions = action.into_data().try_to_vec::<f32>().unwrap();
+        let observation_count =
+            if self.malformed_output == Some(MalformedGroupOutput::StepObservations) {
+                self.count.saturating_sub(1)
+            } else {
+                self.count
+            };
         let observations: Vec<_> = actions
             .iter()
+            .take(observation_count)
             .enumerate()
             .flat_map(|(slot, &action)| [self.group as f32, slot as f32, action])
             .collect();
-        let infos = actions
+        let mut infos: Vec<_> = actions
             .iter()
             .enumerate()
             .map(|(slot, &action)| SlotInfo {
@@ -159,6 +175,9 @@ impl MultiGym<SlotInfo, 2, 2> for GroupEnv {
                 action,
             })
             .collect();
+        if self.malformed_output == Some(MalformedGroupOutput::StepInfos) {
+            infos.truncate(infos.len().saturating_sub(1));
+        }
         let terminal_observations = actions
             .iter()
             .enumerate()
@@ -170,7 +189,7 @@ impl MultiGym<SlotInfo, 2, 2> for GroupEnv {
             .collect();
         Ok(MultiGymStepInfo {
             observations: Tensor::from_data(
-                TensorData::new(observations, [self.count, 3]),
+                TensorData::new(observations, [observation_count, 3]),
                 &Device::flex(),
             ),
             rewards: Tensor::from_data(TensorData::new(actions, [self.count]), &Device::flex()),
@@ -195,11 +214,16 @@ impl MultiGym<SlotInfo, 2, 2> for GroupEnv {
 
     /// Returns F32 reset observations `[count, 3]` in slot order.
     fn reset(&mut self) -> Result<Tensor<2>, Self::Error> {
-        let values = (0..self.count)
+        let count = if self.malformed_output == Some(MalformedGroupOutput::ResetObservations) {
+            self.count.saturating_sub(1)
+        } else {
+            self.count
+        };
+        let values = (0..count)
             .flat_map(|slot| [self.group as f32, slot as f32, 0.0])
             .collect();
         Ok(Tensor::from_data(
-            TensorData::new(values, [self.count, 3]),
+            TensorData::new(values, [count, 3]),
             &Device::flex(),
         ))
     }
