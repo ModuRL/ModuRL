@@ -825,6 +825,12 @@ mod tests {
             AlignedObservationReplay::<2>::new([usize::MAX - 1, 1], 2, &device),
             Err(ReplayStorageError::CapacityOverflow { .. })
         ));
+        let before = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
         assert!(matches!(
             replay.insert(
                 0,
@@ -837,6 +843,72 @@ mod tests {
                 ..
             })
         ));
+        let after = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn aligned_observations_reject_dtype_mismatches_without_mutation() {
+        let device = Device::flex();
+        let options = (&device, DType::F32);
+        let mut replay = AlignedObservationReplay::<2>::new([4, 2], 1, options).unwrap();
+        let f64_states = Tensor::zeros([1, 2], (&device, DType::F64));
+        let before = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert!(matches!(
+            replay.insert(0, f64_states.clone(), f64_states.clone(), &[false]),
+            Err(ReplayStorageError::DTypeMismatch {
+                field: "observations",
+                expected: DType::F32,
+                actual: DType::F64,
+            })
+        ));
+        let after = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert_eq!(before, after);
+
+        replay
+            .insert(
+                0,
+                Tensor::ones([1, 2], options),
+                Tensor::ones([1, 2], options),
+                &[false],
+            )
+            .unwrap();
+        let before = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert!(matches!(
+            replay.insert(1, f64_states.clone(), f64_states, &[false]),
+            Err(ReplayStorageError::DTypeMismatch {
+                field: "observations",
+                expected: DType::F32,
+                actual: DType::F64,
+            })
+        ));
+        let after = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert_eq!(before, after);
     }
 
     #[test]

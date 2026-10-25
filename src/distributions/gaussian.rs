@@ -418,6 +418,15 @@ mod tests {
             flat.sample(Tensor::zeros([1, 3], &device)),
             Err(GaussianDistributionError::InvalidOutputWidth { output_width: 3 })
         ));
+        assert!(matches!(
+            flat.dist_eval(
+                Tensor::zeros([2, 4], &device),
+                Tensor::zeros([1, 2], &device)
+            ),
+            Err(GaussianDistributionError::TensorError(
+                DistributionTensorError::ShapeMismatch { .. }
+            ))
+        ));
         assert_eq!(
             flat.default_target_entropy(&Tensor::zeros([0, 4], &device))
                 .unwrap(),
