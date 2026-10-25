@@ -33,9 +33,12 @@ pub trait ActionSpace<const A: usize> {
 pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A> {
     /// Returns the shape of one latent policy action, excluding the batch axis.
     fn policy_shape(&self) -> Vec<usize>;
-    /// Converts latent policy outputs into batched environment actions.
-    /// Continuous actions are clamped; callers retain latent actions separately
-    /// for probability calculations.
+    /// Converts latent policy output shaped `[batch_size, ...self.policy_shape()]`
+    /// into batched environment actions. Concrete spaces document the output
+    /// shape.
+    ///
+    /// A continuous [`BoxSpace`] clamps each component to its bounds. Callers
+    /// keep the original latent action separately for probability calculations.
     fn tensor_from_neurons(&self, neurons: Tensor<L>)
     -> Result<Tensor<A, Self::Kind>, Self::Error>;
 }
@@ -58,7 +61,7 @@ pub struct Discrete {
 }
 
 impl Discrete {
-    /// Returns true when every index is in `0..possible_values`.
+    /// Tests scalar environment actions `values` shaped `[batch_size]`.
     pub fn contains(&self, values: &Tensor<1, Int>) -> bool {
         values
             .clone()
@@ -77,6 +80,7 @@ impl Discrete {
 impl ObservationSpace<1> for Discrete {
     type Kind = Int;
 
+    /// Tests environment values `values` shaped `[batch_size]`.
     fn contains(&self, values: &Tensor<1, Int>) -> bool {
         self.contains(values)
     }
@@ -89,6 +93,7 @@ impl ActionSpace<1> for Discrete {
     type Kind = Int;
     type Error = SpaceError;
 
+    /// Tests scalar environment actions `values` shaped `[batch_size]`.
     fn contains(&self, values: &Tensor<1, Int>) -> bool {
         self.contains(values)
     }
@@ -182,6 +187,7 @@ impl<const R: usize> BoxSpace<R> {
 impl<const R: usize> ObservationSpace<R> for BoxSpace<R> {
     type Kind = Float;
 
+    /// Tests environment observations `values` shaped `[batch_size, ...self.shape()]`.
     fn contains(&self, values: &Tensor<R>) -> bool {
         self.contains(values)
     }
@@ -194,6 +200,7 @@ impl<const R: usize> ActionSpace<R> for BoxSpace<R> {
     type Kind = Float;
     type Error = SpaceError;
 
+    /// Tests environment actions `values` shaped `[batch_size, ...self.shape()]`.
     fn contains(&self, values: &Tensor<R>) -> bool {
         self.contains(values)
     }
