@@ -22,6 +22,18 @@ pub enum ReplayStorageError {
         expected: usize,
         actual: usize,
     },
+    #[error("replay field {field} has shape {actual:?}, expected {expected:?}")]
+    ShapeMismatch {
+        field: &'static str,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    #[error("replay field {field} has dtype {actual:?}, expected {expected:?}")]
+    DTypeMismatch {
+        field: &'static str,
+        expected: DType,
+        actual: DType,
+    },
     #[error("cannot insert {inserted} items into replay capacity {capacity}")]
     InsertionExceedsCapacity { capacity: usize, inserted: usize },
     #[error("replay environment count {actual} does not match expected count {expected}")]
@@ -206,8 +218,8 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         Ok(())
     }
 
-    /// Stores `states` and `next_states` shaped `[environment_count, ...item_shape]` of rank `R`.
-    /// Both tensors must match storage kind, dtype, device, and item dimensions.
+    /// Validates and stores `states` and `next_states` shaped `[environment_count, ...item_shape]` of rank `R`.
+    /// Both tensors must match the storage dtype and item dimensions; they are transferred to the storage device.
     /// Start must be a multiple of `environment_count` below capacity; `truncateds` has one flag per environment.
     /// Removes autodiff associations. Later state batches overwrite shared next-state rows.
     pub(crate) fn insert(
@@ -218,22 +230,50 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         truncateds: &[bool],
     ) -> Result<usize, ReplayStorageError> {
         let count = states.dims()[0];
-        self.initialize_environment_count(count)?;
+        let mut expected_shape = self.shape;
+        expected_shape[0] = count;
+        validate_replay_shape("observations", &states, expected_shape)?;
+        validate_replay_shape("next observations", &next_states, expected_shape)?;
+
+        let settings = self.options.device.settings();
+        let expected_dtype = match K::KIND {
+            Kind::Float => self
+                .options
+                .dtype
+                .unwrap_or_else(|| settings.float_dtype.into()),
+            Kind::Int => self
+                .options
+                .dtype
+                .unwrap_or_else(|| settings.int_dtype.into()),
+            Kind::Bool => settings.bool_dtype.into(),
+        };
         for (field, actual) in [
-            ("next states", next_states.dims()[0]),
-            ("truncateds", truncateds.len()),
+            ("observations", states.dtype()),
+            ("next observations", next_states.dtype()),
         ] {
-            if actual != count {
-                return Err(ReplayStorageError::BatchLengthMismatch {
+            if actual != expected_dtype {
+                return Err(ReplayStorageError::DTypeMismatch {
                     field,
-                    expected: count,
+                    expected: expected_dtype,
                     actual,
                 });
             }
         }
+
+        if truncateds.len() != count {
+            return Err(ReplayStorageError::BatchLengthMismatch {
+                field: "truncateds",
+                expected: count,
+                actual: truncateds.len(),
+            });
+        }
+
+        let states = states.to_device(&self.options.device).without_autodiff();
+        let next_states = next_states
+            .to_device(&self.options.device)
+            .without_autodiff();
+        self.initialize_environment_count(count)?;
         let capacity = self.shape[0];
-        let states = states.without_autodiff();
-        let next_states = next_states.without_autodiff();
         let offsets: Vec<_> = truncateds
             .iter()
             .enumerate()
@@ -279,7 +319,8 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
     }
 
     pub(crate) fn sampleable_len(&self, len: usize) -> usize {
-        if len == self.shape[0] && self.frontier_is_invalid {
+        let capacity = self.shape[0];
+        if len == capacity && self.frontier_is_invalid {
             len - self
                 .environment_count
                 .expect("a populated aligned replay must have an environment count")
@@ -289,13 +330,14 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
     }
 
     pub(crate) fn sample_index(&self, index: usize, len: usize) -> usize {
-        if len == self.shape[0] && self.frontier_is_invalid {
+        let capacity = self.shape[0];
+        if len == capacity && self.frontier_is_invalid {
             (self.frontier
                 + self
                     .environment_count
                     .expect("a populated aligned replay must have an environment count")
                 + index)
-                % self.shape[0]
+                % capacity
         } else {
             index
         }
@@ -345,6 +387,22 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         }
         Ok((states, next_states))
     }
+}
+
+/// Validates a replay tensor's shape against the expected shape.
+fn validate_replay_shape<const R: usize, K: Autodiff>(
+    field: &'static str,
+    tensor: &Tensor<R, K>,
+    expected: [usize; R],
+) -> Result<(), ReplayStorageError> {
+    if tensor.dims() != expected {
+        return Err(ReplayStorageError::ShapeMismatch {
+            field,
+            expected: expected.to_vec(),
+            actual: tensor.dims().to_vec(),
+        });
+    }
+    Ok(())
 }
 
 /// Converts host indices `[sample_count]` to an `I64` `Int` tensor `[sample_count]` on `device`.
@@ -727,11 +785,111 @@ mod tests {
                 Tensor::zeros([1, 1], &device),
                 &[false; 2]
             ),
-            Err(ReplayStorageError::BatchLengthMismatch {
-                field: "next states",
+            Err(ReplayStorageError::ShapeMismatch {
+                field: "next observations",
+                expected,
+                actual,
+            }) if expected == vec![2, 1] && actual == vec![1, 1]
+        ));
+    }
+
+    #[test]
+    fn aligned_observations_reject_shape_mismatches_without_mutation() {
+        let device = Device::flex();
+        let options = (&device, DType::F32);
+        let mut replay = AlignedObservationReplay::<2>::new([4, 2], options);
+        let states = Tensor::ones([1, 2], options);
+        let invalid_next = Tensor::ones([1, 3], options);
+        assert!(matches!(
+            replay.insert(0, states.clone(), invalid_next, &[false]),
+            Err(ReplayStorageError::ShapeMismatch {
+                field: "next observations",
+                expected,
+                actual,
+            }) if expected == vec![1, 2] && actual == vec![1, 3]
+        ));
+        assert!(replay.observations.is_none());
+        assert!(replay.environment_count.is_none());
+
+        replay
+            .insert(0, states.clone(), Tensor::ones([1, 2], options), &[false])
+            .unwrap();
+        let before = replay
+            .observations
+            .as_ref()
+            .unwrap()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert!(matches!(
+            replay.insert(1, states, Tensor::ones([1, 3], options), &[false]),
+            Err(ReplayStorageError::ShapeMismatch {
+                field: "next observations",
                 ..
             })
         ));
+        let after = replay
+            .observations
+            .as_ref()
+            .unwrap()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn aligned_observations_reject_dtype_mismatches_without_mutation() {
+        let device = Device::flex();
+        let options = (&device, DType::F32);
+        let mut replay = AlignedObservationReplay::<2>::new([4, 2], options);
+        let f64_states = Tensor::zeros([1, 2], (&device, DType::F64));
+        assert!(matches!(
+            replay.insert(0, f64_states.clone(), f64_states.clone(), &[false]),
+            Err(ReplayStorageError::DTypeMismatch {
+                field: "observations",
+                expected: DType::F32,
+                actual: DType::F64,
+            })
+        ));
+        assert!(replay.observations.is_none());
+        assert!(replay.environment_count.is_none());
+
+        replay
+            .insert(
+                0,
+                Tensor::ones([1, 2], options),
+                Tensor::ones([1, 2], options),
+                &[false],
+            )
+            .unwrap();
+        let before = replay
+            .observations
+            .as_ref()
+            .unwrap()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert!(matches!(
+            replay.insert(1, f64_states.clone(), f64_states, &[false]),
+            Err(ReplayStorageError::DTypeMismatch {
+                field: "observations",
+                expected: DType::F32,
+                actual: DType::F64,
+            })
+        ));
+        let after = replay
+            .observations
+            .as_ref()
+            .unwrap()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert_eq!(before, after);
     }
 
     #[test]
