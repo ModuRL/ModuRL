@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 use burn::{
     module::Module,
     nn::Tanh,
@@ -7,6 +6,7 @@ use burn::{
 };
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
+use std::sync::Mutex;
 
 #[derive(Module, Debug)]
 struct Float64Model {
