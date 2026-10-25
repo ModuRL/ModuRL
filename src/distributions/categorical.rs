@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_categories_return_errors_and_single_category_entropy_is_zero() {
+    fn invalid_categories_and_latent_shapes_return_errors() {
         let device = Device::flex();
         assert!(matches!(
             CategoricalDistribution.sample(Tensor::zeros([2, 0], &device)),
