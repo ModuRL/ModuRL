@@ -297,7 +297,7 @@ where
     Ok(combine_step_outputs::<I, O, K, U>(steps))
 }
 
-/// Concatenates observations and rewards from validated groups in order.
+/// Concatenates observations `[group_size, ...observation_shape]` and rewards `[group_size, 1]` from validated groups.
 fn combine_step_outputs<I, const O: usize, K: Basic, const U: usize>(
     steps: Vec<MultiGymStepInfo<I, Tensor<U, K>>>,
 ) -> MultiGymStepInfo<I, Tensor<U, K>>
