@@ -404,7 +404,6 @@ fn validate_replay_shape<const R: usize, K: Autodiff>(
     }
     Ok(())
 }
-
 /// Converts host indices `[sample_count]` to an `I64` `Int` tensor `[sample_count]` on `device`.
 /// Axis order is unchanged; indices must fit the signed 64-bit range.
 pub(crate) fn replay_index_tensor(
