@@ -313,11 +313,11 @@ fn forward_hidden_layers(
     layers: &[Linear],
     activation: &Activation,
     mut input: Tensor<2>,
-) -> Tensor<2> {
+) -> Result<Tensor<2>, ModelError> {
     for layer in layers {
-        input = activation.forward(layer.forward(input));
+        input = Forward::forward(activation, layer.forward(input))?;
     }
-    input
+    Ok(input)
 }
 
 /// A multilayer perceptron with native Burn parameters and configurable activations.
@@ -396,10 +396,10 @@ impl Forward<2, 2> for MLP {
             &input,
             self.hidden_layers.first().unwrap_or(&self.output_layer),
         )?;
-        let features = forward_hidden_layers(&self.hidden_layers, &self.activation, input);
+        let features = forward_hidden_layers(&self.hidden_layers, &self.activation, input)?;
         let output = self.output_layer.forward(features);
         Ok(match &self.output_activation {
-            Some(activation) => activation.forward(output),
+            Some(activation) => Forward::forward(activation, output)?,
             None => output,
         })
     }
@@ -516,14 +516,14 @@ impl Forward<2, 2> for DuelingMLP {
             .or_else(|| self.value_hidden_layers.first())
             .unwrap_or(&self.value_output_layer);
         validate_input(&input, first)?;
-        let features = forward_hidden_layers(&self.shared_layers, &self.activation, input);
+        let features = forward_hidden_layers(&self.shared_layers, &self.activation, input)?;
         let value_features = forward_hidden_layers(
             &self.value_hidden_layers,
             &self.activation,
             features.clone(),
-        );
+        )?;
         let advantage_features =
-            forward_hidden_layers(&self.advantage_hidden_layers, &self.activation, features);
+            forward_hidden_layers(&self.advantage_hidden_layers, &self.activation, features)?;
         Ok(Self::combine_streams(
             self.value_output_layer.forward(value_features),
             self.advantage_output_layer.forward(advantage_features),
