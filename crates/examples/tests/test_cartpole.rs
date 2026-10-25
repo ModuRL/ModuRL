@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 use burn::{
     nn::{Initializer, Tanh},
     optim::AdamWConfig,
@@ -6,6 +5,7 @@ use burn::{
 };
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
+use std::sync::Mutex;
 
 static RNG_LOCK: Mutex<()> = Mutex::new(());
 
