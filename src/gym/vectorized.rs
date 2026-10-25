@@ -194,7 +194,7 @@ mod tests {
     fn vectorized_gym_rejects_short_action_batches_before_stepping() {
         let mut env =
             VectorizedGymWrapper::new(vec![CounterEnv::new(0), CounterEnv::new(1)]).unwrap();
-        let actions = Tensor::<1, Int>::zeros([1], &Device::flex());
+        let actions = Tensor::<2, Int>::zeros([1, 1], &Device::flex());
 
         assert!(matches!(
             env.step(actions),

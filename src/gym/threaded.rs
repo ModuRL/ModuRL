@@ -602,13 +602,13 @@ mod tests {
         .unwrap();
         env.reset().unwrap();
         assert!(matches!(
-            env.step(Tensor::<1, Int>::zeros([2], &Device::flex())),
+            env.step(Tensor::<2, Int>::zeros([2, 1], &Device::flex())),
             Err(VectorizedGymError::InvalidActionBatch {
                 expected: 3,
                 actual: Some(2),
             })
         ));
-        let valid = env.step(Tensor::<1, Int>::zeros([3], &Device::flex()));
+        let valid = env.step(Tensor::<2, Int>::zeros([3, 1], &Device::flex()));
         assert!(valid.is_ok());
     }
 
