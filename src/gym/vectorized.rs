@@ -194,6 +194,22 @@ mod tests {
     }
 
     #[test]
+    fn vectorized_gym_rejects_short_action_batches_before_stepping() {
+        let mut env =
+            VectorizedGymWrapper::new(vec![CounterEnv::new(0), CounterEnv::new(1)]).unwrap();
+        let actions = Tensor::<2, Int>::zeros([1, 1], &Device::flex());
+
+        assert!(matches!(
+            env.step(actions),
+            Err(VectorizedGymError::InvalidActionBatch {
+                expected: 2,
+                actual: 1,
+            })
+        ));
+        assert!(env.envs().iter().all(|env| env.step == 0));
+    }
+
+    #[test]
     fn vectorization_restores_unbatched_observations_and_preserves_metadata() {
         let mut env =
             VectorizedGymWrapper::new(vec![CounterEnv::new(0), CounterEnv::new(1)]).unwrap();
