@@ -53,13 +53,11 @@ pub enum QLearningConfigurationError {
     ObservationRank { expected: usize, actual: usize },
 }
 
-/// Q-learning replay alignment failures or a change to the established observation dtype.
+/// Q-learning replay storage failures.
 #[derive(Debug, thiserror::Error)]
 pub enum QLearningReplayError {
     #[error("replay storage failed: {0}")]
     Storage(#[from] ReplayStorageError),
-    #[error("replay observation dtype is {actual:?}, expected {expected:?}")]
-    ObservationDType { expected: DType, actual: DType },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -234,8 +232,6 @@ struct QLearningReplayStorage<const R: usize, K: Autodiff> {
     next_dones: TensorReplayColumn<2, Bool>,
     observation_storage_shape: [usize; R],
     device: Device,
-    observation_dtype: Option<DType>,
-    environment_count: Option<usize>,
 }
 
 impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
@@ -258,37 +254,7 @@ impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
             next_dones: TensorReplayColumn::new([observation_storage_shape[0], 1], &device),
             observation_storage_shape,
             device,
-            observation_dtype: None,
-            environment_count: None,
         }
-    }
-
-    fn initialize_environment_count(&mut self, count: usize) -> Result<(), ReplayStorageError> {
-        if let Some(expected) = self.environment_count {
-            return if expected == count {
-                Ok(())
-            } else {
-                Err(ReplayStorageError::EnvironmentCountMismatch {
-                    expected,
-                    actual: count,
-                })
-            };
-        }
-        let capacity = self.observation_storage_shape[0];
-        if count == 0 || capacity <= count || !capacity.is_multiple_of(count) {
-            return Err(ReplayStorageError::InvalidReplayAlignment {
-                capacity,
-                environment_count: count,
-            });
-        }
-        capacity
-            .checked_add(count)
-            .ok_or(ReplayStorageError::CapacityOverflow {
-                capacity,
-                additional: count,
-            })?;
-        self.environment_count = Some(count);
-        Ok(())
     }
 }
 
@@ -319,31 +285,24 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 .into());
             }
         }
-        self.initialize_environment_count(count)?;
         let dtype = transitions.observations.dtype();
-        let expected = self.observation_dtype.unwrap_or(dtype);
-        for actual in [dtype, transitions.next_observations.dtype()] {
-            if actual != expected {
-                return Err(QLearningReplayError::ObservationDType { expected, actual });
-            }
-        }
-        if self.observations.is_none() {
-            self.observations = Some(AlignedObservationReplay::new(
-                self.observation_storage_shape,
-                (&self.device, dtype),
-            ));
-            self.observation_dtype = Some(dtype);
-        }
-        let observations = self
-            .observations
-            .as_mut()
-            .ok_or(ReplayStorageError::EnvironmentCountNotSet)?;
+        let mut new_observations = self.observations.is_none().then(|| {
+            AlignedObservationReplay::new(self.observation_storage_shape, (&self.device, dtype))
+        });
+        let observations = match (&mut self.observations, &mut new_observations) {
+            (Some(observations), _) => observations,
+            (None, Some(observations)) => observations,
+            (None, None) => return Err(ReplayStorageError::EnvironmentCountNotSet.into()),
+        };
         observations.insert(
             start,
-            transitions.observations.to_device(&self.device),
-            transitions.next_observations.to_device(&self.device),
+            transitions.observations,
+            transitions.next_observations,
             &transitions.truncateds,
         )?;
+        if let Some(observations) = new_observations {
+            self.observations = Some(observations);
+        }
         self.actions.write(
             start,
             transitions.actions.to_device(&self.device).cast(DType::U32),
@@ -730,9 +689,6 @@ where
     {
         let mut elapsed_timesteps = 0;
         let environment_count = env.num_envs();
-        self.experience_replay
-            .storage_mut()
-            .initialize_environment_count(environment_count)?;
         let mut observations = env.reset().map_err(QAgentError::GymError)?;
         let mut episodes = QEpisodeTracker::new(environment_count);
         while elapsed_timesteps < num_timesteps {
@@ -1182,7 +1138,6 @@ mod tests {
     fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
         let device = Device::flex();
         let mut storage = QLearningReplayStorage::<2, Float>::new([4, 1], device.clone());
-        storage.initialize_environment_count(2).unwrap();
         storage
             .insert(0, replay_insert(&[1.0, 2.0], &device))
             .unwrap();
@@ -1359,10 +1314,13 @@ mod tests {
         changed.next_observations = changed.next_observations.cast(DType::F32);
         assert!(matches!(
             storage.insert(0, changed),
-            Err(QLearningReplayError::ObservationDType {
-                expected: DType::F64,
-                actual: DType::F32
-            })
+            Err(QLearningReplayError::Storage(
+                ReplayStorageError::DTypeMismatch {
+                    field: "observations",
+                    expected: DType::F64,
+                    actual: DType::F32
+                }
+            ))
         ));
         let retained = storage.gather(&[0, 1]).unwrap();
         assert_eq!(retained.observations.dtype(), DType::F64);
