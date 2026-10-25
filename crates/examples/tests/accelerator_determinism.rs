@@ -1,4 +1,3 @@
-#![cfg(any())]
 #![cfg(any(feature = "cuda", feature = "metal"))]
 
 use candle_core::{DType, Device, Tensor};
