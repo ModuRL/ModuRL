@@ -805,6 +805,37 @@ mod tests {
     }
 
     #[test]
+    fn environment_count_validation_does_not_mutate_storage() {
+        let device = Device::flex();
+        let replay =
+            AlignedObservationReplay::<2>::new([8, 1], 2, &device).unwrap();
+        let before = replay
+            .observations()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+
+        replay.validate_environment_count(2).unwrap();
+        assert!(matches!(
+            replay.validate_environment_count(4),
+            Err(ReplayStorageError::EnvironmentCountMismatch {
+                expected: 2,
+                actual: 4
+            })
+        ));
+        assert_eq!(
+            replay
+                .observations()
+                .clone()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
     fn aligned_storage_reports_configuration_and_batch_errors() {
         let device = Device::flex();
         for capacity in [0, 2, 3] {

@@ -15,7 +15,7 @@ use crate::{
     agents::ReplayStorageConfig,
     buffers::experience_replay::{
         AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
-        ReplayStorageError, TensorReplayColumn, replay_index_tensor,
+        ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_replay_alignment,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
@@ -254,6 +254,18 @@ impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
             next_dones: TensorReplayColumn::new([observation_storage_shape[0], 1], &device),
             observation_storage_shape,
             device,
+        }
+    }
+
+    fn validate_environment_count(
+        &self,
+        environment_count: usize,
+    ) -> Result<(), ReplayStorageError> {
+        if let Some(observations) = &self.observations {
+            observations.validate_environment_count(environment_count)
+        } else {
+            validate_replay_alignment(self.observation_storage_shape[0], environment_count)
+                .map(|_| ())
         }
     }
 }
@@ -697,6 +709,9 @@ where
     {
         let mut elapsed_timesteps = 0;
         let environment_count = env.num_envs();
+        self.experience_replay
+            .storage_mut()
+            .validate_environment_count(environment_count)?;
         let mut observations = env.reset().map_err(QAgentError::GymError)?;
         let mut episodes = QEpisodeTracker::new(environment_count);
         while elapsed_timesteps < num_timesteps {
