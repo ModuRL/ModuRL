@@ -8,26 +8,29 @@ No ROMs are included or downloaded. You must supply a filesystem path to a ROM y
 
 ```rust,no_run
 use std::path::PathBuf;
-use modurl_ale::{AtariGym, AtariObsType};
+use modurl_ale::{AtariGym, Ram};
 
-let mut env = AtariGym::builder()
+let mut env = AtariGym::<Ram>::builder()
     .rom_path(PathBuf::from("/path/to/your/game.bin"))
-    .obs_type(AtariObsType::RAM)
     .repeat_action_probability(0.0)
     .build()?;
 env.set_frame_skip(4);
 # Ok::<(), modurl_ale::AtariGymError>(())
 ```
 
-RAM, RGB, and grayscale observations use ALE's standard `u8` representation in `0..=255`, avoiding an unnecessary expansion before preprocessing. ALE environments and their observations always remain on the CPU; convert or normalize observations and transfer processed batches to an accelerator at the policy boundary. The environment exposes ALE's ROM-specific minimal action set as a ModuRL `Discrete` space and max-pools the final two frames when frame skipping is enabled. RAM, RGB, and grayscale observations are supported, along with sticky-action probability, seeding, lives, reset, and optional `minifb` rendering.
+`AtariGym<Ram>`, `AtariGym<RgbScreen>`, and `AtariGym<GrayscaleScreen>` select RAM, RGB, and grayscale layouts.
+Their item shapes are `[ram_size]`, `[height, width, 3]`, and `[height, width]`.
+Batches add one leading axis. Actions use Int tensors shaped `[1]`.
+
+Observations use ALE's standard `u8` representation in `0..=255`, avoiding an unnecessary expansion before preprocessing. These observations use the Int tensor kind and U8 dtype. ALE environments and their observations always remain on CPU Flex; convert or normalize observations and transfer processed batches to an accelerator at the policy boundary. The environment exposes ALE's ROM-specific minimal action set as a ModuRL `Discrete` space and max-pools the final two frames when frame skipping is enabled. RAM, RGB, and grayscale observations are supported, along with sticky-action probability, seeding, lives, reset, and optional `minifb` rendering.
 
 Enable display rendering with `features = ["rendering"]`.
 
 ## PPO Atari example
 
-The workspace includes a readable PPO Atari example matching the Atari
-recreation from *The 37 Implementation Details of Proximal Policy
-Optimization*. Pass it an Atari ROM you are legally entitled to use:
+The workspace includes a PPO Atari executable based on the Atari recreation from
+*The 37 Implementation Details of Proximal Policy Optimization*.
+Pass it a locally supplied ROM:
 
 ```console
 cargo run --release -p examples --example ppo_atari --features atari-environment -- path/to/game.bin

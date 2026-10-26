@@ -1,8 +1,8 @@
-use candle_core::{Device, Tensor};
+use burn::tensor::{Device, Tensor};
 use modurl_logger::{Aggregation, AggregationConfig, Error, Logger, TerminalLogger};
 
-fn scalar(value: f32) -> Tensor {
-    Tensor::new(value, &Device::Cpu).unwrap()
+fn scalar(value: f32) -> Tensor<1> {
+    Tensor::from_data([value], &Device::flex())
 }
 
 #[test]
@@ -66,9 +66,9 @@ fn applies_name_based_reduction_overrides() {
 }
 
 #[test]
-fn converts_numeric_scalar_tensors_to_f32() {
+fn converts_f64_scalar_tensors_to_f32() {
     let mut logger = TerminalLogger::default();
-    let value = Tensor::new(7_i64, &Device::Cpu).unwrap();
+    let value = Tensor::from_data([7.0f64], &Device::flex());
 
     logger.log(4, &[("integer", &value)]).unwrap();
     logger.finish().unwrap();
@@ -79,7 +79,7 @@ fn converts_numeric_scalar_tensors_to_f32() {
 #[test]
 fn rejects_non_scalar_tensors_without_advancing_the_timestep() {
     let mut logger = TerminalLogger::default();
-    let vector = Tensor::new(&[1.0_f32, 2.0], &Device::Cpu).unwrap();
+    let vector = Tensor::from_data([1.0_f32, 2.0], &Device::flex());
     let error = logger.log(10, &[("loss", &vector)]).unwrap_err();
 
     assert!(matches!(
@@ -135,15 +135,33 @@ fn live_updates_preserve_completed_series() {
 
 #[test]
 fn batches_mixed_device_and_dtype_metrics_without_reordering_duplicates() {
-    let device = Device::cuda_if_available(0).unwrap();
+    let device = Device::flex().autodiff();
     let mut logger = TerminalLogger::new(AggregationConfig::new(Aggregation::last()));
-    let first = Tensor::new(2.0f64, &device).unwrap();
-    let middle = Tensor::new(7u32, &Device::Cpu).unwrap();
-    let last = Tensor::new(3.0f32, &device).unwrap();
+    let first = Tensor::from_data([2.0f64], &device).require_grad();
+    let middle = Tensor::from_data([7.0f64], &Device::flex());
+    let last = Tensor::from_data([3.0f32], &device);
     logger
         .log(1, &[("loss", &first), ("count", &middle), ("loss", &last)])
         .unwrap();
     logger.finish().unwrap();
     assert_eq!(logger.series("loss"), Some(&[(1, 3.0)][..]));
     assert_eq!(logger.series("count"), Some(&[(1, 7.0)][..]));
+    assert!(first.is_require_grad());
+}
+
+#[test]
+fn invalid_metric_does_not_complete_or_mutate_the_open_timestep() {
+    let mut logger = TerminalLogger::default();
+    let one = scalar(1.0);
+    logger.log(5, &[("loss", &one)]).unwrap();
+    let empty = Tensor::<1>::zeros([0], &Device::flex());
+    assert!(matches!(
+        logger.log(10, &[("loss", &one), ("empty", &empty)]),
+        Err(Error::NonScalar { .. })
+    ));
+    assert!(logger.series("loss").is_none());
+    logger.log(5, &[("loss", &scalar(3.0))]).unwrap();
+    logger.finish().unwrap();
+    assert_eq!(logger.series("loss"), Some(&[(5, 2.0)][..]));
+    assert!(logger.series("empty").is_none());
 }

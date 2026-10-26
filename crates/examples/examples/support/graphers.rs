@@ -8,7 +8,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use candle_core::{D, Device, Tensor};
+use burn::tensor::{Device, Tensor};
 use modurl::prelude::*;
 use modurl_logger::{Aggregation, AggregationConfig, Logger, TensorBoardLogger, TerminalLogger};
 
@@ -48,8 +48,8 @@ fn with_episode_smoothing(config: AggregationConfig) -> AggregationConfig {
 
 pub struct DQNGrapher<EpisodeSource = AgentEpisodeBoundaries> {
     terminal: TerminalLogger,
-    pending_loss: Option<Tensor>,
-    pending_q_value: Option<Tensor>,
+    pending_loss: Option<burn::tensor::Tensor<1>>,
+    pending_q_value: Option<burn::tensor::Tensor<1>>,
     pending_updates: usize,
     pending_timestep: usize,
     pending_epsilon: f32,
@@ -92,10 +92,10 @@ impl<EpisodeSource> DQNGrapher<EpisodeSource> {
         self.terminal.display();
     }
 
-    /// Adds a scalar `value` shaped `[]` to the detached scalar accumulator.
-    fn accumulate(total: &mut Option<Tensor>, value: Tensor) {
+    /// Adds a Burn scalar `value` shaped `[1]` to the detached scalar accumulator.
+    fn accumulate(total: &mut Option<burn::tensor::Tensor<1>>, value: burn::tensor::Tensor<1>) {
         *total = Some(match total.take() {
-            Some(total) => (&total + &value).unwrap().detach(),
+            Some(total) => (total + value).detach(),
             None => value.detach(),
         });
     }
@@ -106,9 +106,19 @@ impl<EpisodeSource> DQNGrapher<EpisodeSource> {
         }
 
         let count = self.pending_updates as f64;
-        let loss = (self.pending_loss.take().unwrap() / count).unwrap();
-        let mean_q_value = (self.pending_q_value.take().unwrap() / count).unwrap();
-        let epsilon = Tensor::new(self.pending_epsilon, &Device::Cpu).unwrap();
+        let loss = Tensor::from_data(
+            [(self.pending_loss.take().unwrap() / count)
+                .try_into_scalar::<f32>()
+                .unwrap()],
+            &Device::flex(),
+        );
+        let mean_q_value = Tensor::from_data(
+            [(self.pending_q_value.take().unwrap() / count)
+                .try_into_scalar::<f32>()
+                .unwrap()],
+            &Device::flex(),
+        );
+        let epsilon = Tensor::from_data([self.pending_epsilon], &Device::flex());
         self.terminal
             .log(
                 self.pending_timestep,
@@ -123,8 +133,8 @@ impl<EpisodeSource> DQNGrapher<EpisodeSource> {
     }
 
     fn log_episode(&mut self, timestep: usize, episode_return: f32, episode_length: usize) {
-        let episode_return = Tensor::new(episode_return, &Device::Cpu).unwrap();
-        let episode_length = Tensor::new(episode_length as f32, &Device::Cpu).unwrap();
+        let episode_return = Tensor::from_data([episode_return], &Device::flex());
+        let episode_length = Tensor::from_data([episode_length as f32], &Device::flex());
         self.terminal
             .log(
                 timestep,
@@ -137,8 +147,8 @@ impl<EpisodeSource> DQNGrapher<EpisodeSource> {
     }
 
     fn log_update(&mut self, entry: &QLogEntry) {
-        let loss = entry.loss.mean_all().unwrap();
-        let mean_q_value = entry.q_values.mean_all().unwrap();
+        let loss = entry.loss.clone().mean();
+        let mean_q_value = entry.q_values.clone().mean();
         Self::accumulate(&mut self.pending_loss, loss);
         Self::accumulate(&mut self.pending_q_value, mean_q_value);
         self.pending_updates += 1;
@@ -214,13 +224,18 @@ impl PPOGrapher {
     }
 }
 
+/// Averages a rank-D Float metric over all axes, returning a detached Float tensor [1] on the input device.
+fn on_policy_metric<const D: usize>(value: &Tensor<D>) -> Tensor<1> {
+    value.clone().detach().mean()
+}
+
 impl PPOLogger for PPOGrapher {
     fn log(&mut self, info: &PPOLogEntry) {
-        let actor_loss = info.actor_loss.mean_all().unwrap();
-        let critic_loss = info.critic_loss.mean_all().unwrap();
-        let entropy = info.entropy.mean_all().unwrap();
-        let kl_divergence = info.kl_divergence.mean_all().unwrap();
-        let explained_variance = info.explained_variance.mean_all().unwrap();
+        let actor_loss = on_policy_metric(&info.actor_loss);
+        let critic_loss = on_policy_metric(&info.critic_loss);
+        let entropy = on_policy_metric(&info.entropy);
+        let kl_divergence = on_policy_metric(&info.kl_divergence);
+        let explained_variance = on_policy_metric(&info.explained_variance);
         self.terminal
             .log(
                 info.timestep,
@@ -237,8 +252,9 @@ impl PPOLogger for PPOGrapher {
 
     fn log_collection(&mut self, info: &PPOCollectionLogEntry) {
         for episode in &info.completed_episodes {
-            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            let episode_return = Tensor::from_data([episode.episode_return], &Device::flex());
+            let episode_length =
+                Tensor::from_data([episode.episode_length as f32], &Device::flex());
             self.terminal
                 .log(
                     episode.collection_timestep,
@@ -322,11 +338,10 @@ impl<EpisodeSource> OnPolicyGrapher<EpisodeSource> {
         if new_timestep {
             self.timestep = info.timestep;
             if self.raw_reward_samples > 0 {
-                let mean_raw_reward = Tensor::new(
-                    self.raw_reward_sum / self.raw_reward_samples as f32,
-                    &Device::Cpu,
-                )
-                .unwrap();
+                let mean_raw_reward = Tensor::from_data(
+                    [self.raw_reward_sum / self.raw_reward_samples as f32],
+                    &Device::flex(),
+                );
                 self.log_terminal_and_tensorboard(
                     info.timestep,
                     &[("Mean Raw Step Reward", &mean_raw_reward)],
@@ -336,11 +351,11 @@ impl<EpisodeSource> OnPolicyGrapher<EpisodeSource> {
             self.raw_reward_samples = 0;
         }
 
-        let actor_loss = info.actor_loss.mean_all().unwrap();
-        let critic_loss = info.critic_loss.mean_all().unwrap();
-        let entropy = info.entropy.mean_all().unwrap();
-        let kl_divergence = info.kl_divergence.mean_all().unwrap();
-        let explained_variance = info.explained_variance.mean_all().unwrap();
+        let actor_loss = on_policy_metric(&info.actor_loss);
+        let critic_loss = on_policy_metric(&info.critic_loss);
+        let entropy = on_policy_metric(&info.entropy);
+        let kl_divergence = on_policy_metric(&info.kl_divergence);
+        let explained_variance = on_policy_metric(&info.explained_variance);
         self.log_terminal_and_tensorboard(
             info.timestep,
             &[
@@ -362,8 +377,8 @@ impl<EpisodeSource> OnPolicyGrapher<EpisodeSource> {
     }
 
     fn record_episode(&mut self, timestep: usize, episode_return: f32, episode_length: usize) {
-        let episode_return = Tensor::new(episode_return, &Device::Cpu).unwrap();
-        let episode_length = Tensor::new(episode_length as f32, &Device::Cpu).unwrap();
+        let episode_return = Tensor::from_data([episode_return], &Device::flex());
+        let episode_length = Tensor::from_data([episode_length as f32], &Device::flex());
         self.log_terminal_and_tensorboard(
             timestep,
             &[
@@ -398,7 +413,7 @@ impl<EpisodeSource> OnPolicyGrapher<EpisodeSource> {
     }
 
     /// Logs named scalar metric tensors, each shaped `[]`.
-    fn log_terminal_and_tensorboard(&mut self, timestep: usize, metrics: &[(&str, &Tensor)]) {
+    fn log_terminal_and_tensorboard(&mut self, timestep: usize, metrics: &[(&str, &Tensor<1>)]) {
         self.terminal.log(timestep, metrics).unwrap();
         self.tensorboard.log(timestep, metrics).unwrap();
     }
@@ -507,43 +522,25 @@ impl<I> SACLogger<I> for SACGrapher {
         {
             return;
         }
-        let critic_loss = Tensor::stack(&entry.critic_losses, 0)
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let actor_loss = entry.actor_loss.mean_all().unwrap();
-        let entropy_coefficient = entry.alpha.mean_all().unwrap();
-        let policy_entropy = entry
-            .policy_log_probabilities
-            .mul(&entry.policy_weights)
-            .unwrap()
-            .sum(D::Minus1)
-            .unwrap()
-            .neg()
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let expected_policy_q = entry
-            .policy_q_values
-            .mul(&entry.policy_weights)
-            .unwrap()
-            .sum(D::Minus1)
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let replay_reward = entry.replay_rewards.mean_all().unwrap();
-        let bellman_target = entry.bellman_targets.mean_all().unwrap();
-        let alpha_loss = entry
-            .alpha_loss
-            .as_ref()
-            .map(|loss| loss.mean_all().unwrap());
-        let entropy_change_loss = entry
-            .entropy_change_loss
-            .as_ref()
-            .map(|loss| loss.mean_all().unwrap());
+        let critic_loss = on_policy_metric(&burn::tensor::Tensor::<1>::stack::<2>(
+            entry.critic_losses.clone(),
+            0,
+        ));
+        let actor_loss = on_policy_metric(&entry.actor_loss);
+        let entropy_coefficient = on_policy_metric(&entry.alpha);
+        let policy_entropy = on_policy_metric(
+            &(-(entry.policy_log_probabilities.clone() * entry.policy_weights.clone()).sum_dim(1)),
+        );
+        let expected_policy_q = on_policy_metric(
+            &(entry.policy_q_values.clone() * entry.policy_weights.clone()).sum_dim(1),
+        );
+        let replay_reward = on_policy_metric(&entry.replay_rewards);
+        let bellman_target = on_policy_metric(&entry.bellman_targets);
+        let alpha_loss = entry.alpha_loss.as_ref().map(on_policy_metric);
+        let entropy_change_loss = entry.entropy_change_loss.as_ref().map(on_policy_metric);
         let target_entropy = entry
             .target_entropy
-            .map(|value| Tensor::new(value, &Device::Cpu).unwrap());
+            .map(|value| Tensor::from_data([value], &Device::flex()));
 
         let mut metrics = vec![
             ("Critic Loss", &critic_loss),
@@ -573,7 +570,7 @@ impl<I> SACLogger<I> for SACGrapher {
             .collection_timestep
             .is_multiple_of(SAC_UPDATE_LOG_INTERVAL)
         {
-            let mean_step_reward = entry.collection_rewards.mean_all().unwrap();
+            let mean_step_reward = on_policy_metric(&entry.collection_rewards);
             self.terminal
                 .log(
                     entry.collection_timestep,
@@ -585,8 +582,9 @@ impl<I> SACLogger<I> for SACGrapher {
         // Update metrics may already have advanced this monotonic logger, so
         // completed episodes are intentionally recorded at the batch time.
         for episode in &entry.completed_episodes {
-            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            let episode_return = Tensor::from_data([episode.episode_return], &Device::flex());
+            let episode_length =
+                Tensor::from_data([episode.episode_length as f32], &Device::flex());
             self.terminal
                 .log(
                     entry.collection_timestep,
@@ -630,29 +628,22 @@ impl DeterministicActorCriticGrapher {
             return;
         }
 
-        let critic_loss = Tensor::stack(&entry.critic_losses, 0)
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let replay_q = Tensor::stack(&entry.critic_q_values, 0)
-            .unwrap()
-            .mean_all()
-            .unwrap();
-        let bellman_target = entry.bellman_targets.mean_all().unwrap();
-        let replay_reward = entry.replay_rewards.mean_all().unwrap();
-        let exploration_noise = Tensor::new(
-            entry.exploration_noise_standard_deviation as f32,
-            &Device::Cpu,
-        )
-        .unwrap();
-        let actor_loss = entry
-            .actor_loss
-            .as_ref()
-            .map(|loss| loss.mean_all().unwrap());
-        let policy_q = entry
-            .policy_q_values
-            .as_ref()
-            .map(|values| values.mean_all().unwrap());
+        let critic_loss = on_policy_metric(&burn::tensor::Tensor::<1>::stack::<2>(
+            entry.critic_losses.clone(),
+            0,
+        ));
+        let replay_q = on_policy_metric(&burn::tensor::Tensor::<2>::stack::<3>(
+            entry.critic_q_values.clone(),
+            0,
+        ));
+        let bellman_target = on_policy_metric(&entry.bellman_targets);
+        let replay_reward = on_policy_metric(&entry.replay_rewards);
+        let exploration_noise = Tensor::from_data(
+            [entry.exploration_noise_standard_deviation as f32],
+            &Device::flex(),
+        );
+        let actor_loss = entry.actor_loss.as_ref().map(on_policy_metric);
+        let policy_q = entry.policy_q_values.as_ref().map(on_policy_metric);
 
         let mut metrics = vec![
             ("Critic Loss", &critic_loss),
@@ -677,7 +668,7 @@ impl DeterministicActorCriticGrapher {
             .collection_timestep
             .is_multiple_of(DETERMINISTIC_ACTOR_CRITIC_UPDATE_LOG_INTERVAL)
         {
-            let mean_step_reward = entry.collection_rewards.mean_all().unwrap();
+            let mean_step_reward = on_policy_metric(&entry.collection_rewards);
             self.terminal
                 .log(
                     entry.collection_timestep,
@@ -689,8 +680,9 @@ impl DeterministicActorCriticGrapher {
         // See the SAC grapher: completed episodes use the enclosing batch time
         // because optimization metrics may already have advanced the logger.
         for episode in &entry.completed_episodes {
-            let episode_return = Tensor::new(episode.episode_return, &Device::Cpu).unwrap();
-            let episode_length = Tensor::new(episode.episode_length as f32, &Device::Cpu).unwrap();
+            let episode_return = Tensor::from_data([episode.episode_return], &Device::flex());
+            let episode_length =
+                Tensor::from_data([episode.episode_length as f32], &Device::flex());
             self.terminal
                 .log(
                     entry.collection_timestep,
@@ -734,17 +726,17 @@ mod tests {
 
     #[test]
     fn dqn_metrics_are_reduced_before_periodic_host_logging() {
-        let device = Device::Cpu;
+        let device = burn::tensor::Device::flex();
         let mut grapher = DQNGrapher::new();
         for update_index in 0..DQN_LOG_INTERVAL {
             DQNLogger::<()>::log(
                 &mut grapher,
                 &QLogEntry {
-                    loss: Tensor::new(2.0f32, &device).unwrap(),
+                    loss: burn::tensor::Tensor::from_data([2.0f32], &device),
                     epsilon: 0.1,
                     learning_rate: 1e-4,
-                    q_values: Tensor::new(&[1.0f32, 3.0], &device).unwrap(),
-                    replay_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                    q_values: burn::tensor::Tensor::from_data([[1.0f32], [3.0]], &device),
+                    replay_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
                     update_index,
                     collection_timestep: update_index + 1,
                 },
@@ -768,16 +760,16 @@ mod tests {
 
     #[test]
     fn dqn_episode_metrics_do_not_go_backwards_after_a_batch_update() {
-        let device = Device::Cpu;
+        let device = burn::tensor::Device::flex();
         let mut grapher = DQNGrapher::new();
         DQNLogger::<()>::log(
             &mut grapher,
             &QLogEntry {
-                loss: Tensor::new(1.0f32, &device).unwrap(),
+                loss: burn::tensor::Tensor::from_data([1.0f32], &device),
                 epsilon: 0.1,
                 learning_rate: 1e-4,
-                q_values: Tensor::new(&[1.0f32], &device).unwrap(),
-                replay_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                q_values: burn::tensor::Tensor::from_data([[1.0f32]], &device),
+                replay_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
                 update_index: 0,
                 collection_timestep: 80_000,
             },
@@ -785,7 +777,7 @@ mod tests {
         DQNLogger::<()>::log_collection(
             &mut grapher,
             &QCollectionLogEntry {
-                collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+                collection_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
                 infos: vec![()],
                 epsilon: 0.1,
                 collection_timestep: 80_000,
@@ -804,10 +796,10 @@ mod tests {
     #[cfg(feature = "atari-environment")]
     #[test]
     fn atari_dqn_logs_recorded_full_game_return_instead_of_life_return() {
-        let device = Device::Cpu;
+        let device = burn::tensor::Device::flex();
         let mut grapher = DQNGrapher::atari();
         let life_boundary = QCollectionLogEntry {
-            collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+            collection_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
             infos: vec![RawRewardInfo {
                 inner: EpisodeStatisticsInfo {
                     inner: (),
@@ -830,7 +822,7 @@ mod tests {
         assert!(grapher.terminal.series(EPISODE_RETURN_METRIC).is_none());
 
         let game_boundary = QCollectionLogEntry {
-            collection_rewards: Tensor::new(&[1.0f32], &device).unwrap(),
+            collection_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
             infos: vec![RawRewardInfo {
                 inner: EpisodeStatisticsInfo {
                     inner: (),
@@ -874,7 +866,7 @@ mod tests {
         ));
         let mut logger = TerminalLogger::new(aggregation);
         for timestep in 0..=100 {
-            let value = Tensor::new(timestep as f32, &Device::Cpu).unwrap();
+            let value = Tensor::from_data([timestep as f32], &Device::flex());
             logger
                 .log(
                     timestep,
@@ -914,16 +906,81 @@ mod tests {
     }
 
     #[test]
+    fn sac_native_metrics_and_episodes_keep_monotonic_batch_times() {
+        let device = burn::tensor::Device::flex();
+        let mut grapher = SACGrapher::new();
+        SACLogger::<()>::log_update(
+            &mut grapher,
+            &SACLogEntry {
+                critic_losses: vec![
+                    burn::tensor::Tensor::from_data([2.0f32], &device),
+                    burn::tensor::Tensor::from_data([4.0f32], &device),
+                ],
+                actor_loss: burn::tensor::Tensor::from_data([1.0f32], &device),
+                alpha_loss: None,
+                entropy_change_loss: None,
+                target_entropy: None,
+                alpha: burn::tensor::Tensor::from_data([0.2f32], &device),
+                bellman_targets: burn::tensor::Tensor::from_data([[3.0f32]], &device),
+                policy_log_probabilities: burn::tensor::Tensor::from_data(
+                    [[[-1.0f32], [-2.0]]],
+                    &device,
+                ),
+                policy_weights: burn::tensor::Tensor::from_data([[[0.5f32], [0.5]]], &device),
+                policy_q_values: burn::tensor::Tensor::from_data([[[2.0f32], [6.0]]], &device),
+                replay_rewards: burn::tensor::Tensor::from_data([[1.0f32]], &device),
+                update_index: 0,
+                collection_timestep: 1_000,
+            },
+        );
+        grapher.log_collection(&SACCollectionLogEntry {
+            collection_rewards: burn::tensor::Tensor::from_data([[1.0f32], [1.0]], &device),
+            infos: vec![(), ()],
+            collection_timestep: 1_000,
+            replay_len: 1_000,
+            completed_episodes: vec![SACEpisodeLogEntry {
+                environment_index: 0,
+                episode_return: 2.0,
+                episode_length: 1,
+                collection_timestep: 999,
+                terminated: true,
+                truncated: false,
+            }],
+        });
+        grapher.terminal.finish().unwrap();
+        assert_eq!(
+            grapher
+                .terminal
+                .series("Critic Loss")
+                .unwrap()
+                .last()
+                .unwrap()
+                .1,
+            3.0
+        );
+        assert_eq!(
+            grapher
+                .terminal
+                .series(EPISODE_RETURN_METRIC)
+                .unwrap()
+                .last()
+                .unwrap()
+                .0,
+            1_000
+        );
+    }
+
+    #[test]
     fn deterministic_grapher_uses_batch_timestep_for_completed_episodes() {
         let mut grapher = DeterministicActorCriticGrapher::new();
-        let update_metric = Tensor::new(1.0_f32, &Device::Cpu).unwrap();
+        let update_metric = Tensor::from_data([1.0_f32], &Device::flex());
         grapher
             .terminal
             .log(6_000, &[("Update", &update_metric)])
             .unwrap();
 
         grapher.log_collection_metrics(&DeterministicActorCriticCollectionLogEntry {
-            collection_rewards: Tensor::zeros(2, candle_core::DType::F32, &Device::Cpu).unwrap(),
+            collection_rewards: burn::tensor::Tensor::zeros([2, 1], &burn::tensor::Device::flex()),
             infos: vec![(), ()],
             collection_timestep: 6_000,
             completed_episodes: vec![

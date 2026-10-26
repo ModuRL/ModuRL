@@ -1,7 +1,7 @@
 # ModuRL Guide
 
 This guide is for Rust developers who want to build reinforcement learning
-programs with ModuRL and Candle. It starts with PPO on CartPole, then explains
+programs with ModuRL. It starts with PPO on CartPole, then explains
 the library types behind that example, stochastic and deterministic
 actor-critic algorithms, and the value-based DQN and DDQN paths.
 

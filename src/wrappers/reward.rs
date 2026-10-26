@@ -1,8 +1,12 @@
 //! Wrappers that transform rewards.
 
-use candle_core::Tensor;
+use crate::tensor_rank::TensorBatchTypes;
+use burn::tensor::kind::Basic;
 
-use crate::gym::{Gym, ResetInfo, StepInfo};
+use crate::{
+    gym::{Gym, ResetInfo, StepInfo},
+    spaces::{ActionSpace, ObservationSpace},
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClipRewardGymError<E> {
@@ -21,19 +25,30 @@ impl<G> ClipRewardGym<G> {
     }
 }
 
-impl<G, I> Gym<I> for ClipRewardGym<G>
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> Gym<I, BO, BA>
+    for ClipRewardGym<G>
 where
-    G: Gym<I>,
+    G: Gym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
-    type Error = ClipRewardGymError<<G as Gym<I>>::Error>;
-    type SpaceError = <G as Gym<I>>::SpaceError;
+    type Error = ClipRewardGymError<G::Error>;
+    type ObservationSpace = G::ObservationSpace;
+    type ActionSpace = G::ActionSpace;
 
-    fn reset(&mut self) -> Result<ResetInfo<I>, Self::Error> {
+    /// Returns the inner gym's unbatched rank-`BO - 1` observation, preserving its kind, dtype, device, and item axes.
+    fn reset(
+        &mut self,
+    ) -> Result<ResetInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         self.gym.reset().map_err(ClipRewardGymError::GymError)
     }
 
-    /// Forwards one unbatched environment action shaped `action_shape`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo<I>, Self::Error> {
+    /// Forwards an unbatched rank-`BA - 1` action and returns an unbatched rank-`BO - 1` observation; scalars use `[1]`.
+    /// Preserves tensor shapes, kinds, dtypes, and devices, subject to the inner gym's input requirements.
+    fn step(
+        &mut self,
+        action: <Self::ActionSpace as TensorBatchTypes>::Item,
+    ) -> Result<StepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         let mut info = self
             .gym
             .step(action)
@@ -46,11 +61,11 @@ where
         Ok(info)
     }
 
-    fn action_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
     }
 
-    fn observation_space(&self) -> Box<dyn crate::spaces::Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> Self::ObservationSpace {
         self.gym.observation_space()
     }
 }

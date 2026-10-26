@@ -32,8 +32,7 @@ edition = "2024"
 [dependencies]
 modurl = "0.1"
 modurl_gym = "0.1"
-candle-core = "0.11.0"
-candle-nn = "0.11.0"
+burn = { version = "=0.22.0", default-features = false, features = ["std", "optim", "flex", "autodiff"] }
 ```
 
 The snippets below are consecutive pieces of `src/main.rs`. Add each one in
@@ -41,12 +40,11 @@ order; the file compiles after the final `Train` section.
 
 ### Imports
 
-First, bring the Candle types, optimizer, ModuRL traits, and CartPole
+First, bring the tensor types, optimizer, ModuRL traits, and CartPole
 environment into scope:
 
 ```rust,ignore
-use candle_core::{Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use burn::{nn::Tanh, optim::AdamWConfig, tensor::{DType, Device}};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 ```
@@ -66,7 +64,7 @@ networks.
 
 The actor network is the source of the policy's action scores. It produces
 logits, which are raw scores for each action.
-`ProbabilisticPolicyModel<CategoricalDistribution>` interprets those scores as
+`ProbabilisticPolicyModel` interprets those scores as
 a categorical policy: it can sample an action from them and later compute the
 log probability of that action. PPO needs both operations during training.
 
@@ -80,7 +78,7 @@ Start `main` by choosing where tensors and models will live:
 
 ```rust,ignore
 fn main() {
-    let device = Device::Cpu;
+    let device = Device::flex().autodiff();
 ```
 
 The CPU device is the simplest first run. See [Run on CUDA or Metal](./run-on-cuda-or-metal.md) when the CPU version works.
@@ -92,10 +90,10 @@ environments and wrap them as one vectorized environment:
 
 ```rust,ignore
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
+        .map(|_| CartPoleV1::builder().rng_device(&Device::flex()).build().unwrap())
         .collect::<Vec<_>>();
     let mut env = DeviceMultiGymWrapper::new(
-        VectorizedGymWrapper::from(envs), Device::Cpu, device.clone(),
+        VectorizedGymWrapper::new(envs).unwrap(), Device::flex(), device.clone(),
     );
 ```
 
@@ -120,15 +118,12 @@ space determines how many action logits the actor network must produce.
 The actor network maps observations to action logits:
 
 ```rust,ignore
-    let actor_var_map = VarMap::new();
-    let actor_vb = VarBuilder::from_varmap(&actor_var_map, candle_core::DType::F32, &device);
     let actor_network = MLP::builder()
         .input_size(observation_space.shape()[0])
-        .output_size(action_space.shape()[0])
-        .vb(actor_vb)
-        .activation(Tensor::tanh)
+        .output_size(action_space.get_possible_values())
+        .options((&device, DType::F32))
+        .activation(Tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .name("actor".to_string())
         .build()
         .expect("failed to build actor network");
 ```
@@ -143,15 +138,12 @@ those logits as a discrete policy.
 The critic maps observations to one value estimate:
 
 ```rust,ignore
-    let critic_var_map = VarMap::new();
-    let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
     let critic_network = MLP::builder()
         .input_size(observation_space.shape()[0])
         .output_size(1)
-        .vb(critic_vb)
-        .activation(Tensor::tanh)
+        .options((&device, DType::F32))
+        .activation(Tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .name("critic".to_string())
         .build()
         .expect("failed to build critic network");
 ```
@@ -165,18 +157,12 @@ input size as the actor network but only one output.
 Give the actor network and critic network separate AdamW optimizers:
 
 ```rust,ignore
-    let optimizer_config = ParamsAdamW {
-        lr: 3e-4,
-        ..Default::default()
-    };
-
-    let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
-        .expect("failed to build actor optimizer");
-    let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
-        .expect("failed to build critic optimizer");
+    let optimizer_config = AdamWConfig::new();
+    let actor_optimizer = optimizer_config.init();
+    let critic_optimizer = optimizer_config.init();
 ```
 
-Each optimizer receives the variables from the matching network's `VarMap`.
+Each network owns its parameters. Set learning rates in the network builder.
 
 ### Assemble PPO
 
@@ -185,16 +171,16 @@ actions and evaluate their log probabilities:
 
 ```rust,ignore
     let policy =
-        ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
+        ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
 
-    let network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
+    let network_info = SeparatePPONetwork::builder()
             .actor_network(policy)
             .critic_network(critic_network)
             .actor_optimizer(actor_optimizer)
             .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+            .actor_learning_rate(3e-4)
+            .critic_learning_rate(3e-4)
+            .build().unwrap();
 ```
 
 `policy` is the probabilistic policy PPO trains. In this configuration, the
@@ -207,6 +193,7 @@ Finally, build the `PPOAgent` and run learning:
 
 ```rust,ignore
     let mut agent = PPOAgent::builder()
+        .observation_space(observation_space)
         .action_space(action_space)
         .network_info(network_info)
         .batch_size(1024)
@@ -242,71 +229,70 @@ program but is smaller than a longer experiment.
 After applying the pieces above, `src/main.rs` should look like this:
 
 ```rust,ignore
-use candle_core::{Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use burn::{
+    nn::Tanh,
+    optim::AdamWConfig,
+    tensor::{DType, Device},
+};
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn main() {
-    let device = Device::Cpu;
+    let device = Device::flex().autodiff();
 
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
+        .map(|_| {
+            CartPoleV1::builder()
+                .rng_device(&Device::flex())
+                .build()
+                .unwrap()
+        })
         .collect::<Vec<_>>();
     let mut env = DeviceMultiGymWrapper::new(
-        VectorizedGymWrapper::from(envs), Device::Cpu, device.clone(),
+        VectorizedGymWrapper::new(envs).unwrap(),
+        Device::flex(),
+        device.clone(),
     );
 
     let observation_space = env.observation_space();
     let action_space = env.action_space();
 
-    let actor_var_map = VarMap::new();
-    let actor_vb = VarBuilder::from_varmap(&actor_var_map, candle_core::DType::F32, &device);
     let actor_network = MLP::builder()
         .input_size(observation_space.shape()[0])
-        .output_size(action_space.shape()[0])
-        .vb(actor_vb)
-        .activation(Tensor::tanh)
+        .output_size(action_space.get_possible_values())
+        .options((&device, DType::F32))
+        .activation(Tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .name("actor".to_string())
         .build()
         .expect("failed to build actor network");
 
-    let critic_var_map = VarMap::new();
-    let critic_vb = VarBuilder::from_varmap(&critic_var_map, candle_core::DType::F32, &device);
     let critic_network = MLP::builder()
         .input_size(observation_space.shape()[0])
         .output_size(1)
-        .vb(critic_vb)
-        .activation(Tensor::tanh)
+        .options((&device, DType::F32))
+        .activation(Tanh)
         .hidden_layer_sizes(vec![64, 64])
-        .name("critic".to_string())
         .build()
         .expect("failed to build critic network");
 
-    let optimizer_config = ParamsAdamW {
-        lr: 3e-4,
-        ..Default::default()
-    };
+    let optimizer_config = AdamWConfig::new();
+    let actor_optimizer = optimizer_config.init();
+    let critic_optimizer = optimizer_config.init();
 
-    let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
-        .expect("failed to build actor optimizer");
-    let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
-        .expect("failed to build critic optimizer");
+    let policy = ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
 
-    let policy =
-        ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
-
-    let network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(policy)
-            .critic_network(critic_network)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .build(),
-    );
+    let network_info = SeparatePPONetwork::builder()
+        .actor_network(policy)
+        .critic_network(critic_network)
+        .actor_optimizer(actor_optimizer)
+        .critic_optimizer(critic_optimizer)
+        .actor_learning_rate(3e-4)
+        .critic_learning_rate(3e-4)
+        .build()
+        .unwrap();
 
     let mut agent = PPOAgent::builder()
+        .observation_space(observation_space)
         .action_space(action_space)
         .network_info(network_info)
         .batch_size(1024)
@@ -314,7 +300,8 @@ fn main() {
         .clip_range(ConstantSchedule::new(0.2))
         .training_horizon(10_000)
         .device(device)
-        .build().unwrap();
+        .build()
+        .unwrap();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
     println!("Training complete.");

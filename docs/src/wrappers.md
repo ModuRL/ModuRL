@@ -24,6 +24,21 @@ Wrapper order determines which values a wrapper sees. For example, placing
 `RecordEpisodeStatisticsGym` inside `ClipRewardGym` records the underlying return
 while the agent receives clipped rewards.
 
+`FrameStackGym<G, BF, S>` uses native Burn tensors. `BF` is the stacked batch
+rank. Two `PrevRank` mappings determine the inner observation's single rank. The defaults
+stack vectors `[features]` into `[stack_size, features]`. Scalar observations use
+`FrameStackGym::<_, 3>::new(...)` and produce `[stack_size, 1]`.
+The supplied space `S` must use the inner observation kind. For `BoxSpace`,
+bounds include a size-one batch axis. Invalid rank relationships fail during compilation.
+
+`InputMapMultiGymWrapper` and `OutputMapMultiGymWrapper` callbacks return
+`Result` with a caller-defined error type. Callback errors use
+`TensorMapMultiGymError::Mapping`; environment errors use `Gym`. Callbacks
+must preserve the documented tensor layouts and kinds. Observation normalization
+reports host-read failures through `NormalizeObservationGymError::TensorRead`.
+Output callbacks use the observation space's `Batch` type for batched observations
+and `Item` type for terminal observations. These types follow the underlying space.
+
 ## Atari Wrappers
 
 These wrappers are available from `modurl_ale::wrappers` and implement the

@@ -6,3 +6,4 @@
 /crates/benches/.uv-cache
 /crates/benches/__pycache__
 /crates/benches/python/__pycache__
+/roms

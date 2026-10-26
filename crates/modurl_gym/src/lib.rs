@@ -11,7 +11,7 @@ pub(crate) mod testing;
 #[derive(Debug, thiserror::Error)]
 pub enum EnvironmentError {
     #[error("environment tensor operation failed: {0}")]
-    Tensor(#[source] candle_core::Error),
+    Tensor(#[source] burn::tensor::TensorReadError),
     #[error("invalid environment configuration: {0}")]
     InvalidConfiguration(&'static str),
     #[error("invalid action: {0}")]
@@ -25,8 +25,8 @@ pub enum EnvironmentError {
     Rendering(#[source] minifb::Error),
 }
 
-impl From<candle_core::Error> for EnvironmentError {
-    fn from(error: candle_core::Error) -> Self {
+impl From<burn::tensor::TensorReadError> for EnvironmentError {
+    fn from(error: burn::tensor::TensorReadError) -> Self {
         Self::Tensor(error)
     }
 }

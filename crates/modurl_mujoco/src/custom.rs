@@ -3,10 +3,10 @@
 use std::path::Path;
 
 use bon::bon;
-use candle_core::Tensor;
+use burn::tensor::Tensor;
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::Space,
+    spaces::BoxSpace,
 };
 
 use crate::{MjModel, MujocoError, core::MujocoCore};
@@ -73,23 +73,30 @@ pub trait MujocoTask {
     fn action_dim(&self) -> Option<usize> {
         None
     }
+
     fn physical_control_targets(&self) -> bool {
         false
     }
+
     /// Maps a policy action of shape `[action_dim]` to actuator controls of shape
     /// `[nu]`. By default, `action_dim` is the model actuator count `nu`.
-    fn map_action(&self, action: &Tensor) -> Result<Tensor, candle_core::Error> {
+    /// Both tensors must use CPU Flex and a Float dtype. Returns mapping failures as `MujocoError`.
+    fn map_action(&self, action: &Tensor<1>) -> Result<Tensor<1>, MujocoError> {
         Ok(action.clone())
     }
 
     /// Optionally edits generalized position or velocity after the simulator's
     /// default reset and before the task observes the new episode.
     fn reset_state(&mut self, _state: &mut MujocoState) {}
+
     fn reset(&mut self, _state: &MujocoState) {}
+
     /// Optionally edits generalized position or velocity immediately before a
     /// control step. This supports task disturbances such as push impulses.
     fn before_step(&mut self, _state: &mut MujocoState) {}
+
     fn observation(&self, state: &MujocoState) -> Vec<f64>;
+
     fn transition(
         &mut self,
         previous: &MujocoState,
@@ -180,7 +187,8 @@ impl<T: MujocoTask> CustomMujoco<T> {
         self.core.nu()
     }
 
-    fn make_observation(&self) -> Result<Tensor, MujocoError> {
+    /// Returns unbatched F32 observations `[observation_dim]` on CPU Flex after checking the task values.
+    fn make_observation(&self) -> Result<Tensor<1>, MujocoError> {
         let values = self.task.observation(&MujocoState::capture(&self.core));
         if values.len() != self.observation_dim || !values.iter().all(|value| value.is_finite()) {
             return Err(MujocoError::InvalidInput(format!(
@@ -189,14 +197,16 @@ impl<T: MujocoTask> CustomMujoco<T> {
                 values.len()
             )));
         }
-        self.core.tensor(&values)
+        Ok(self.core.tensor(&values))
     }
 }
 
 impl<T: MujocoTask> Gym for CustomMujoco<T> {
     type Error = MujocoError;
-    type SpaceError = candle_core::Error;
+    type ObservationSpace = BoxSpace<2>;
+    type ActionSpace = BoxSpace<2>;
 
+    /// Returns unbatched F32 observations `[observation_dim]` on CPU Flex with reset metadata.
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.core.reset_uniform(0.0)?;
         let mut state = MujocoState::capture(&self.core);
@@ -210,33 +220,19 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
         self.task.reset(&state);
         self.core.render()?;
         Ok(ResetInfo {
-            state: self.make_observation()?,
+            observation: self.make_observation()?,
             info: (),
         })
     }
 
     /// Steps with a floating policy action of shape `[action_dim]`; the task
     /// maps it to the model's `[nu]` actuator controls.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        if action.rank() != 1 || !action.dtype().is_float() {
-            return Err(MujocoError::InvalidInput(
-                "invalid policy action shape or dtype".into(),
-            ));
-        }
-        let action_values = action.to_dtype(candle_core::DType::F64)?.to_vec1::<f64>()?;
-        if action_values.len() != self.action_dim || !action_values.iter().all(|a| a.is_finite()) {
-            return Err(MujocoError::InvalidInput(
-                "invalid policy action shape or nonfinite action".into(),
-            ));
-        }
+    /// Accepts Float actions on CPU Flex; returns unbatched F32 observations `[observation_dim]` on CPU Flex and an F32 reward.
+    fn step(&mut self, action: Tensor<1>) -> Result<StepInfo, Self::Error> {
+        let action_values = MujocoCore::action_values(&action, self.action_dim)?;
         let mapped = self.task.map_action(&action)?;
         let physical = self.task.physical_control_targets();
-        if mapped.rank() != 1 || mapped.dims()[0] != self.core.nu() || !mapped.dtype().is_float() {
-            return Err(MujocoError::InvalidInput(
-                "invalid mapped action shape or dtype".into(),
-            ));
-        }
-        let mapped_values = mapped.to_dtype(candle_core::DType::F64)?.to_vec1::<f64>()?;
+        let mapped_values = MujocoCore::action_values(&mapped, self.core.nu())?;
         if !mapped_values.iter().all(|value| {
             value.is_finite() && (physical || (-1.0 - 1e-6..=1.0 + 1e-6).contains(value))
         }) {
@@ -253,9 +249,9 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
             previous = MujocoState::capture(&self.core);
         }
         if physical {
-            self.core.step_physical(&mapped)?;
+            self.core.step_physical(&mapped_values)?;
         } else {
-            self.core.step_normalized(&mapped)?;
+            self.core.step_normalized(&mapped_values)?;
         }
         let next = MujocoState::capture(&self.core);
         let outcome = self.task.transition(&previous, &next, &action_values);
@@ -266,7 +262,7 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
             ));
         }
         Ok(StepInfo {
-            state: self.make_observation()?,
+            observation: self.make_observation()?,
             reward: outcome.reward,
             done: outcome.done,
             truncated: outcome.truncated,
@@ -274,11 +270,11 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> BoxSpace<2> {
         self.core.unbounded_observation_space(self.observation_dim)
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> BoxSpace<2> {
         if self.task.physical_control_targets() {
             self.core.unbounded_action_space_for_dim(self.action_dim)
         } else {

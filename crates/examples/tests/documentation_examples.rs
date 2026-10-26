@@ -1,502 +1,503 @@
-use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use modurl::prelude::*;
-use modurl_gym::classic_control::cartpole::CartPoleV1;
+mod getting_started {
+    use burn::{
+        nn::Tanh,
+        optim::AdamWConfig,
+        tensor::{DType, Device},
+    };
+    use modurl::prelude::*;
+    use modurl_gym::classic_control::cartpole::CartPoleV1;
 
-// This is the logger shape shown in docs/src/understand-q-learning-training.md.
-struct DocumentationDQNLogger;
+    fn main() {
+        let device = Device::flex().autodiff();
 
-impl DQNLogger for DocumentationDQNLogger {
-    fn log(&mut self, entry: &QLogEntry) {
-        let _ = (entry.update_index, &entry.loss);
+        let envs = (0..4)
+            .map(|_| {
+                CartPoleV1::builder()
+                    .rng_device(&Device::flex())
+                    .build()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut env = DeviceMultiGymWrapper::new(
+            VectorizedGymWrapper::new(envs).unwrap(),
+            Device::flex(),
+            device.clone(),
+        );
+
+        let observation_space = env.observation_space();
+        let action_space = env.action_space();
+
+        let actor_network = MLP::builder()
+            .input_size(observation_space.shape()[0])
+            .output_size(action_space.get_possible_values())
+            .options((&device, DType::F32))
+            .activation(Tanh)
+            .hidden_layer_sizes(vec![64, 64])
+            .build()
+            .expect("failed to build actor network");
+
+        let critic_network = MLP::builder()
+            .input_size(observation_space.shape()[0])
+            .output_size(1)
+            .options((&device, DType::F32))
+            .activation(Tanh)
+            .hidden_layer_sizes(vec![64, 64])
+            .build()
+            .expect("failed to build critic network");
+
+        let optimizer_config = AdamWConfig::new();
+        let actor_optimizer = optimizer_config.init();
+        let critic_optimizer = optimizer_config.init();
+
+        let policy = ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
+
+        let network_info = SeparatePPONetwork::builder()
+            .actor_network(policy)
+            .critic_network(critic_network)
+            .actor_optimizer(actor_optimizer)
+            .critic_optimizer(critic_optimizer)
+            .actor_learning_rate(3e-4)
+            .critic_learning_rate(3e-4)
+            .build()
+            .unwrap();
+
+        let mut agent = PPOAgent::builder()
+            .observation_space(observation_space)
+            .action_space(action_space)
+            .network_info(network_info)
+            .batch_size(1024)
+            .mini_batch_size(64)
+            .clip_range(ConstantSchedule::new(0.2))
+            .training_horizon(10_000)
+            .device(device)
+            .build()
+            .unwrap();
+
+        agent.learn(&mut env, 10_000).expect("PPO learning failed");
+        println!("Training complete.");
     }
 
-    fn log_collection(&mut self, entry: &QCollectionLogEntry) {
+    pub(super) fn compile_program() {
+        let _ = main as fn();
+    }
+}
+
+mod dqn {
+    use burn::{
+        optim::AdamWConfig,
+        tensor::{DType, Device},
+    };
+    use modurl::prelude::*;
+    use modurl_gym::classic_control::cartpole::CartPoleV1;
+
+    fn main() {
+        let device = Device::flex().autodiff();
+
+        let environment_device = Device::flex();
+        let envs = vec![
+            CartPoleV1::builder()
+                .rng_device(&environment_device)
+                .build()
+                .unwrap(),
+        ];
+        let env = VectorizedGymWrapper::new(envs).unwrap();
+        let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
+        let observation_space = env.observation_space();
+        let online_q_network = MLP::builder()
+            .input_size(observation_space.shape()[0])
+            .output_size(env.action_space().get_possible_values())
+            .options((&device, DType::F32))
+            .hidden_layer_sizes(vec![64, 64])
+            .build()
+            .expect("failed to build the online Q-network");
+        let optimizer = AdamWConfig::new().init();
+
+        let mut agent = DQNAgent::builder()
+            .dtype(DType::F32)
+            .action_space(env.action_space())
+            .observation_space(observation_space)
+            .online_q_network(online_q_network)
+            .optimizer(optimizer)
+            .learning_rate(2.5e-4)
+            .replay_capacity(10_000)
+            .batch_size(128)
+            .training_start(10_000)
+            .update_frequency(10)
+            .target_update_interval(500)
+            .training_horizon(500_000)
+            .epsilon_schedule(|progress: f64| {
+                let exploration_progress = (progress / 0.5).min(1.0);
+                1.0 + (0.05 - 1.0) * exploration_progress
+            })
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device,
+            )))
+            .build()
+            .expect("DQN configuration should be valid");
+
+        agent.learn(&mut env, 500_000).expect("DQN learning failed");
+        println!("Training complete.");
+    }
+
+    pub(super) fn compile_program() {
+        let _ = main as fn();
+    }
+}
+
+mod ddqn {
+    use burn::{
+        optim::AdamWConfig,
+        tensor::{DType, Device},
+    };
+    use modurl::prelude::*;
+    use modurl_gym::classic_control::cartpole::CartPoleV1;
+
+    fn main() {
+        let device = Device::flex().autodiff();
+
+        let environment_device = Device::flex();
+        let envs = vec![
+            CartPoleV1::builder()
+                .rng_device(&environment_device)
+                .build()
+                .unwrap(),
+        ];
+        let env = VectorizedGymWrapper::new(envs).unwrap();
+        let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
+        let observation_space = env.observation_space();
+        let online_q_network = MLP::builder()
+            .input_size(observation_space.shape()[0])
+            .output_size(env.action_space().get_possible_values())
+            .options((&device, DType::F32))
+            .hidden_layer_sizes(vec![64, 64])
+            .build()
+            .expect("failed to build the online Q-network");
+        let optimizer = AdamWConfig::new().init();
+
+        let mut agent = DDQNAgent::builder()
+            .action_space(Discrete::new(2))
+            .observation_space(observation_space)
+            .online_q_network(online_q_network)
+            .optimizer(optimizer)
+            .learning_rate(2.5e-4)
+            .replay_capacity(10_000)
+            .batch_size(128)
+            .training_start(10_000)
+            .update_frequency(10)
+            .target_update_interval(500)
+            .training_horizon(500_000)
+            .epsilon_schedule(|progress: f64| {
+                let exploration_progress = (progress / 0.5).min(1.0);
+                1.0 + (0.05 - 1.0) * exploration_progress
+            })
+            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                device.clone(),
+            )))
+            .build()
+            .expect("DDQN configuration should be valid");
+
+        agent
+            .learn(&mut env, 500_000)
+            .expect("DDQN learning failed");
+    }
+    pub(super) fn compile_program() {
+        let _ = main as fn();
+    }
+}
+mod counter_env {
+    use burn::tensor::{Device, Int, Tensor, TensorReadError};
+    use modurl::prelude::*;
+
+    #[derive(Debug, thiserror::Error)]
+    pub enum CounterEnvError {
+        #[error("action {0} is outside the action space")]
+        InvalidAction(i32),
+        #[error("reading the action failed: {0}")]
+        Read(#[from] TensorReadError),
+    }
+
+    pub struct CounterEnv {
+        state: i32,
+        device: Device,
+    }
+
+    impl CounterEnv {
+        pub fn new(device: Device) -> Self {
+            Self { state: 0, device }
+        }
+
+        /// Returns the position as an unbatched observation `[1]` with one feature.
+        fn observation(&self) -> Tensor<1> {
+            Tensor::from_data([self.state as f32], &self.device)
+        }
+    }
+
+    impl Gym for CounterEnv {
+        type Error = CounterEnvError;
+        type ObservationSpace = BoxSpace<2>;
+        type ActionSpace = Discrete;
+
+        /// Returns the initial position as unbatched `[1]` on the environment device.
+        fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+            self.state = 0;
+            Ok(ResetInfo {
+                observation: self.observation(),
+                info: (),
+            })
+        }
+
+        /// Consumes one scalar integer action `[1]` and returns an unbatched position `[1]`.
+        /// Actions must be readable on the host; observations use the environment device.
+        fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
+            match action.try_into_scalar::<i32>()? {
+                0 => self.state -= 1,
+                1 => self.state += 1,
+                action => return Err(CounterEnvError::InvalidAction(action)),
+            }
+
+            let done = self.state.abs() >= 4;
+            Ok(StepInfo {
+                observation: self.observation(),
+                reward: 1.0,
+                done,
+                truncated: false,
+                info: (),
+            })
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            BoxSpace::new_with_universal_bounds([1, 1], -4.0, 4.0, &self.device)
+        }
+
+        fn action_space(&self) -> Self::ActionSpace {
+            Discrete::new(2)
+        }
+    }
+}
+
+mod deterministic_logger {
+    use modurl::prelude::*;
+
+    pub struct ConsoleLogger;
+
+    fn log_update(entry: &DeterministicActorCriticLogEntry) {
+        if !entry.update_index.is_multiple_of(1_000) {
+            return;
+        }
+
+        let critic_loss = entry.critic_losses[0]
+            .clone()
+            .cast(burn::tensor::DType::F32)
+            .into_scalar::<f32>();
+        let actor_loss = entry.actor_loss.as_ref().map(|loss| {
+            loss.clone()
+                .cast(burn::tensor::DType::F32)
+                .into_scalar::<f32>()
+        });
+
+        println!(
+            "step={} update={} critic_loss={critic_loss:.4} \
+         actor_updated={} actor_loss={actor_loss:?}",
+            entry.collection_timestep, entry.update_index, entry.actor_updated,
+        );
+    }
+
+    fn log_collection<I>(entry: &DeterministicActorCriticCollectionLogEntry<I>) {
         for episode in &entry.completed_episodes {
-            let _ = (
+            println!(
+                "step={} env={} return={} length={} terminated={} truncated={}",
+                episode.collection_timestep,
                 episode.environment_index,
                 episode.episode_return,
                 episode.episode_length,
                 episode.terminated,
                 episode.truncated,
-                episode.collection_timestep,
             );
         }
     }
-}
 
-// DDQN has the same logger entry types, and collection logging remains optional.
-struct DocumentationDDQNLogger;
-
-impl DDQNLogger for DocumentationDDQNLogger {
-    fn log(&mut self, entry: &QLogEntry) {
-        let _ = (&entry.replay_rewards, entry.collection_timestep);
-    }
-}
-
-// This is the shared logger shape shown in
-// docs/src/understand-deterministic-actor-critic-training.md.
-struct DocumentationDeterministicActorCriticLogger;
-
-fn log_deterministic_update(entry: &DeterministicActorCriticLogEntry) {
-    if !entry.update_index.is_multiple_of(1_000) {
-        return;
-    }
-
-    let critic_loss = entry.critic_losses[0]
-        .to_scalar::<f32>()
-        .expect("critic loss must be scalar");
-    let actor_loss = entry
-        .actor_loss
-        .as_ref()
-        .map(|loss| loss.to_scalar::<f32>().expect("actor loss must be scalar"));
-
-    println!(
-        "step={} update={} critic_loss={critic_loss:.4} \
-         actor_updated={} actor_loss={actor_loss:?}",
-        entry.collection_timestep, entry.update_index, entry.actor_updated,
-    );
-}
-
-fn log_deterministic_collection<I>(entry: &DeterministicActorCriticCollectionLogEntry<I>) {
-    for episode in &entry.completed_episodes {
-        println!(
-            "step={} env={} return={} length={} terminated={} truncated={}",
-            episode.collection_timestep,
-            episode.environment_index,
-            episode.episode_return,
-            episode.episode_length,
-            episode.terminated,
-            episode.truncated,
-        );
-    }
-}
-
-impl<I> DDPGLogger<I> for DocumentationDeterministicActorCriticLogger {
-    fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
-        log_deterministic_update(entry);
-    }
-
-    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
-        log_deterministic_collection(entry);
-    }
-}
-
-impl<I> TD3Logger<I> for DocumentationDeterministicActorCriticLogger {
-    fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
-        log_deterministic_update(entry);
-    }
-
-    fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
-        log_deterministic_collection(entry);
-    }
-}
-
-// This is the complete program shown in docs/src/getting-started.md. Keep this
-// test compile-only: running it would turn a documentation check into training.
-fn getting_started_program() {
-    let device = Device::Cpu;
-
-    let envs = (0..4)
-        .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
-        .collect::<Vec<_>>();
-    let mut env = DeviceMultiGymWrapper::new(
-        VectorizedGymWrapper::from(envs),
-        Device::Cpu,
-        device.clone(),
-    );
-
-    let observation_space = env.observation_space();
-    let action_space = env.action_space();
-
-    let actor_var_map = VarMap::new();
-    let actor_vb = VarBuilder::from_varmap(&actor_var_map, DType::F32, &device);
-    let actor_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(action_space.shape()[0])
-        .vb(actor_vb)
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .name("actor".to_string())
-        .build()
-        .expect("failed to build actor network");
-
-    let critic_var_map = VarMap::new();
-    let critic_vb = VarBuilder::from_varmap(&critic_var_map, DType::F32, &device);
-    let critic_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(1)
-        .vb(critic_vb)
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .name("critic".to_string())
-        .build()
-        .expect("failed to build critic network");
-
-    let optimizer_config = ParamsAdamW {
-        lr: 3e-4,
-        ..Default::default()
-    };
-
-    let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
-        .expect("failed to build actor optimizer");
-    let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
-        .expect("failed to build critic optimizer");
-
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
-
-    let network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(policy)
-            .critic_network(critic_network)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .build(),
-    );
-
-    let mut agent = PPOAgent::builder()
-        .action_space(action_space)
-        .network_info(network_info)
-        .batch_size(1024)
-        .mini_batch_size(64)
-        .clip_range(ConstantSchedule::new(0.2))
-        .training_horizon(10_000)
-        .device(device)
-        .build()
-        .unwrap();
-
-    agent.learn(&mut env, 10_000).expect("PPO learning failed");
-    println!("Training complete.");
-}
-
-// This is the complete DQN program shown in docs/src/dqn.md. Keep this test
-// compile-only: running it would turn a documentation check into training.
-fn dqn_program() {
-    let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
-    let mut env = DeviceMultiGymWrapper::new(
-        VectorizedGymWrapper::from(envs),
-        Device::Cpu,
-        device.clone(),
-    );
-    let observation_space = env.observation_space();
-
-    let online_var_map = VarMap::new();
-    let online_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &online_var_map,
-            DType::F32,
-            &device,
-        ))
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("failed to build the online Q-network");
-
-    let mut target_var_map = VarMap::new();
-    let target_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &target_var_map,
-            DType::F32,
-            &device,
-        ))
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("failed to build the target Q-network");
-
-    let optimizer = AdamW::new(
-        online_var_map.all_vars(),
-        ParamsAdamW {
-            lr: 2.5e-4,
-            ..Default::default()
-        },
-    )
-    .expect("failed to build the optimizer");
-
-    let mut logger = DocumentationDQNLogger;
-    let mut agent = DQNAgent::builder()
-        .action_space(Discrete::new(2))
-        .observation_space(observation_space)
-        .online_q_network(online_q_network)
-        .target_q_network(target_q_network)
-        .online_vars(&online_var_map)
-        .target_vars(&mut target_var_map)
-        .optimizer(optimizer)
-        .replay_capacity(10_000)
-        .batch_size(128)
-        .training_start(10_000)
-        .update_frequency(10)
-        .target_update_interval(500)
-        .training_horizon(500_000)
-        .epsilon_schedule(|progress: f64| {
-            let exploration_progress = (progress / 0.5).min(1.0);
-            1.0 + (0.05 - 1.0) * exploration_progress
-        })
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device.clone(),
-        )))
-        .logger(&mut logger)
-        .build()
-        .expect("DQN configuration should be valid");
-
-    agent.learn(&mut env, 500_000).expect("DQN learning failed");
-    println!("Training complete.");
-}
-
-// This is the DQN program with the DDQN-specific construction shown in
-// docs/src/ddqn.md. Keep this test compile-only for the same reason.
-fn ddqn_program() {
-    let device = Device::Cpu;
-    let envs = vec![CartPoleV1::builder().rng_device(&device).build().unwrap()];
-    let mut env = DeviceMultiGymWrapper::new(
-        VectorizedGymWrapper::from(envs),
-        Device::Cpu,
-        device.clone(),
-    );
-    let observation_space = env.observation_space();
-
-    let online_var_map = VarMap::new();
-    let online_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &online_var_map,
-            DType::F32,
-            &device,
-        ))
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("failed to build the online Q-network");
-
-    let mut target_var_map = VarMap::new();
-    let target_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(2)
-        .vb(VarBuilder::from_varmap(
-            &target_var_map,
-            DType::F32,
-            &device,
-        ))
-        .hidden_layer_sizes(vec![64, 64])
-        .build()
-        .expect("failed to build the target Q-network");
-
-    let optimizer = AdamW::new(
-        online_var_map.all_vars(),
-        ParamsAdamW {
-            lr: 2.5e-4,
-            ..Default::default()
-        },
-    )
-    .expect("failed to build the optimizer");
-
-    let mut logger = DocumentationDDQNLogger;
-    let mut agent = DDQNAgent::builder()
-        .action_space(Discrete::new(2))
-        .observation_space(observation_space)
-        .online_q_network(online_q_network)
-        .target_q_network(target_q_network)
-        .online_vars(&online_var_map)
-        .target_vars(&mut target_var_map)
-        .optimizer(optimizer)
-        .replay_capacity(10_000)
-        .batch_size(128)
-        .training_start(10_000)
-        .update_frequency(10)
-        .target_update_interval(500)
-        .training_horizon(500_000)
-        .epsilon_schedule(|progress: f64| {
-            let exploration_progress = (progress / 0.5).min(1.0);
-            1.0 + (0.05 - 1.0) * exploration_progress
-        })
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device.clone(),
-        )))
-        .logger(&mut logger)
-        .build()
-        .expect("DDQN configuration should be valid");
-
-    agent
-        .learn(&mut env, 500_000)
-        .expect("DDQN learning failed");
-    println!("Training complete.");
-}
-
-// This is the PPO builder configuration shown in docs/src/understand-ppo-training.md.
-fn understand_ppo_training_configuration() {
-    let device = Device::Cpu;
-
-    let envs = (0..4)
-        .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
-        .collect::<Vec<_>>();
-    let mut env = DeviceMultiGymWrapper::new(
-        VectorizedGymWrapper::from(envs),
-        Device::Cpu,
-        device.clone(),
-    );
-
-    let observation_space = env.observation_space();
-    let action_space = env.action_space();
-
-    let actor_var_map = VarMap::new();
-    let actor_vb = VarBuilder::from_varmap(&actor_var_map, DType::F32, &device);
-    let actor_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(action_space.shape()[0])
-        .vb(actor_vb)
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .name("actor".to_string())
-        .build()
-        .expect("failed to build actor network");
-
-    let critic_var_map = VarMap::new();
-    let critic_vb = VarBuilder::from_varmap(&critic_var_map, DType::F32, &device);
-    let critic_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
-        .output_size(1)
-        .vb(critic_vb)
-        .activation(Tensor::tanh)
-        .hidden_layer_sizes(vec![64, 64])
-        .name("critic".to_string())
-        .build()
-        .expect("failed to build critic network");
-
-    let optimizer_config = ParamsAdamW {
-        lr: 3e-4,
-        ..Default::default()
-    };
-    let actor_optimizer = AdamW::new(actor_var_map.all_vars(), optimizer_config.clone())
-        .expect("failed to build actor optimizer");
-    let critic_optimizer = AdamW::new(critic_var_map.all_vars(), optimizer_config)
-        .expect("failed to build critic optimizer");
-
-    let policy = ProbabilisticPolicyModel::<CategoricalDistribution>::new(actor_network);
-    let network_info = PPONetworkInfo::Separate(
-        SeparatePPONetwork::builder()
-            .actor_network(policy)
-            .critic_network(critic_network)
-            .actor_optimizer(actor_optimizer)
-            .critic_optimizer(critic_optimizer)
-            .build(),
-    );
-
-    let mut agent = PPOAgent::builder()
-        .action_space(action_space)
-        .network_info(network_info)
-        .batch_size(2048)
-        .mini_batch_size(64)
-        .ent_coef(0.005)
-        .clip_range(ConstantSchedule::new(0.2))
-        .num_epochs(10)
-        .training_horizon(120_000)
-        .device(device)
-        .build()
-        .unwrap();
-
-    agent.learn(&mut env, 120_000).expect("PPO learning failed");
-}
-
-struct CounterEnv {
-    state: i32,
-    device: Device,
-}
-
-impl CounterEnv {
-    fn new(device: Device) -> Self {
-        Self { state: 0, device }
-    }
-
-    fn observation(&self) -> candle_core::Result<Tensor> {
-        Tensor::from_vec(vec![self.state as f32], (1,), &self.device)
-    }
-}
-
-impl Gym for CounterEnv {
-    type Error = candle_core::Error;
-    type SpaceError = candle_core::Error;
-
-    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
-        self.state = 0;
-        Ok(ResetInfo {
-            state: self.observation()?,
-            info: (),
-        })
-    }
-
-    /// Steps with one scalar discrete action shaped `[]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
-        match action.to_vec0::<u32>()? {
-            0 => self.state -= 1,
-            1 => self.state += 1,
-            _ => panic!("action is outside the action space"),
+    impl<I> DDPGLogger<I> for ConsoleLogger {
+        fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
+            log_update(entry);
         }
 
-        let done = self.state.abs() >= 4;
-        Ok(StepInfo {
-            state: self.observation()?,
-            reward: 1.0,
-            done,
-            truncated: false,
-            info: (),
-        })
+        fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+            log_collection(entry);
+        }
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(BoxSpace::new_with_universal_bounds(
-            vec![1],
-            -4.0,
-            4.0,
-            &self.device,
-        ))
+    impl<I> TD3Logger<I> for ConsoleLogger {
+        fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
+            log_update(entry);
+        }
+
+        fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry<I>) {
+            log_collection(entry);
+        }
+    }
+}
+
+mod ppo_configuration {
+    use burn::{
+        nn::Tanh,
+        optim::AdamWConfig,
+        tensor::{DType, Device},
+    };
+    use modurl::prelude::*;
+    use modurl_gym::classic_control::cartpole::CartPoleV1;
+
+    fn configure() {
+        let device = Device::flex().autodiff();
+
+        let envs = (0..4)
+            .map(|_| {
+                CartPoleV1::builder()
+                    .rng_device(&Device::flex())
+                    .build()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut env = DeviceMultiGymWrapper::new(
+            VectorizedGymWrapper::new(envs).unwrap(),
+            Device::flex(),
+            device.clone(),
+        );
+
+        let observation_space = env.observation_space();
+        let action_space = env.action_space();
+
+        let actor_network = MLP::builder()
+            .input_size(observation_space.shape()[0])
+            .output_size(action_space.get_possible_values())
+            .options((&device, DType::F32))
+            .activation(Tanh)
+            .hidden_layer_sizes(vec![64, 64])
+            .build()
+            .expect("failed to build actor network");
+
+        let critic_network = MLP::builder()
+            .input_size(observation_space.shape()[0])
+            .output_size(1)
+            .options((&device, DType::F32))
+            .activation(Tanh)
+            .hidden_layer_sizes(vec![64, 64])
+            .build()
+            .expect("failed to build critic network");
+
+        let optimizer_config = AdamWConfig::new();
+        let actor_optimizer = optimizer_config.init();
+        let critic_optimizer = optimizer_config.init();
+
+        let policy = ProbabilisticPolicyModel::new(actor_network, CategoricalDistribution);
+
+        let network_info = SeparatePPONetwork::builder()
+            .actor_network(policy)
+            .critic_network(critic_network)
+            .actor_optimizer(actor_optimizer)
+            .critic_optimizer(critic_optimizer)
+            .actor_learning_rate(3e-4)
+            .critic_learning_rate(3e-4)
+            .build()
+            .unwrap();
+
+        let mut agent = PPOAgent::builder()
+            .observation_space(observation_space)
+            .action_space(action_space)
+            .network_info(network_info)
+            .batch_size(2048)
+            .mini_batch_size(64)
+            .ent_coef(0.005)
+            .clip_range(ConstantSchedule::new(0.2))
+            .training_horizon(120_000)
+            .num_epochs(10)
+            .device(device)
+            .build()
+            .unwrap();
+
+        agent.learn(&mut env, 120_000).expect("PPO learning failed");
+        println!("Training complete.");
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
-        Box::new(Discrete::new(2))
+    pub(super) fn compile_program() {
+        let _ = configure as fn();
     }
+}
+use burn::tensor::{Device, Int, Tensor};
+use modurl::prelude::*;
+
+#[test]
+fn documentation_programs_compile_without_running_training() {
+    getting_started::compile_program();
+    dqn::compile_program();
+    ddqn::compile_program();
+    ppo_configuration::compile_program();
+    let _ = deterministic_logger::ConsoleLogger;
 }
 
 #[test]
 fn custom_gym_can_be_vectorized() {
-    let device = Device::Cpu;
+    let device = Device::flex();
     let envs = (0..4)
-        .map(|_| CounterEnv::new(device.clone()))
-        .collect::<Vec<_>>();
-    let mut env = VectorizedGymWrapper::from(envs);
-
-    let _states = env.reset().expect("counter environment resets");
-    let actions = Tensor::zeros((4,), DType::U32, &device).expect("valid actions");
-    let step = env.step(actions).expect("counter environment steps");
-    let _transition_next_states = step
-        .transition_next_states()
-        .expect("transition states have a consistent shape");
+        .map(|_| counter_env::CounterEnv::new(device.clone()))
+        .collect();
+    let mut env = VectorizedGymWrapper::new(envs).unwrap();
+    assert_eq!(env.reset().unwrap().dims(), [4, 1]);
+    let actions = Tensor::<2, Int>::zeros([4, 1], &device);
+    let step = env.step(actions).unwrap();
+    assert_eq!(step.transition_next_observations().dims(), [4, 1]);
 }
 
 #[test]
-fn documentation_programs_compile_without_running_training() {
-    let _logger = DocumentationDeterministicActorCriticLogger;
-    let _ = getting_started_program as fn();
-    let _ = dqn_program as fn();
-    let _ = ddqn_program as fn();
-    let _ = understand_ppo_training_configuration as fn();
-
-    #[cfg(feature = "cuda")]
-    let _ = cuda_device as fn() -> candle_core::Result<Device>;
-    #[cfg(feature = "metal")]
-    let _ = metal_device as fn() -> candle_core::Result<Device>;
+fn mirrored_book_snippets_match() {
+    let source = include_str!("documentation_examples.rs");
+    for (book, block_index) in [
+        (
+            include_str!("../../../docs/src/getting-started.md"),
+            usize::MAX,
+        ),
+        (include_str!("../../../docs/src/dqn.md"), 0),
+        (include_str!("../../../docs/src/ddqn.md"), 0),
+        (
+            include_str!("../../../docs/src/custom-gym-environment.md"),
+            0,
+        ),
+        (
+            include_str!("../../../docs/src/understand-deterministic-actor-critic-training.md"),
+            0,
+        ),
+    ] {
+        let snippets: Vec<_> = book
+            .split("```rust")
+            .skip(1)
+            .map(|block| {
+                block
+                    .split_once('\n')
+                    .unwrap()
+                    .1
+                    .split("```")
+                    .next()
+                    .unwrap()
+            })
+            .collect();
+        let snippet = if block_index == usize::MAX {
+            snippets.last().unwrap()
+        } else {
+            &snippets[block_index]
+        };
+        assert!(
+            without_whitespace(source).contains(&without_whitespace(snippet)),
+            "book snippet differs from its compiled mirror"
+        );
+    }
 }
 
-#[cfg(feature = "cuda")]
-
-fn cuda_device() -> candle_core::Result<Device> {
-    Device::new_cuda(0)
-}
-
-#[cfg(feature = "metal")]
-
-fn metal_device() -> candle_core::Result<Device> {
-    Device::new_metal(0)
+fn without_whitespace(text: &str) -> String {
+    let compact: String = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    compact
+        .replace(",)", ")")
+        .replace(",]", "]")
+        .replace(",}", "}")
 }

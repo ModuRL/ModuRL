@@ -1,45 +1,49 @@
-//! Twin Delayed Deep Deterministic Policy Gradient.
-//!
-//! [`TD3Agent`] extends deterministic replay training with a critic ensemble,
-//! target-policy smoothing, and delayed actor updates. [`TD3Logger`] receives
-//! replay-update and collection metrics.
-
-use std::fmt::Debug;
-
-use bon::bon;
-use candle_core::Tensor;
-use candle_nn::{Optimizer, VarMap};
+//! Twin Delayed Deep Deterministic Policy Gradient with a critic ensemble.
 
 use super::{
     CriticCountRequirement, DeterministicActorCriticAgent,
-    DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticError,
-    DeterministicActorCriticLogEntry, DeterministicActorCriticLogger,
-    DeterministicActorCriticResult, DeterministicActorCriticStrategy, DeterministicCritic,
+    DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
+    DeterministicActorCriticError, DeterministicActorCriticLogEntry,
+    DeterministicActorCriticLogger, DeterministicActorCriticModelFor,
+    DeterministicActorCriticModelGroup, DeterministicActorCriticModelTypes,
+    DeterministicActorCriticStrategy,
 };
 use crate::{
     agents::{
         Agent, ReplayStorageConfig,
-        sac::{SACCriticAggregationMode, SACCriticError, aggregate_critic_values},
+        action_value_critic::{
+            ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
+            ActionValueCriticNetwork, aggregate_critic_values,
+        },
     },
     gym::MultiGym,
-    spaces::{BoxSpace, Space},
+    models::Forward,
+    spaces::{ActionMap, ObservationSpace},
+    tensor_rank::{NextRank, PrevRank},
 };
+use bon::bon;
+use burn::{
+    module::Module,
+    optim::ModuleOptimizer,
+    tensor::{DType, Float, Tensor, kind::Autodiff},
+};
+use std::fmt::Debug;
 
 /// Receives TD3 replay-update and collection metrics.
-pub trait TD3Logger<I = ()> {
-    /// Records metrics from one replay optimization.
-    fn log(&mut self, entry: &DeterministicActorCriticLogEntry);
+pub trait TD3Logger<I = (), const A: usize = 2> {
+    /// Records metrics from one replay optimization with rank-A action batches.
+    fn log(&mut self, entry: &DeterministicActorCriticLogEntry<A>);
 
     /// Records metrics from one vectorized environment step.
     fn log_collection(&mut self, _entry: &DeterministicActorCriticCollectionLogEntry<I>) {}
 }
 
-struct TD3LoggingInfo<'a, I> {
-    logger: &'a mut dyn TD3Logger<I>,
+struct TD3LoggingInfo<'a, I, const A: usize> {
+    logger: &'a mut dyn TD3Logger<I, A>,
 }
 
-impl<I> DeterministicActorCriticLogger<I> for Option<TD3LoggingInfo<'_, I>> {
-    fn log_update(&mut self, entry: &DeterministicActorCriticLogEntry) {
+impl<I, const A: usize> DeterministicActorCriticLogger<I, A> for Option<TD3LoggingInfo<'_, I, A>> {
+    fn log_update(&mut self, entry: &DeterministicActorCriticLogEntry<A>) {
         if let Some(info) = self {
             info.logger.log(entry);
         }
@@ -56,8 +60,8 @@ pub(crate) struct TD3Strategy {
     target_policy_noise: f64,
     target_noise_clip: f64,
     actor_update_interval: usize,
-    target_aggregation_mode: SACCriticAggregationMode,
-    actor_aggregation_mode: Option<SACCriticAggregationMode>,
+    target_aggregation_mode: ActionValueCriticAggregationMode,
+    actor_aggregation_mode: Option<ActionValueCriticAggregationMode>,
 }
 
 impl DeterministicActorCriticStrategy for TD3Strategy {
@@ -77,117 +81,115 @@ impl DeterministicActorCriticStrategy for TD3Strategy {
         self.target_noise_clip
     }
 
-    /// Takes the elementwise minimum of two target tensors shaped `[batch]`.
-    fn aggregate_target_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError> {
-        aggregate_critic_values(&values, self.target_aggregation_mode)
+    /// Combines critic targets [batch_size, 1] with the configured elementwise aggregation; preserves dtype and device.
+    fn aggregate_target_values(
+        &self,
+        values: Vec<Tensor<2>>,
+    ) -> Result<Tensor<2>, ActionValueCriticError> {
+        aggregate_critic_values::<2, 3>(&values, self.target_aggregation_mode)
     }
 
-    /// Combines actor-objective Q tensors shaped `[batch_size]` using the
+    /// Combines actor-objective Q tensors shaped `[batch_size, 1]` using the
     /// configured mode, or selects the first tensor for canonical TD3.
-    fn aggregate_actor_values(&self, values: Vec<Tensor>) -> Result<Tensor, SACCriticError> {
+    fn aggregate_actor_values(
+        &self,
+        values: Vec<Tensor<2>>,
+    ) -> Result<Tensor<2>, ActionValueCriticError> {
         match self.actor_aggregation_mode {
-            Some(mode) => aggregate_critic_values(&values, mode),
+            Some(mode) => aggregate_critic_values::<2, 3>(&values, mode),
             None => values
                 .into_iter()
                 .next()
-                .ok_or(SACCriticError::NoCriticValues),
+                .ok_or(ActionValueCriticError::NoCriticValues),
         }
     }
 }
 
-/// Twin Delayed Deep Deterministic Policy Gradient agent.
-///
-/// The canonical configuration uses two critics and
-/// [`SACCriticAggregationMode::Min`] for targets, while optimizing the actor
-/// against the first critic. Any non-empty critic ensemble is supported, and
-/// target and actor aggregation can be configured independently for
-/// experimentation.
-pub struct TD3Agent<'a, AO, CO, GE, SE, I = ()>
-where
-    AO: Optimizer,
-    CO: Optimizer,
-    GE: Debug,
-    SE: Debug,
-{
-    inner: DeterministicActorCriticAgent<'a, AO, CO, GE, SE, TD3Strategy>,
-    logging_info: Option<TD3LoggingInfo<'a, I>>,
+/// Trains one deterministic actor and a nonempty critic ensemble with bounded continuous actions.
+/// Targets use the minimum Q value by default; the actor uses the first critic.
+/// Target-policy noise defaults to 0.2 with a 0.5 componentwise clip. Actor and target updates occur every second replay update.
+/// Native observations keep their kind and dtype. Actions and training statistics use the configured floating-point dtype.
+/// Rank O includes observation batch and event axes; rank A includes action batch and event axes.
+pub struct TD3Agent<
+    'a,
+    G: DeterministicActorCriticModelTypes,
+    OS,
+    AS,
+    GE,
+    I = (),
+    const A: usize = 2,
+> {
+    inner: DeterministicActorCriticAgent<G, OS, AS, TD3Strategy, GE, A>,
+    logging_info: Option<TD3LoggingInfo<'a, I, A>>,
 }
 
 #[bon]
-impl<'a, AO, CO, GE, SE, I> TD3Agent<'a, AO, CO, GE, SE, I>
-where
-    AO: Optimizer,
-    CO: Optimizer,
-    GE: Debug,
-    SE: Debug,
+impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
+    TD3Agent<'a, G, OS, AS, GE, I, A>
 {
+    /// Builds an agent with detached target copies of the online actor and each critic.
+    /// Observations use [batch_size, ...observation_shape]; Float actions use [batch_size, ...action_shape].
+    /// Models must use the optimization device. Models perform any observation dtype conversion explicitly.
+    /// Returns typed errors for invalid configuration, space shapes, or model devices.
     #[builder]
-    /// Builds a TD3 agent and initializes every target network from its online
-    /// counterpart.
-    pub fn new(
-        /// Actor optimized on delayed replay updates.
-        #[builder(with = |actor: impl candle_core::Module + 'static| Box::new(actor))]
-        online_actor: Box<dyn candle_core::Module>,
-        /// Actor used to calculate smoothed next-state Bellman targets.
-        #[builder(with = |actor: impl candle_core::Module + 'static| Box::new(actor))]
-        target_actor: Box<dyn candle_core::Module>,
-        /// Parameters belonging to `online_actor`.
-        online_actor_vars: &'a VarMap,
-        /// Parameters belonging to `target_actor`.
-        target_actor_vars: &'a mut VarMap,
-        /// Optimizer for the online actor parameters.
-        actor_optimizer: AO,
-        /// Non-empty independently optimized critic ensemble.
-        critics: Vec<DeterministicCritic<'a, CO>>,
-        /// Bounded action space matching the actor output and environment.
-        action_space: BoxSpace,
-        /// Observation-space contract expected by the actor and critics.
-        observation_space: Box<dyn Space<Error = SE>>,
-        /// Devices used for replay storage and optimization.
+    pub fn new<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
+        online_actor: M,
+        #[builder(into)] actor_optimizer: ModuleOptimizer,
+        actor_learning_rate: f64,
+        critics: Vec<ActionValueCritic<N>>,
+        action_space: AS,
+        observation_space: OS,
         replay_storage_config: ReplayStorageConfig,
-        /// Optional replay-update and collection metric sink.
-        logger: Option<&'a mut dyn TD3Logger<I>>,
-        /// Bellman discount factor.
-        #[builder(default = 0.99)]
-        gamma: f64,
-        /// Polyak coefficient for actor and critic target updates.
-        #[builder(default = 0.005)]
-        tau: f64,
-        /// Standard deviation of Gaussian collection-action noise.
-        #[builder(default = 0.1)]
-        exploration_noise: f64,
-        /// Standard deviation of Gaussian target-policy noise.
+        logger: Option<&'a mut dyn TD3Logger<I, A>>,
+        #[builder(default = 0.99)] gamma: f64,
+        #[builder(default = 0.005)] tau: f64,
+        #[builder(default = 0.1)] exploration_noise: f64,
+        /// Standard deviation of Gaussian noise applied only to target policy outputs.
         #[builder(default = 0.2)]
         target_policy_noise: f64,
         /// Componentwise absolute limit for target-policy noise.
         #[builder(default = 0.5)]
         target_noise_clip: f64,
-        /// Replay-optimization interval between actor and target updates.
+        /// Replay-update interval between actor and target updates.
         #[builder(default = 2)]
         actor_update_interval: usize,
-        /// Aggregates the target critics' next-state Q estimates. Canonical
-        /// TD3 uses [`SACCriticAggregationMode::Min`].
-        #[builder(default = SACCriticAggregationMode::Min)]
-        target_aggregation_mode: SACCriticAggregationMode,
-        /// Optionally aggregates all online critics for the actor objective.
-        /// `None` preserves canonical TD3 behavior by using the first critic.
-        actor_aggregation_mode: Option<SACCriticAggregationMode>,
-        /// Maximum number of transitions retained in replay.
-        #[builder(default = 1_000_000)]
-        replay_capacity: usize,
-        /// Number of replay transitions sampled per optimization.
-        #[builder(default = 256)]
-        batch_size: usize,
-        /// Collected-transition interval between replay optimizations.
-        #[builder(default = 1)]
-        update_frequency: usize,
-        /// Number of random-action transitions collected before optimization.
-        #[builder(default = 1_000)]
-        training_start: usize,
-        /// Global collected-transition horizon.
+        /// Elementwise combination of target Q values [batch_size, 1].
+        #[builder(default = ActionValueCriticAggregationMode::Min)]
+        target_aggregation_mode: ActionValueCriticAggregationMode,
+        /// Optional combination of actor-objective Q values [batch_size, 1]; omission selects the first critic.
+        actor_aggregation_mode: Option<ActionValueCriticAggregationMode>,
+        #[builder(default = 1_000_000)] replay_capacity: usize,
+        #[builder(default = 256)] batch_size: usize,
+        #[builder(default = 1)] update_frequency: usize,
+        #[builder(default = 1_000)] training_start: usize,
         training_horizon: usize,
-        #[builder(default = candle_core::DType::F32)] dtype: candle_core::DType,
-    ) -> DeterministicActorCriticResult<Self, GE, SE> {
+        #[builder(default = DType::F32)] dtype: DType,
+    ) -> Result<Self, DeterministicActorCriticConfigurationError>
+    where
+        OS: ObservationSpace<O>,
+        OS::Kind: Autodiff,
+        AS: ActionMap<A, A, Kind = Float, Error = SE>,
+        Tensor<A>: NextRank<Next = Tensor<C>>,
+        M: Module
+            + Forward<O, A, InputKind = OS::Kind, OutputKind = Float, Error = AE>
+            + DeterministicActorCriticModelFor<
+                N,
+                Tensor<O, OS::Kind>,
+                Tensor<A>,
+                Tensor<C>,
+                ModelGroup = G,
+            >,
+        N: ActionValueCriticNetwork<
+                O,
+                A,
+                C,
+                ObservationKind = OS::Kind,
+                ActionKind = Float,
+                Error = CE,
+            >,
+        G: DeterministicActorCriticModelTypes<Actor = M, Critic = N>,
+        GE: Debug,
+    {
         let strategy = TD3Strategy {
             target_policy_noise,
             target_noise_clip,
@@ -195,12 +197,11 @@ where
             target_aggregation_mode,
             actor_aggregation_mode,
         };
+
         let inner = DeterministicActorCriticAgent::builder()
             .online_actor(online_actor)
-            .target_actor(target_actor)
-            .online_actor_vars(online_actor_vars)
-            .target_actor_vars(target_actor_vars)
             .actor_optimizer(actor_optimizer)
+            .actor_learning_rate(actor_learning_rate)
             .critics(critics)
             .strategy(strategy)
             .action_space(action_space)
@@ -221,48 +222,120 @@ where
             logging_info: logger.map(|logger| TD3LoggingInfo { logger }),
         })
     }
+}
 
-    /// Returns the bounded continuous action space used by the agent.
-    pub fn get_action_space(&self) -> &BoxSpace {
+impl<
+    M,
+    N,
+    OS,
+    AS,
+    GE,
+    I,
+    AE: Debug,
+    CE: Debug,
+    SE: Debug,
+    const O: usize,
+    const A: usize,
+    const C: usize,
+>
+    TD3Agent<
+        '_,
+        DeterministicActorCriticModelGroup<M, N, Tensor<O, OS::Kind>, Tensor<A>, Tensor<C>>,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
+where
+    OS: ObservationSpace<O>,
+    OS::Kind: Autodiff,
+    AS: ActionMap<A, A, Kind = Float, Error = SE>,
+    Tensor<A>: NextRank<Next = Tensor<C>>,
+    M: Module + Forward<O, A, InputKind = OS::Kind, OutputKind = Float, Error = AE>,
+    N: ActionValueCriticNetwork<
+            O,
+            A,
+            C,
+            ObservationKind = OS::Kind,
+            ActionKind = Float,
+            Error = CE,
+        >,
+    GE: Debug,
+{
+    /// Returns the bounded action-space contract.
+    pub fn get_action_space(&self) -> &AS {
         self.inner.get_action_space()
     }
 
-    /// Returns the observation-space contract used by the agent.
-    pub fn get_observation_space(&self) -> &dyn Space<Error = SE> {
+    /// Returns the native observation-space contract.
+    pub fn get_observation_space(&self) -> &OS {
         self.inner.get_observation_space()
     }
 
-    /// Maps observations `[batch, ...observation_shape]` to deterministic
-    /// actions `[batch, ...action_shape]`.
+    /// Maps native observations [batch_size, ...observation_shape] to Float actions [batch_size, ...action_shape].
+    /// Preserves the batch axis and actor gradients. Transfers inputs to the optimization device and applies the action transform without noise.
     pub fn act_deterministic(
         &self,
-        observation: &Tensor,
-    ) -> Result<Tensor, DeterministicActorCriticError<GE, SE>> {
-        self.inner.act_deterministic(observation)
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        self.inner.act_deterministic(observations)
     }
 }
 
-impl<'a, AO, CO, GE, SE, I> Agent<I> for TD3Agent<'a, AO, CO, GE, SE, I>
-where
-    AO: Optimizer,
-    CO: Optimizer,
-    GE: Debug,
+impl<
+    M,
+    N,
+    OS,
+    AS,
+    GE,
+    I,
+    K: Autodiff,
+    AE: Debug,
+    CE: Debug,
     SE: Debug,
+    const O: usize,
+    const A: usize,
+    const C: usize,
+    const U: usize,
+> Agent<I, O, A>
+    for TD3Agent<
+        '_,
+        DeterministicActorCriticModelGroup<M, N, Tensor<O, K>, Tensor<A>, Tensor<C>>,
+        OS,
+        AS,
+        GE,
+        I,
+        A,
+    >
+where
+    OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+    AS: ActionMap<A, A, Kind = Float, Error = SE>,
+    Tensor<A>: NextRank<Next = Tensor<C>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    M: Module + Forward<O, A, InputKind = K, OutputKind = Float, Error = AE>,
+    N: ActionValueCriticNetwork<O, A, C, ObservationKind = K, ActionKind = Float, Error = CE>,
+    GE: Debug,
 {
-    type Error = DeterministicActorCriticError<GE, SE>;
+    type Error = DeterministicActorCriticError<AE, GE, SE, CE>;
     type GymError = GE;
     type SpaceError = SE;
+    type ObservationSpace = OS;
+    type ActionSpace = AS;
 
-    /// Maps observations `[batch, ...observation_shape]` to exploration-noised
-    /// actions `[batch, ...action_shape]`.
-    fn act(&mut self, observation: &Tensor) -> Result<Tensor, Self::Error> {
-        self.inner.act(observation)
+    /// Maps native observations [batch_size, ...observation_shape] to Float exploration actions [batch_size, ...action_shape].
+    /// Preserves input kind and dtype; returned actions use the configured dtype and optimization device.
+    fn act(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
+        self.inner.act(observations)
     }
 
+    /// Trains from native observation batches, Float action batches, and rewards [num_envs, 1].
+    /// Terminal observations omit the batch axis. Replay and progress persist across calls; truncations bootstrap from terminal observations.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
-            name = "td3.learn",
+            name = "ddpg.learn",
             target = "modurl::performance",
             skip_all,
             fields(num_timesteps)
@@ -270,181 +343,336 @@ where
     )]
     fn learn(
         &mut self,
-        env: &mut dyn MultiGym<I, Error = GE, SpaceError = SE>,
+        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)
     }
 }
-
 #[cfg(test)]
 mod tests {
-    use super::{TD3Agent, TD3Logger, TD3Strategy};
+    use super::*;
     use crate::{
-        agents::{
-            Agent, ReplayDeviceStrategy, ReplayStorageConfig,
-            deterministic_actor_critic::{
-                DeterministicActorCriticLogEntry, DeterministicActorCriticStrategy,
-            },
-            sac::{SACCritic, SACCriticAggregationMode, ScalarStateActionCritic},
-            test_support::{CountingOptimizer, FixedContinuousEnv},
-        },
-        gym::{MultiGym, VectorizedGymWrapper},
-        models::MLP,
+        agents::ReplayDeviceStrategy, agents::action_value_critic::ScalarStateActionCritic,
+        agents::test_support::FixedContinuousEnv, gym::VectorizedGymWrapper, models::MLP,
         spaces::BoxSpace,
     };
-    use candle_core::{DType, Device, Tensor};
-    use candle_nn::{VarBuilder, VarMap};
+    use burn::{nn::Tanh, optim::SgdConfig, tensor::Device};
 
-    #[test]
-    fn strategy_uses_the_configured_critic_aggregation() {
-        let strategy = TD3Strategy {
-            target_policy_noise: 0.2,
-            target_noise_clip: 0.5,
-            actor_update_interval: 2,
-            target_aggregation_mode: SACCriticAggregationMode::Mean,
-            actor_aggregation_mode: Some(SACCriticAggregationMode::Mean),
-        };
-        let values = || {
-            vec![
-                Tensor::new(&[1.0f32, 3.0], &Device::Cpu).unwrap(),
-                Tensor::new(&[3.0f32, 1.0], &Device::Cpu).unwrap(),
-                Tensor::new(&[2.0f32, 2.0], &Device::Cpu).unwrap(),
-            ]
-        };
-
-        assert_eq!(
-            strategy
-                .aggregate_target_values(values())
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap(),
-            vec![2.0, 2.0]
-        );
-        assert_eq!(
-            strategy
-                .aggregate_actor_values(values())
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap(),
-            vec![2.0, 2.0]
-        );
+    struct DTypeEnv {
+        inner: FixedContinuousEnv,
+        dtype: DType,
     }
 
-    #[derive(Default)]
-    struct RecordingLogger {
-        actor_updates: Vec<bool>,
-    }
+    impl crate::gym::Gym for DTypeEnv {
+        type Error = std::convert::Infallible;
+        type ObservationSpace = BoxSpace<2>;
+        type ActionSpace = BoxSpace<2>;
 
-    impl TD3Logger for RecordingLogger {
-        fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
-            self.actor_updates.push(entry.actor_updated);
-            assert_eq!(entry.critic_losses.len(), 3);
-            assert_eq!(entry.critic_q_values.len(), 3);
-            assert!(
-                entry
-                    .critic_q_values
-                    .iter()
-                    .all(|values| values.dims() == [1])
-            );
-            assert_eq!(entry.bellman_targets.dims(), &[1]);
-            assert_eq!(entry.replay_actions.dims(), &[1, 1]);
-            assert_eq!(entry.critic_learning_rates, vec![1e-3, 1e-3, 1e-3]);
-            assert_eq!(entry.actor_loss.is_some(), entry.actor_updated);
-            assert_eq!(entry.policy_q_values.is_some(), entry.actor_updated);
-            assert_eq!(entry.policy_actions.is_some(), entry.actor_updated);
+        /// Accepts Float actions [1] and returns observations [4] in the fixture dtype; rewards remain F32.
+        fn step(&mut self, action: Tensor<1>) -> Result<crate::gym::StepInfo, Self::Error> {
+            let mut step = self.inner.step(action)?;
+            step.observation = step.observation.cast(self.dtype) + 1.0;
+            Ok(step)
+        }
+
+        /// Returns native Float observations [4] in the fixture dtype.
+        fn reset(&mut self) -> Result<crate::gym::ResetInfo, Self::Error> {
+            let mut reset = self.inner.reset()?;
+            reset.observation = reset.observation.cast(self.dtype) + 1.0;
+            Ok(reset)
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            self.inner.observation_space()
+        }
+
+        fn action_space(&self) -> Self::ActionSpace {
+            self.inner.action_space()
         }
     }
 
-    fn actor(vars: &VarMap, device: &Device) -> MLP {
-        MLP::builder()
-            .input_size(4)
-            .output_size(1)
-            .hidden_layer_sizes(vec![4])
-            .output_activation(Tensor::tanh)
-            .vb(VarBuilder::from_varmap(vars, DType::F32, device))
-            .build()
-            .unwrap()
+    #[derive(Default)]
+    struct Logger {
+        updates: usize,
+        collections: usize,
+        actor_updates: Vec<bool>,
     }
 
-    fn critic<'a>(
-        online_vars: &'a VarMap,
-        target_vars: &'a mut VarMap,
-        device: &Device,
-    ) -> SACCritic<'a, CountingOptimizer> {
-        let network = |vars| {
-            MLP::builder()
-                .input_size(5)
-                .output_size(1)
-                .hidden_layer_sizes(vec![4])
-                .vb(VarBuilder::from_varmap(vars, DType::F32, device))
-                .build()
-                .unwrap()
-        };
-        SACCritic::builder()
-            .online_network(ScalarStateActionCritic::new(network(online_vars)))
-            .target_network(ScalarStateActionCritic::new(network(target_vars)))
-            .online_vars(online_vars)
-            .target_vars(target_vars)
-            .optimizer(CountingOptimizer::with_learning_rate(1e-3))
-            .build()
-            .unwrap()
+    impl TD3Logger for Logger {
+        fn log(&mut self, entry: &DeterministicActorCriticLogEntry) {
+            self.updates += 1;
+            self.actor_updates.push(entry.actor_updated);
+            assert_eq!(entry.critic_losses.len(), 3);
+            assert_eq!(entry.critic_q_values[0].dims(), [1, 1]);
+            assert_eq!(entry.bellman_targets.dims(), [1, 1]);
+            assert_eq!(entry.policy_actions.is_some(), entry.actor_updated);
+            assert_eq!(entry.actor_loss.is_some(), entry.actor_updated);
+            assert_eq!(entry.policy_q_values.is_some(), entry.actor_updated);
+            assert_eq!(entry.actor_learning_rate, 0.01);
+        }
+
+        fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry) {
+            self.collections += 1;
+            assert_eq!(entry.collection_rewards.dims(), [2, 1]);
+        }
     }
 
     #[test]
-    fn public_agent_supports_generalized_critic_ensembles_and_delays_actor_updates() {
-        let device = Device::Cpu;
-        let mut env: VectorizedGymWrapper<FixedContinuousEnv> = vec![
-            FixedContinuousEnv::new(device.clone()),
-            FixedContinuousEnv::new(device.clone()),
-        ]
-        .into();
-        let online_actor_vars = VarMap::new();
-        let mut target_actor_vars = VarMap::new();
-        let online_critic_vars_1 = VarMap::new();
-        let mut target_critic_vars_1 = VarMap::new();
-        let online_critic_vars_2 = VarMap::new();
-        let mut target_critic_vars_2 = VarMap::new();
-        let online_critic_vars_3 = VarMap::new();
-        let mut target_critic_vars_3 = VarMap::new();
-        let critic_1 = critic(&online_critic_vars_1, &mut target_critic_vars_1, &device);
-        let critic_2 = critic(&online_critic_vars_2, &mut target_critic_vars_2, &device);
-        let critic_3 = critic(&online_critic_vars_3, &mut target_critic_vars_3, &device);
-        let mut logger = RecordingLogger::default();
-        let mut agent = TD3Agent::builder()
-            .online_actor(actor(&online_actor_vars, &device))
-            .target_actor(actor(&target_actor_vars, &device))
-            .online_actor_vars(&online_actor_vars)
-            .target_actor_vars(&mut target_actor_vars)
-            .actor_optimizer(CountingOptimizer::with_learning_rate(1e-3))
-            .critics(vec![critic_1, critic_2, critic_3])
-            .action_space(BoxSpace::new_with_universal_bounds(
-                vec![1],
-                -1.0,
-                1.0,
-                &device,
-            ))
-            .observation_space(env.observation_space())
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device,
-            )))
-            .exploration_noise(0.0)
-            .target_policy_noise(0.0)
-            .target_aggregation_mode(SACCriticAggregationMode::Mean)
-            .actor_aggregation_mode(SACCriticAggregationMode::Median)
-            .replay_capacity(4)
-            .batch_size(1)
-            .training_start(1)
-            .training_horizon(2)
-            .logger(&mut logger)
-            .build()
-            .unwrap();
+    fn builder_rejects_empty_ensembles_and_invalid_target_settings() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let actor = || {
+            MLP::builder()
+                .input_size(4)
+                .output_size(1)
+                .hidden_layer_sizes(vec![4])
+                .options((&device, DType::F32))
+                .build()
+                .unwrap()
+        };
+        let critic = || {
+            ActionValueCritic::builder()
+                .online_network(ScalarStateActionCritic::new(
+                    MLP::builder()
+                        .input_size(5)
+                        .output_size(1)
+                        .hidden_layer_sizes(vec![4])
+                        .options((&device, DType::F32))
+                        .build()
+                        .unwrap(),
+                ))
+                .optimizer(SgdConfig::new().init())
+                .learning_rate(0.01)
+                .build()
+                .unwrap()
+        };
+        let build = |critics, interval, noise, clip| {
+            TD3Agent::<_, _, _, std::convert::Infallible>::builder()
+                .online_actor(actor())
+                .actor_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(0.01)
+                .critics(critics)
+                .actor_update_interval(interval)
+                .target_policy_noise(noise)
+                .target_noise_clip(clip)
+                .action_space(BoxSpace::new_with_universal_bounds(
+                    [1, 1],
+                    -1.0,
+                    1.0,
+                    &device,
+                ))
+                .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+                .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                    device.clone(),
+                )))
+                .training_horizon(4)
+                .build()
+        };
+        assert!(matches!(
+            build(vec![], 2, 0.2, 0.5),
+            Err(DeterministicActorCriticConfigurationError::NoCritics)
+        ));
+        assert!(matches!(
+            build(vec![critic()], 0, 0.2, 0.5),
+            Err(DeterministicActorCriticConfigurationError::ZeroActorUpdateInterval)
+        ));
+        assert!(matches!(
+            build(vec![critic()], 2, f64::NAN, 0.5),
+            Err(DeterministicActorCriticConfigurationError::InvalidTargetPolicyNoise)
+        ));
+        assert!(matches!(
+            build(vec![critic()], 2, 0.2, -0.5),
+            Err(DeterministicActorCriticConfigurationError::InvalidTargetNoiseClip)
+        ));
+    }
 
-        agent.learn(&mut env, 2).unwrap();
-        assert_eq!(agent.inner.actor_optimizer.steps, 1);
-        assert_eq!(agent.inner.critics[0].optimizer().steps, 2);
-        assert_eq!(agent.inner.critics[1].optimizer().steps, 2);
-        assert_eq!(agent.inner.critics[2].optimizer().steps, 2);
-        assert_eq!(logger.actor_updates, vec![false, true]);
+    #[test]
+    fn aggregation_preserves_modes_and_canonical_actor_selection() {
+        let device = Device::flex();
+        for dtype in [DType::F32, DType::F64] {
+            let values = || {
+                vec![1.0, 3.0, 2.0]
+                    .into_iter()
+                    .map(|value| Tensor::full([2, 1], value, (&device, dtype)))
+                    .collect()
+            };
+            for (mode, expected) in [
+                (ActionValueCriticAggregationMode::Min, 1.0),
+                (ActionValueCriticAggregationMode::Mean, 2.0),
+                (ActionValueCriticAggregationMode::Median, 2.0),
+                (ActionValueCriticAggregationMode::Max, 3.0),
+            ] {
+                let strategy = TD3Strategy {
+                    target_policy_noise: 0.2,
+                    target_noise_clip: 0.5,
+                    actor_update_interval: 2,
+                    target_aggregation_mode: mode,
+                    actor_aggregation_mode: Some(mode),
+                };
+                for result in [
+                    strategy.aggregate_target_values(values()).unwrap(),
+                    strategy.aggregate_actor_values(values()).unwrap(),
+                ] {
+                    assert_eq!(result.dims(), [2, 1]);
+                    assert_eq!(result.dtype(), dtype);
+                    assert_eq!(
+                        result
+                            .into_data()
+                            .convert::<f64>()
+                            .try_to_vec::<f64>()
+                            .unwrap(),
+                        [expected, expected]
+                    );
+                }
+                assert!(matches!(
+                    strategy.aggregate_target_values(vec![]),
+                    Err(ActionValueCriticError::NoCriticValues)
+                ));
+            }
+            let strategy = TD3Strategy {
+                target_policy_noise: 0.2,
+                target_noise_clip: 0.5,
+                actor_update_interval: 2,
+                target_aggregation_mode: ActionValueCriticAggregationMode::Min,
+                actor_aggregation_mode: None,
+            };
+            assert_eq!(
+                strategy
+                    .aggregate_actor_values(values())
+                    .unwrap()
+                    .into_data()
+                    .convert::<f64>()
+                    .try_to_vec::<f64>()
+                    .unwrap(),
+                [1.0, 1.0]
+            );
+            assert!(matches!(
+                strategy.aggregate_actor_values(vec![]),
+                Err(ActionValueCriticError::NoCriticValues)
+            ));
+        }
+    }
+
+    #[test]
+    fn public_builder_trains_ensembles_and_delays_actor_and_targets() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        for dtype in [DType::F32, DType::F64] {
+            let device = Device::flex().autodiff();
+            let actor = MLP::builder()
+                .input_size(4)
+                .output_size(1)
+                .hidden_layer_sizes(vec![4])
+                .hidden_initializer(burn::nn::Initializer::Constant { value: 0.1 })
+                .output_initializer(burn::nn::Initializer::Constant { value: 0.1 })
+                .output_activation(Tanh)
+                .options((&device, dtype))
+                .build()
+                .unwrap();
+            let critic = || {
+                ActionValueCritic::builder()
+                    .online_network(ScalarStateActionCritic::new(
+                        MLP::builder()
+                            .input_size(5)
+                            .output_size(1)
+                            .hidden_layer_sizes(vec![4])
+                            .hidden_initializer(burn::nn::Initializer::Constant { value: 0.1 })
+                            .output_initializer(burn::nn::Initializer::Constant { value: 0.1 })
+                            .options((&device, dtype))
+                            .build()
+                            .unwrap(),
+                    ))
+                    .optimizer(SgdConfig::new().init())
+                    .learning_rate(0.01)
+                    .build()
+                    .unwrap()
+            };
+            let mut env = VectorizedGymWrapper::new(vec![
+                DTypeEnv {
+                    inner: FixedContinuousEnv::new(device.clone()),
+                    dtype,
+                },
+                DTypeEnv {
+                    inner: FixedContinuousEnv::new(device.clone()),
+                    dtype,
+                },
+            ])
+            .unwrap();
+            let mut logger = Logger::default();
+            let mut agent = TD3Agent::builder()
+                .online_actor(actor)
+                .critics(vec![critic(), critic(), critic()])
+                .actor_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(0.01)
+                .action_space(BoxSpace::new_with_universal_bounds(
+                    [1, 1],
+                    -1.0,
+                    1.0,
+                    &device,
+                ))
+                .observation_space(env.observation_space())
+                .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+                    device.clone(),
+                )))
+                .dtype(dtype)
+                .exploration_noise(0.0)
+                .replay_capacity(4)
+                .batch_size(1)
+                .training_start(0)
+                .training_horizon(4)
+                .actor_update_interval(3)
+                .target_aggregation_mode(ActionValueCriticAggregationMode::Mean)
+                .actor_aggregation_mode(ActionValueCriticAggregationMode::Median)
+                .logger(&mut logger)
+                .build()
+                .unwrap();
+            let observations = Tensor::ones([2, 4], (&device, dtype));
+            let actions = agent.act_deterministic(&observations).unwrap();
+            assert_eq!(actions.dims(), [2, 1]);
+            assert_eq!(actions.dtype(), dtype);
+            assert!(!actions.is_require_grad());
+            assert!(matches!(
+                agent.act_deterministic(&Tensor::zeros([2, 3], (&device, dtype))),
+                Err(DeterministicActorCriticError::Shape { .. })
+            ));
+            if dtype == DType::F64 {
+                assert!(matches!(
+                    agent.act_deterministic(&Tensor::zeros([2, 4], (&device, DType::F32))),
+                    Err(DeterministicActorCriticError::ActorError(
+                        crate::models::ModelError::InputDType { .. }
+                    ))
+                ));
+            }
+            let target_before = agent
+                .inner
+                .target_actor
+                .forward(observations.clone())
+                .unwrap()
+                .into_data();
+            agent.learn(&mut env, 2).unwrap();
+            assert_eq!(
+                agent
+                    .inner
+                    .target_actor
+                    .forward(observations.clone())
+                    .unwrap()
+                    .into_data(),
+                target_before
+            );
+            agent.learn(&mut env, 2).unwrap();
+            assert_ne!(
+                agent
+                    .inner
+                    .target_actor
+                    .forward(observations.clone())
+                    .unwrap()
+                    .into_data(),
+                target_before
+            );
+            assert_eq!(agent.inner.optimization_steps, 4);
+            assert_eq!(logger.updates, 4);
+            assert_eq!(logger.collections, 2);
+            assert_eq!(logger.actor_updates, [false, false, true, false]);
+        }
     }
 }

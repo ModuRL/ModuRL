@@ -1,8 +1,8 @@
 use bon::bon;
-use candle_core::Tensor;
+use burn::tensor::Tensor;
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::Space,
+    spaces::BoxSpace,
 };
 
 use crate::{
@@ -54,34 +54,40 @@ impl HalfCheetahV5 {
     }
 
     /// Sets an exact MuJoCo state, useful for reproducible evaluation and parity tests.
-    pub fn set_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<Tensor, MujocoError> {
+    /// Accepts host positions `[nq]` and velocities `[nv]`; returns unbatched F32 observations `[observation_size]` on CPU Flex.
+    pub fn set_state(&mut self, qpos: &[f64], qvel: &[f64]) -> Result<Tensor<1>, MujocoError> {
         self.core.set_state(qpos, qvel)?;
         self.core.render()?;
         self.observation()
     }
 
-    fn observation(&self) -> Result<Tensor, MujocoError> {
-        self.core
-            .tensor(&self.core.observation(self.exclude_x, false))
+    /// Returns unbatched F32 observations `[observation_size]` on CPU Flex, preserving the configured observation component order.
+    fn observation(&self) -> Result<Tensor<1>, MujocoError> {
+        Ok(self
+            .core
+            .tensor(&self.core.observation(self.exclude_x, false)))
     }
 }
 
 impl Gym for HalfCheetahV5 {
     type Error = MujocoError;
-    type SpaceError = candle_core::Error;
+    type ObservationSpace = BoxSpace<2>;
+    type ActionSpace = BoxSpace<2>;
 
+    /// Returns unbatched F32 observations `[observation_size]` on CPU Flex with reset metadata.
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.core
             .reset_uniform_positions_normal_velocities(self.reset_noise_scale)?;
         self.core.render()?;
         Ok(ResetInfo {
-            state: self.observation()?,
+            observation: self.observation()?,
             info: (),
         })
     }
 
     /// Steps with one continuous actuator vector shaped `[action_size]`.
-    fn step(&mut self, action: Tensor) -> Result<StepInfo, Self::Error> {
+    /// Accepts Float actions on CPU Flex; returns unbatched F32 observations `[observation_size]` on CPU Flex and an F32 reward.
+    fn step(&mut self, action: Tensor<1>) -> Result<StepInfo, Self::Error> {
         let x_before = self.core.qpos()[0];
         let action = self.core.step(&action)?;
         let x_velocity = (self.core.qpos()[0] - x_before) / self.core.dt();
@@ -89,7 +95,7 @@ impl Gym for HalfCheetahV5 {
         let reward = self.forward_reward_weight * x_velocity - control_cost;
         self.core.render()?;
         Ok(StepInfo {
-            state: self.observation()?,
+            observation: self.observation()?,
             reward: reward as f32,
             done: false,
             truncated: false,
@@ -97,11 +103,11 @@ impl Gym for HalfCheetahV5 {
         })
     }
 
-    fn observation_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn observation_space(&self) -> BoxSpace<2> {
         self.core.observation_space(self.exclude_x)
     }
 
-    fn action_space(&self) -> Box<dyn Space<Error = Self::SpaceError>> {
+    fn action_space(&self) -> BoxSpace<2> {
         self.core.action_space()
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use candle_core::{DType, Tensor};
+use burn::tensor::{DType, Tensor};
 
 use crate::{Error, Result};
 
@@ -129,11 +129,11 @@ impl Aggregator {
         }
     }
 
-    /// Aggregates named scalar metric tensors, each shaped `[]`.
+    /// Aggregates named scalar metric tensors, each shaped `[1]`.
     pub(crate) fn log(
         &mut self,
         timestep: usize,
-        metrics: &[(&str, &Tensor)],
+        metrics: &[(&str, &Tensor<1>)],
     ) -> Result<Option<CompletedTimestep>> {
         if let Some(current) = self.current_timestep
             && timestep < current
@@ -185,22 +185,22 @@ impl Aggregator {
     }
 }
 
-/// Converts named scalar tensors shaped `[]` into host values.
-fn read_metrics(metrics: &[(&str, &Tensor)]) -> Result<Vec<(String, f32)>> {
-    let mut groups: Vec<Vec<(usize, Tensor)>> = Vec::new();
+/// Converts named scalar tensors shaped `[1]` into host values.
+fn read_metrics(metrics: &[(&str, &Tensor<1>)]) -> Result<Vec<(String, f32)>> {
+    let mut groups: Vec<Vec<(usize, Tensor<1>)>> = Vec::new();
     let mut result = Vec::with_capacity(metrics.len());
     for (index, (name, tensor)) in metrics.iter().enumerate() {
-        if !tensor.dims().is_empty() {
+        if tensor.dims() != [1] {
             return Err(Error::NonScalar {
                 metric: (*name).to_owned(),
                 shape: tensor.dims().to_vec(),
             });
         }
         result.push(((*name).to_owned(), 0.0));
-        let tensor = tensor.to_dtype(DType::F32)?;
+        let tensor = (*tensor).clone().detach().cast(DType::F32);
         if let Some(group) = groups
             .iter_mut()
-            .find(|group| group[0].1.device().same_device(tensor.device()))
+            .find(|group| group[0].1.device() == tensor.device())
         {
             group.push((index, tensor));
         } else {
@@ -208,8 +208,15 @@ fn read_metrics(metrics: &[(&str, &Tensor)]) -> Result<Vec<(String, f32)>> {
         }
     }
     for group in groups {
-        let tensors = group.iter().map(|(_, tensor)| tensor).collect::<Vec<_>>();
-        let values = Tensor::stack(&tensors, 0)?.to_vec1::<f32>()?;
+        let tensors = group
+            .iter()
+            .map(|(_, tensor)| tensor.clone())
+            .collect::<Vec<_>>();
+        let values = Tensor::cat(tensors, 0)
+            .try_into_data()
+            .map_err(burn::tensor::TensorReadError::from)?
+            .try_to_vec::<f32>()
+            .map_err(burn::tensor::TensorReadError::from)?;
         for ((index, _), value) in group.into_iter().zip(values) {
             result[index].1 = value;
         }

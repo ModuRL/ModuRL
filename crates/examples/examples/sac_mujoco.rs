@@ -1,5 +1,12 @@
-use candle_core::{DType, Device, Module, Tensor, Var};
-use candle_nn::{AdamW, Init, Optimizer, ParamsAdamW, VarBuilder, VarMap};
+use burn::{
+    module::{Module, Param},
+    tensor::Float,
+};
+use burn::{
+    nn::{Initializer, Tanh},
+    optim::AdamWConfig,
+    tensor::{DType, Device, Tensor},
+};
 use modurl::prelude::*;
 
 mod support;
@@ -11,159 +18,109 @@ use support::{
 const DTYPE: DType = DType::F32;
 
 fn sac_mlp(
-    vb: VarBuilder<'_>,
     input_size: usize,
     output_size: usize,
     output_gain: f64,
-    name: &str,
-) -> candle_core::Result<MLP> {
+    device: &Device,
+) -> Result<MLP, ModelError> {
     MLP::builder()
         .input_size(input_size)
         .output_size(output_size)
-        .vb(vb)
         .hidden_layer_sizes(vec![64, 64])
-        .activation(Tensor::tanh)
-        .initializer(OrthogonalMLPInitializer {
-            hidden_gain: 2.0_f64.sqrt(),
-            output_gain,
+        .activation(Tanh)
+        .hidden_initializer(Initializer::Orthogonal {
+            gain: 2.0_f64.sqrt(),
         })
-        .name(name.to_owned())
+        .output_initializer(Initializer::Orthogonal { gain: output_gain })
+        .options((device, DTYPE))
         .build()
 }
 
+/// Produces Gaussian parameters `[batch_size, 2 * action_size]` from native observations `[batch_size, observation_size]`.
+#[derive(Module, Debug)]
 struct GaussianModule {
     mean: MLP,
-    log_std: Tensor,
+    log_std: Param<Tensor<2>>,
 }
 
-impl Module for GaussianModule {
-    /// Maps observations `[batch, observation_size]` to Gaussian parameters
-    /// `[batch, 2 * action_size]`.
-    fn forward(&self, observations: &Tensor) -> candle_core::Result<Tensor> {
+impl Forward<2, 2> for GaussianModule {
+    type InputKind = Float;
+    type OutputKind = Float;
+    type Error = ModelError;
+
+    /// Broadcasts learned log standard deviations `[1, action_size]` over the batch axis and joins them with the means.
+    /// Maps observations `[batch_size, observation_size]` to `[batch_size, 2 * action_size]`, preserving model dtype, device, and gradients.
+    fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
         let mean = self.mean.forward(observations)?;
-        let log_std = self.log_std.broadcast_as(mean.shape())?.clamp(-20.0, 2.0)?;
-        Tensor::cat(&[mean, log_std], 1)
+        let log_std = self.log_std.val().expand(mean.dims()).clamp(-20.0, 2.0);
+        Ok(Tensor::cat(vec![mean, log_std], 1))
     }
 }
 
-fn scalar_critic<'a>(
-    online_vars: &'a VarMap,
-    target_vars: &'a mut VarMap,
-    input_size: usize,
-    optimizer_parameters: &ParamsAdamW,
-    device: &Device,
-) -> Result<SACCritic<'a, AdamW>, SACCriticError> {
-    let online = sac_mlp(
-        VarBuilder::from_varmap(online_vars, DTYPE, device),
-        input_size,
-        1,
-        1.0,
-        "mlp",
-    )?;
-    let target = sac_mlp(
-        VarBuilder::from_varmap(target_vars, DTYPE, device),
-        input_size,
-        1,
-        1.0,
-        "mlp",
-    )?;
-    SACCritic::builder()
-        .online_network(ScalarStateActionCritic::new(online))
-        .target_network(ScalarStateActionCritic::new(target))
-        .online_vars(online_vars)
-        .target_vars(target_vars)
-        .optimizer(AdamW::new(
-            online_vars.all_vars(),
-            optimizer_parameters.clone(),
-        )?)
-        .build()
-}
-
-fn main() {
-    let total_timesteps = 1_000_000;
-    let device = Device::cuda_if_available(0).unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let total_timesteps = std::env::var("MODURL_SAC_TIMESTEPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1_000_000);
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    let device = Device::flex();
+    #[cfg(feature = "cuda")]
+    let device = Device::cuda(0);
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
+    let device = device.autodiff();
     println!("Environment: {ENVIRONMENT_NAME}");
-    println!("Using device: {device:?}");
-    let env =
-        VectorizedGymWrapper::from(vec![TimeLimitGym::new(mujoco::build_environment(), 1_000)]);
-    let mut env = DeviceMultiGymWrapper::new(env, candle_core::Device::Cpu, device.clone());
+    let env = VectorizedGymWrapper::from(TimeLimitGym::new(mujoco::build_environment(), 1_000));
+    let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let observation_space = env.observation_space();
     let action_space = env.action_space();
     let observation_size = observation_space.shape()[0];
-    let action_shape = action_space.shape();
-    let action_size = action_shape.iter().product();
-    let optimizer_parameters = ParamsAdamW {
-        lr: 3e-4,
-        weight_decay: 0.0,
-        ..Default::default()
+    let action_size = action_space.shape().iter().product();
+    let model = GaussianModule {
+        mean: sac_mlp(observation_size, action_size, 0.01, &device)?,
+        log_std: Param::from_tensor(Tensor::zeros([1, action_size], (&device, DTYPE))),
     };
-
-    let actor_vars = VarMap::new();
-    let actor_vb = VarBuilder::from_varmap(&actor_vars, DTYPE, &device);
-    let mean = sac_mlp(
-        actor_vb.pp("mean"),
-        observation_size,
-        action_size,
-        0.01,
-        "mlp",
-    )
-    .unwrap();
-    let log_std = actor_vb
-        .get_with_hints((1, action_size), "log_std", Init::Const(0.0))
-        .unwrap();
-    let distribution = TransformedDistribution::new(
-        GaussianDistribution::new(action_shape).unwrap(),
-        TanhTransform,
-    );
-    let policy =
-        ProbabilisticPolicyModel::with_distribution(GaussianModule { mean, log_std }, distribution);
-    let actor_optimizer = AdamW::new(actor_vars.all_vars(), optimizer_parameters.clone()).unwrap();
-
-    let online_vars_1 = VarMap::new();
-    let mut target_vars_1 = VarMap::new();
-    let critic_1 = scalar_critic(
-        &online_vars_1,
-        &mut target_vars_1,
-        observation_size + action_size,
-        &optimizer_parameters,
-        &device,
-    )
-    .unwrap();
-
-    let online_vars_2 = VarMap::new();
-    let mut target_vars_2 = VarMap::new();
-    let critic_2 = scalar_critic(
-        &online_vars_2,
-        &mut target_vars_2,
-        observation_size + action_size,
-        &optimizer_parameters,
-        &device,
-    )
-    .unwrap();
-
-    let log_alpha = Var::zeros((), DTYPE, &device).unwrap();
-    let alpha_optimizer =
-        AdamW::new(vec![log_alpha.clone()], optimizer_parameters.clone()).unwrap();
-    let entropy = SACEntropyConfiguration::automatic(log_alpha, alpha_optimizer);
+    let distribution =
+        TransformedDistribution::new(GaussianDistribution::new([action_size])?, TanhTransform);
+    let policy = ProbabilisticPolicyModel::new(model, distribution);
+    let mut critics = Vec::new();
+    for _ in 0..2 {
+        critics.push(
+            ActionValueCritic::builder()
+                .online_network(ScalarStateActionCritic::new(sac_mlp(
+                    observation_size + action_size,
+                    1,
+                    1.0,
+                    &device,
+                )?))
+                .optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+                .learning_rate(3e-4)
+                .build()?,
+        );
+    }
+    let entropy = SACEntropyConfiguration::automatic(
+        Param::from_tensor(Tensor::zeros([1], (&device, DTYPE))),
+        AdamWConfig::new().with_weight_decay(0.0).init(),
+        3e-4,
+    )?;
     let mut grapher = SACGrapher::new();
-
     let mut agent = SACAgent::builder()
         .dtype(DTYPE)
         .policy(policy)
-        .actor_optimizer(actor_optimizer)
-        .critics(vec![critic_1, critic_2])
+        .actor_optimizer(AdamWConfig::new().with_weight_decay(0.0).init())
+        .actor_learning_rate(3e-4)
+        .critics(critics)
         .entropy_configuration(entropy)
         .action_space(action_space)
         .observation_space(observation_space)
-        .aggregation_mode(SACCriticAggregationMode::Min)
+        .aggregation_mode(ActionValueCriticAggregationMode::Min)
         .training_horizon(total_timesteps)
         .logger(&mut grapher)
         .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
             device,
         )))
-        .build()
-        .unwrap();
-
-    agent.learn(&mut env, total_timesteps).unwrap();
+        .build()?;
+    agent.learn(&mut env, total_timesteps)?;
     grapher.display();
+    Ok(())
 }

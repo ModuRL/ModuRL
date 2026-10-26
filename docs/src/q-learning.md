@@ -30,9 +30,7 @@ otherwise the same.
 
 A *Q-network* maps one observation to one value per discrete action. Its output
 width must equal the number of actions. An *online Q-network* is the network the
-optimizer updates. A *target Q-network* has the same architecture and variable
-names, but the agent only refreshes its parameters by copying the online network
-at a fixed interval.
+optimizer updates. A *target Q-network* is a detached copy of the online model. The agent refreshes that copy at a fixed interval.
 
 *Epsilon-greedy exploration* chooses a random valid action with probability
 epsilon and otherwise chooses the online network's highest-valued action.
@@ -49,7 +47,7 @@ Q-network:
 let online_q_network = DuelingMLP::builder()
     .input_size(observation_space.shape()[0])
     .output_size(2)
-    .vb(online_vb)
+    .options(&device)
     .hidden_layer_sizes(vec![64, 64])
     .value_hidden_layer_sizes(vec![64])
     .advantage_hidden_layer_sizes(vec![64])
@@ -61,14 +59,14 @@ hidden-layer fields configure the two independent streams after that trunk.
 Leave either stream's list empty when you want its output head to connect
 directly to the shared features.
 
-Pass identically configured online and target `DuelingMLP` instances to either
+Pass the owned online `DuelingMLP` to either
 `DQNAgent` or `DDQNAgent`. Dueling changes the network architecture; DDQN
 independently changes the next-state target calculation, so the two techniques
 can be used together.
 
 ## Where to Go Next
 
-Build the complete [DQN CartPole program](./dqn.md). It shows the two
-Q-networks, replay configuration, and training call in one place. Then use the
+Build the complete [DQN CartPole program](./dqn.md). It shows the owned
+Q-network, replay configuration, and training call in one place. Then use the
 small, documented change in [Double DQN](./ddqn.md) to change its target
 calculation.

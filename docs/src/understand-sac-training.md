@@ -26,11 +26,13 @@ impl<I> SACLogger<I> for ConsoleLogger {
 
         let actor_loss = entry
             .actor_loss
-            .to_scalar::<f32>()
+            .clone()
+            .try_into_scalar::<f32>()
             .expect("actor loss must be scalar");
         let alpha = entry
             .alpha
-            .to_scalar::<f32>()
+            .clone()
+            .try_into_scalar::<f32>()
             .expect("alpha must be scalar");
 
         println!(
@@ -112,17 +114,17 @@ categorical policy, `K` is the action count. For a sampled continuous policy,
 
 | Field | Shape | Meaning |
 | --- | --- | --- |
-| `critic_losses` | One scalar per critic | Critic objectives for the replay batch |
-| `actor_loss` | Scalar | Objective used for the actor update |
-| `alpha_loss` | Optional scalar | Automatic entropy-coefficient objective |
-| `entropy_change_loss` | Optional scalar | Discrete stabilization penalty |
+| `critic_losses` | One `[1]` tensor per critic | Critic objectives for the replay batch |
+| `actor_loss` | `[1]` | Objective used for the actor update |
+| `alpha_loss` | Optional `[1]` | Automatic entropy-coefficient objective |
+| `entropy_change_loss` | Optional `[1]` | Discrete stabilization penalty |
 | `target_entropy` | Optional `f64` | Current automatic target entropy |
-| `alpha` | Scalar | Current entropy coefficient |
-| `bellman_targets` | `[B]` | Detached soft targets shared by all critics |
-| `policy_log_probabilities` | `[B, K]` | Candidate log probabilities |
-| `policy_weights` | `[B, K]` | Candidate expectation weights |
-| `policy_q_values` | `[B, K]` | Aggregated Q-values used by the actor |
-| `replay_rewards` | `[B]` | Rewards from the sampled replay entries |
+| `alpha` | `[1]` | Current entropy coefficient |
+| `bellman_targets` | `[B, 1]` | Detached soft targets shared by all critics |
+| `policy_log_probabilities` | `[B, K, 1]` | Candidate log probabilities |
+| `policy_weights` | `[B, K, 1]` | Candidate expectation weights |
+| `policy_q_values` | `[B, K, 1]` | Aggregated Q-values used by the actor |
+| `replay_rewards` | `[B, 1]` | Rewards from the sampled replay entries |
 
 Losses do not have a universal target value. Reward scale, model architecture,
 and entropy configuration all change their magnitude. Compare them with episode
