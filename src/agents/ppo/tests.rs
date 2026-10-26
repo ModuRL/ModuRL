@@ -843,6 +843,98 @@ mod schedule_tests {
     }
 
     #[test]
+    fn policy_surrogates_use_actor_dtype_with_mixed_reward_dtypes() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+
+        for (actor_dtype, reward_dtype) in [(DType::F64, DType::F32), (DType::F32, DType::F64)] {
+            for clipped in [true, false] {
+                let device = Device::flex().autodiff();
+                let env = VectorizedGymWrapper::from(crate::agents::test_support::FixedEnv::new(
+                    device.clone(),
+                ));
+                let mut env = crate::wrappers::OutputMapMultiGymWrapper::new(
+                    env,
+                    Ok::<_, Infallible>,
+                    move |mut step| {
+                        if reward_dtype == DType::F64 {
+                            step.rewards = step.rewards.cast(DType::F64);
+                        }
+                        Ok::<_, Infallible>(step)
+                    },
+                );
+                let model = |output_size, dtype| {
+                    MLP::builder()
+                        .input_size(4)
+                        .output_size(output_size)
+                        .hidden_layer_sizes(vec![2])
+                        .options((&device, dtype))
+                        .build()
+                        .unwrap()
+                };
+                let actor = ProbabilisticPolicyModel::new(
+                    ObservationModel::<Float> {
+                        model: model(2, actor_dtype),
+                        double_precision: actor_dtype == DType::F64,
+                        kind: PhantomData,
+                    },
+                    CategoricalDistribution,
+                );
+                let critic = ObservationModel::<Float> {
+                    model: model(1, reward_dtype),
+                    double_precision: reward_dtype == DType::F64,
+                    kind: PhantomData,
+                };
+                let networks = SeparatePPONetwork::builder()
+                    .actor_network(actor)
+                    .critic_network(critic)
+                    .actor_optimizer(SgdConfig::new().init())
+                    .critic_optimizer(SgdConfig::new().init())
+                    .actor_learning_rate(1e-3)
+                    .critic_learning_rate(1e-3)
+                    .build()
+                    .unwrap();
+
+                struct DTypeLogger {
+                    actor_dtype: DType,
+                    advantages_dtype: DType,
+                    updates: usize,
+                }
+
+                impl PPOLogger for DTypeLogger {
+                    fn log(&mut self, entry: &PPOLogEntry) {
+                        assert_eq!(entry.actor_loss.dtype(), self.actor_dtype);
+                        assert_eq!(entry.advantages.dtype(), self.advantages_dtype);
+                        self.updates += 1;
+                    }
+                }
+
+                let mut logger = DTypeLogger {
+                    actor_dtype,
+                    advantages_dtype: reward_dtype,
+                    updates: 0,
+                };
+                let mut agent = PPOAgent::builder()
+                    .observation_space(env.observation_space())
+                    .action_space(env.action_space())
+                    .network_info(networks)
+                    .clipped(clipped)
+                    .normalize_advantage(false)
+                    .batch_size(2)
+                    .mini_batch_size(2)
+                    .num_epochs(1)
+                    .training_horizon(2)
+                    .logging_info(&mut logger)
+                    .device(device)
+                    .build()
+                    .unwrap();
+
+                agent.learn(&mut env, 2).unwrap();
+                assert_eq!(logger.updates, 1);
+            }
+        }
+    }
+
+    #[test]
     fn seeded_collection_and_training_are_repeatable() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
