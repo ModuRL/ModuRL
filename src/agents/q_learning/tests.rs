@@ -371,7 +371,15 @@ fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
     let batch = storage.gather(&[0, 1, 2, 3]).unwrap();
     assert_eq!(
         batch.observations.into_data().try_to_vec::<f64>().unwrap(),
-        [5.0, 6.0, 15.0, 16.0]
+        [5.0, 6.0, 3.0, 4.0]
+    );
+    assert_eq!(
+        batch
+            .next_observations
+            .into_data()
+            .try_to_vec::<f64>()
+            .unwrap(),
+        [15.0, 16.0, 13.0, 14.0]
     );
     assert_eq!(batch.actions.dims(), [4, 1]);
     assert_eq!(batch.next_dones.dims(), [4, 1]);
@@ -656,7 +664,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
 }
 
 #[test]
-fn full_capacity_replay_stalls_after_wrap() {
+fn full_capacity_replay_continues_optimizing_after_wrap() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex();
     let mut env = VectorizedGymWrapper::from(EpisodeEnv {
@@ -687,6 +695,7 @@ fn full_capacity_replay_stalls_after_wrap() {
     agent.learn(&mut env, 12, &mut logger).unwrap();
 
     assert_eq!(logger.updates, (4..=12).collect::<Vec<_>>());
+    assert_eq!(agent.experience_replay.len(), 4);
 }
 
 #[test]

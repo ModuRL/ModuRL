@@ -604,7 +604,7 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
 }
 
 #[test]
-fn full_capacity_replay_stalls_after_wrap() {
+fn full_capacity_replay_continues_optimizing_after_wrap() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let environment_device = Device::flex();
     let device = environment_device.clone().autodiff();
@@ -641,7 +641,10 @@ fn full_capacity_replay_stalls_after_wrap() {
 
     agent.learn(&mut environment, 12).unwrap();
 
+    let replay_len = agent.replay.as_ref().unwrap().len();
+    drop(agent);
     assert_eq!(logger.updates, (4..=12).collect::<Vec<_>>());
+    assert_eq!(replay_len, 4);
 }
 
 #[test]

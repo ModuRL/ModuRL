@@ -284,14 +284,6 @@ where
             entropy_change_weights: self.entropy_change_weights.gather(rows),
         })
     }
-
-    fn sampleable_len(&self, len: usize) -> usize {
-        self.observations.sampleable_len(len)
-    }
-
-    fn sample_index(&self, index: usize, len: usize) -> usize {
-        self.observations.sample_index(index, len)
-    }
 }
 
 #[cfg(test)]
@@ -420,11 +412,26 @@ mod tests {
                 .unwrap(),
             [10]
         );
-        assert_eq!(storage.sampleable_len(4), 4);
         storage
             .insert(0, integer_transitions(&device, DType::I64))
             .unwrap();
-        assert_eq!(storage.sampleable_len(4), 2);
+        let after_wrap = storage.gather(&[0, 1, 2, 3]).unwrap();
+        assert_eq!(
+            after_wrap
+                .observations
+                .into_data()
+                .try_to_vec::<i64>()
+                .unwrap(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(
+            after_wrap
+                .next_observations
+                .into_data()
+                .try_to_vec::<i64>()
+                .unwrap(),
+            [10, 20, 10, 20]
+        );
     }
 
     #[test]

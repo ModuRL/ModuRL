@@ -72,14 +72,6 @@ pub trait ReplayStorage {
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error>;
 
     fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error>;
-
-    fn sampleable_len(&self, len: usize) -> usize {
-        len
-    }
-
-    fn sample_index(&self, index: usize, _len: usize) -> usize {
-        index
-    }
 }
 
 /// Stores one replay field as a native tensor `[capacity, ...item_shape]` of rank `R`.
@@ -153,13 +145,12 @@ impl<const R: usize, K: Autodiff> TensorReplayColumn<R, K> {
 
 /// Stores observations in one `[capacity + environment_count, ...item_shape]` tensor of rank `R`.
 /// A transition at row `i` uses observations at `i` and `i + environment_count`.
-/// Terminal observations are retained separately when an environment resets after truncation.
+/// Wrapped frontier states and truncated terminal observations are retained separately.
 pub(crate) struct AlignedObservationReplay<const R: usize, K: Autodiff = Float> {
     observations: Tensor<R, K>,
     truncated_next_states: HashMap<usize, Tensor<R, K>>,
+    frontier_states: Option<(usize, Tensor<R, K>)>,
     environment_count: usize,
-    frontier: usize,
-    frontier_is_invalid: bool,
     inserted: usize,
 }
 
@@ -194,9 +185,8 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         Ok(Self {
             observations: Tensor::zeros(shape, options),
             truncated_next_states: HashMap::new(),
+            frontier_states: None,
             environment_count,
-            frontier: 0,
-            frontier_is_invalid: false,
             inserted: 0,
         })
     }
@@ -269,6 +259,17 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
                 replay_index_tensor(&offsets, &self.observations.device())?,
             ))
         };
+        self.frontier_states = if start + count < capacity && self.inserted >= capacity {
+            let frontier_start = start + count;
+            Some((
+                frontier_start,
+                self.observations
+                    .clone()
+                    .slice([Slice::from(frontier_start..start + 2 * count)]),
+            ))
+        } else {
+            None
+        };
         let observations = &mut self.observations;
         // Reuse the previous batch's next-observation rows for current observations to avoid storing each observation twice.
         observations
@@ -290,28 +291,8 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
                 );
             }
         }
-        self.frontier_is_invalid |= self.inserted >= capacity;
         self.inserted = self.inserted.saturating_add(count);
-        self.frontier = (start + count) % capacity;
         Ok(count)
-    }
-
-    pub(crate) fn sampleable_len(&self, len: usize) -> usize {
-        let capacity = self.shape()[0];
-        if len == capacity && self.frontier_is_invalid {
-            len - self.environment_count
-        } else {
-            len
-        }
-    }
-
-    pub(crate) fn sample_index(&self, index: usize, len: usize) -> usize {
-        let capacity = self.shape()[0];
-        if len == capacity && self.frontier_is_invalid {
-            (self.frontier + self.environment_count + index) % capacity
-        } else {
-            index
-        }
     }
 
     /// Returns states and next states `[sample_count, ...item_shape]` of rank `R` for host indices `[sample_count]`.
@@ -325,10 +306,37 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         let observations = &self.observations;
         let environment_count = self.environment_count;
         let rows = replay_index_tensor(indices, &self.observations.device())?;
-        let states = observations.clone().select(0, rows.clone());
+        let mut states = observations.clone().select(0, rows.clone());
         let mut next_states = observations
             .clone()
             .select(0, rows + environment_count as i64);
+        let mut frontier_positions = Vec::new();
+        let mut saved_states = Vec::new();
+        if let Some((frontier_start, frontier_states)) = &self.frontier_states {
+            let frontier_end = *frontier_start + environment_count;
+            for (batch_index, replay_index) in indices.iter().copied().enumerate() {
+                if (*frontier_start..frontier_end).contains(&replay_index) {
+                    frontier_positions.push(batch_index);
+                    let offset = replay_index - *frontier_start;
+                    saved_states.push(
+                        frontier_states
+                            .clone()
+                            .slice([Slice::from(offset..offset + 1)]),
+                    );
+                }
+            }
+        }
+        if !frontier_positions.is_empty() {
+            if const { matches!(K::KIND, Kind::Bool) } {
+                for (position, state) in frontier_positions.into_iter().zip(saved_states) {
+                    states = states.slice_assign([Slice::from(position..position + 1)], state);
+                }
+            } else {
+                let saved_states = Tensor::cat(saved_states, 0);
+                let rows = replay_index_tensor(&frontier_positions, &self.observations.device())?;
+                states = states.select_assign(0, rows, saved_states, IndexingUpdateOp::Assign);
+            }
+        }
         let mut positions = Vec::new();
         let mut terminals = Vec::new();
         for (batch_index, replay_index) in indices.iter().copied().enumerate() {
@@ -450,19 +458,16 @@ where
     }
 
     pub fn sample(&self) -> Result<S::Batch, ExperienceReplayError<S::Error>> {
-        let total_samples = self.storage.sampleable_len(self.len);
+        let total_samples = self.len;
         let size_to_sample = self.batch_size.min(total_samples);
-        let indices = sample_indices_without_replacement(total_samples, size_to_sample)
-            .into_iter()
-            .map(|index| self.storage.sample_index(index, self.len))
-            .collect::<Vec<_>>();
+        let indices = sample_indices_without_replacement(total_samples, size_to_sample);
         self.storage
             .gather(&indices)
             .map_err(ExperienceReplayError::ExperienceError)
     }
 
     pub fn len(&self) -> usize {
-        self.storage.sampleable_len(self.len)
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
@@ -684,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn aligned_observations_exclude_frontier_and_preserve_truncations() {
+    fn aligned_observations_preserve_frontier_and_truncations() {
         let device = Device::flex();
         let mut replay = AlignedObservationReplay::<2>::new([4, 1], 2, &device).unwrap();
         let batch = |values: [f32; 2]| Tensor::<1>::from_data(values, &device).reshape([2, 1]);
@@ -694,47 +699,95 @@ mod tests {
         replay
             .insert(2, batch([1.0, 11.0]), batch([99.0, 12.0]), &[true, false])
             .unwrap();
-        assert_eq!(replay.sampleable_len(4), 4);
+        let (states, next_states) = replay.gather(&[0, 1, 2, 3]).unwrap();
         assert_eq!(
-            replay
-                .gather(&[2, 3])
-                .unwrap()
-                .1
-                .into_data()
-                .try_to_vec::<f32>()
-                .unwrap(),
-            vec![99.0, 12.0]
+            states.into_data().try_to_vec::<f32>().unwrap(),
+            vec![0.0, 10.0, 1.0, 11.0]
+        );
+        assert_eq!(
+            next_states.into_data().try_to_vec::<f32>().unwrap(),
+            vec![1.0, 11.0, 99.0, 12.0]
         );
         replay
             .insert(0, batch([2.0, 12.0]), batch([3.0, 13.0]), &[false; 2])
             .unwrap();
-        assert_eq!(replay.sampleable_len(4), 2);
-        assert_eq!(replay.sample_index(0, 4), 0);
-        assert_eq!(replay.sample_index(1, 4), 1);
+        let (states, next_states) = replay.gather(&[0, 1, 2, 3]).unwrap();
         assert_eq!(
-            replay
-                .gather(&[2])
-                .unwrap()
-                .1
-                .into_data()
-                .try_to_vec::<f32>()
-                .unwrap(),
-            vec![99.0]
+            states.into_data().try_to_vec::<f32>().unwrap(),
+            vec![2.0, 12.0, 1.0, 11.0]
+        );
+        assert_eq!(
+            next_states.into_data().try_to_vec::<f32>().unwrap(),
+            vec![3.0, 13.0, 99.0, 12.0]
         );
         replay
             .insert(2, batch([3.0, 13.0]), batch([4.0, 14.0]), &[false; 2])
             .unwrap();
-        assert_eq!(replay.sample_index(0, 4), 2);
-        assert_eq!(replay.sample_index(1, 4), 3);
+        let (states, next_states) = replay.gather(&[0, 1, 2, 3]).unwrap();
         assert_eq!(
-            replay
-                .gather(&[2])
-                .unwrap()
-                .1
-                .into_data()
-                .try_to_vec::<f32>()
-                .unwrap(),
-            vec![4.0]
+            states.into_data().try_to_vec::<f32>().unwrap(),
+            vec![2.0, 12.0, 3.0, 13.0]
+        );
+        assert_eq!(
+            next_states.into_data().try_to_vec::<f32>().unwrap(),
+            vec![3.0, 13.0, 4.0, 14.0]
+        );
+    }
+
+    #[test]
+    fn boolean_frontier_states_survive_multiple_count_two_wraps() {
+        let device = Device::flex();
+        let mut replay = AlignedObservationReplay::<2, Bool>::new([4, 2], 2, &device).unwrap();
+        let batch = |values: [[bool; 2]; 2]| Tensor::from_data(values, &device);
+        replay
+            .insert(
+                0,
+                batch([[false, false], [false, true]]),
+                batch([[true, false], [true, true]]),
+                &[false; 2],
+            )
+            .unwrap();
+        replay
+            .insert(
+                2,
+                batch([[true, false], [true, true]]),
+                batch([[false, false], [false, true]]),
+                &[false; 2],
+            )
+            .unwrap();
+        replay
+            .insert(
+                0,
+                batch([[false, true], [false, false]]),
+                batch([[true, true], [true, false]]),
+                &[false; 2],
+            )
+            .unwrap();
+        replay
+            .insert(
+                2,
+                batch([[true, true], [true, false]]),
+                batch([[false, false], [false, true]]),
+                &[false; 2],
+            )
+            .unwrap();
+        replay
+            .insert(
+                0,
+                batch([[false, false], [true, false]]),
+                batch([[false, true], [true, true]]),
+                &[false; 2],
+            )
+            .unwrap();
+
+        let (states, next_states) = replay.gather(&[0, 1, 2, 3]).unwrap();
+        assert_eq!(
+            states.into_data().iter::<bool>().collect::<Vec<_>>(),
+            [false, false, true, false, true, true, true, false]
+        );
+        assert_eq!(
+            next_states.into_data().iter::<bool>().collect::<Vec<_>>(),
+            [false, true, true, true, false, false, false, true]
         );
     }
 

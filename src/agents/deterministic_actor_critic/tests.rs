@@ -352,7 +352,7 @@ impl Gym for EpisodeEnv {
 }
 
 #[test]
-fn full_capacity_replay_stalls_after_wrap() {
+fn full_capacity_replay_continues_optimizing_after_wrap() {
     struct UpdateCounter {
         updates: usize,
     }
@@ -377,7 +377,10 @@ fn full_capacity_replay_stalls_after_wrap() {
         .online_actor(linear_model(&[0.25], &device, DType::F64))
         .actor_optimizer(SgdConfig::new().init())
         .actor_learning_rate(0.01)
-        .critics(vec![critic(&device, DType::F64), critic(&device, DType::F64)])
+        .critics(vec![
+            critic(&device, DType::F64),
+            critic(&device, DType::F64),
+        ])
         .strategy(TestStrategy {
             interval: 1,
             noise: 0.0,
@@ -404,6 +407,7 @@ fn full_capacity_replay_stalls_after_wrap() {
     agent.learn(&mut env, 12, &mut logger).unwrap();
 
     assert_eq!(logger.updates, 9);
+    assert_eq!(agent.replay.as_ref().unwrap().len(), 4);
 }
 
 #[test]

@@ -354,18 +354,6 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             next_dones: self.next_dones.gather(rows),
         })
     }
-
-    fn sampleable_len(&self, len: usize) -> usize {
-        self.observations
-            .as_ref()
-            .map_or(0, |storage| storage.sampleable_len(len))
-    }
-
-    fn sample_index(&self, index: usize, len: usize) -> usize {
-        self.observations
-            .as_ref()
-            .map_or(index, |storage| storage.sample_index(index, len))
-    }
 }
 
 struct QCollectedTransitions<'a, const R: usize, K: Autodiff> {

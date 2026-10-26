@@ -302,14 +302,6 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
             terminated: self.terminated.gather(rows),
         })
     }
-
-    fn sampleable_len(&self, len: usize) -> usize {
-        self.observations.sampleable_len(len)
-    }
-
-    fn sample_index(&self, index: usize, len: usize) -> usize {
-        self.observations.sample_index(index, len)
-    }
 }
 
 #[cfg(test)]
@@ -390,14 +382,27 @@ mod tests {
                 .unwrap(),
             [7, 4]
         );
-        assert_eq!(storage.sampleable_len(4), 4);
         let mut wrapped = integer_transitions(&device);
         wrapped.observations = Tensor::from_data([[5u64], [6]], (&device, DType::U64));
         wrapped.truncateds = vec![false, false];
         storage.insert(0, wrapped).unwrap();
-        assert_eq!(storage.sampleable_len(4), 2);
-        assert_eq!(storage.sample_index(0, 4), 0);
-        assert_eq!(storage.sample_index(1, 4), 1);
+        let after_wrap = storage.gather(&[0, 1, 2, 3]).unwrap();
+        assert_eq!(
+            after_wrap
+                .observations
+                .into_data()
+                .try_to_vec::<u64>()
+                .unwrap(),
+            [5, 6, 3, 4]
+        );
+        assert_eq!(
+            after_wrap
+                .next_observations
+                .into_data()
+                .try_to_vec::<u64>()
+                .unwrap(),
+            [7, 8, 7, 8]
+        );
         assert_eq!(
             before.observations.into_data().try_to_vec::<u64>().unwrap(),
             [u64::MAX - 1, u64::MAX - 2]
