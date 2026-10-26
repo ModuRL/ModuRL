@@ -45,7 +45,6 @@ impl Args {
         let mut trace_sync = false;
         let mut rom = None;
         let mut steps = None;
-        let mut warmup_steps = None;
         let mut threads = 1;
         let mut arguments = arguments.into_iter();
         while let Some(flag) = arguments.next() {
@@ -64,9 +63,6 @@ impl Args {
                 }
                 "--rom" => rom = Some(PathBuf::from(value)),
                 "--steps" => steps = Some(value.parse().map_err(|_| "invalid --steps")?),
-                "--warmup-steps" => {
-                    warmup_steps = Some(value.parse().map_err(|_| "invalid --warmup-steps")?)
-                }
                 "--threads" => threads = value.parse().map_err(|_| "invalid --threads")?,
                 _ => return Err(format!("unknown argument: {flag}")),
             }
@@ -84,7 +80,7 @@ impl Args {
             trace_sync,
             rom: rom.ok_or("--rom requires a Breakout ROM path")?,
             steps: steps.unwrap_or(default_steps),
-            warmup_steps: warmup_steps.unwrap_or(default_warmup),
+            warmup_steps: default_warmup,
             threads,
         };
         if parsed.threads == 0 || parsed.steps == 0 {
@@ -98,19 +94,6 @@ impl Args {
         }
         if parsed.trace.is_some() && !cfg!(feature = "tracing") {
             return Err("--trace requires --features tracing".to_owned());
-        }
-        if parsed.algorithm == "ppo"
-            && (parsed.warmup_steps == 0 || !parsed.warmup_steps.is_multiple_of(PPO_ROLLOUT_SIZE))
-        {
-            return Err(format!(
-                "PPO --warmup-steps must be a positive multiple of {PPO_ROLLOUT_SIZE}"
-            ));
-        }
-        if parsed.algorithm == "dqn" && parsed.warmup_steps != default_warmup {
-            return Err(format!(
-                "{} requires --warmup-steps {default_warmup}",
-                parsed.algorithm
-            ));
         }
         let interval = if parsed.algorithm == "ppo" {
             PPO_ROLLOUT_SIZE
@@ -443,29 +426,34 @@ mod tests {
     }
 
     #[test]
-    fn ppo_warmup_requires_complete_nonzero_rollouts() {
-        for (warmup, accepted) in [
-            ("4096", true),
-            ("16384", true),
-            ("0", false),
-            ("16000", false),
-        ] {
-            let result = Args::parse(
-                [
-                    "--algorithm",
-                    "ppo",
-                    "--rom",
-                    concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
-                    "--steps",
-                    "4096",
-                    "--warmup-steps",
-                    warmup,
-                ]
-                .into_iter()
-                .map(str::to_owned),
-            );
-            assert_eq!(result.is_ok(), accepted, "warmup {warmup}");
-        }
+    fn dqn_uses_fixed_warmup() {
+        let args = Args::parse(
+            [
+                "--algorithm",
+                "dqn",
+                "--rom",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        assert_eq!(args.warmup_steps, 80_004);
+    }
+
+    #[test]
+    fn warmup_override_is_rejected_as_unknown_argument() {
+        let flag = ["--warmup", "-steps"].concat();
+        let args = [
+            "--rom".to_owned(),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml").to_owned(),
+            flag.clone(),
+            "4096".to_owned(),
+        ];
+        assert_eq!(
+            Args::parse(args).unwrap_err(),
+            format!("unknown argument: {flag}")
+        );
     }
 
     #[cfg(feature = "cuda")]
