@@ -186,6 +186,19 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         &mut self,
         environment_count: usize,
     ) -> Result<(), ReplayStorageError> {
+        self.validate_environment_count(environment_count)?;
+        let capacity = self.shape[0];
+        let mut shape = self.shape;
+        shape[0] = capacity + environment_count;
+        self.observations = Some(Tensor::zeros(shape, self.options.clone()));
+        self.environment_count = Some(environment_count);
+        Ok(())
+    }
+
+    pub(crate) fn validate_environment_count(
+        &self,
+        environment_count: usize,
+    ) -> Result<(), ReplayStorageError> {
         if let Some(expected) = self.environment_count {
             return if expected == environment_count {
                 Ok(())
@@ -197,25 +210,7 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
             };
         }
         let capacity = self.shape[0];
-        if environment_count == 0
-            || capacity <= environment_count
-            || !capacity.is_multiple_of(environment_count)
-        {
-            return Err(ReplayStorageError::InvalidReplayAlignment {
-                capacity,
-                environment_count,
-            });
-        }
-        let mut shape = self.shape;
-        shape[0] = capacity.checked_add(environment_count).ok_or(
-            ReplayStorageError::CapacityOverflow {
-                capacity,
-                additional: environment_count,
-            },
-        )?;
-        self.observations = Some(Tensor::zeros(shape, self.options.clone()));
-        self.environment_count = Some(environment_count);
-        Ok(())
+        validate_replay_alignment(capacity, environment_count).map(|_| ())
     }
 
     /// Validates and stores `states` and `next_states` shaped `[environment_count, ...item_shape]` of rank `R`.
@@ -403,6 +398,27 @@ fn validate_replay_shape<const R: usize, K: Autodiff>(
         });
     }
     Ok(())
+}
+
+pub(crate) fn validate_replay_alignment(
+    capacity: usize,
+    environment_count: usize,
+) -> Result<usize, ReplayStorageError> {
+    if environment_count == 0
+        || capacity <= environment_count
+        || !capacity.is_multiple_of(environment_count)
+    {
+        return Err(ReplayStorageError::InvalidReplayAlignment {
+            capacity,
+            environment_count,
+        });
+    }
+    capacity
+        .checked_add(environment_count)
+        .ok_or(ReplayStorageError::CapacityOverflow {
+            capacity,
+            additional: environment_count,
+        })
 }
 
 /// Converts host indices `[sample_count]` to an `I64` `Int` tensor `[sample_count]` on `device`.
@@ -791,6 +807,26 @@ mod tests {
                 actual,
             }) if expected == vec![2, 1] && actual == vec![1, 1]
         ));
+    }
+
+    #[test]
+    fn environment_count_validation_does_not_mutate_storage() {
+        let device = Device::flex();
+        let mut replay = AlignedObservationReplay::<2>::new([8, 1], &device);
+
+        replay.validate_environment_count(2).unwrap();
+        assert_eq!(replay.environment_count, None);
+        assert!(replay.observations.is_none());
+
+        replay.initialize_environment_count(2).unwrap();
+        assert!(matches!(
+            replay.validate_environment_count(4),
+            Err(ReplayStorageError::EnvironmentCountMismatch {
+                expected: 2,
+                actual: 4
+            })
+        ));
+        assert_eq!(replay.environment_count, Some(2));
     }
 
     #[test]
