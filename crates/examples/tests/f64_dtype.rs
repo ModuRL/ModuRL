@@ -1,12 +1,24 @@
-#![cfg(any())]
-
+#[cfg(any())]
 use candle_core::{DType, Device, Tensor};
+#[cfg(any())]
 use candle_nn::{AdamW, Optimizer, ParamsAdamW, VarBuilder, VarMap};
-use modurl::prelude::*;
+use modurl::{
+    agents::{
+        Agent, ReplayDeviceStrategy, ReplayStorageConfig,
+        q_learning::{ddqn::DDQNAgent, dqn::DQNAgent},
+    },
+    gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymWrapper},
+    models::MLP,
+    parameter_schedule::ConstantSchedule,
+    spaces::{BoxSpace, Discrete},
+};
+#[cfg(any())]
 use modurl_gym::classic_control::cartpole::CartPoleV1;
 
+#[cfg(any())]
 const DTYPE: DType = DType::F64;
 
+#[cfg(any())]
 fn mlp(
     variables: &VarMap,
     input_size: usize,
@@ -27,6 +39,7 @@ fn mlp(
         .build()
 }
 
+#[cfg(any())]
 fn cartpole() -> VectorizedGymWrapper<CartPoleV1> {
     VectorizedGymWrapper::from(vec![
         CartPoleV1::builder()
@@ -53,22 +66,67 @@ impl modurl::models::Forward<2, 2> for Float64QNetwork {
     }
 }
 
+struct NativeF32DiscreteEnv {
+    device: burn::tensor::Device,
+    steps: usize,
+}
+
+impl Gym for NativeF32DiscreteEnv {
+    type Error = std::convert::Infallible;
+    type ObservationSpace = BoxSpace<2>;
+    type ActionSpace = Discrete;
+
+    fn step(
+        &mut self,
+        _action: burn::tensor::Tensor<1, burn::tensor::Int>,
+    ) -> Result<StepInfo, Self::Error> {
+        self.steps += 1;
+        Ok(StepInfo {
+            observation: burn::tensor::Tensor::from_floats(
+                [self.steps as f32, 0.0, 0.0, 0.0],
+                &self.device,
+            ),
+            reward: 1.0,
+            done: false,
+            truncated: false,
+            info: (),
+        })
+    }
+
+    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+        self.steps = 0;
+        Ok(ResetInfo {
+            observation: burn::tensor::Tensor::zeros([4], &self.device),
+            info: (),
+        })
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, 4], &self.device)
+    }
+
+    fn action_space(&self) -> Self::ActionSpace {
+        Discrete::new(2)
+    }
+}
+
+static RNG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn dqn_updates_f64_networks_from_native_f32_observations() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let environment_device = burn::tensor::Device::flex();
     let device = environment_device.clone().autodiff();
-    let mut env = VectorizedGymWrapper::from(
-        CartPoleV1::builder()
-            .rng_device(&environment_device)
-            .build()
-            .unwrap(),
-    );
+    let mut env = VectorizedGymWrapper::from(NativeF32DiscreteEnv {
+        device: environment_device.clone(),
+        steps: 0,
+    });
     let model = MLP::builder()
         .input_size(4)
         .output_size(2)
         .options((&device, burn::tensor::DType::F64))
         .hidden_layer_sizes(vec![8])
-        .activation(burn::nn::activation::Activation::Tanh)
+        .activation(burn::nn::Tanh::new())
         .build()
         .unwrap();
     let mut agent = DQNAgent::builder()
@@ -99,20 +157,19 @@ fn dqn_updates_f64_networks_from_native_f32_observations() {
 
 #[test]
 fn ddqn_updates_f64_networks_from_native_f32_observations() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let environment_device = burn::tensor::Device::flex();
     let device = environment_device.clone().autodiff();
-    let mut env = VectorizedGymWrapper::from(
-        CartPoleV1::builder()
-            .rng_device(&environment_device)
-            .build()
-            .unwrap(),
-    );
+    let mut env = VectorizedGymWrapper::from(NativeF32DiscreteEnv {
+        device: environment_device.clone(),
+        steps: 0,
+    });
     let model = MLP::builder()
         .input_size(4)
         .output_size(2)
         .options((&device, burn::tensor::DType::F64))
         .hidden_layer_sizes(vec![8])
-        .activation(burn::nn::activation::Activation::Tanh)
+        .activation(burn::nn::Tanh::new())
         .build()
         .unwrap();
     let mut agent = DDQNAgent::builder()
@@ -141,6 +198,7 @@ fn ddqn_updates_f64_networks_from_native_f32_observations() {
     assert_eq!(agent.act(&observations).unwrap().dims(), [1, 1]);
 }
 
+#[cfg(any())]
 #[test]
 fn ppo_updates_f64_networks_from_native_f32_observations() {
     let mut env = cartpole();
@@ -184,6 +242,7 @@ fn ppo_updates_f64_networks_from_native_f32_observations() {
     );
 }
 
+#[cfg(any())]
 #[test]
 fn a2c_updates_f64_networks_from_native_f32_observations() {
     let mut env = cartpole();
@@ -216,6 +275,7 @@ fn a2c_updates_f64_networks_from_native_f32_observations() {
     agent.learn(&mut env, 4).unwrap();
 }
 
+#[cfg(any())]
 fn discrete_critic<'a>(
     online_vars: &'a VarMap,
     target_vars: &'a mut VarMap,
@@ -232,6 +292,7 @@ fn discrete_critic<'a>(
         .unwrap()
 }
 
+#[cfg(any())]
 #[test]
 fn sac_updates_f64_networks_from_native_f32_observations() {
     let mut env = cartpole();
@@ -275,10 +336,12 @@ fn sac_updates_f64_networks_from_native_f32_observations() {
     );
 }
 
+#[cfg(any())]
 struct NativeF32ContinuousEnv {
     state: f32,
 }
 
+#[cfg(any())]
 fn continuous_critic<'a>(
     online_vars: &'a VarMap,
     target_vars: &'a mut VarMap,
@@ -295,6 +358,7 @@ fn continuous_critic<'a>(
         .unwrap()
 }
 
+#[cfg(any())]
 impl Gym for NativeF32ContinuousEnv {
     type Error = candle_core::Error;
     type SpaceError = candle_core::Error;
@@ -334,6 +398,7 @@ impl Gym for NativeF32ContinuousEnv {
     }
 }
 
+#[cfg(any())]
 #[test]
 fn ddpg_updates_f64_networks_from_native_f32_observations() {
     let mut env = VectorizedGymWrapper::from(vec![NativeF32ContinuousEnv { state: 0.0 }]);
@@ -381,6 +446,7 @@ fn ddpg_updates_f64_networks_from_native_f32_observations() {
     );
 }
 
+#[cfg(any())]
 #[test]
 fn td3_updates_f64_networks_from_native_f32_observations() {
     let mut env = VectorizedGymWrapper::from(vec![NativeF32ContinuousEnv { state: 0.0 }]);

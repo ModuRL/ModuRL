@@ -20,8 +20,7 @@ two Q-values.
 ## Complete Program
 
 Enable Burn `0.22.0` features `std`, `optim`, `flex`, and `autodiff` in the application.
-The code below shows the Burn agent API. It requires the CartPole environment migration before it can run.
-The current CartPole executable still uses Candle.
+This program cannot run until CartPole in `modurl_gym` is migrated to Burn. The repository's `dqn_cartpole` example target is disabled until then too.
 
 ```rust,ignore
 use burn::{optim::AdamWConfig, tensor::{DType, Device}};
@@ -99,6 +98,8 @@ program above:
 ```sh
 cargo run --example dqn_cartpole
 ```
+
+This command is unavailable until CartPole in `modurl_gym` is migrated to Burn.
 
 The example prints each completed CartPole episode's collection step, length,
 and return during training. After its 500,000-transition run, it plots DQN loss,
