@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut critics = Vec::new();
     for _ in 0..2 {
         critics.push(
-            SACCritic::builder()
+            ActionValueCritic::builder()
                 .online_network(DiscreteVectorHeadCritic::new(sac_mlp(
                     observation_size,
                     action_count,
@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .entropy_configuration(entropy)
         .action_space(action_space)
         .observation_space(observation_space)
-        .aggregation_mode(SACCriticAggregationMode::Mean)
+        .aggregation_mode(ActionValueCriticAggregationMode::Mean)
         .entropy_change_penalty(0.5)
         .replay_capacity(100_000)
         .batch_size(64)
