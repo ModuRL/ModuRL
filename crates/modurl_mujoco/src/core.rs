@@ -13,6 +13,430 @@ use std::{
 
 use crate::MujocoError;
 
+trait RuntimeFloatValue {
+    fn changed_to_non_finite(&self, original: &Self) -> bool;
+}
+
+impl RuntimeFloatValue for f32 {
+    fn changed_to_non_finite(&self, original: &Self) -> bool {
+        !self.is_finite() && self.to_bits() != original.to_bits()
+    }
+}
+
+impl RuntimeFloatValue for f64 {
+    fn changed_to_non_finite(&self, original: &Self) -> bool {
+        !self.is_finite() && self.to_bits() != original.to_bits()
+    }
+}
+
+impl<T: RuntimeFloatValue, const N: usize> RuntimeFloatValue for [T; N] {
+    fn changed_to_non_finite(&self, original: &Self) -> bool {
+        self.iter()
+            .zip(original)
+            .any(|(candidate, original)| candidate.changed_to_non_finite(original))
+    }
+}
+
+fn validate_unchanged<T: PartialEq + ?Sized>(
+    field: &str,
+    original: &T,
+    candidate: &T,
+) -> Result<(), MujocoError> {
+    if original == candidate {
+        Ok(())
+    } else {
+        Err(MujocoError::InvalidInput(format!(
+            "runtime edits to {field} are not allowed"
+        )))
+    }
+}
+
+fn validate_float_value<T: RuntimeFloatValue>(
+    field: &str,
+    original: &T,
+    candidate: &T,
+) -> Result<(), MujocoError> {
+    if candidate.changed_to_non_finite(original) {
+        Err(MujocoError::InvalidInput(format!(
+            "runtime edits cannot set {field} to a new non-finite value"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_float_slice<T: RuntimeFloatValue>(
+    field: &str,
+    original: &[T],
+    candidate: &[T],
+) -> Result<(), MujocoError> {
+    if original.len() != candidate.len() {
+        return Err(MujocoError::InvalidInput(format!(
+            "runtime edits cannot change the length of {field}"
+        )));
+    }
+    for (index, (original, candidate)) in original.iter().zip(candidate).enumerate() {
+        if candidate.changed_to_non_finite(original) {
+            return Err(MujocoError::InvalidInput(format!(
+                "runtime edits cannot set {field}[{index}] to a new non-finite value"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_edit(original: &MjModel, candidate: &MjModel) -> Result<(), MujocoError> {
+    macro_rules! check_non_float_field {
+        (unchanged $field:ident) => {
+            validate_unchanged(stringify!($field), original.$field(), candidate.$field())?;
+        };
+        (allowed $field:ident) => {};
+    }
+
+    macro_rules! check_non_float_fields {
+        ($($policy:ident $field:ident),* $(,)?) => {
+            $(check_non_float_field!($policy $field);)*
+        };
+    }
+
+    check_non_float_fields!(
+        unchanged body_simple,
+        unchanged body_sameframe,
+        allowed body_contype,
+        allowed body_conaffinity,
+        unchanged bvh_depth,
+        unchanged oct_depth,
+        allowed jnt_group,
+        allowed jnt_limited,
+        allowed jnt_actfrclimited,
+        allowed jnt_actgravcomp,
+        unchanged dof_simplenum,
+        unchanged tree_sleep_policy,
+        allowed geom_contype,
+        allowed geom_conaffinity,
+        allowed geom_group,
+        allowed geom_priority,
+        unchanged geom_sameframe,
+        unchanged site_type,
+        allowed site_group,
+        unchanged site_sameframe,
+        unchanged cam_mode,
+        unchanged cam_projection,
+        unchanged cam_output,
+        unchanged light_mode,
+        unchanged light_type,
+        unchanged light_castshadow,
+        unchanged light_active,
+        allowed flex_contype,
+        allowed flex_conaffinity,
+        allowed flex_priority,
+        unchanged flex_internal,
+        unchanged flex_selfcollide,
+        unchanged flex_activelayers,
+        unchanged flex_passive,
+        allowed flex_group,
+        unchanged flex_elemlayer,
+        unchanged flex_edgeequality,
+        unchanged flex_rigid,
+        unchanged flexedge_rigid,
+        unchanged flex_centered,
+        unchanged flex_flatskin,
+        allowed skin_group,
+        unchanged tex_type,
+        unchanged tex_colorspace,
+        unchanged tex_data,
+        unchanged mat_texuniform,
+        unchanged pair_signature,
+        unchanged exclude_signature,
+        allowed eq_active0,
+        allowed tendon_group,
+        unchanged tendon_treenum,
+        allowed tendon_limited,
+        allowed tendon_actfrclimited,
+        unchanged actuator_gaintype,
+        unchanged actuator_biastype,
+        allowed actuator_group,
+        allowed actuator_ctrllimited,
+        allowed actuator_forcelimited,
+        allowed actuator_actlimited,
+        allowed actuator_actearly,
+        unchanged sensor_datatype,
+        unchanged sensor_needstage,
+        unchanged sensor_intprm,
+        unchanged tuple_objtype,
+    );
+
+    macro_rules! check_float_fields {
+        ($($field:ident),* $(,)?) => {
+            $(validate_float_slice(stringify!($field), original.$field(), candidate.$field())?;)*
+        };
+    }
+
+    check_float_fields!(
+        qpos0,
+        qpos_spring,
+        body_pos,
+        body_quat,
+        body_ipos,
+        body_iquat,
+        body_mass,
+        body_subtreemass,
+        body_inertia,
+        body_invweight0,
+        body_gravcomp,
+        body_margin,
+        bvh_aabb,
+        oct_aabb,
+        oct_coeff,
+        jnt_solref,
+        jnt_solimp,
+        jnt_pos,
+        jnt_axis,
+        jnt_stiffness,
+        jnt_stiffnesspoly,
+        jnt_range,
+        jnt_actfrcrange,
+        jnt_margin,
+        dof_solref,
+        dof_solimp,
+        dof_frictionloss,
+        dof_armature,
+        dof_damping,
+        dof_dampingpoly,
+        dof_invweight0,
+        dof_length,
+        geom_solmix,
+        geom_solref,
+        geom_solimp,
+        geom_size,
+        geom_aabb,
+        geom_rbound,
+        geom_pos,
+        geom_quat,
+        geom_friction,
+        geom_margin,
+        geom_gap,
+        geom_fluid,
+        geom_rgba,
+        site_size,
+        site_pos,
+        site_quat,
+        site_rgba,
+        cam_pos,
+        cam_quat,
+        cam_poscom0,
+        cam_pos0,
+        cam_mat0,
+        cam_fovy,
+        cam_ipd,
+        cam_sensorsize,
+        cam_intrinsic,
+        light_bulbradius,
+        light_intensity,
+        light_range,
+        light_pos,
+        light_dir,
+        light_poscom0,
+        light_pos0,
+        light_dir0,
+        light_attenuation,
+        light_cutoff,
+        light_exponent,
+        light_ambient,
+        light_diffuse,
+        light_specular,
+        flex_solmix,
+        flex_solref,
+        flex_solimp,
+        flex_friction,
+        flex_margin,
+        flex_gap,
+        flex_vert,
+        flex_vert0,
+        flex_vertmetric,
+        flex_node,
+        flex_node0,
+        flexedge_length0,
+        flexedge_invweight0,
+        flex_radius,
+        flex_size,
+        flex_stiffness,
+        flex_bending,
+        flex_damping,
+        flex_edgestiffness,
+        flex_edgedamping,
+        flex_rgba,
+        flex_texcoord,
+        mesh_vert,
+        mesh_normal,
+        mesh_texcoord,
+        mesh_scale,
+        mesh_pos,
+        mesh_quat,
+        mesh_polynormal,
+        skin_rgba,
+        skin_inflate,
+        skin_vert,
+        skin_texcoord,
+        skin_bonebindpos,
+        skin_bonebindquat,
+        skin_bonevertweight,
+        hfield_size,
+        hfield_data,
+        mat_texrepeat,
+        mat_emission,
+        mat_specular,
+        mat_shininess,
+        mat_reflectance,
+        mat_metallic,
+        mat_roughness,
+        mat_rgba,
+        pair_solref,
+        pair_solreffriction,
+        pair_solimp,
+        pair_margin,
+        pair_gap,
+        pair_friction,
+        eq_solref,
+        eq_solimp,
+        eq_data,
+        tendon_width,
+        tendon_solref_lim,
+        tendon_solimp_lim,
+        tendon_solref_fri,
+        tendon_solimp_fri,
+        tendon_range,
+        tendon_actfrcrange,
+        tendon_margin,
+        tendon_stiffness,
+        tendon_stiffnesspoly,
+        tendon_damping,
+        tendon_dampingpoly,
+        tendon_armature,
+        tendon_frictionloss,
+        tendon_lengthspring,
+        tendon_length0,
+        tendon_invweight0,
+        tendon_rgba,
+        actuator_delay,
+        actuator_dynprm,
+        actuator_gainprm,
+        actuator_biasprm,
+        actuator_ctrlrange,
+        actuator_forcerange,
+        actuator_actrange,
+        actuator_damping,
+        actuator_dampingpoly,
+        actuator_armature,
+        actuator_gear,
+        actuator_cranklength,
+        actuator_acc0,
+        actuator_length0,
+        actuator_lengthrange,
+        sensor_cutoff,
+        sensor_noise,
+        sensor_delay,
+        sensor_interval,
+        numeric_data,
+        tuple_objprm,
+        key_time,
+        key_qpos,
+        key_qvel,
+        key_act,
+        key_mpos,
+        key_mquat,
+        key_ctrl,
+        sensor_user,
+        actuator_user,
+        tendon_user,
+        cam_user,
+        site_user,
+        geom_user,
+        jnt_user,
+        body_user,
+        dof_m0,
+    );
+
+    let original_opt = original.opt();
+    let candidate_opt = candidate.opt();
+    macro_rules! check_option_unchanged {
+        ($($field:ident),* $(,)?) => {
+            $(validate_unchanged(
+                concat!("opt.", stringify!($field)),
+                &original_opt.$field,
+                &candidate_opt.$field,
+            )?;)*
+        };
+    }
+    check_option_unchanged!(
+        integrator,
+        cone,
+        jacobian,
+        solver,
+        ccd_iterations,
+        sdf_initpoints,
+        sdf_iterations,
+    );
+
+    for (field, value) in [
+        ("opt.iterations", candidate_opt.iterations),
+        ("opt.ls_iterations", candidate_opt.ls_iterations),
+        ("opt.noslip_iterations", candidate_opt.noslip_iterations),
+    ] {
+        if value < 0 {
+            return Err(MujocoError::InvalidInput(format!(
+                "{field} must be non-negative"
+            )));
+        }
+    }
+
+    macro_rules! check_option_floats {
+        ($($field:ident),* $(,)?) => {
+            $(validate_float_value(
+                concat!("opt.", stringify!($field)),
+                &original_opt.$field,
+                &candidate_opt.$field,
+            )?;)*
+        };
+    }
+    check_option_floats!(
+        timestep,
+        impratio,
+        tolerance,
+        ls_tolerance,
+        noslip_tolerance,
+        ccd_tolerance,
+        sleep_tolerance,
+        gravity,
+        wind,
+        magnetic,
+        density,
+        viscosity,
+        o_margin,
+        o_solref,
+        o_solimp,
+        o_friction,
+    );
+
+    for (index, eq_type) in candidate.eq_type().iter().enumerate() {
+        let flexstrain = mujoco_rs::mujoco_c::mjtEq::mjEQ_FLEXSTRAIN;
+        if *eq_type == flexstrain || original.eq_type()[index] == flexstrain {
+            let original_row = &original.eq_data()[index];
+            let candidate_row = &candidate.eq_data()[index];
+            if original_row
+                .iter()
+                .zip(candidate_row)
+                .any(|(original, candidate)| original.to_bits() != candidate.to_bits())
+            {
+                return Err(MujocoError::InvalidInput(format!(
+                    "eq_data for flexstrain equality {index} cannot be changed"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 // Weak entries let a model disappear when the last environment using it is dropped.
 // Hold the mutex during compilation so simultaneous constructors compile only once.
 fn shared_xml_model(xml: &str) -> Result<Arc<MjModel>, MujocoError> {
@@ -125,6 +549,7 @@ impl MujocoCore {
                 "runtime model edits must preserve the compiled model signature".into(),
             ));
         }
+        validate_runtime_edit(self.data.model(), &candidate)?;
         {
             // mj_setConst uses scratch data because it can overwrite state while
             // calculating constants at qpos0. Preserve the live integration state.
