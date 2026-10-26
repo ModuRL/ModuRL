@@ -912,6 +912,7 @@ where
     /// `advantages`, `returns`, and `rewards`) shaped `[batch, 1]`. `old_values`
     /// is present only when value-loss clipping is enabled.
     /// `explained_variance` is `[1]`. Rewards, returns, and advantages share the environment reward dtype.
+    /// Advantages are cast to the policy dtype for the surrogate.
     /// Policy actions and log probabilities retain their policy dtype. All tensors share a device.
     /// Detaches rollout estimates while retaining gradients through current model predictions.
     fn compute_loss(
@@ -940,6 +941,7 @@ where
 
         let log_ratio = log_probs - old_log_probs.detach();
         let ratio = log_ratio.clone().exp();
+        let policy_advantages = advantages.clone().cast(ratio.dtype());
         let approx_kl = ratio.clone() - 1.0 - log_ratio;
 
         let actor_loss = match self.clipped {
@@ -950,8 +952,8 @@ where
                     1.0 + f64::from(clip_range),
                 );
 
-                let surrogate1 = ratio.clone() * advantages.clone();
-                let surrogate2 = clipped_ratio * advantages.clone();
+                let surrogate1 = ratio.clone() * policy_advantages.clone();
+                let surrogate2 = clipped_ratio * policy_advantages.clone();
                 let ties = surrogate1.clone().equal(surrogate2.clone());
                 let surrogate = surrogate1
                     .clone()
@@ -961,7 +963,7 @@ where
                 -surrogate.mean()
             }
             false => {
-                let surrogate = ratio * advantages.clone();
+                let surrogate = ratio * policy_advantages;
                 -surrogate.mean()
             }
         };
