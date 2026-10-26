@@ -440,11 +440,6 @@ impl<N: Module> ActionValueCritic<N> {
         self.learning_rate
     }
 
-    /// Returns the detached target model for evaluation and parameter inspection.
-    pub(crate) fn target_network(&self) -> &N {
-        &self.target_network
-    }
-
     /// Owns the model and optimizer, enables online training, and clones the target snapshot.
     /// Rejects a nonpositive or non-finite learning rate.
     #[builder]
@@ -727,6 +722,149 @@ mod tests {
             assert_eq!(input.dtype(), DType::I64);
             Ok(input.float())
         }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("custom critic failed")]
+    struct CustomError;
+
+    #[derive(Module, Debug)]
+    struct CustomNetwork {
+        weight: Param<Tensor<2>>,
+        #[module(skip)]
+        fail: bool,
+    }
+
+    impl ActionValueCriticNetwork for CustomNetwork {
+        type ObservationKind = Int;
+        type ActionKind = Float;
+        type Error = CustomError;
+
+        /// Evaluates observations and replay actions shaped `[batch, 1]`.
+        fn replay_values(
+            &self,
+            observations: &Tensor<2, Int>,
+            actions: &Tensor<2>,
+        ) -> Result<Tensor<2>, Self::Error> {
+            if self.fail {
+                return Err(CustomError);
+            }
+            Ok(Tensor::cat(
+                vec![
+                    observations.clone().float().cast(self.weight.val().dtype()),
+                    actions.clone(),
+                ],
+                1,
+            )
+            .matmul(self.weight.val()))
+        }
+
+        /// Evaluates observations `[batch, 1]` and candidates `[batch, candidates, 1]`.
+        fn policy_values(
+            &self,
+            observations: &Tensor<2, Int>,
+            candidate_actions: &Tensor<3>,
+        ) -> Result<Tensor<3>, Self::Error> {
+            if self.fail {
+                return Err(CustomError);
+            }
+            let [batch_size, candidate_count, _] = candidate_actions.dims();
+            let inputs = Tensor::cat(
+                vec![
+                    observations
+                        .clone()
+                        .float()
+                        .cast(self.weight.val().dtype())
+                        .unsqueeze_dim::<3>(1)
+                        .expand([batch_size, candidate_count, 1]),
+                    candidate_actions.clone(),
+                ],
+                2,
+            )
+            .reshape([batch_size * candidate_count, 2]);
+            Ok(inputs
+                .matmul(self.weight.val())
+                .reshape([batch_size, candidate_count, 1]))
+        }
+
+        /// Evaluates candidates `[batch, candidates, 1]` without critic-parameter gradients.
+        fn actor_values(
+            &self,
+            observations: &Tensor<2, Int>,
+            candidate_actions: &Tensor<3>,
+        ) -> Result<Tensor<3>, Self::Error> {
+            self.clone()
+                .set_require_grad(false)
+                .policy_values(observations, candidate_actions)
+        }
+    }
+
+    #[test]
+    fn custom_action_value_critic_network_contract_is_supported() {
+        let device = Device::flex().autodiff();
+        let mut critic = ActionValueCritic::builder()
+            .online_network(CustomNetwork {
+                weight: Param::from_tensor(Tensor::ones([2, 1], (&device, DType::F64))),
+                fail: false,
+            })
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.1)
+            .build()
+            .unwrap();
+        let observations = Tensor::from_data([[2i64]], (&device, DType::I64));
+        let actions = Tensor::from_data([[3.0f64]], (&device, DType::F64));
+        let candidates =
+            Tensor::from_data([[[3.0f64], [4.0]]], (&device, DType::F64)).require_grad();
+        assert_eq!(
+            numbers(
+                critic
+                    .online_replay_values::<2, 2, 3>(&observations, &actions)
+                    .unwrap()
+            ),
+            [5.0]
+        );
+        assert_eq!(
+            numbers(
+                critic
+                    .target_policy_values::<2, 2, 3>(&observations, &candidates)
+                    .unwrap()
+            ),
+            [5.0, 6.0]
+        );
+        let gradients = critic
+            .online_actor_values::<2, 2, 3>(&observations, &candidates)
+            .unwrap()
+            .sum()
+            .backward();
+        assert_eq!(numbers(candidates.grad(&gradients).unwrap()), [1.0, 1.0]);
+        assert!(
+            critic
+                .online_network()
+                .weight
+                .val()
+                .grad(&gradients)
+                .is_none()
+        );
+        let loss = critic
+            .online_replay_values::<2, 2, 3>(&observations, &actions)
+            .unwrap()
+            .sum();
+        critic.backward_step(&loss).unwrap();
+        assert_eq!(observations.dtype(), DType::I64);
+
+        let failing = ActionValueCritic::builder()
+            .online_network(CustomNetwork {
+                weight: Param::from_tensor(Tensor::ones([2, 1], &device)),
+                fail: true,
+            })
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.1)
+            .build()
+            .unwrap();
+        assert!(matches!(
+            failing.online_replay_values::<2, 2, 3>(&observations, &actions),
+            Err(CustomError)
+        ));
     }
 
     /// Creates an autodiff CPU model with weights `[features, 1]` in the requested Float dtype.

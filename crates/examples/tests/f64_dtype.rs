@@ -176,7 +176,7 @@ fn sac_updates_f64_networks_from_native_f32_observations() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut env = cartpole();
-    let critic = SACCritic::builder()
+    let critic = ActionValueCritic::builder()
         .online_network(DiscreteVectorHeadCritic::new(model(4, 2, &device)))
         .optimizer(SgdConfig::new().init())
         .learning_rate(0.01)

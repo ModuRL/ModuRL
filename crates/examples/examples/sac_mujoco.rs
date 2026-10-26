@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut critics = Vec::new();
     for _ in 0..2 {
         critics.push(
-            SACCritic::builder()
+            ActionValueCritic::builder()
                 .online_network(ScalarStateActionCritic::new(sac_mlp(
                     observation_size + action_size,
                     1,
@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .entropy_configuration(entropy)
         .action_space(action_space)
         .observation_space(observation_space)
-        .aggregation_mode(SACCriticAggregationMode::Min)
+        .aggregation_mode(ActionValueCriticAggregationMode::Min)
         .training_horizon(total_timesteps)
         .logger(&mut grapher)
         .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
