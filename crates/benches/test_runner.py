@@ -8,19 +8,39 @@ import run
 
 
 class BackendCommandTests(unittest.TestCase):
-    def test_default_ppo_warmup_is_ten_rollouts_and_explicit_override_still_works(self):
+    def test_warmup_is_fixed_per_algorithm(self):
         arguments = ["run.py", "--rom", str(Path(__file__))]
         with mock.patch.object(sys, "argv", arguments):
             self.assertEqual(run.parse_args().warmup_steps, 40960)
-        with mock.patch.object(sys, "argv", arguments + ["--warmup-steps", "16384"]):
-            self.assertEqual(run.parse_args().warmup_steps, 16384)
+        with mock.patch.object(sys, "argv", arguments + ["--algorithm", "dqn"]):
+            self.assertEqual(run.parse_args().warmup_steps, 80004)
+
+    def test_warmup_override_is_rejected(self):
+        arguments = ["run.py", "--rom", str(Path(__file__)), "--warmup" + "-steps", "16384"]
+        with mock.patch.object(sys, "argv", arguments):
+            with self.assertRaises(SystemExit):
+                run.parse_args()
 
     def arguments(self, backend):
         return argparse.Namespace(
             algorithm="ppo", device="cuda", backend=backend, steps=40960,
-            warmup_steps=4096, threads=1, rom=Path("breakout.bin"), python=Path("python"),
+            warmup_steps=40960, threads=1, rom=Path("breakout.bin"), python=Path("python"),
             trace_dir=None, trace_sync=False,
-            repeats=1, frameworks=["modurl"],
+            repeats=1, frameworks=["modurl"], output=None,
+        )
+
+    def test_all_runs_use_each_algorithms_fixed_warmup(self):
+        args = self.arguments("native")
+        args.algorithm = "all"
+        args.steps = None
+        args.warmup_steps = None
+        with mock.patch.object(run, "parse_args", return_value=args):
+            with mock.patch.object(run, "run_algorithm") as runner:
+                run.main()
+        self.assertEqual(
+            [(call.args[0].algorithm, call.args[0].steps, call.args[0].warmup_steps)
+             for call in runner.call_args_list],
+            [("ppo", 40960, 40960), ("dqn", 4096, 80004)],
         )
 
     def test_libtorch_selects_its_feature_and_preserves_the_cuda_workload(self):
@@ -49,22 +69,15 @@ class BackendCommandTests(unittest.TestCase):
                 run.command_for(framework, self.arguments("libtorch")),
                 run.command_for(framework, self.arguments("native")),
             )
+            self.assertNotIn("--warmup" + "-steps", run.command_for(framework, self.arguments("native")))
+        self.assertNotIn("--warmup" + "-steps", run.command_for("modurl", self.arguments("native")))
 
-    def test_longer_ppo_warmup_reaches_the_runner(self):
-        args = self.arguments("native")
-        args.steps = 4096
-        args.warmup_steps = 16384
-        with mock.patch.object(run, "run_one", side_effect=RuntimeError("validated warmup")) as runner:
-            with self.assertRaisesRegex(RuntimeError, "validated warmup"):
-                run.run_algorithm(args)
-            runner.assert_called_once_with("modurl", args)
-
-    def test_ppo_warmup_rejects_incomplete_rollouts_and_zero_steps(self):
-        for warmup in (0, 16000):
-            with self.subTest(warmup=warmup):
+    def test_nonpositive_steps_are_rejected(self):
+        for steps in (0, -1):
+            with self.subTest(steps=steps):
                 args = self.arguments("native")
-                args.warmup_steps = warmup
-                with self.assertRaises(ValueError):
+                args.steps = steps
+                with self.assertRaisesRegex(ValueError, "--steps must be at least 1"):
                     run.run_algorithm(args)
 
 

@@ -28,11 +28,13 @@ Native compilation requires CMake and a C/C++ toolchain.
 Use `--framework modurl`, `--framework sb3`, or `--framework cleanrl` to select runners. Repeat the flag to select several.
 The default runs all three frameworks, with five fresh-process samples each and shuffled framework order.
 `--algorithm all` runs PPO, then DQN, sequentially and writes a separate report for each.
+DQN's 1,000,000-transition replay keeps U8 `[4, 84, 84]` frame stacks in CPU memory, about 26 GiB per runner process before other overhead. Make sure that much RAM is free before running `--algorithm dqn` or `--algorithm all`.
 `--steps` sets measured transitions, `--repeats` sets samples, and `--threads` sets tensor compute threads.
 PPO still uses 32 environment workers when `--threads 1` is selected.
-PPO `--steps` and `--warmup-steps` must be positive multiples of 4,096 transitions.
+PPO `--steps` must be a positive multiple of 4,096 transitions.
+Warmup is fixed per workload: PPO uses 40,960 transitions, and DQN uses 80,004.
 The default PPO warmup is ten rollouts: 40,960 transitions and 160 optimizer updates.
-Use `--steps 4096` to measure one rollout after warmup. Override warmup with `--warmup-steps`.
+Use `--steps 4096` to measure one rollout after warmup.
 
 CUDA requires an NVIDIA driver and a CUDA-enabled PyTorch installation.
 CUDA is the default benchmark target for all three frameworks.

@@ -33,7 +33,6 @@ def parse_args() -> argparse.Namespace:
                         help="Tensor backend for ModuRL; Python runners keep using PyTorch.")
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--steps", type=int)
-    parser.add_argument("--warmup-steps", type=int)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument(
         "--framework",
@@ -64,7 +63,7 @@ def parse_args() -> argparse.Namespace:
         "all": (None, None),
     }[args.algorithm]
     args.steps = default_steps if args.steps is None else args.steps
-    args.warmup_steps = default_warmup if args.warmup_steps is None else args.warmup_steps
+    args.warmup_steps = default_warmup
     if not args.rom.is_file():
         parser.error(f"ROM file does not exist: {args.rom}")
     args.rom = args.rom.resolve()
@@ -111,8 +110,6 @@ def command_for(framework: str, args: argparse.Namespace) -> list[str]:
         args.device,
         "--steps",
         str(args.steps),
-        "--warmup-steps",
-        str(args.warmup_steps),
         "--threads",
         str(args.threads),
         "--rom",
@@ -217,12 +214,8 @@ def print_markdown(algorithm: str, summary: dict[str, dict[str, float]]) -> None
 def run_algorithm(args: argparse.Namespace) -> None:
     if args.repeats < 1:
         raise ValueError("--repeats must be at least 1")
-    if args.steps < 1 or args.warmup_steps < 1:
-        raise ValueError("--steps and --warmup-steps must be at least 1")
-    if args.algorithm == "ppo" and args.warmup_steps % 4_096:
-        raise ValueError("PPO --warmup-steps must be a positive multiple of 4096")
-    if args.algorithm == "dqn" and args.warmup_steps != 80_004:
-        raise ValueError("DQN requires --warmup-steps 80004")
+    if args.steps < 1:
+        raise ValueError("--steps must be at least 1")
     if args.algorithm == "ppo" and args.steps % 4_096:
         raise ValueError("PPO --steps must be a multiple of 4096")
     if args.algorithm == "dqn" and args.steps % 4:
@@ -344,7 +337,7 @@ def main() -> None:
         selected = argparse.Namespace(**{**vars(args), "algorithm": algorithm})
         default_steps, default_warmup = {"ppo": (40960, 40960), "dqn": (4096, 80004)}[algorithm]
         selected.steps = default_steps if selected.steps is None else selected.steps
-        selected.warmup_steps = default_warmup if selected.warmup_steps is None else selected.warmup_steps
+        selected.warmup_steps = default_warmup
         run_algorithm(selected)
 
 

@@ -36,19 +36,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=("cpu", "cuda", "metal"), default="cuda")
     parser.add_argument("--rom", type=Path, required=True)
     parser.add_argument("--steps", type=int)
-    parser.add_argument("--warmup-steps", type=int)
     parser.add_argument("--threads", type=int, default=1)
     args = parser.parse_args()
     defaults = {"ppo": (40960, 40960), "dqn": (4096, 80004)}[args.algorithm]
     args.steps = defaults[0] if args.steps is None else args.steps
-    args.warmup_steps = defaults[1] if args.warmup_steps is None else args.warmup_steps
+    args.warmup_steps = defaults[1]
     interval = 4096 if args.algorithm == "ppo" else 4
     if args.threads < 1 or args.steps < 1 or args.steps % interval:
         parser.error(f"--threads must be positive; --steps must be a positive multiple of {interval}")
-    if args.algorithm == "ppo" and (args.warmup_steps < 1 or args.warmup_steps % 4096):
-        parser.error("PPO --warmup-steps must be a positive multiple of 4096")
-    if args.algorithm == "dqn" and args.warmup_steps != defaults[1]:
-        parser.error(f"{args.algorithm} requires --warmup-steps {defaults[1]}")
     if not args.rom.is_file():
         parser.error(f"ROM file does not exist: {args.rom}")
     args.rom = args.rom.resolve()
