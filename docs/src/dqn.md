@@ -20,8 +20,6 @@ two Q-values.
 ## Complete Program
 
 Enable Burn `0.22.0` features `std`, `optim`, `flex`, and `autodiff` in the application.
-The code below shows the Burn agent API. It requires the CartPole environment migration before it can run.
-The current CartPole executable still uses Candle.
 
 ```rust,ignore
 use burn::{optim::AdamWConfig, tensor::{DType, Device}};
