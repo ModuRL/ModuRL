@@ -807,8 +807,7 @@ mod tests {
     #[test]
     fn environment_count_validation_does_not_mutate_storage() {
         let device = Device::flex();
-        let replay =
-            AlignedObservationReplay::<2>::new([8, 1], 2, &device).unwrap();
+        let replay = AlignedObservationReplay::<2>::new([8, 1], 2, &device).unwrap();
         let before = replay
             .observations()
             .clone()
