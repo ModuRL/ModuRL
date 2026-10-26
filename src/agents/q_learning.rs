@@ -981,6 +981,7 @@ mod tests {
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
 
+        /// Accepts an Int scalar action [1] and returns a Float observation [1] on the environment device.
         fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
             self.calls.steps.fetch_add(1, Ordering::Relaxed);
             Ok(StepInfo {
