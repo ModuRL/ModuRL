@@ -11,7 +11,11 @@ use std::{
     fs::File,
     marker::PhantomData,
     path::{Path, PathBuf},
+    sync::{Mutex, PoisonError},
 };
+
+// The vendored emulator has process-wide state touched during construction.
+pub(crate) static ALE_CONSTRUCTION: Mutex<()> = Mutex::new(());
 
 mod sealed {
     pub trait Sealed {}
@@ -196,26 +200,33 @@ impl<M: AtariObservationMode> AtariGym<M> {
         validate_rom(&rom_path)?;
         let c_path = path_to_cstring(&rom_path)?;
 
-        let mut ale = Ale::new();
-        if let Some(seed) = random_seed {
-            ale.set_int(c"random_seed", seed);
-        }
-        ale.set_float(c"repeat_action_probability", repeat_action_probability);
-        ale.set_bool(c"color_averaging", false);
-        ale.load_rom_file(&c_path);
-        let shape = if const { M::FORMAT == 0 } {
-            vec![ale.ram_size()]
-        } else if const { M::FORMAT == 1 } {
-            vec![ale.screen_height(), ale.screen_width(), 3]
-        } else {
-            vec![ale.screen_height(), ale.screen_width()]
+        let (ale, shape, action_space, lives) = {
+            let _construction = ALE_CONSTRUCTION
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut ale = Ale::new();
+            if let Some(seed) = random_seed {
+                ale.set_int(c"random_seed", seed);
+            }
+            ale.set_float(c"repeat_action_probability", repeat_action_probability);
+            ale.set_bool(c"color_averaging", false);
+            ale.load_rom_file(&c_path);
+            let shape = if const { M::FORMAT == 0 } {
+                vec![ale.ram_size()]
+            } else if const { M::FORMAT == 1 } {
+                vec![ale.screen_height(), ale.screen_width(), 3]
+            } else {
+                vec![ale.screen_height(), ale.screen_width()]
+            };
+            let action_space = Discrete::new(ale.minimal_action_set().len());
+            let lives = ale.lives() as u32;
+            (ale, shape, action_space, lives)
         };
         let observation_len = shape.iter().product();
-        let action_space = Discrete::new(ale.minimal_action_set().len());
         Ok(Self {
             _not_send_sync: PhantomData,
             mode: PhantomData,
-            lives: ale.lives() as u32,
+            lives,
             #[cfg(feature = "rendering")]
             renderer: if render {
                 Some(crate::renderer::Renderer::new(

@@ -229,6 +229,29 @@ jobs:
       - name: Build MuJoCo rendering feature
         run: cargo build --locked -p modurl_mujoco --features rendering
 
+  ale-thread-sanitizer:
+    name: ALE construction ThreadSanitizer
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      CFLAGS: -fsanitize=thread
+      CXXFLAGS: -fsanitize=thread
+      RUSTFLAGS: -Zsanitizer=thread
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Install ALE build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake zlib1g-dev
+      - name: Test concurrent ALE construction with ThreadSanitizer
+        run: >-
+          cargo test -Zbuild-std
+          --target x86_64-unknown-linux-gnu
+          -p modurl_ale --test concurrent_construction
+
   packaging:
     name: Package validation
     runs-on: ubuntu-latest

@@ -16,12 +16,16 @@
 // $Id: M6502.cxx,v 1.21 2007/01/01 18:04:50 stephena Exp $
 //============================================================================
 
+#include <mutex>
+
 #include "M6502.hxx"
 
 #ifdef DEBUGGER_SUPPORT
   #include "Expression.hxx"
 #endif
 using namespace std;
+
+static std::once_flag m6502_init_once;
 
 // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 M6502::M6502(uInt32 systemCyclesPerProcessorCycle)
@@ -37,14 +41,17 @@ M6502::M6502(uInt32 systemCyclesPerProcessorCycle)
 #endif
 
   // Compute the BCD lookup table
-  uInt16 t;
-  for(t = 0; t < 256; ++t)
-  {
-    ourBCDTable[0][t] = ((t >> 4) * 10) + (t & 0x0f);
-    ourBCDTable[1][t] = (((t % 100) / 10) << 4) | (t % 10);
-  }
+  std::call_once(m6502_init_once, []() {
+    uInt16 t;
+    for(t = 0; t < 256; ++t)
+    {
+      ourBCDTable[0][t] = ((t >> 4) * 10) + (t & 0x0f);
+      ourBCDTable[1][t] = (((t % 100) / 10) << 4) | (t % 10);
+    }
+  });
 
   // Compute the System Cycle table
+  uInt16 t;
   for(t = 0; t < 256; ++t)
   {
     myInstructionSystemCycleTable[t] = ourInstructionProcessorCycleTable[t] *
