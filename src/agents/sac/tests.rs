@@ -604,6 +604,47 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
 }
 
 #[test]
+fn full_capacity_replay_stalls_after_wrap() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let environment_device = Device::flex();
+    let device = environment_device.clone().autodiff();
+    let mut environment = VectorizedGymWrapper::from(EndingEnv {
+        device: environment_device,
+        terminated: false,
+        terminal_width: 1,
+    });
+    let mut logger = RecordingLogger::default();
+    let mut agent = SACAgent::builder()
+        .policy(ProbabilisticPolicyModel::new(
+            linear_model(1, 2, 0.0, &device),
+            CategoricalDistribution,
+        ))
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![
+            discrete_critic(&device, DType::F32),
+            discrete_critic(&device, DType::F32),
+        ])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(environment.action_space())
+        .observation_space(environment.observation_space())
+        .replay_storage_config(ReplayStorageConfig::new(
+            super::super::ReplayDeviceStrategy::OneDevice(device.clone()),
+        ))
+        .replay_capacity(4)
+        .batch_size(4)
+        .training_start(0)
+        .training_horizon(12)
+        .logger(&mut logger)
+        .build()
+        .unwrap();
+
+    agent.learn(&mut environment, 12).unwrap();
+
+    assert_eq!(logger.updates, (4..=12).collect::<Vec<_>>());
+}
+
+#[test]
 fn continuous_policy_uses_reparameterized_actions_and_detached_targets() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();

@@ -352,6 +352,61 @@ impl Gym for EpisodeEnv {
 }
 
 #[test]
+fn full_capacity_replay_stalls_after_wrap() {
+    struct UpdateCounter {
+        updates: usize,
+    }
+
+    impl DeterministicActorCriticLogger for UpdateCounter {
+        fn log_update(&mut self, _entry: &DeterministicActorCriticLogEntry) {
+            self.updates += 1;
+        }
+
+        fn log_collection(&mut self, _entry: &DeterministicActorCriticCollectionLogEntry) {}
+    }
+
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let environment_device = Device::flex();
+    let device = environment_device.clone().autodiff();
+    let mut env = VectorizedGymWrapper::from(EpisodeEnv {
+        device: environment_device,
+        truncate: false,
+        steps: 0,
+    });
+    let mut agent = DeterministicActorCriticAgent::builder()
+        .online_actor(linear_model(&[0.25], &device, DType::F64))
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![critic(&device, DType::F64), critic(&device, DType::F64)])
+        .strategy(TestStrategy {
+            interval: 1,
+            noise: 0.0,
+            clip: 0.0,
+        })
+        .action_space(env.action_space())
+        .observation_space(env.observation_space())
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            device.clone(),
+        )))
+        .gamma(0.9)
+        .tau(0.25)
+        .exploration_noise(0.0)
+        .training_start(0)
+        .replay_capacity(4)
+        .batch_size(4)
+        .update_frequency(1)
+        .training_horizon(12)
+        .dtype(DType::F64)
+        .build()
+        .unwrap();
+    let mut logger = UpdateCounter { updates: 0 };
+
+    agent.learn(&mut env, 12, &mut logger).unwrap();
+
+    assert_eq!(logger.updates, 9);
+}
+
+#[test]
 fn full_mse_targets_and_actor_gradient_boundaries_are_preserved() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     for dtype in [DType::F32, DType::F64] {

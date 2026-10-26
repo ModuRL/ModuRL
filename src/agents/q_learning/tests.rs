@@ -656,6 +656,40 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
 }
 
 #[test]
+fn full_capacity_replay_stalls_after_wrap() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex();
+    let mut env = VectorizedGymWrapper::from(EpisodeEnv {
+        device: device.clone(),
+        steps: 0,
+        truncate: false,
+    });
+    let mut agent = QLearningAgent::<_, _, _, TestTarget>::builder()
+        .action_space(Discrete::new(2))
+        .observation_space(BoxSpace::new_unbounded([1, 1], &device))
+        .online_q_network(network(&device.clone().autodiff(), DType::F32))
+        .optimizer(SgdConfig::new().init())
+        .learning_rate(0.01)
+        .epsilon_schedule(LinearSchedule::new(1.0, 0.0))
+        .training_start(0)
+        .replay_capacity(4)
+        .batch_size(4)
+        .update_frequency(1)
+        .target_update_interval(1)
+        .training_horizon(12)
+        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
+            device.clone().autodiff(),
+        )))
+        .build()
+        .unwrap();
+    let mut logger = Logger::default();
+
+    agent.learn(&mut env, 12, &mut logger).unwrap();
+
+    assert_eq!(logger.updates, (4..=12).collect::<Vec<_>>());
+}
+
+#[test]
 fn learn_rejects_invalid_replay_alignment_before_reset_or_step() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex();
