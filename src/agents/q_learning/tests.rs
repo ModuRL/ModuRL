@@ -7,7 +7,13 @@ use crate::{
     spaces::BoxSpace,
 };
 use burn::{module::Param, optim::SgdConfig};
-use std::convert::Infallible;
+use std::{
+    convert::Infallible,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 struct TestTarget;
 
@@ -97,6 +103,66 @@ impl Gym for EpisodeEnv {
     fn action_space(&self) -> Self::ActionSpace {
         Discrete::new(2)
     }
+}
+
+#[derive(Default)]
+struct GymCallCounts {
+    resets: AtomicUsize,
+    steps: AtomicUsize,
+}
+
+struct CountingEpisodeEnv {
+    device: Device,
+    calls: Arc<GymCallCounts>,
+}
+
+impl Gym for CountingEpisodeEnv {
+    type Error = Infallible;
+    type ObservationSpace = BoxSpace<2>;
+    type ActionSpace = Discrete;
+
+    fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
+        self.calls.steps.fetch_add(1, Ordering::Relaxed);
+        Ok(StepInfo {
+            observation: Tensor::zeros([1], &self.device),
+            reward: 0.0,
+            done: false,
+            truncated: false,
+            info: (),
+        })
+    }
+
+    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+        self.calls.resets.fetch_add(1, Ordering::Relaxed);
+        Ok(ResetInfo {
+            observation: Tensor::zeros([1], &self.device),
+            info: (),
+        })
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, 1], &self.device)
+    }
+
+    fn action_space(&self) -> Self::ActionSpace {
+        Discrete::new(2)
+    }
+}
+
+fn counting_envs(
+    count: usize,
+    device: &Device,
+    calls: Arc<GymCallCounts>,
+) -> VectorizedGymWrapper<CountingEpisodeEnv> {
+    VectorizedGymWrapper::new(
+        (0..count)
+            .map(|_| CountingEpisodeEnv {
+                device: device.clone(),
+                calls: calls.clone(),
+            })
+            .collect(),
+    )
+    .unwrap()
 }
 
 #[derive(Default)]
@@ -586,6 +652,56 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
         ))
     ));
     assert_eq!(agent.experience_replay.len(), len);
+}
+
+#[test]
+fn learn_rejects_invalid_replay_alignment_before_reset_or_step() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex();
+    let calls = Arc::new(GymCallCounts::default());
+    let mut env = counting_envs(3, &device, calls.clone());
+    let mut agent = float_agent(&device);
+
+    assert!(matches!(
+        agent.learn(&mut env, 1, &mut Logger::default()),
+        Err(QAgentError::ReplayStorageError(
+            QLearningReplayError::Storage(ReplayStorageError::InvalidReplayAlignment {
+                capacity: 8,
+                environment_count: 3
+            })
+        ))
+    ));
+    assert_eq!(calls.resets.load(Ordering::Relaxed), 0);
+    assert_eq!(calls.steps.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn learn_reuses_matching_count_and_rejects_a_new_count_before_reset() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex();
+    let calls = Arc::new(GymCallCounts::default());
+    let mut env = counting_envs(2, &device, calls.clone());
+    let mut agent = float_agent(&device);
+    let mut logger = Logger::default();
+
+    agent.learn(&mut env, 1, &mut logger).unwrap();
+    agent.learn(&mut env, 1, &mut logger).unwrap();
+    assert_eq!(calls.resets.load(Ordering::Relaxed), 4);
+    assert_eq!(calls.steps.load(Ordering::Relaxed), 4);
+
+    let changed_calls = Arc::new(GymCallCounts::default());
+    let mut changed_env = counting_envs(4, &device, changed_calls.clone());
+    assert!(matches!(
+        agent.learn(&mut changed_env, 1, &mut logger),
+        Err(QAgentError::ReplayStorageError(
+            QLearningReplayError::Storage(ReplayStorageError::EnvironmentCountMismatch {
+                expected: 2,
+                actual: 4
+            })
+        ))
+    ));
+    assert_eq!(changed_calls.resets.load(Ordering::Relaxed), 0);
+    assert_eq!(changed_calls.steps.load(Ordering::Relaxed), 0);
 }
 
 #[test]
