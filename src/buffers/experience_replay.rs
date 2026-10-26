@@ -186,10 +186,12 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         &mut self,
         environment_count: usize,
     ) -> Result<(), ReplayStorageError> {
-        self.validate_environment_count(environment_count)?;
+        if self.environment_count.is_some() {
+            return self.validate_environment_count(environment_count);
+        }
         let capacity = self.shape[0];
         let mut shape = self.shape;
-        shape[0] = capacity + environment_count;
+        shape[0] = validate_replay_alignment(capacity, environment_count)?;
         self.observations = Some(Tensor::zeros(shape, self.options.clone()));
         self.environment_count = Some(environment_count);
         Ok(())
@@ -763,6 +765,31 @@ mod tests {
                 .try_to_vec::<f32>()
                 .unwrap(),
             vec![4.0]
+        );
+    }
+
+    #[test]
+    fn repeated_environment_count_initialization_preserves_previous_rows() {
+        let device = Device::flex();
+        let mut replay = AlignedObservationReplay::<2>::new([8, 1], &device);
+        let batch = |values: [f32; 2]| Tensor::<1>::from_data(values, &device).reshape([2, 1]);
+
+        replay
+            .insert(0, batch([1.0, 2.0]), batch([10.0, 20.0]), &[false; 2])
+            .unwrap();
+        replay
+            .insert(2, batch([3.0, 4.0]), batch([30.0, 40.0]), &[false; 2])
+            .unwrap();
+
+        assert_eq!(
+            replay
+                .gather(&[0, 1])
+                .unwrap()
+                .0
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![1.0, 2.0]
         );
     }
 
