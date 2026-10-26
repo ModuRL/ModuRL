@@ -838,7 +838,7 @@ class SACActor(nn.Module):
         return squashed * 2.0, log_probability.sum(dim=1, keepdim=True)
 
 
-class SACCriticNetwork(nn.Module):
+class CriticNetwork(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.network = nn.Sequential(
@@ -900,10 +900,10 @@ def make_cleanrl_sac_runner(
     observation, _ = env.reset(seed=SEED)
     env.action_space.seed(SEED)
     actor = SACActor().to(device)
-    critic_1 = SACCriticNetwork().to(device)
-    critic_2 = SACCriticNetwork().to(device)
-    target_1 = SACCriticNetwork().to(device)
-    target_2 = SACCriticNetwork().to(device)
+    critic_1 = CriticNetwork().to(device)
+    critic_2 = CriticNetwork().to(device)
+    target_1 = CriticNetwork().to(device)
+    target_2 = CriticNetwork().to(device)
     target_1.load_state_dict(critic_1.state_dict())
     target_2.load_state_dict(critic_2.state_dict())
     log_alpha = torch.zeros(1, requires_grad=True, device=device)

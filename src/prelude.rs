@@ -12,7 +12,7 @@ pub use crate::agents::{
     },
     action_value_critic::{
         ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
-        ActionValueCriticNetwork,
+        ActionValueCriticNetwork, DiscreteVectorHeadCritic, ScalarStateActionCritic,
     },
     deterministic_actor_critic::{
         DeterministicActorCriticCollectionLogEntry, DeterministicActorCriticConfigurationError,
@@ -34,10 +34,9 @@ pub use crate::agents::{
         dqn::{DQNAgent, DQNLogger},
     },
     sac::{
-        DiscreteVectorHeadCritic, SACAgent, SACCollectionLogEntry, SACConfigurationError,
-        SACCritic, SACCriticAggregationMode, SACCriticError, SACCriticNetwork,
-        SACEntropyConfiguration, SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger,
-        SACModelGroup, SACModelTypes, SACReplayError, ScalarStateActionCritic,
+        SACAgent, SACCollectionLogEntry, SACConfigurationError, SACEntropyConfiguration,
+        SACEpisodeLogEntry, SACError, SACLogEntry, SACLogger, SACModelGroup, SACModelTypes,
+        SACReplayError,
     },
 };
 pub use crate::distributions::{
