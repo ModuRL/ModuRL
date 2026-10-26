@@ -1,9 +1,7 @@
 //! Generalized Soft Actor-Critic with independent critic optimizers and exact or sampled policy expectations.
 
-mod network;
 mod replay;
 
-pub use network::*;
 pub use replay::SACReplayError;
 
 use bon::bon;
@@ -16,7 +14,13 @@ use burn::{
 use std::{fmt::Debug, marker::PhantomData, num::NonZeroUsize};
 
 use self::replay::{SACOptimizationBatch, SACReplay, SACReplayInsert, SACReplayStorage};
-use super::{Agent, ReplayStorageConfig};
+use super::{
+    Agent, ReplayStorageConfig,
+    action_value_critic::{
+        ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
+        ActionValueCriticNetwork, aggregate_critic_values,
+    },
+};
 use crate::{
     buffers::experience_replay::{
         ExperienceReplayError, ReplayStorageError, validate_replay_alignment,
@@ -92,7 +96,7 @@ pub enum SACError<PE, GE, SE, CE = std::convert::Infallible> {
     #[error("critic network failed: {0}")]
     CriticError(#[source] CE),
     #[error("critic operation failed: {0}")]
-    CriticOperationError(#[from] SACCriticError),
+    CriticOperationError(#[from] ActionValueCriticError),
     #[error("invalid SAC configuration: {0}")]
     ConfigurationError(#[from] SACConfigurationError),
     #[error("SAC {field} shape differs: expected {expected:?}, got {actual:?}")]
@@ -437,9 +441,9 @@ pub struct SACAgent<'a, G: SACModelTypes, OS, AS, GE, I = (), const A: usize = 2
     policy: G::Policy,
     actor_optimizer: ModuleOptimizer,
     actor_learning_rate: f64,
-    critics: Vec<SACCritic<G::Critic>>,
+    critics: Vec<ActionValueCritic<G::Critic>>,
     entropy_configuration: SACEntropyConfiguration,
-    aggregation_mode: SACCriticAggregationMode,
+    aggregation_mode: ActionValueCriticAggregationMode,
     action_space: AS,
     observation_space: OS,
     replay: Option<G::Replay>,
@@ -479,13 +483,13 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
         policy: P,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
         actor_learning_rate: f64,
-        critics: Vec<SACCritic<N>>,
+        critics: Vec<ActionValueCritic<N>>,
         entropy_configuration: SACEntropyConfiguration,
         action_space: AS,
         observation_space: OS,
         replay_storage_config: ReplayStorageConfig,
         logger: Option<&'a mut dyn SACLogger<I>>,
-        aggregation_mode: Option<SACCriticAggregationMode>,
+        aggregation_mode: Option<ActionValueCriticAggregationMode>,
         entropy_change_penalty: Option<f64>,
         q_value_clip: Option<f64>,
         #[builder(default = 0.99)] gamma: f64,
@@ -513,7 +517,14 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
                 CandidateKind = AS::Kind,
                 Error = PE,
             >,
-        N: SACCriticNetwork<O, A, C, ObservationKind = OS::Kind, ActionKind = AS::Kind, Error = CE>,
+        N: ActionValueCriticNetwork<
+                O,
+                A,
+                C,
+                ObservationKind = OS::Kind,
+                ActionKind = AS::Kind,
+                Error = CE,
+            >,
         GE: Debug,
         P: SACPolicyModelTypes<
                 N,
@@ -589,7 +600,7 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
             actor_learning_rate,
             critics,
             entropy_configuration,
-            aggregation_mode: aggregation_mode.unwrap_or(SACCriticAggregationMode::Min),
+            aggregation_mode: aggregation_mode.unwrap_or(ActionValueCriticAggregationMode::Min),
             action_space,
             observation_space,
             replay: None,
@@ -652,7 +663,14 @@ where
     DType: Cast<A, AS::Kind, OutputKind = AS::Kind>,
     P: Module
         + ExpectationPolicy<O, L, C, ObservationKind = OS::Kind, CandidateKind = AS::Kind, Error = PE>,
-    N: SACCriticNetwork<O, A, C, ObservationKind = OS::Kind, ActionKind = AS::Kind, Error = CE>,
+    N: ActionValueCriticNetwork<
+            O,
+            A,
+            C,
+            ObservationKind = OS::Kind,
+            ActionKind = AS::Kind,
+            Error = CE,
+        >,
     GE: Debug,
 {
     pub fn get_action_space(&self) -> &AS {
@@ -669,7 +687,7 @@ where
     }
 
     /// Returns the independently optimized critic ensemble.
-    pub fn critics(&self) -> &[SACCritic<N>] {
+    pub fn critics(&self) -> &[ActionValueCritic<N>] {
         &self.critics
     }
 
@@ -1358,7 +1376,7 @@ where
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
     P: Module + ExpectationPolicy<O, L, C, ObservationKind = K, CandidateKind = AS::Kind>,
-    N: SACCriticNetwork<O, A, C, ObservationKind = K, ActionKind = AS::Kind>,
+    N: ActionValueCriticNetwork<O, A, C, ObservationKind = K, ActionKind = AS::Kind>,
     P::Error: Debug,
     N::Error: Debug,
     AS::Error: Debug,

@@ -344,7 +344,7 @@ fn sac_critic<'a>(
     online_vars: &'a VarMap,
     target_vars: &'a mut VarMap,
     device: &Device,
-) -> Result<SACCritic<'a, AdamW>, Box<dyn Error>> {
+) -> Result<ActionValueCritic<'a, AdamW>, Box<dyn Error>> {
     let online = MLP::builder()
         .input_size(4)
         .output_size(1)
@@ -362,7 +362,7 @@ fn sac_critic<'a>(
         .name("critic".to_owned())
         .build()?;
     debug_result(
-        SACCritic::builder()
+        ActionValueCritic::builder()
             .online_network(ScalarStateActionCritic::new(online))
             .target_network(ScalarStateActionCritic::new(target))
             .online_vars(online_vars)
@@ -422,7 +422,7 @@ fn sac(
             .entropy_configuration(entropy)
             .action_space(action_space)
             .observation_space(observation_space)
-            .aggregation_mode(SACCriticAggregationMode::Min)
+            .aggregation_mode(ActionValueCriticAggregationMode::Min)
             .replay_capacity(SAC_REPLAY_CAPACITY)
             .batch_size(SAC_BATCH_SIZE)
             .training_start(warmup_steps + 1)

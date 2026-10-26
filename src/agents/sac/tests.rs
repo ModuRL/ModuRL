@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    agents::action_value_critic::{DiscreteVectorHeadCritic, ScalarStateActionCritic},
     distributions::{
         CategoricalDistribution, GaussianDistribution, TanhTransform, TransformedDistribution,
     },
@@ -99,8 +100,8 @@ fn linear_model(features: usize, outputs: usize, value: f64, device: &Device) ->
 fn discrete_critic(
     device: &Device,
     dtype: DType,
-) -> SACCritic<DiscreteVectorHeadCritic<LinearModel>> {
-    SACCritic::builder()
+) -> ActionValueCritic<DiscreteVectorHeadCritic<LinearModel>> {
+    ActionValueCritic::builder()
         .online_network(DiscreteVectorHeadCritic::new(LinearModel {
             weight: Param::from_tensor(Tensor::from_data([[1.0f64, 3.0]], (device, dtype))),
         }))
@@ -556,7 +557,7 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
         .batch_size(2)
         .training_start(2)
         .training_horizon(4)
-        .aggregation_mode(SACCriticAggregationMode::Mean)
+        .aggregation_mode(ActionValueCriticAggregationMode::Mean)
         .entropy_change_penalty(0.5)
         .q_value_clip(0.5)
         .logger(&mut logger)
@@ -611,7 +612,7 @@ fn continuous_policy_uses_reparameterized_actions_and_detached_targets() {
         linear_model(1, 2, 0.0, &device),
         TransformedDistribution::<GaussianDistribution, TanhTransform>::default(),
     );
-    let critic = SACCritic::builder()
+    let critic = ActionValueCritic::builder()
         .online_network(ScalarStateActionCritic::new(linear_model(
             2, 1, 1.0, &device,
         )))
@@ -725,7 +726,7 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         },
         CategoricalDistribution,
     );
-    let critic = SACCritic::builder()
+    let critic = ActionValueCritic::builder()
         .online_network(DiscreteVectorHeadCritic::new(IntegerModel {
             weight: Param::from_tensor(Tensor::ones([1, 2], (&device, DType::F64))),
         }))
@@ -771,7 +772,7 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         },
         CategoricalDistribution,
     );
-    let critic = SACCritic::builder()
+    let critic = ActionValueCritic::builder()
         .online_network(DiscreteVectorHeadCritic::new(BooleanModel {
             weight: Param::from_tensor(Tensor::ones([1, 2], &device)),
         }))

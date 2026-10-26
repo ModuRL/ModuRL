@@ -281,10 +281,10 @@ fn a2c_updates_f64_networks_from_native_f32_observations() {
 fn discrete_critic<'a>(
     online_vars: &'a VarMap,
     target_vars: &'a mut VarMap,
-) -> SACCritic<'a, AdamW> {
+) -> ActionValueCritic<'a, AdamW> {
     let online = mlp(online_vars, 4, 2, "critic").unwrap();
     let target = mlp(target_vars, 4, 2, "critic").unwrap();
-    SACCritic::builder()
+    ActionValueCritic::builder()
         .online_network(DiscreteVectorHeadCritic::new(online))
         .target_network(DiscreteVectorHeadCritic::new(target))
         .online_vars(online_vars)
@@ -323,7 +323,7 @@ fn sac_updates_f64_networks_from_native_f32_observations() {
             Device::Cpu,
         )))
         .dtype(DTYPE)
-        .aggregation_mode(SACCriticAggregationMode::Mean)
+        .aggregation_mode(ActionValueCriticAggregationMode::Mean)
         .entropy_change_penalty(0.5)
         .build()
         .unwrap();
@@ -347,10 +347,10 @@ struct NativeF32ContinuousEnv {
 fn continuous_critic<'a>(
     online_vars: &'a VarMap,
     target_vars: &'a mut VarMap,
-) -> SACCritic<'a, AdamW> {
+) -> ActionValueCritic<'a, AdamW> {
     let online = mlp(online_vars, 2, 1, "critic").unwrap();
     let target = mlp(target_vars, 2, 1, "critic").unwrap();
-    SACCritic::builder()
+    ActionValueCritic::builder()
         .online_network(ScalarStateActionCritic::new(online))
         .target_network(ScalarStateActionCritic::new(target))
         .online_vars(online_vars)

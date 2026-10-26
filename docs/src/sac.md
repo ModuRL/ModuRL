@@ -1,6 +1,6 @@
 # Soft Actor-Critic
 
-The SAC agent and critic components use Burn and are available through `modurl::agents::sac` and the prelude.
+The SAC agent uses Burn and is available through `modurl::agents::sac` and the prelude. Its critics use the generic action-value API in `modurl::agents::action_value_critic`.
 
 `SACModelGroup` groups the policy, critic, and execution tensor types.
 The builder infers this group from the supplied models and spaces.
@@ -103,7 +103,7 @@ Jacobian correction in action log probabilities.
 
 ## Build Two Critics
 
-Each `SACCritic` owns an online Burn model, a detached target snapshot, and an optimizer.
+Each `ActionValueCritic` owns an online Burn model, a detached target snapshot, and an optimizer.
 The constructor clones the online model to initialize the target. Each critic has its own explicit learning rate.
 
 A continuous critic receives observations and actions and returns one Q-value per batch item.
@@ -113,7 +113,7 @@ It accepts Float `[batch_size, observation_size + action_size]` and returns `[ba
 Observations and actions must share dtype and device; the adapter does not cast them.
 
 ```rust,ignore
-let critic = SACCritic::builder()
+let critic = ActionValueCritic::builder()
     .online_network(ScalarStateActionCritic::new(online_network))
     .optimizer(critic_optimizer)
     .learning_rate(3e-4)
@@ -126,7 +126,7 @@ Create each critic with its own online model and optimizer. Separate target mode
 `polyak_update(tau)` blends each floating-point target parameter with its matching online parameter.
 Both target-evaluation methods detach their results. Actor evaluation retains action gradients while excluding critic-parameter gradients.
 
-`SACCriticNetwork<O, A, C>` describes native observation and action kinds.
+`ActionValueCriticNetwork<O, A, C>` describes native observation and action kinds.
 Ranks O and A include batch and event axes; rank C adds a candidate axis to rank A.
 The methods retain borrowed tensor inputs. For a scalar critic, use `online_replay_values::<2, 2, 3>(&observations, &actions)` for rank-2 batches.
 
@@ -135,7 +135,7 @@ It requires Int replay actions `[batch_size, 1]` or Int candidates `[batch_size,
 The adapter checks index bounds before gathering values, reading one Boolean result to the host.
 The model must perform any required observation conversion explicitly.
 
-The default aggregation mode is `SACCriticAggregationMode::Min`. This is the
+The default aggregation mode is `ActionValueCriticAggregationMode::Min`. This is the
 traditional SAC choice: using the lower estimate helps reduce optimistic
 Q-value errors.
 
@@ -206,7 +206,7 @@ let mut agent = SACAgent::builder()
     .entropy_configuration(entropy)
     .action_space(action_space)
     .observation_space(observation_space)
-    .aggregation_mode(SACCriticAggregationMode::Min)
+    .aggregation_mode(ActionValueCriticAggregationMode::Min)
     .training_horizon(total_timesteps)
     .replay_storage_config(ReplayStorageConfig::new(
         ReplayDeviceStrategy::OneDevice(device),
@@ -264,7 +264,7 @@ opt-in.
 ## Implement a Custom Critic Adapter
 
 Use `ScalarStateActionCritic` unless your critic has a different input or
-output layout. A custom `SACCriticNetwork<O, A, C>` must implement Burn's `Module` and follow these contracts:
+output layout. A custom `ActionValueCriticNetwork<O, A, C>` must implement Burn's `Module` and follow these contracts:
 
 | Operation | Inputs | Output |
 | --- | --- | --- |
@@ -279,7 +279,7 @@ actions while excluding gradients to critic parameters.
 
 `SACAgent` can also work with categorical policies and
 `DiscreteVectorHeadCritic`. Experimental discrete-SAC configurations can select
-mean critic aggregation with `.aggregation_mode(SACCriticAggregationMode::Mean)`
+mean critic aggregation with `.aggregation_mode(ActionValueCriticAggregationMode::Mean)`
 and add an entropy-drift penalty with `.entropy_change_penalty(0.5)`. It is not
 the canonical example because traditional SAC is a continuous-control algorithm.
 
