@@ -529,10 +529,10 @@ impl<I> SACLogger<I> for SACGrapher {
         let actor_loss = on_policy_metric(&entry.actor_loss);
         let entropy_coefficient = on_policy_metric(&entry.alpha);
         let policy_entropy = on_policy_metric(
-            &(-(entry.policy_log_probabilities.clone() * entry.policy_weights.clone()).sum_dim(2)),
+            &(-(entry.policy_log_probabilities.clone() * entry.policy_weights.clone()).sum_dim(1)),
         );
         let expected_policy_q = on_policy_metric(
-            &(entry.policy_q_values.clone() * entry.policy_weights.clone()).sum_dim(2),
+            &(entry.policy_q_values.clone() * entry.policy_weights.clone()).sum_dim(1),
         );
         let replay_reward = on_policy_metric(&entry.replay_rewards);
         let bellman_target = on_policy_metric(&entry.bellman_targets);
