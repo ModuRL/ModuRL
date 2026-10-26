@@ -78,6 +78,7 @@ impl Gym for NativeF32DiscreteEnv {
     type ObservationSpace = BoxSpace<2>;
     type ActionSpace = Discrete;
 
+    /// Accepts an action tensor shaped [1].
     fn step(
         &mut self,
         _action: burn::tensor::Tensor<1, burn::tensor::Int>,
