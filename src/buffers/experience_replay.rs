@@ -261,11 +261,12 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         };
         self.frontier_states = if start + count < capacity && self.inserted >= capacity {
             let frontier_start = start + count;
+            let frontier_rows = (frontier_start..start + 2 * count).collect::<Vec<_>>();
             Some((
                 frontier_start,
                 self.observations
                     .clone()
-                    .slice([Slice::from(frontier_start..start + 2 * count)]),
+                    .select(0, replay_index_tensor(&frontier_rows, &device)?),
             ))
         } else {
             None
