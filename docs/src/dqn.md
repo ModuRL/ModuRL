@@ -31,7 +31,7 @@ fn main() {
 
     let environment_device = Device::flex();
     let envs = vec![CartPoleV1::builder().rng_device(&environment_device).build().unwrap()];
-    let env = VectorizedGymWrapper::from(envs);
+    let env = VectorizedGymWrapper::new(envs).unwrap();
     let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let observation_space = env.observation_space();
     let online_q_network = MLP::builder()
