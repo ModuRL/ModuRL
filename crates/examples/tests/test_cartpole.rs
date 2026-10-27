@@ -96,7 +96,6 @@ fn ppo_cartpole() {
         .gae_lambda(0.95)
         .num_epochs(10)
         .training_horizon(120_000)
-        .device(device.clone())
         .build()
         .unwrap();
     for _ in 0..6 {
@@ -181,7 +180,6 @@ fn ppo_cartpole_shared() {
         .num_epochs(10)
         .gradient_clip(gradient_clip)
         .training_horizon(120_000)
-        .device(device.clone())
         .build()
         .unwrap();
     for _ in 0..6 {
@@ -222,7 +220,6 @@ fn ppo_cartpole_shared_multithreaded() {
         .gae_lambda(0.95)
         .num_epochs(10)
         .training_horizon(120_000)
-        .device(device.clone())
         .build()
         .unwrap();
     for _ in 0..6 {

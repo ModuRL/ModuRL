@@ -190,7 +190,6 @@ fn main() {
         .ent_coef(ENTROPY_COEFFICIENT)
         .gradient_clip(MAX_GRADIENT_NORM)
         .training_horizon(TRAINING_TIMESTEPS)
-        .device(device)
         .logging_info(&mut logger)
         .build()
         .expect("invalid PPO configuration");

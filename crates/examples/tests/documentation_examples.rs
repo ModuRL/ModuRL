@@ -64,7 +64,6 @@ mod getting_started {
             .mini_batch_size(64)
             .clip_range(ConstantSchedule::new(0.2))
             .training_horizon(10_000)
-            .device(device)
             .build()
             .unwrap();
 
@@ -390,7 +389,6 @@ mod ppo_configuration {
             .clip_range(ConstantSchedule::new(0.2))
             .training_horizon(120_000)
             .num_epochs(10)
-            .device(device)
             .build()
             .unwrap();
 

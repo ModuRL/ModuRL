@@ -285,7 +285,6 @@ fn ppo(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
             .ent_coef(0.01)
             .gradient_clip(0.5)
             .training_horizon(args.warmup_steps + args.steps)
-            .device(device.clone())
             .build(),
     )?;
     debug_result(agent.learn(&mut envs, args.warmup_steps))?;

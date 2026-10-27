@@ -21,7 +21,7 @@ use bon::bon;
 use burn::{
     module::Module,
     optim::ModuleOptimizer,
-    tensor::{DType, Device, Tensor, TensorReadError, kind::Autodiff},
+    tensor::{DType, Tensor, TensorReadError, kind::Autodiff},
 };
 use std::sync::Arc;
 
@@ -225,7 +225,6 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
         #[builder(default = 0.5)] gradient_clip: f32,
         training_horizon: usize,
         logging_info: Option<&'a mut dyn A2CLogger<I>>,
-        device: Device,
     ) -> Result<Self, PPOConfigurationError>
     where
         N: PPONetwork<O, H, L, InputKind = OS::Kind, ModelGroup = G>,
@@ -255,7 +254,6 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
             .gradient_clip(gradient_clip)
             .training_horizon(training_horizon)
             .maybe_logging_info(logging_info)
-            .device(device)
             .build()?;
         Ok(Self { inner })
     }
@@ -378,7 +376,10 @@ mod tests {
         gym::VectorizedGymWrapper,
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
     };
-    use burn::{optim::SgdConfig, tensor::DType};
+    use burn::{
+        optim::SgdConfig,
+        tensor::{DType, Device},
+    };
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -440,7 +441,6 @@ mod tests {
             .batch_size(2)
             .training_horizon(4)
             .logging_info(&mut logger)
-            .device(device.clone())
             .build()
             .unwrap();
         agent.learn(&mut env, 2).unwrap();
@@ -485,7 +485,6 @@ mod tests {
             .batch_size(2)
             .training_horizon(4)
             .logging_info(&mut logger)
-            .device(device)
             .build()
             .unwrap();
         agent.learn(&mut env, 2).unwrap();

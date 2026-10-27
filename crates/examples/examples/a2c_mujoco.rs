@@ -123,7 +123,6 @@ fn main() {
         .batch_size(rollout_batch_size)
         .training_horizon(TOTAL_TIMESTEPS)
         .logging_info(&mut grapher)
-        .device(device)
         .build()
         .unwrap();
 

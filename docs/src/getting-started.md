@@ -200,7 +200,6 @@ Finally, build the `PPOAgent` and run learning:
         .mini_batch_size(64)
         .clip_range(ConstantSchedule::new(0.2))
         .training_horizon(10_000)
-        .device(device)
         .build().unwrap();
 
     agent.learn(&mut env, 10_000).expect("PPO learning failed");
@@ -294,7 +293,6 @@ fn main() {
         .mini_batch_size(64)
         .clip_range(ConstantSchedule::new(0.2))
         .training_horizon(10_000)
-        .device(device)
         .build()
         .unwrap();
 
