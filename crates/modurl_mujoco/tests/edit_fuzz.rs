@@ -343,9 +343,32 @@ fn edit_float_field<T: FloatValues + ?Sized>(
     }
     let index = rng.random_range(0..count);
     let old = original.scalar_at(index);
-    let value = random_float(rng, old);
+    let value = filter_float_value(field, old, random_float(rng, old))?;
     candidate.set_scalar(index, value);
     Some(format!("{field}[{index}]={value:?}"))
+}
+
+fn filter_float_value(field: &str, original: f64, value: f64) -> Option<f64> {
+    if field == "body_mass" {
+        if original <= 0.0 {
+            return None;
+        }
+        return Some(if value <= 0.0 { original } else { value });
+    }
+    if matches!(
+        field,
+        "geom_gap"
+            | "geom_margin"
+            | "pair_gap"
+            | "pair_margin"
+            | "flex_gap"
+            | "flex_margin"
+            | "body_quat"
+    ) && (!value.is_finite() || value.abs() == 1e300)
+    {
+        return Some(original);
+    }
+    Some(value)
 }
 
 fn random_float(rng: &mut StdRng, original: f64) -> f64 {
@@ -479,7 +502,7 @@ float_field_editors! {
     skin_inflate => skin_inflate_mut, skin_vert => skin_vert_mut,
     skin_texcoord => skin_texcoord_mut, skin_bonebindpos => skin_bonebindpos_mut,
     skin_bonebindquat => skin_bonebindquat_mut, skin_bonevertweight => skin_bonevertweight_mut,
-    hfield_size => hfield_size_mut, hfield_data => hfield_data_mut,
+    hfield_data => hfield_data_mut,
     mat_texrepeat => mat_texrepeat_mut, mat_emission => mat_emission_mut,
     mat_specular => mat_specular_mut, mat_shininess => mat_shininess_mut,
     mat_reflectance => mat_reflectance_mut, mat_metallic => mat_metallic_mut,

@@ -76,46 +76,15 @@ fn deterministic_random_rom_fuzz() {
         let size = ROM_SIZES[rng.random_range(0..ROM_SIZES.len())];
         let mut bytes: Vec<u8> = (0..size).map(|_| rng.random()).collect();
         let vector_index = if size >= 2 * 1024 {
-            let rom_base = (0x10000 - size.min(4096) + 0x80) as u16;
-            let boot = [
-                0xA9,
-                0x00,
-                0x85,
-                0x96,
-                0xA9,
-                0x02,
-                0x85,
-                0x00,
-                0xA2,
-                0x28,
-                0xCA,
-                0xD0,
-                0xFD,
-                0xA9,
-                0x00,
-                0x85,
-                0x00,
-                0x4C,
-                rom_base as u8,
-                (rom_base >> 8) as u8,
-            ];
+            let address = (0x10000 - size.min(4096) + 0x80) as u16;
             let last_bank = size - size.min(4096);
-            let mut bank_starts = Vec::new();
-            if size >= 8192 || size.is_multiple_of(4096) {
-                bank_starts.extend((0..=size.saturating_sub(4096)).step_by(4096));
-            }
-            if !bank_starts.contains(&last_bank) {
-                bank_starts.push(last_bank);
-            }
-            for bank_start in bank_starts {
-                bytes[bank_start + 0x80..bank_start + 0x80 + boot.len()].copy_from_slice(&boot);
-                if size >= 8192 && bank_start + 0x1000 <= size {
-                    let index = bank_start + 0xFFC;
-                    bytes[index..index + 2].copy_from_slice(&rom_base.to_le_bytes());
-                }
-            }
+            bytes[last_bank + 0x80..last_bank + 0x83].copy_from_slice(&[
+                0x4C,
+                address as u8,
+                (address >> 8) as u8,
+            ]);
             let index = size - 4;
-            bytes[index..index + 2].copy_from_slice(&rom_base.to_le_bytes());
+            bytes[index..index + 2].copy_from_slice(&address.to_le_bytes());
             Some(index)
         } else {
             None
