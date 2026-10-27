@@ -252,6 +252,37 @@ jobs:
           --target x86_64-unknown-linux-gnu
           -p modurl_ale --test concurrent_construction
 
+  native-memory-fuzz:
+    name: Native memory fuzz (Valgrind)
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      MUJOCO_DOWNLOAD_DIR: ${{ github.workspace }}/target/mujoco
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: "valgrind --error-exitcode=1 --leak-check=no"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install latest stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install native memory test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind cmake zlib1g-dev
+      - name: Configure MuJoCo runtime library path
+        shell: bash
+        run: |
+          printf 'LD_LIBRARY_PATH=%s\n' \
+            "$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            >> "$GITHUB_ENV"
+      - name: Fuzz MuJoCo runtime model edits
+        env:
+          MODURL_FUZZ_ITERS: "1600"
+        run: cargo test --locked -p modurl_mujoco --test edit_fuzz
+      - name: Fuzz ALE ROM loading and execution
+        env:
+          MODURL_FUZZ_ITERS: "100"
+        run: cargo test --locked -p modurl_ale --test rom_fuzz
+
   packaging:
     name: Package validation
     runs-on: ubuntu-latest
