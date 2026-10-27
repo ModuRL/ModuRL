@@ -41,7 +41,6 @@ fn threaded_cartpole_rollout() -> Vec<Vec<f32>> {
 
 #[test]
 fn threaded_envs_are_reproducible() {
-    let _guard = RNG_LOCK.lock().unwrap();
     let first = threaded_cartpole_rollout();
     for _ in 0..10 {
         assert_eq!(threaded_cartpole_rollout(), first);
@@ -81,7 +80,6 @@ fn lunar_lander_rollout(render: bool) -> Vec<Vec<f32>> {
 #[test]
 #[ignore = "needs a display"]
 fn lunar_lander_rendering_does_not_change_physics() {
-    let _guard = RNG_LOCK.lock().unwrap();
     assert_eq!(lunar_lander_rollout(true), lunar_lander_rollout(false));
 }
 
