@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
-use crate::MujocoError;
+use crate::{MujocoError, model_edit};
 
 // Weak entries let a model disappear when the last environment using it is dropped.
 // Hold the mutex during compilation so simultaneous constructors compile only once.
@@ -125,6 +125,7 @@ impl MujocoCore {
                 "runtime model edits must preserve the compiled model signature".into(),
             ));
         }
+        model_edit::validate_runtime_edit(self.data.model(), &candidate)?;
         {
             // mj_setConst uses scratch data because it can overwrite state while
             // calculating constants at qpos0. Preserve the live integration state.

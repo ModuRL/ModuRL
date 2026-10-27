@@ -162,11 +162,14 @@ impl<T: MujocoTask> CustomMujoco<T> {
     /// viewer reloads the edited model without replacing its window; a closed
     /// viewer stays closed.
     ///
-    /// Use MuJoCo's runtime-editable numerical parameters. Structural changes
-    /// (a different compiled signature) are rejected. The caller is responsible
-    /// for valid MuJoCo parameter values and combinations; this API does not
-    /// validate every field. Randomness, scheduling, and baselines belong to the
-    /// caller. Rebuild the environment to change model structure or render assets.
+    /// Structural changes (a different compiled signature) are rejected. Integer,
+    /// flag, and enum edits are allowed only for fields MuJoCo reads safely at
+    /// runtime (contact filtering, groups, priorities, limit/active flags,
+    /// camera/light modes, and rendering options); structural flags,
+    /// solver/integrator selection, SDF/CCD settings, and flex-strain equality
+    /// data are rejected. Randomness, scheduling, and baselines belong to the
+    /// caller.
+    /// Rebuild the environment to change model structure or render assets.
     pub fn edit_model(
         &mut self,
         edit: impl FnOnce(&mut MjModel) -> Result<(), MujocoError>,

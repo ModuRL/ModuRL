@@ -12,6 +12,7 @@ mod custom;
 mod half_cheetah;
 mod hopper;
 mod humanoid;
+mod model_edit;
 mod walker2d;
 
 pub use ant::{AntV5, AntV5Info};
