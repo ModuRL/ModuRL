@@ -1296,7 +1296,6 @@ where
 {
     type Error = PPOError<N::Error, GE, AS::Error>;
     type GymError = GE;
-    type SpaceError = AS::Error;
     type ObservationSpace = OS;
     type ActionSpace = AS;
 

@@ -320,7 +320,6 @@ where
 {
     type Error = DeterministicActorCriticError<AE, GE, SE, CE>;
     type GymError = GE;
-    type SpaceError = SE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
 

@@ -22,10 +22,9 @@ pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
 pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     type Error;
     type GymError;
-    type SpaceError;
 
     type ObservationSpace: ObservationSpace<O>;
-    type ActionSpace: ActionSpace<A, Error = Self::SpaceError>;
+    type ActionSpace: ActionSpace<A>;
 
     /// Selects rank-`A` actions `[batch_size, ...action_shape]` from rank-`O` observations `[batch_size, ...observation_shape]`.
     /// Preserves the batch axis. The agent defines supported observation dtypes/devices and returned action dtypes/devices.
@@ -157,7 +156,7 @@ mod tests {
     use super::test_support::{FixedContinuousEnv, FixedEnv};
     use crate::{
         gym::{Gym, MultiGym, VectorizedGymError, VectorizedGymWrapper},
-        spaces::{BoxSpace, Discrete, SpaceError},
+        spaces::{BoxSpace, Discrete},
     };
     use burn::tensor::{DType, Device, Int, Tensor};
     use std::convert::Infallible;
@@ -167,7 +166,6 @@ mod tests {
     impl Agent for FixedAgent {
         type Error = VectorizedGymError<Infallible>;
         type GymError = VectorizedGymError<Infallible>;
-        type SpaceError = SpaceError;
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
 
@@ -204,7 +202,6 @@ mod tests {
         let agent: &mut dyn Agent<
             Error = VectorizedGymError<Infallible>,
             GymError = VectorizedGymError<Infallible>,
-            SpaceError = SpaceError,
             ObservationSpace = BoxSpace<2>,
             ActionSpace = Discrete,
         > = &mut agent;

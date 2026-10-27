@@ -1385,7 +1385,6 @@ where
 {
     type Error = SACError<P::Error, GE, AS::Error, N::Error>;
     type GymError = GE;
-    type SpaceError = AS::Error;
     type ObservationSpace = OS;
     type ActionSpace = AS;
 
