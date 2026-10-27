@@ -60,9 +60,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .critic(critic)
         .action_space(action_space)
         .observation_space(observation_space)
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device,
-        )))
         .gamma(0.99)
         .tau(0.005)
         .exploration_noise(0.1)

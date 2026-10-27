@@ -307,9 +307,6 @@ fn categorical_bellman_targets_and_half_mse_preserve_f64() {
             Tensor::zeros([1, 1], &device),
             Tensor::full([1, 1], 100.0, &device),
         ))
-        .replay_storage_config(ReplayStorageConfig::new(
-            super::super::ReplayDeviceStrategy::OneDevice(device.clone()),
-        ))
         .dtype(DType::F64)
         .gamma(0.9)
         .training_horizon(4)
@@ -379,9 +376,6 @@ fn agent_builder_rejects_invalid_sizes_ranges_and_dtype() {
                 Tensor::zeros([1, 1], &device),
                 Tensor::ones([1, 1], &device),
             ))
-            .replay_storage_config(ReplayStorageConfig::new(
-                super::super::ReplayDeviceStrategy::OneDevice(device.clone()),
-            ))
             .replay_capacity(if case == 0 {
                 0
             } else if case == 2 {
@@ -434,9 +428,6 @@ fn mismatched_critic_dtype_is_rejected_before_training_arithmetic() {
             Tensor::zeros([1, 1], &device),
             Tensor::ones([1, 1], &device),
         ))
-        .replay_storage_config(ReplayStorageConfig::new(
-            super::super::ReplayDeviceStrategy::OneDevice(device.clone()),
-        ))
         .training_horizon(4)
         .build()
         .unwrap();
@@ -472,9 +463,6 @@ fn actor_update_changes_policy_without_updating_critics_or_targets() {
         .observation_space(BoxSpace::new(
             Tensor::zeros([1, 1], &device),
             Tensor::full([1, 1], 100.0, &device),
-        ))
-        .replay_storage_config(ReplayStorageConfig::new(
-            super::super::ReplayDeviceStrategy::OneDevice(device.clone()),
         ))
         .training_horizon(4)
         .build()
@@ -547,12 +535,7 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
         .entropy_configuration(entropy)
         .action_space(environment.action_space())
         .observation_space(environment.observation_space())
-        .replay_storage_config(ReplayStorageConfig::new(
-            super::super::ReplayDeviceStrategy::Hybrid {
-                optimization_device: device,
-                storage_device: Device::flex(),
-            },
-        ))
+        .replay_device(Device::flex())
         .replay_capacity(16)
         .batch_size(2)
         .training_start(2)
@@ -635,9 +618,6 @@ fn continuous_policy_uses_reparameterized_actions_and_detached_targets() {
             Tensor::zeros([1, 1], &device),
             Tensor::full([1, 1], 100.0, &device),
         ))
-        .replay_storage_config(ReplayStorageConfig::new(
-            super::super::ReplayDeviceStrategy::OneDevice(device.clone()),
-        ))
         .samples(NonZeroUsize::new(4).unwrap())
         .training_horizon(4)
         .build()
@@ -696,9 +676,6 @@ fn malformed_terminal_observations_return_errors_before_replay_insertion() {
             .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
             .action_space(environment.action_space())
             .observation_space(environment.observation_space())
-            .replay_storage_config(ReplayStorageConfig::new(
-                super::super::ReplayDeviceStrategy::OneDevice(device.clone()),
-            ))
             .replay_capacity(8)
             .batch_size(1)
             .training_horizon(4)
@@ -742,9 +719,6 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
         .action_space(Discrete::new(2))
         .observation_space(Discrete::new(10))
-        .replay_storage_config(ReplayStorageConfig::new(
-            super::super::ReplayDeviceStrategy::OneDevice(device.clone()),
-        ))
         .dtype(DType::F64)
         .training_horizon(4)
         .build()
@@ -788,9 +762,6 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
         .action_space(Discrete::new(2))
         .observation_space(BooleanSpace)
-        .replay_storage_config(ReplayStorageConfig::new(
-            super::super::ReplayDeviceStrategy::OneDevice(device.clone()),
-        ))
         .training_horizon(4)
         .build()
         .unwrap();

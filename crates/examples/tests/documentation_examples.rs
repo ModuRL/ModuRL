@@ -119,9 +119,6 @@ mod dqn {
                 let exploration_progress = (progress / 0.5).min(1.0);
                 1.0 + (0.05 - 1.0) * exploration_progress
             })
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device,
-            )))
             .build()
             .expect("DQN configuration should be valid");
 
@@ -175,9 +172,6 @@ mod ddqn {
                 let exploration_progress = (progress / 0.5).min(1.0);
                 1.0 + (0.05 - 1.0) * exploration_progress
             })
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device.clone(),
-            )))
             .build()
             .expect("DDQN configuration should be valid");
 

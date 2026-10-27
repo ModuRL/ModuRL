@@ -1,10 +1,7 @@
 use super::*;
 use crate::{
-    agents::{
-        ReplayDeviceStrategy,
-        action_value_critic::{
-            ActionValueCriticAggregationMode, ScalarStateActionCritic, aggregate_critic_values,
-        },
+    agents::action_value_critic::{
+        ActionValueCriticAggregationMode, ScalarStateActionCritic, aggregate_critic_values,
     },
     buffers::experience_replay::ReplayStorage,
     gym::{Gym, ResetInfo, StepInfo, VectorizedGymWrapper},
@@ -227,9 +224,6 @@ fn agent(
             device,
         ))
         .observation_space(BoxSpace::new_unbounded([1, 1], device))
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device.clone(),
-        )))
         .gamma(0.9)
         .tau(0.25)
         .exploration_noise(0.0)
@@ -695,10 +689,7 @@ fn native_high_rank_boolean_collection_trains_and_rejects_invalid_terminals() {
         })
         .action_space(env.action_space())
         .observation_space(BooleanSpace)
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-            optimization_device: device.clone(),
-            storage_device: env.device.clone(),
-        }))
+        .replay_device(env.device.clone())
         .dtype(DType::F64)
         .replay_capacity(8)
         .batch_size(2)
@@ -783,9 +774,6 @@ fn builder_and_actions_reject_invalid_contracts() {
                 &device,
             ))
             .observation_space(BoxSpace::new_unbounded([1, 1], &device))
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device.clone(),
-            )))
             .dtype(dtype)
             .training_horizon(10)
             .build()

@@ -182,8 +182,9 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `ExperienceReplayError::TensorError` and `ReplayStorageError::TensorError`, `MissingBatchDimension`,
   and `ItemShapeMismatch` are removed. `UninitializedEnvironmentCount` becomes `EnvironmentCountNotSet`.
   Added `ReplayStorageError::IndexTooLarge` for indices outside the signed 64-bit range.
-- `ReplayDeviceStrategy` and `ReplayStorageConfig` now use Burn devices.
-  Removed `ReplayStorageConfig::with_observation_dtype`; configuration selects devices only.
+- Removed `ReplayDeviceStrategy` and `ReplayStorageConfig`. SAC, DDPG, TD3, DQN and DDQN optimize on the device of their model parameters,
+  which must share one device (`ModelDevice` otherwise, now also on `QLearningConfigurationError`).
+  Replay is stored on that device unless the builder sets `.replay_device(..)`.
   Migrated Q-learning replay preserves incoming observation kind and the first batch's dtype, rejecting later dtype changes.
   Environment output mapping, model input conversion, or another explicit caller composition can select the representation.
   The unmigrated SAC and deterministic actor-critic storage paths retain their former default F32 observation storage.

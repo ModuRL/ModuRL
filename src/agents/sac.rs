@@ -9,7 +9,7 @@ use burn::tensor::kind::TensorKind;
 use burn::{
     module::{Module, Param},
     optim::{GradientsParams, ModuleOptimizer},
-    tensor::{Bool, Cast, DType, Tensor, TensorData, TensorReadError, kind::Autodiff},
+    tensor::{Bool, Cast, DType, Device, Tensor, TensorData, TensorReadError, kind::Autodiff},
 };
 use std::{fmt::Debug, marker::PhantomData, num::NonZeroUsize};
 
@@ -76,7 +76,7 @@ pub enum SACConfigurationError {
     EmptySpace,
     #[error("log alpha dtype differs: expected {expected:?}, got {actual:?}")]
     LogAlphaDType { expected: DType, actual: DType },
-    #[error("model parameters must use the optimization device")]
+    #[error("model parameters must share one device")]
     ModelDevice,
     #[error("reading entropy configuration failed: {0}")]
     Tensor(#[from] TensorReadError),
@@ -488,7 +488,7 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
         entropy_configuration: SACEntropyConfiguration,
         action_space: AS,
         observation_space: OS,
-        replay_storage_config: ReplayStorageConfig,
+        replay_device: Option<Device>,
         logger: Option<&'a mut dyn SACLogger<I>>,
         aggregation_mode: Option<ActionValueCriticAggregationMode>,
         entropy_change_penalty: Option<f64>,
@@ -557,21 +557,16 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
             .training_horizon(training_horizon)
             .call()?;
 
-        let optimization_device = replay_storage_config.optimization_device();
-        if policy
-            .devices()
-            .iter()
-            .any(|device| *device != optimization_device)
-            || critics.iter().any(|critic| {
-                critic
-                    .online_network()
-                    .devices()
+        let replay_storage_config = ReplayStorageConfig::from_models(
+            policy.devices().into_iter().chain(
+                critics
                     .iter()
-                    .any(|device| *device != optimization_device)
-            })
-        {
-            return Err(SACConfigurationError::ModelDevice);
-        }
+                    .flat_map(|critic| critic.online_network().devices()),
+            ),
+            replay_device,
+        )
+        .ok_or(SACConfigurationError::ModelDevice)?;
+        let optimization_device = replay_storage_config.optimization_device();
 
         if let SACEntropyConfigurationKind::Automatic { log_alpha, .. } =
             &entropy_configuration.kind

@@ -30,6 +30,8 @@ pub mod dqn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum QLearningConfigurationError {
+    #[error("Q-network parameters must share one device")]
+    ModelDevice,
     #[error("replay capacity must be nonzero")]
     ZeroReplayCapacity,
     #[error("batch size must be nonzero")]
@@ -434,7 +436,7 @@ where
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         training_horizon: usize,
-        replay_storage_config: ReplayStorageConfig,
+        replay_device: Option<Device>,
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, QAgentError<GE, ME>> {
         const {
@@ -474,6 +476,9 @@ where
                     actual,
                 }
             })?;
+        let replay_storage_config =
+            ReplayStorageConfig::from_models(online_q_network.devices(), replay_device)
+                .ok_or(QLearningConfigurationError::ModelDevice)?;
         let replay_storage = QLearningReplayStorage::<R, K>::new(
             observation_storage_shape,
             replay_storage_config.storage_device(),

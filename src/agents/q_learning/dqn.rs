@@ -3,14 +3,14 @@ use bon::bon;
 use burn::{
     module::Module,
     optim::ModuleOptimizer,
-    tensor::{Bool, DType, Float, Int, Tensor, kind::Autodiff},
+    tensor::{Bool, DType, Device, Float, Int, Tensor, kind::Autodiff},
 };
 
 use super::{
     QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
 };
 use crate::{
-    agents::{Agent, ReplayStorageConfig},
+    agents::Agent,
     gym::MultiGym,
     models::Forward,
     objectives::bellman_targets,
@@ -115,7 +115,7 @@ where
         #[builder(default = 1000)] training_start: usize,
         training_horizon: usize,
         logger: Option<&'a mut dyn DQNLogger<I>>,
-        replay_storage_config: ReplayStorageConfig,
+        replay_device: Option<Device>,
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, QAgentError<GE, ME>> {
         let inner = QLearningAgent::<M, S, GE, DQNTarget, R>::builder()
@@ -132,7 +132,7 @@ where
             .update_frequency(update_frequency)
             .training_start(training_start)
             .training_horizon(training_horizon)
-            .replay_storage_config(replay_storage_config)
+            .maybe_replay_device(replay_device)
             .dtype(dtype)
             .build()?;
         Ok(Self {
@@ -199,7 +199,7 @@ mod tests {
     use super::*;
     use crate::{
         agents::q_learning::tests::{ObservationFixture, network},
-        agents::{ReplayDeviceStrategy, test_support::FixedEnv},
+        agents::test_support::FixedEnv,
         gym::{VectorizedGymError, VectorizedGymWrapper},
         parameter_schedule::ConstantSchedule,
     };
@@ -251,9 +251,6 @@ mod tests {
                 .target_update_interval(2)
                 .training_horizon(4)
                 .logger(&mut logger)
-                .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                    device.clone(),
-                )))
                 .build()
                 .unwrap();
             assert_eq!(agent.get_action_space().get_possible_values(), 2);
@@ -287,9 +284,6 @@ mod tests {
             .replay_capacity(4)
             .batch_size(1)
             .training_horizon(4)
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device.clone(),
-            )))
             .build()
             .unwrap();
         let observations = Tensor::<3, Bool>::from_data([[[true]], [[false]]], &device);

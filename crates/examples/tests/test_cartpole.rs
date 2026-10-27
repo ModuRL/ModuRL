@@ -271,9 +271,6 @@ fn dqn_cartpole() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         })
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device,
-        )))
         .build()
         .unwrap();
     const TRAINING_TIMESTEPS: usize = 500_000;
@@ -332,9 +329,6 @@ fn ddqn_cartpole() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         })
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device,
-        )))
         .build()
         .unwrap();
     const TRAINING_TIMESTEPS: usize = 500_000;
