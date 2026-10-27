@@ -150,13 +150,11 @@ void ALEInterface::loadSettings(const std::string& romfile,
 }
 
 ALEInterface::ALEInterface() {
-  disableBufferedIO();
   Logger::Info << welcomeMessage() << std::endl;
   createOSystem(theOSystem, theSettings);
 }
 
 ALEInterface::ALEInterface(bool display_screen) {
-  disableBufferedIO();
   Logger::Info << welcomeMessage() << std::endl;
   createOSystem(theOSystem, theSettings);
   this->setBool("display_screen", display_screen);
