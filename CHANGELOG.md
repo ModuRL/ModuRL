@@ -82,6 +82,9 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Added `VectorizedGymError::Empty` and feature-gated `WorkerDisconnected` variants for threaded failures.
   Candle tensor-error conversions are removed;
   callers must satisfy the documented tensor layouts and backend requirements.
+- PPO and A2C network builders merge `lr_scheduler`, `actor_lr_scheduler` and `critic_lr_scheduler` into
+  `learning_rate`, `actor_learning_rate` and `critic_learning_rate`, which take an `f64` or any `ParameterSchedule`.
+  `f64` implements `ParameterSchedule` as a constant. `set_learning_rate` replaces the schedule with the fixed rate.
 
 ### Environment wrappers and device placement
 

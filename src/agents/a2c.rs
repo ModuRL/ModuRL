@@ -97,23 +97,19 @@ impl<T: Module, A: Module, C: Module> SharedA2CNetwork<T, A, C> {
     #[builder]
     pub fn new(
         #[builder(into)] optimizer: ModuleOptimizer,
-        learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         shared_network: T,
         critic_head: C,
         actor_head: A,
-        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
-        lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
     ) -> Result<Self, PPOConfigurationError> {
         Ok(Self {
             inner: SharedPPONetwork::builder()
                 .optimizer(optimizer)
-                .learning_rate(learning_rate)
+                .learning_rate(move |progress| learning_rate.value(progress))
                 .shared_network(shared_network)
                 .critic_head(critic_head)
                 .actor_head(actor_head)
-                .maybe_lr_scheduler(
-                    lr_scheduler.map(|schedule| move |progress| schedule.value(progress)),
-                )
                 .build()?,
         })
     }
@@ -132,30 +128,22 @@ impl<A: Module, C: Module> SeparateA2CNetwork<A, C> {
     pub fn new(
         #[builder(into)] actor_optimizer: ModuleOptimizer,
         #[builder(into)] critic_optimizer: ModuleOptimizer,
-        actor_learning_rate: f64,
-        critic_learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        actor_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        critic_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         actor_network: A,
         critic_network: C,
-        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
-        actor_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
-        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
-        critic_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
         #[builder(default = false)] combined_loss: bool,
     ) -> Result<Self, PPOConfigurationError> {
         Ok(Self {
             inner: SeparatePPONetwork::builder()
                 .actor_optimizer(actor_optimizer)
                 .critic_optimizer(critic_optimizer)
-                .actor_learning_rate(actor_learning_rate)
-                .critic_learning_rate(critic_learning_rate)
+                .actor_learning_rate(move |progress| actor_learning_rate.value(progress))
+                .critic_learning_rate(move |progress| critic_learning_rate.value(progress))
                 .actor_network(actor_network)
                 .critic_network(critic_network)
-                .maybe_actor_lr_scheduler(
-                    actor_lr_scheduler.map(|schedule| move |progress| schedule.value(progress)),
-                )
-                .maybe_critic_lr_scheduler(
-                    critic_lr_scheduler.map(|schedule| move |progress| schedule.value(progress)),
-                )
                 .combined_loss(combined_loss)
                 .build()?,
         })
@@ -519,8 +507,7 @@ mod tests {
             ))
             .critic_head(model(1, &device))
             .optimizer(SgdConfig::new().init())
-            .learning_rate(1e-3)
-            .lr_scheduler(RecordingSchedule {
+            .learning_rate(RecordingSchedule {
                 progress: shared_progress.clone(),
             })
             .build()
@@ -533,12 +520,10 @@ mod tests {
             .critic_network(model(1, &device))
             .actor_optimizer(SgdConfig::new().init())
             .critic_optimizer(SgdConfig::new().init())
-            .actor_learning_rate(1e-3)
-            .critic_learning_rate(1e-3)
-            .actor_lr_scheduler(RecordingSchedule {
+            .actor_learning_rate(RecordingSchedule {
                 progress: actor_progress.clone(),
             })
-            .critic_lr_scheduler(RecordingSchedule {
+            .critic_learning_rate(RecordingSchedule {
                 progress: critic_progress.clone(),
             })
             .build()
@@ -547,8 +532,8 @@ mod tests {
         progress.advance_steps(2);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut shared.inner, &progress);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut separate.inner, &progress);
-        assert_eq!(*shared_progress.lock().unwrap(), [0.25]);
-        assert_eq!(*actor_progress.lock().unwrap(), [0.25]);
-        assert_eq!(*critic_progress.lock().unwrap(), [0.25]);
+        assert_eq!(*shared_progress.lock().unwrap(), [0.0, 0.25]);
+        assert_eq!(*actor_progress.lock().unwrap(), [0.0, 0.25]);
+        assert_eq!(*critic_progress.lock().unwrap(), [0.0, 0.25]);
     }
 }

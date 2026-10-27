@@ -123,10 +123,8 @@ fn main() {
         .critic_network(critic_network)
         .actor_optimizer(actor_optimizer)
         .critic_optimizer(critic_optimizer)
-        .actor_learning_rate(3e-4)
-        .critic_learning_rate(3e-4)
-        .actor_lr_scheduler(LinearSchedule::new(3e-4, 3e-5))
-        .critic_lr_scheduler(LinearSchedule::new(3e-4, 3e-5))
+        .actor_learning_rate(LinearSchedule::new(3e-4, 3e-5))
+        .critic_learning_rate(LinearSchedule::new(3e-4, 3e-5))
         .build()
         .unwrap();
 

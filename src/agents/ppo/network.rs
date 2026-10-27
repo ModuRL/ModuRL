@@ -39,8 +39,8 @@ impl ModuleVisitor for PPOGradientSelection<'_> {
 pub struct SharedPPONetwork<T: Module, A: Module, C: Module> {
     optimizer: ModuleOptimizer,
     learning_rate: f64,
+    learning_rate_schedule: Arc<dyn ParameterSchedule + Send + Sync>,
     model: (T, A, C),
-    lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
 }
 
 impl<T: Module, A: Module, C: Module> std::fmt::Debug for SharedPPONetwork<T, A, C> {
@@ -104,25 +104,21 @@ impl<T: Module, A: Module, C: Module> SharedPPONetwork<T, A, C> {
 
     /// Owns the models and optimizer, and enables training on the models.
     /// Model input and output contracts must agree. Models must share a device; Critic outputs and PPO statistics must use the environment reward dtype.
-    /// Rejects a nonpositive or non-finite learning rate.
+    /// `learning_rate` is a fixed `f64` or a schedule; rejects a nonpositive or non-finite initial rate.
     #[builder]
     pub fn new(
         #[builder(into)] optimizer: ModuleOptimizer,
-        learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         shared_network: T,
         critic_head: C,
         actor_head: A,
-        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
-        lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
     ) -> Result<Self, PPOConfigurationError> {
-        if !learning_rate.is_finite() || learning_rate <= 0.0 {
-            return Err(PPOConfigurationError::InvalidLearningRate);
-        }
         Ok(Self {
             optimizer,
-            learning_rate,
+            learning_rate: initial_learning_rate(&*learning_rate)?,
+            learning_rate_schedule: learning_rate,
             model: (shared_network, actor_head, critic_head).train(),
-            lr_scheduler,
         })
     }
 }
@@ -137,9 +133,9 @@ pub struct SeparatePPONetwork<A: Module, C: Module> {
     critic_optimizer: ModuleOptimizer,
     actor_learning_rate: f64,
     critic_learning_rate: f64,
+    actor_learning_rate_schedule: Arc<dyn ParameterSchedule + Send + Sync>,
+    critic_learning_rate_schedule: Arc<dyn ParameterSchedule + Send + Sync>,
     model: (A, C),
-    actor_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
-    critic_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
     combined_loss: bool,
 }
 
@@ -204,39 +200,38 @@ impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
 
     /// Owns the models and optimizers, and enables training on both models.
     /// Models must accept the same native observation kind and share a device. Critic outputs and PPO statistics must use the environment reward dtype.
-    /// Rejects nonpositive or non-finite learning rates.
+    /// Learning rates are fixed `f64`s or schedules; rejects nonpositive or non-finite initial rates.
     #[builder]
     pub fn new(
         #[builder(into)] actor_optimizer: ModuleOptimizer,
         #[builder(into)] critic_optimizer: ModuleOptimizer,
-        actor_learning_rate: f64,
-        critic_learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        actor_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        critic_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         actor_network: A,
         critic_network: C,
-        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
-        actor_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
-        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
-        critic_lr_scheduler: Option<Arc<dyn ParameterSchedule + Send + Sync>>,
         #[builder(default = false)] combined_loss: bool,
     ) -> Result<Self, PPOConfigurationError> {
-        if !actor_learning_rate.is_finite()
-            || actor_learning_rate <= 0.0
-            || !critic_learning_rate.is_finite()
-            || critic_learning_rate <= 0.0
-        {
-            return Err(PPOConfigurationError::InvalidLearningRate);
-        }
         Ok(Self {
             actor_optimizer,
             critic_optimizer,
-            actor_learning_rate,
-            critic_learning_rate,
+            actor_learning_rate: initial_learning_rate(&*actor_learning_rate)?,
+            critic_learning_rate: initial_learning_rate(&*critic_learning_rate)?,
+            actor_learning_rate_schedule: actor_learning_rate,
+            critic_learning_rate_schedule: critic_learning_rate,
             model: (actor_network, critic_network).train(),
-            actor_lr_scheduler,
-            critic_lr_scheduler,
             combined_loss,
         })
     }
+}
+
+fn initial_learning_rate(schedule: &dyn ParameterSchedule) -> Result<f64, PPOConfigurationError> {
+    let learning_rate = schedule.value(0.0);
+    if !learning_rate.is_finite() || learning_rate <= 0.0 {
+        return Err(PPOConfigurationError::InvalidLearningRate);
+    }
+    Ok(learning_rate)
 }
 
 /// Executes an owned PPO network configuration with native tensor kinds and explicit batch ranks.
@@ -374,13 +369,12 @@ where
     }
 
     fn update_learning_rates(&mut self, progress: &ScheduleProgress) {
-        if let Some(schedule) = &self.lr_scheduler {
-            self.learning_rate = progress.parameter(&**schedule);
-        }
+        self.learning_rate = progress.parameter(&*self.learning_rate_schedule);
     }
 
     fn set_learning_rate(&mut self, learning_rate: f64) {
         self.learning_rate = learning_rate;
+        self.learning_rate_schedule = Arc::new(learning_rate);
     }
 }
 
@@ -503,17 +497,15 @@ where
     }
 
     fn update_learning_rates(&mut self, progress: &ScheduleProgress) {
-        if let Some(schedule) = &self.actor_lr_scheduler {
-            self.actor_learning_rate = progress.parameter(&**schedule);
-        }
-        if let Some(schedule) = &self.critic_lr_scheduler {
-            self.critic_learning_rate = progress.parameter(&**schedule);
-        }
+        self.actor_learning_rate = progress.parameter(&*self.actor_learning_rate_schedule);
+        self.critic_learning_rate = progress.parameter(&*self.critic_learning_rate_schedule);
     }
 
     fn set_learning_rate(&mut self, learning_rate: f64) {
         self.actor_learning_rate = learning_rate;
         self.critic_learning_rate = learning_rate;
+        self.actor_learning_rate_schedule = Arc::new(learning_rate);
+        self.critic_learning_rate_schedule = Arc::new(learning_rate);
     }
 }
 
@@ -646,36 +638,33 @@ mod tests {
             .actor_head(Relu)
             .critic_head(Relu)
             .optimizer(SgdConfig::new().init())
-            .learning_rate(start)
-            .lr_scheduler(move |progress| start * (1.0 - progress))
+            .learning_rate(move |progress| start * (1.0 - progress))
             .build()
             .unwrap();
         let validation = shared.valid();
         assert!(std::sync::Arc::ptr_eq(
-            shared.lr_scheduler.as_ref().unwrap(),
-            validation.lr_scheduler.as_ref().unwrap(),
+            &shared.learning_rate_schedule,
+            &validation.learning_rate_schedule,
         ));
-        assert_eq!(validation.lr_scheduler.as_ref().unwrap().value(0.5), 0.005);
+        assert_eq!(validation.learning_rate_schedule.value(0.5), 0.005);
 
         let separate = SeparatePPONetwork::builder()
             .actor_network(Relu)
             .critic_network(Relu)
             .actor_optimizer(SgdConfig::new().init())
             .critic_optimizer(SgdConfig::new().init())
-            .actor_learning_rate(start)
-            .critic_learning_rate(start)
-            .actor_lr_scheduler(move |progress| start * (1.0 - progress))
-            .critic_lr_scheduler(move |progress| start * (1.0 - progress))
+            .actor_learning_rate(move |progress| start * (1.0 - progress))
+            .critic_learning_rate(move |progress| start * (1.0 - progress))
             .build()
             .unwrap();
         let validation = separate.valid();
         assert!(std::sync::Arc::ptr_eq(
-            separate.actor_lr_scheduler.as_ref().unwrap(),
-            validation.actor_lr_scheduler.as_ref().unwrap(),
+            &separate.actor_learning_rate_schedule,
+            &validation.actor_learning_rate_schedule,
         ));
         assert!(std::sync::Arc::ptr_eq(
-            separate.critic_lr_scheduler.as_ref().unwrap(),
-            validation.critic_lr_scheduler.as_ref().unwrap(),
+            &separate.critic_learning_rate_schedule,
+            &validation.critic_learning_rate_schedule,
         ));
     }
 
@@ -897,8 +886,7 @@ mod tests {
             .actor_head(layer(&device))
             .critic_head(layer(&device))
             .optimizer(SgdConfig::new().init())
-            .learning_rate(0.001)
-            .lr_scheduler(|_| 0.0005)
+            .learning_rate(|progress| 0.001 * (1.0 - progress))
             .build()
             .unwrap();
         let mut network = network;
@@ -907,7 +895,7 @@ mod tests {
         assert!(network.model.1.weight.val().is_require_grad());
         assert!(network.model.2.weight.val().is_require_grad());
         assert_eq!(network.learning_rate, 0.001);
-        assert_eq!(network.lr_scheduler.as_ref().unwrap().value(0.5), 0.0005);
+        assert_eq!(network.learning_rate_schedule.value(0.5), 0.0005);
 
         let models = (network.model.0, network.model.1, network.model.2);
         let loss =
@@ -932,10 +920,8 @@ mod tests {
             .critic_network(layer(&device))
             .actor_optimizer(AdamConfig::new().init())
             .critic_optimizer(SgdConfig::new().init())
-            .actor_learning_rate(0.001)
-            .critic_learning_rate(0.002)
-            .actor_lr_scheduler(|_| 0.0005)
-            .critic_lr_scheduler(|_| 0.0007)
+            .actor_learning_rate(|progress| 0.001 * (1.0 - progress))
+            .critic_learning_rate(|progress| 0.002 * (1.0 - progress))
             .combined_loss(true)
             .build()
             .unwrap();
@@ -945,14 +931,8 @@ mod tests {
         assert!(network.model.1.weight.val().is_require_grad());
         assert_eq!(network.actor_learning_rate, 0.001);
         assert_eq!(network.critic_learning_rate, 0.002);
-        assert_eq!(
-            network.actor_lr_scheduler.as_ref().unwrap().value(0.5),
-            0.0005
-        );
-        assert_eq!(
-            network.critic_lr_scheduler.as_ref().unwrap().value(0.5),
-            0.0007
-        );
+        assert_eq!(network.actor_learning_rate_schedule.value(0.5), 0.0005);
+        assert_eq!(network.critic_learning_rate_schedule.value(0.5), 0.001);
         assert!(network.combined_loss);
 
         let actor_gradients = GradientsParams::from_grads(
@@ -1100,8 +1080,7 @@ mod tests {
             .actor_head(actor)
             .critic_head(mlp(4, 1, &device))
             .optimizer(SgdConfig::new().init())
-            .learning_rate(1e-3)
-            .lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
+            .learning_rate(LinearSchedule::new(1e-3, 1e-4))
             .build()
             .unwrap();
         let mut logger = NoopLogger::default();
@@ -1150,12 +1129,10 @@ mod tests {
         let networks = SeparatePPONetwork::builder()
             .actor_optimizer(SgdConfig::new().init())
             .critic_optimizer(SgdConfig::new().init())
-            .actor_learning_rate(1e-3)
-            .critic_learning_rate(1e-3)
             .actor_network(actor)
             .critic_network(mlp(4, 1, &device))
-            .actor_lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
-            .critic_lr_scheduler(LinearSchedule::new(1e-3, 1e-4))
+            .actor_learning_rate(LinearSchedule::new(1e-3, 1e-4))
+            .critic_learning_rate(LinearSchedule::new(1e-3, 1e-4))
             .build()
             .unwrap();
         let mut logger = NoopLogger::default();
