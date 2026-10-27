@@ -225,8 +225,9 @@ environment.edit_model(|model| {
 Call this whenever your application needs a physics change, including during an
 episode. Integer, flag, and enum edits are allowed only for fields MuJoCo reads
 safely at runtime (contact filtering, groups, priorities, limit/active flags,
-camera/light modes, and rendering options); structural flags, solver/integrator
-selection, SDF/CCD settings, and flex-strain equality data are rejected.
+camera/light modes, and rendering options); structural flags, heightfield sizes,
+solver/integrator selection, SDF/CCD settings, and flex-strain equality data are
+rejected.
 Sampling, curriculum schedules, and restoration of baseline values are ordinary
 application code.
 `MjModel` and `MjtObj` are re-exported in the prelude.

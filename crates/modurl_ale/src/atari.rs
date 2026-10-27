@@ -163,7 +163,7 @@ pub enum AtariGymError {
 impl<M: AtariObservationMode> AtariGym<M> {
     /// Loads a supplied ROM and fixes the observation layout from mode M.
     /// Creates CPU U8 observations and a discrete minimal-action space. No ROMs are downloaded.
-    /// Rejects unreadable paths and invalid sticky-action or rendering settings before loading the ROM.
+    /// Rejects unreadable or undersized ROMs and invalid sticky-action or rendering settings before loading the ROM.
     #[builder]
     pub fn new<const D: usize, const B: usize>(
         rom_path: PathBuf,
@@ -431,6 +431,12 @@ fn validate_rom(path: &Path) -> Result<(), AtariGymError> {
         return Err(AtariGymError::IoError(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "ROM path is not a file",
+        )));
+    }
+    if metadata.len() < 2048 {
+        return Err(AtariGymError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ROM must be at least 2048 bytes",
         )));
     }
     File::open(path).map_err(AtariGymError::IoError)?;

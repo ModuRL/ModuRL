@@ -291,6 +291,9 @@ bool Cartridge::searchForBytes(const uInt8* image, uInt32 imagesize,
                                const uInt8* signature, uInt32 sigsize,
                                uInt32 minhits)
 {
+  if(imagesize < sigsize)
+    return false;
+
   uInt32 count = 0;
   for(uInt32 i = 0; i < imagesize - sigsize; ++i)
   {

@@ -1,4 +1,4 @@
-use modurl_ale::{AtariGym, Ram};
+use modurl_ale::{AtariGym, AtariGymError, Ram};
 use std::{
     fs,
     path::PathBuf,
@@ -32,13 +32,17 @@ impl Drop for TinyRom {
 }
 
 #[test]
-fn one_byte_rom_builder_returns_without_crashing() {
+fn one_byte_rom_is_rejected() {
     let rom = TinyRom::new();
     let result = AtariGym::<Ram>::builder()
         .rom_path(rom.path.clone())
         .build();
-    eprintln!(
-        "one-byte ROM builder returned {}",
-        if result.is_ok() { "Ok" } else { "Err" }
-    );
+    match result {
+        Err(AtariGymError::IoError(error)) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(error.to_string(), "ROM must be at least 2048 bytes");
+        }
+        Err(error) => panic!("unexpected error: {error}"),
+        Ok(_) => panic!("one-byte ROM was accepted"),
+    }
 }

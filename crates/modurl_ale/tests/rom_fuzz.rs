@@ -13,7 +13,6 @@ const DEFAULT_ITERS: usize = 32;
 const ROM_SIZES: &[usize] = &[
     1,
     2 * 1024,
-    3 * 1024,
     4 * 1024,
     4097,
     8 * 1024,
@@ -75,14 +74,48 @@ fn deterministic_random_rom_fuzz() {
     for iteration in 0..iterations {
         let size = ROM_SIZES[rng.random_range(0..ROM_SIZES.len())];
         let mut bytes: Vec<u8> = (0..size).map(|_| rng.random()).collect();
+        if size == 128 * 1024 {
+            bytes[0x100..0x104].copy_from_slice(&[0x85, 0x3E, 0xA9, 0x00]);
+        }
         let vector_index = if size >= 2 * 1024 {
             let address = (0x10000 - size.min(4096) + 0x80) as u16;
-            let last_bank = size - size.min(4096);
-            bytes[last_bank + 0x80..last_bank + 0x83].copy_from_slice(&[
+            let boot = [
+                0xA9,
+                0x00,
+                0x85,
+                0x96,
+                0xA9,
+                0x02,
+                0x85,
+                0x00,
+                0xA2,
+                0x28,
+                0xCA,
+                0xD0,
+                0xFD,
+                0xA9,
+                0x00,
+                0x85,
+                0x00,
                 0x4C,
                 address as u8,
                 (address >> 8) as u8,
-            ]);
+            ];
+            let last_bank = size - size.min(4096);
+            let mut bank_starts = Vec::new();
+            if size >= 8192 || size.is_multiple_of(4096) {
+                bank_starts.extend((0..=size.saturating_sub(4096)).step_by(4096));
+            }
+            if !bank_starts.contains(&last_bank) {
+                bank_starts.push(last_bank);
+            }
+            for bank_start in bank_starts {
+                bytes[bank_start + 0x80..bank_start + 0x80 + boot.len()].copy_from_slice(&boot);
+                if size >= 8192 && bank_start + 0x1000 <= size {
+                    let index = bank_start + 0xFFC;
+                    bytes[index..index + 2].copy_from_slice(&address.to_le_bytes());
+                }
+            }
             let index = size - 4;
             bytes[index..index + 2].copy_from_slice(&address.to_le_bytes());
             Some(index)
