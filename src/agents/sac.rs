@@ -499,7 +499,7 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
         #[builder(default = 256)] batch_size: usize,
         #[builder(default = 1_000)] training_start: usize,
         #[builder(default = NonZeroUsize::MIN)] samples: NonZeroUsize,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, SACConfigurationError>
     where
@@ -554,7 +554,7 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
             .dtype(dtype)
             .maybe_entropy_change_penalty(entropy_change_penalty)
             .maybe_q_value_clip(q_value_clip)
-            .training_horizon(training_horizon)
+            .maybe_training_horizon(training_horizon)
             .call()?;
 
         let optimization_device = replay_storage_config.optimization_device();
@@ -1412,6 +1412,7 @@ where
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
+        self.schedule_progress.default_horizon(num_timesteps);
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_replay_collection(env)?;
         let mut episodes = SACEpisodeTracker::new(env.num_envs());
@@ -1440,7 +1441,7 @@ fn validate_sac_configuration(
     dtype: DType,
     entropy_change_penalty: Option<f64>,
     q_value_clip: Option<f64>,
-    training_horizon: usize,
+    training_horizon: Option<usize>,
 ) -> Result<(), SACConfigurationError> {
     if critic_count == 0 {
         return Err(SACConfigurationError::NoCritics);
@@ -1482,7 +1483,7 @@ fn validate_sac_configuration(
         return Err(SACConfigurationError::InvalidQValueClip);
     }
 
-    if training_horizon == 0 {
+    if training_horizon == Some(0) {
         return Err(SACConfigurationError::ZeroTrainingHorizon);
     }
 

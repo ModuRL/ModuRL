@@ -82,6 +82,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Added `VectorizedGymError::Empty` and feature-gated `WorkerDisconnected` variants for threaded failures.
   Candle tensor-error conversions are removed;
   callers must satisfy the documented tensor layouts and backend requirements.
+- Agent builders make `.training_horizon(...)` optional. Without it, schedules span the first `learn` call's `num_timesteps`; set it explicitly for chunked training.
 
 ### Environment wrappers and device placement
 

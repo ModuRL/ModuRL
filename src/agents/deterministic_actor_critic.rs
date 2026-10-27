@@ -327,7 +327,7 @@ impl DeterministicActorCriticConfigurationValidator {
         target_noise_clip: f64,
         actor_update_interval: usize,
         update_frequency: usize,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
     ) -> Result<(), DeterministicActorCriticConfigurationError> {
         let error = if !actor_learning_rate.is_finite() || actor_learning_rate <= 0.0 {
             Some(DeterministicActorCriticConfigurationError::InvalidActorLearningRate)
@@ -354,7 +354,7 @@ impl DeterministicActorCriticConfigurationValidator {
             Some(DeterministicActorCriticConfigurationError::ReplayCapacityBelowBatchSize)
         } else if update_frequency == 0 {
             Some(DeterministicActorCriticConfigurationError::ZeroUpdateFrequency)
-        } else if training_horizon == 0 {
+        } else if training_horizon == Some(0) {
             Some(DeterministicActorCriticConfigurationError::ZeroTrainingHorizon)
         } else if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
             Some(DeterministicActorCriticConfigurationError::InvalidGamma)
@@ -498,7 +498,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
         #[builder(default = 256)] batch_size: usize,
         #[builder(default = 1)] update_frequency: usize,
         #[builder(default = 1_000)] training_start: usize,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, DeterministicActorCriticConfigurationError>
     where
@@ -546,7 +546,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             .target_noise_clip(strategy.target_noise_clip())
             .actor_update_interval(strategy.actor_update_interval())
             .update_frequency(update_frequency)
-            .training_horizon(training_horizon)
+            .maybe_training_horizon(training_horizon)
             .call()?;
         space_storage_shape::<O>("observations", observation_space.shape(), replay_capacity)?;
         space_storage_shape::<A>("actions", action_space.shape(), replay_capacity)?;
@@ -1093,6 +1093,7 @@ where
                 "terminal observation rank must omit the batch axis"
             );
         }
+        self.schedule_progress.default_horizon(num_timesteps);
         let count = env.num_envs();
         validate_replay_alignment(self.replay_capacity, count)?;
         if let Some(expected) = self.environment_count

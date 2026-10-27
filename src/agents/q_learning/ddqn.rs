@@ -118,7 +118,7 @@ where
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
         logger: Option<&'a mut dyn DDQNLogger<I>>,
         replay_storage_config: ReplayStorageConfig,
         #[builder(default = DType::F32)] dtype: DType,
@@ -136,7 +136,7 @@ where
             .gamma(gamma)
             .update_frequency(update_frequency)
             .training_start(training_start)
-            .training_horizon(training_horizon)
+            .maybe_training_horizon(training_horizon)
             .replay_storage_config(replay_storage_config)
             .dtype(dtype)
             .build()?;
