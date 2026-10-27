@@ -102,11 +102,9 @@ fn deterministic_random_rom_fuzz() {
                 (address >> 8) as u8,
             ];
             let last_bank = size - size.min(4096);
-            let mut bank_starts = Vec::new();
-            if size >= 8192 || size.is_multiple_of(4096) {
-                bank_starts.extend((0..=size.saturating_sub(4096)).step_by(4096));
-            }
-            if !bank_starts.contains(&last_bank) {
+            let mut bank_starts: Vec<usize> =
+                (0..=size.saturating_sub(4096)).step_by(4096).collect();
+            if size >= 8192 && !bank_starts.contains(&last_bank) {
                 bank_starts.push(last_bank);
             }
             for bank_start in bank_starts {
@@ -116,7 +114,11 @@ fn deterministic_random_rom_fuzz() {
                     bytes[index..index + 2].copy_from_slice(&address.to_le_bytes());
                 }
             }
-            let index = size - 4;
+            let index = if size >= 8192 {
+                size - 4
+            } else {
+                size.min(4096) - 4
+            };
             bytes[index..index + 2].copy_from_slice(&address.to_le_bytes());
             Some(index)
         } else {
