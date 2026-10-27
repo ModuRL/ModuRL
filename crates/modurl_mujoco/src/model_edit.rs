@@ -30,18 +30,13 @@ pub(crate) fn validate_runtime_edit(
         };
     }
 
-    // Intentionally editable: contact type/affinity, groups, priorities, *_limited,
-    // actfrclimited, actgravcomp, actearly, and eq_active0.
+    // Other safe-mutable non-float fields use bounded or enum-checked MuJoCo 3.9.0 paths.
     frozen! {
-        body_simple, body_sameframe, bvh_depth, oct_depth, dof_simplenum,
-        tree_sleep_policy, geom_sameframe, site_type, site_sameframe,
-        cam_mode, cam_projection, cam_output, light_mode, light_type,
-        light_castshadow, light_active, flex_internal, flex_selfcollide,
-        flex_activelayers, flex_passive, flex_elemlayer, flex_edgeequality,
-        flex_rigid, flexedge_rigid, flex_centered, flex_flatskin, tex_type,
-        tex_colorspace, tex_data, mat_texuniform, pair_signature,
-        exclude_signature, tendon_treenum, actuator_gaintype, actuator_biastype,
-        sensor_datatype, sensor_needstage, sensor_intprm, tuple_objtype,
+        body_simple, dof_simplenum, tree_sleep_policy, site_type, flex_internal,
+        flex_selfcollide, flex_activelayers, flex_passive, flex_elemlayer,
+        flex_edgeequality, flex_rigid, flexedge_rigid, flex_centered, tex_type,
+        tendon_treenum, actuator_gaintype, actuator_biastype, sensor_datatype,
+        sensor_needstage, sensor_intprm,
     }
 
     let original_opt = original.opt();

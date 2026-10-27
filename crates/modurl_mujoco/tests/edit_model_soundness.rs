@@ -1,7 +1,7 @@
 use burn::tensor::{Device, Tensor};
 use modurl::gym::Gym;
 use modurl_mujoco::{CustomMujoco, MjModel, MujocoError, MujocoState, MujocoTask, TaskStep};
-use mujoco_rs::mujoco_c::mjtEq;
+use mujoco_rs::mujoco_c::{mjtCamLight, mjtEq, mjtGeom, mjtProjection};
 use std::{
     fmt::Debug,
     fs,
@@ -16,6 +16,7 @@ const SLIDE_XML: &str = r#"
     <body name="slider">
       <joint name="slide" type="slide" axis="1 0 0"/>
       <geom type="sphere" size="0.05" mass="1"/>
+      <site name="marker" size="0.01"/>
     </body>
   </worldbody>
   <actuator>
@@ -209,6 +210,86 @@ fn only_finite_physics_edits_and_allowlisted_flags_are_accepted() {
     assert_eq!(env.model().opt().disableflags, disableflags);
     env.reset().unwrap();
     step(&mut env);
+}
+
+#[test]
+fn camera_and_light_render_fields_are_editable() {
+    let model = TempModel::new(
+        r#"
+        <mujoco model="camera-light">
+          <worldbody>
+            <body name="target">
+              <joint name="slide" type="slide" axis="1 0 0"/>
+              <geom type="sphere" size="0.05" mass="1"/>
+            </body>
+            <light name="runtime-light" mode="fixed" target="target" pos="0 0 1"/>
+            <camera name="runtime-camera" mode="fixed" target="target" pos="0 -1 1"/>
+          </worldbody>
+          <actuator>
+            <motor joint="slide" ctrllimited="true" ctrlrange="-1 1"/>
+          </actuator>
+        </mujoco>
+        "#,
+    );
+    let mut env = build(&model.path);
+    env.reset().unwrap();
+
+    let light_active = env.model().light_active()[0];
+    let light_castshadow = env.model().light_castshadow()[0];
+    env.edit_model(|model| {
+        model.light_active_mut()[0] = !light_active;
+        model.light_castshadow_mut()[0] = !light_castshadow;
+        model.cam_projection_mut()[0] = mjtProjection::mjPROJ_ORTHOGRAPHIC;
+        model.cam_mode_mut()[0] = mjtCamLight::mjCAMLIGHT_TRACK;
+        model.light_mode_mut()[0] = mjtCamLight::mjCAMLIGHT_TRACK;
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(env.model().light_active()[0], !light_active);
+    assert_eq!(env.model().light_castshadow()[0], !light_castshadow);
+    assert_eq!(
+        env.model().cam_projection()[0],
+        mjtProjection::mjPROJ_ORTHOGRAPHIC
+    );
+    assert_eq!(env.model().cam_mode()[0], mjtCamLight::mjCAMLIGHT_TRACK);
+    assert_eq!(env.model().light_mode()[0], mjtCamLight::mjCAMLIGHT_TRACK);
+    env.reset().unwrap();
+    assert_eq!(env.model().light_active()[0], !light_active);
+    assert_eq!(env.model().light_castshadow()[0], !light_castshadow);
+    assert_eq!(
+        env.model().cam_projection()[0],
+        mjtProjection::mjPROJ_ORTHOGRAPHIC
+    );
+    assert_eq!(env.model().cam_mode()[0], mjtCamLight::mjCAMLIGHT_TRACK);
+    assert_eq!(env.model().light_mode()[0], mjtCamLight::mjCAMLIGHT_TRACK);
+    step(&mut env);
+
+    env.edit_model(|model| {
+        model.light_active_mut()[0] = light_active;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(env.model().light_active()[0], light_active);
+    step(&mut env);
+}
+
+#[test]
+fn site_type_cannot_be_changed() {
+    let model = TempModel::new(SLIDE_XML);
+    let mut env = build(&model.path);
+    env.reset().unwrap();
+    assert_eq!(env.model().site_type().len(), 1);
+
+    assert_rejected_and_unchanged(
+        &mut env,
+        "site_type",
+        |model| model.site_type().to_vec(),
+        |model| {
+            model.site_type_mut()[0] = mjtGeom::mjGEOM_FLEX;
+            Ok(())
+        },
+    );
 }
 
 #[test]
