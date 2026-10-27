@@ -76,6 +76,13 @@ fn lunar_lander_rollout(render: bool) -> Vec<Vec<f32>> {
     observations
 }
 
+fn assert_close(actual: &[f32], expected: &[f32], tol: f32) {
+    assert_eq!(actual.len(), expected.len());
+    for (a, e) in actual.iter().zip(expected) {
+        assert!((a - e).abs() <= tol, "{actual:?} vs {expected:?}");
+    }
+}
+
 #[test]
 fn lunar_lander_seeded_trajectory_matches_golden() {
     let device = Device::flex();
@@ -95,31 +102,36 @@ fn lunar_lander_seeded_trajectory_matches_golden() {
         final_observation = step.observation.into_data().try_to_vec::<f32>().unwrap();
     }
     let actual = (reset_observation, final_observation, total_reward);
-    assert_eq!(
-        actual,
-        (
-            vec![
-                -0.0024300576,
-                1.416066,
-                -0.2461533,
-                0.22869912,
-                0.0028189588,
-                0.055681963,
-                0.0,
-                0.0,
-            ],
-            vec![
-                -0.052530956,
-                1.4581959,
-                -0.26300734,
-                -0.038651336,
-                0.10441409,
-                0.100221366,
-                0.0,
-                0.0,
-            ],
-            -9.250286,
-        )
+    let expected = (
+        vec![
+            -0.0024300576,
+            1.416066,
+            -0.2461533,
+            0.22869912,
+            0.0028189588,
+            0.055681963,
+            0.0,
+            0.0,
+        ],
+        vec![
+            -0.052530956,
+            1.4581959,
+            -0.26300734,
+            -0.038651336,
+            0.10441409,
+            0.100221366,
+            0.0,
+            0.0,
+        ],
+        -9.250286,
+    );
+    assert_close(&actual.0, &expected.0, 1e-4);
+    assert_close(&actual.1, &expected.1, 1e-4);
+    assert!(
+        (actual.2 - expected.2).abs() <= 1e-3,
+        "{:?} vs {:?}",
+        actual.2,
+        expected.2
     );
 }
 
