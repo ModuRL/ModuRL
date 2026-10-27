@@ -490,7 +490,7 @@ bool OSystem::openROM(const string& rom, string& md5, uInt8** image, int* size)
   if(!f)
     return false;
 
-  *image = new uInt8[MAX_ROM_SIZE];
+  *image = new uInt8[MAX_ROM_SIZE]();
   *size = gzread(f, *image, MAX_ROM_SIZE);
   gzclose(f);
 

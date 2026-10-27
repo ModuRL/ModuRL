@@ -42,6 +42,9 @@ thiserror = "2.0.20"
 [build-dependencies]
 cmake = "0.1"
 
+[dev-dependencies]
+rand = "0.10.3"
+
 [features]
 default = []
 rendering = ["dep:minifb"]

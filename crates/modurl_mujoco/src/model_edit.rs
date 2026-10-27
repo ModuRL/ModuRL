@@ -35,8 +35,8 @@ pub(crate) fn validate_runtime_edit(
         body_simple, body_sameframe, dof_simplenum, tree_sleep_policy,
         geom_sameframe, site_type, site_sameframe, flex_internal,
         flex_selfcollide, flex_activelayers, flex_passive, flex_elemlayer,
-        flex_edgeequality, flex_rigid, flexedge_rigid, flex_centered, tex_type,
-        pair_signature, exclude_signature, tendon_treenum, actuator_gaintype,
+        flex_edgeequality, flex_rigid, flexedge_rigid, flex_centered, hfield_size,
+        tex_type, pair_signature, exclude_signature, tendon_treenum, actuator_gaintype,
         actuator_biastype, sensor_datatype, sensor_needstage, sensor_intprm,
     }
 

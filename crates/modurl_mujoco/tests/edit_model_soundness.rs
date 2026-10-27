@@ -293,6 +293,43 @@ fn site_type_cannot_be_changed() {
 }
 
 #[test]
+fn hfield_size_is_frozen() {
+    let model = TempModel::new(
+        r#"
+        <mujoco model="hfield-ray">
+          <option timestep="0.01" gravity="0 0 0"/>
+          <asset>
+            <hfield name="terrain" nrow="3" ncol="3" size="1 1 1 0.1"
+                    elevation="0 0 0 0 0.5 0 0 0 0"/>
+          </asset>
+          <worldbody>
+            <geom name="ground" type="hfield" hfield="terrain"/>
+            <body name="probe" pos="-2 0 0.5">
+              <joint name="slide" type="slide" axis="0 0 1"/>
+              <geom type="sphere" size="0.01" mass="1" contype="0" conaffinity="0"/>
+              <site name="rf" zaxis="1 0 0"/>
+            </body>
+          </worldbody>
+          <actuator><motor joint="slide"/></actuator>
+          <sensor><rangefinder name="range" site="rf"/></sensor>
+        </mujoco>
+        "#,
+    );
+    let mut env = build(&model.path);
+    env.reset().unwrap();
+
+    assert_rejected_and_unchanged(
+        &mut env,
+        "hfield_size",
+        |model| model.hfield_size().to_vec(),
+        |model| {
+            model.hfield_size_mut()[0][1] = 0.0;
+            Ok(())
+        },
+    );
+}
+
+#[test]
 fn compiled_key_geom_sameframe_is_frozen() {
     let model = TempModel::new(SLIDE_XML);
     let mut env = build(&model.path);
