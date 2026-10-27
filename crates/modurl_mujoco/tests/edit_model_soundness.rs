@@ -1,7 +1,7 @@
 use burn::tensor::{Device, Tensor};
 use modurl::gym::Gym;
 use modurl_mujoco::{CustomMujoco, MjModel, MujocoError, MujocoState, MujocoTask, TaskStep};
-use mujoco_rs::mujoco_c::{mjtCamLight, mjtEq, mjtGeom, mjtProjection};
+use mujoco_rs::mujoco_c::{mjtCamLight, mjtEq, mjtGeom, mjtProjection, mjtSameFrame};
 use std::{
     fmt::Debug,
     fs,
@@ -287,6 +287,68 @@ fn site_type_cannot_be_changed() {
         |model| model.site_type().to_vec(),
         |model| {
             model.site_type_mut()[0] = mjtGeom::mjGEOM_FLEX;
+            Ok(())
+        },
+    );
+}
+
+#[test]
+fn compiled_key_geom_sameframe_is_frozen() {
+    let model = TempModel::new(SLIDE_XML);
+    let mut env = build(&model.path);
+    env.reset().unwrap();
+    let changed = if env.model().geom_sameframe()[0] == mjtSameFrame::mjSAMEFRAME_NONE {
+        mjtSameFrame::mjSAMEFRAME_BODY
+    } else {
+        mjtSameFrame::mjSAMEFRAME_NONE
+    };
+
+    assert_rejected_and_unchanged(
+        &mut env,
+        "geom_sameframe",
+        |model| model.geom_sameframe().to_vec(),
+        move |model| {
+            model.geom_sameframe_mut()[0] = changed;
+            Ok(())
+        },
+    );
+}
+
+#[test]
+fn compiled_key_pair_signature_is_frozen() {
+    let model = TempModel::new(
+        r#"
+        <mujoco model="pair-signature">
+          <option timestep="0.01" gravity="0 0 0"/>
+          <worldbody>
+            <body name="first">
+              <joint name="first-slide" type="slide" axis="1 0 0"/>
+              <geom name="geom_a" type="sphere" size="0.05" mass="1"/>
+            </body>
+            <body name="second">
+              <joint name="second-slide" type="slide" axis="0 1 0"/>
+              <geom name="geom_b" type="sphere" size="0.05" pos="0.2 0 0" mass="1"/>
+            </body>
+          </worldbody>
+          <contact>
+            <pair geom1="geom_a" geom2="geom_b"/>
+          </contact>
+          <actuator>
+            <motor joint="first-slide" ctrllimited="true" ctrlrange="-1 1"/>
+          </actuator>
+        </mujoco>
+        "#,
+    );
+    let mut env = build(&model.path);
+    env.reset().unwrap();
+    assert_eq!(env.model().pair_signature().len(), 1);
+
+    assert_rejected_and_unchanged(
+        &mut env,
+        "pair_signature",
+        |model| model.pair_signature().to_vec(),
+        |model| {
+            model.pair_signature_mut()[0] += 1;
             Ok(())
         },
     );

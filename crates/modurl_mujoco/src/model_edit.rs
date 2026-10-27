@@ -30,13 +30,14 @@ pub(crate) fn validate_runtime_edit(
         };
     }
 
-    // Other safe-mutable non-float fields use bounded or enum-checked MuJoCo 3.9.0 paths.
+    // Frozen fields are compiler-derived or runtime-unsafe; other safe-mutable non-floats use bounded/enum-checked MuJoCo 3.9.0 paths.
     frozen! {
-        body_simple, dof_simplenum, tree_sleep_policy, site_type, flex_internal,
+        body_simple, body_sameframe, dof_simplenum, tree_sleep_policy,
+        geom_sameframe, site_type, site_sameframe, flex_internal,
         flex_selfcollide, flex_activelayers, flex_passive, flex_elemlayer,
         flex_edgeequality, flex_rigid, flexedge_rigid, flex_centered, tex_type,
-        tendon_treenum, actuator_gaintype, actuator_biastype, sensor_datatype,
-        sensor_needstage, sensor_intprm,
+        pair_signature, exclude_signature, tendon_treenum, actuator_gaintype,
+        actuator_biastype, sensor_datatype, sensor_needstage, sensor_intprm,
     }
 
     let original_opt = original.opt();
