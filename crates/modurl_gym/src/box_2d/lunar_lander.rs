@@ -13,11 +13,12 @@ use box2d_rs::shapes::b2_edge_shape::*;
 use box2d_rs::shapes::b2_polygon_shape::*;
 
 use bon::bon;
-use burn::tensor::{DType, Device, Distribution, Int, Tensor, TensorData, TensorReadError};
+use burn::tensor::{Device, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces,
 };
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -25,6 +26,8 @@ use crate::EnvironmentError;
 
 #[cfg(feature = "rendering")]
 use crate::rendering::{Flag, Renderer};
+#[cfg(feature = "rendering")]
+use rand::Rng;
 
 // Constants from Python code
 const FPS: f32 = 50.0;
@@ -252,7 +255,10 @@ pub struct LunarLanderV3 {
     // Deterministic mode flag for testing
     deterministic_mode: bool,
 
-    rng_device: Device,
+    rng: StdRng,
+
+    #[cfg(feature = "rendering")]
+    particle_rng: StdRng,
 
     #[cfg(feature = "rendering")]
     renderer: Option<Renderer>,
@@ -266,9 +272,8 @@ impl LunarLanderV3 {
         #[builder(default = false)] enable_wind: bool,
         #[builder(default = 15.0)] wind_power: f32,
         #[builder(default = 1.5)] turbulence_power: f32,
-        /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = Device::flex())]
-        rng_device: Device,
+        /// Seeds the environment's RNG; when omitted the RNG is seeded from OS entropy.
+        seed: Option<u64>,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
@@ -293,6 +298,14 @@ impl LunarLanderV3 {
             );
         }
 
+        let rng = seed.map_or_else(rand::make_rng, StdRng::seed_from_u64);
+        #[cfg(feature = "rendering")]
+        let (rng, particle_rng) = {
+            let mut rng = rng;
+            let particle_rng = StdRng::seed_from_u64(rng.next_u64());
+            (rng, particle_rng)
+        };
+
         Ok(Self {
             gravity,
             enable_wind,
@@ -315,7 +328,9 @@ impl LunarLanderV3 {
             wind_idx: 0,
             torque_idx: 0,
             deterministic_mode: false,
-            rng_device,
+            rng,
+            #[cfg(feature = "rendering")]
+            particle_rng,
             #[cfg(feature = "rendering")]
             renderer: render
                 .then(|| Renderer::new(VIEWPORT_W as usize, VIEWPORT_H as usize, "Lunar Lander"))
@@ -323,13 +338,13 @@ impl LunarLanderV3 {
         })
     }
 
-    fn random_uniform(&self, low: f32, high: f32) -> Result<f32, TensorReadError> {
-        Tensor::<1>::random(
-            [1],
-            Distribution::Uniform(f64::from(low), f64::from(high)),
-            (&self.rng_device, DType::F32),
-        )
-        .try_into_scalar::<f32>()
+    fn random_uniform(&mut self, low: f32, high: f32) -> Result<f32, TensorReadError> {
+        Ok(self.rng.random_range(low..high))
+    }
+
+    #[cfg(feature = "rendering")]
+    fn random_particle_uniform(&mut self, low: f32, high: f32) -> Result<f32, TensorReadError> {
+        Ok(self.particle_rng.random_range(low..high))
     }
 
     fn destroy(&mut self) {
@@ -605,13 +620,13 @@ impl LunarLanderV3 {
             lander_pos.y - tip.1 * (-MAIN_ENGINE_Y_LOCATION / SCALE + 2.0 * dispersion[0]);
 
         // Add some randomness to particle starting position
-        let rand_x = self.random_uniform(-2.0, 2.0)? / SCALE;
-        let rand_y = self.random_uniform(-2.0, 2.0)? / SCALE;
+        let rand_x = self.random_particle_uniform(-2.0, 2.0)? / SCALE;
+        let rand_y = self.random_particle_uniform(-2.0, 2.0)? / SCALE;
 
         particle_body_def
             .position
             .set(particle_x + rand_x, particle_y + rand_y);
-        particle_body_def.angle = lander_angle + self.random_uniform(-0.1, 0.1)?;
+        particle_body_def.angle = lander_angle + self.random_particle_uniform(-0.1, 0.1)?;
 
         let particle = B2world::create_body(world.clone(), &particle_body_def);
 
@@ -631,8 +646,8 @@ impl LunarLanderV3 {
         B2body::create_fixture(particle.clone(), &fixture_def);
 
         // Apply velocity to particle (flame effect)
-        let flame_vel_x = -tip.0 * (20.0 + self.random_uniform(-5.0, 5.0)?);
-        let flame_vel_y = -tip.1 * (20.0 + self.random_uniform(-5.0, 5.0)?);
+        let flame_vel_x = -tip.0 * (20.0 + self.random_particle_uniform(-5.0, 5.0)?);
+        let flame_vel_y = -tip.1 * (20.0 + self.random_particle_uniform(-5.0, 5.0)?);
 
         particle
             .borrow_mut()
@@ -670,13 +685,13 @@ impl LunarLanderV3 {
             let particle_y = lander_pos.y + engine_offset_y + tip.1 * SIDE_ENGINE_HEIGHT / SCALE;
 
             // Add some randomness
-            let rand_x = self.random_uniform(-1.0, 1.0)? / SCALE;
-            let rand_y = self.random_uniform(-1.0, 1.0)? / SCALE;
+            let rand_x = self.random_particle_uniform(-1.0, 1.0)? / SCALE;
+            let rand_y = self.random_particle_uniform(-1.0, 1.0)? / SCALE;
 
             particle_body_def
                 .position
                 .set(particle_x + rand_x, particle_y + rand_y);
-            particle_body_def.angle = lander_angle + self.random_uniform(-0.1, 0.1)?;
+            particle_body_def.angle = lander_angle + self.random_particle_uniform(-0.1, 0.1)?;
 
             let particle = B2world::create_body(world.clone(), &particle_body_def);
 
@@ -696,8 +711,10 @@ impl LunarLanderV3 {
             B2body::create_fixture(particle.clone(), &fixture_def);
 
             // Apply velocity to particle (side flame effect)
-            let flame_vel_x = -side.0 * direction * (10.0 + self.random_uniform(-3.0, 3.0)?);
-            let flame_vel_y = -side.1 * direction * (10.0 + self.random_uniform(-3.0, 3.0)?);
+            let flame_vel_x =
+                -side.0 * direction * (10.0 + self.random_particle_uniform(-3.0, 3.0)?);
+            let flame_vel_y =
+                -side.1 * direction * (10.0 + self.random_particle_uniform(-3.0, 3.0)?);
 
             particle
                 .borrow_mut()
@@ -1821,7 +1838,6 @@ mod tests {
                 observation: _,
                 reward: _,
                 done,
-                truncated: _,
                 ..
             } = env.step(action).expect("Failed to step environment");
 

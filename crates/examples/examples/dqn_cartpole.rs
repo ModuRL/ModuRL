@@ -21,12 +21,7 @@ fn main() {
     println!("Using device: {device:?}");
 
     let environment_device = Device::flex();
-    let envs = vec![
-        CartPoleV1::builder()
-            .rng_device(&environment_device)
-            .build()
-            .unwrap(),
-    ];
+    let envs = vec![CartPoleV1::builder().seed(42).build().unwrap()];
     let env = VectorizedGymWrapper::new(envs).unwrap();
     let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let observation_space = env.observation_space();

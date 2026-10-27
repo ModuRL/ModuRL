@@ -22,7 +22,9 @@ The getting-started example uses `CartPoleV1` for individual environments and
 Discrete actions have shape `[1]` and kind `Int`;
 continuous actions retain the component shapes above. Vectorized batches add one leading axis.
 Reset and step results expose `observation`. Observations and space bounds stay on CPU.
-The `rng_device` builder option selects the device used for random draws.
+Each environment owns a host RNG. Use the builder's `.seed(u64)` option for
+reproducible behavior; omitted seeds use OS entropy and are independent of
+`Device::seed`.
 
 `BipedalWalkerV3` implements the standard environment with uneven grass terrain;
 the hardcore obstacle variant is not included.

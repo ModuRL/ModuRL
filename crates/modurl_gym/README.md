@@ -25,7 +25,7 @@ use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::flex();
-    let mut env = CartPoleV1::builder().rng_device(&device).build()?;
+    let mut env = CartPoleV1::builder().seed(7).build()?;
 
     let observation = env.reset()?.observation;
     let action = env.action_space().sample_batch(1, &device)?.squeeze_dims::<1>(&[0]);
@@ -42,11 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Discrete actions have shape `[1]` and kind `Int`; vectorized actions have shape `[batch_size, 1]`.
 Continuous actions retain their component shapes. Observation space bounds include a leading size-one batch axis.
 
-All environments produce observations and space bounds on CPU. The optional
-builder setting `rng_device` controls only random draws and defaults to CPU.
-Use `DeviceMultiGymWrapper` around vectorized environments to transfer whole
-action and observation batches to an accelerator. The former `.device(...)`
-builder setting is now `.rng_device(...)`; observation-device overrides are removed.
+All environments produce observations and space bounds on CPU. Each environment
+owns a host RNG; set `.seed(u64)` for reproducible behavior. If omitted, the RNG
+uses OS entropy and is independent of `Device::seed`. Use
+`DeviceMultiGymWrapper` around vectorized environments to transfer whole action
+and observation batches to an accelerator.
 
 | Module | Environment | Action space | Observation shape |
 | --- | --- | --- | --- |

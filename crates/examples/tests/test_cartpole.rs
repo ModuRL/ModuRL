@@ -246,12 +246,7 @@ fn dqn_cartpole() {
     #[cfg(all(feature = "metal", not(feature = "cuda")))]
     let device = burn::tensor::Device::metal(burn::tensor::DeviceKind::DefaultDevice).autodiff();
     device.seed(42);
-    let env = VectorizedGymWrapper::from(
-        CartPoleV1::builder()
-            .rng_device(&environment_device)
-            .build()
-            .unwrap(),
-    );
+    let env = VectorizedGymWrapper::from(CartPoleV1::builder().seed(42).build().unwrap());
     let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let online_q_network = MLP::builder()
         .input_size(4)
@@ -312,12 +307,7 @@ fn ddqn_cartpole() {
     #[cfg(all(feature = "metal", not(feature = "cuda")))]
     let device = burn::tensor::Device::metal(burn::tensor::DeviceKind::DefaultDevice).autodiff();
     device.seed(42);
-    let env = VectorizedGymWrapper::from(
-        CartPoleV1::builder()
-            .rng_device(&environment_device)
-            .build()
-            .unwrap(),
-    );
+    let env = VectorizedGymWrapper::from(CartPoleV1::builder().seed(42).build().unwrap());
     let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let online_q_network = MLP::builder()
         .input_size(4)

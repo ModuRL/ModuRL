@@ -2,17 +2,18 @@ use std::f64::consts::PI;
 
 use crate::EnvironmentError;
 use bon::bon;
-use burn::tensor::{DType, Device, Distribution, Tensor, TensorData, TensorReadError};
+use burn::tensor::{DType, Device, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces::BoxSpace,
 };
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 
 /// Gymnasium-compatible `Pendulum-v1` continuous-control environment.
 pub struct PendulumV1 {
     state: [f64; 2],
     gravity: f64,
-    rng_device: Device,
+    rng: StdRng,
     action_space: BoxSpace,
     observation_space: BoxSpace,
     #[cfg(feature = "rendering")]
@@ -24,9 +25,8 @@ impl PendulumV1 {
     /// Creates a pendulum with Gymnasium's default dynamics.
     #[builder]
     pub fn new(
-        /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = Device::flex(), with = |device: &Device| device.clone())]
-        rng_device: Device,
+        /// Seeds the environment's RNG; when omitted the RNG is seeded from OS entropy.
+        seed: Option<u64>,
         #[builder(default = 10.0)] gravity: f64,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
@@ -38,7 +38,7 @@ impl PendulumV1 {
             ));
         }
         Self::from_config(
-            &rng_device,
+            seed,
             gravity,
             #[cfg(feature = "rendering")]
             render,
@@ -46,7 +46,7 @@ impl PendulumV1 {
     }
 
     fn from_config(
-        rng_device: &Device,
+        seed: Option<u64>,
         gravity: f64,
         #[cfg(feature = "rendering")] render: bool,
     ) -> Result<Self, EnvironmentError> {
@@ -64,7 +64,7 @@ impl PendulumV1 {
         Ok(Self {
             state: [0.0; 2],
             gravity,
-            rng_device: rng_device.clone(),
+            rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
             action_space,
             observation_space,
             #[cfg(feature = "rendering")]
@@ -136,17 +136,9 @@ impl Gym for PendulumV1 {
     type ActionSpace = BoxSpace;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
-        let random = Tensor::<1>::random(
-            [2],
-            Distribution::Uniform(0.0, 1.0),
-            (&self.rng_device, DType::F32),
-        )
-        .clone()
-        .try_into_data_as::<f32>()
-        .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))?;
         self.state = [
-            -PI + f64::from(random[0]) * 2.0 * PI,
-            -1.0 + f64::from(random[1]) * 2.0,
+            -PI + f64::from(self.rng.random_range(0.0_f32..1.0_f32)) * 2.0 * PI,
+            -1.0 + f64::from(self.rng.random_range(0.0_f32..1.0_f32)) * 2.0,
         ];
         #[cfg(feature = "rendering")]
         self.render()?;

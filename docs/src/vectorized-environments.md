@@ -8,7 +8,7 @@ vectorized environment:
 
 ```rust,ignore
 let envs = (0..4)
-    .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
+    .map(|index| CartPoleV1::builder().seed(42 + index).build().unwrap())
     .collect::<Vec<_>>();
 let mut env = DeviceMultiGymWrapper::new(
     VectorizedGymWrapper::new(envs)?, Device::flex(), device.clone(),
@@ -23,10 +23,7 @@ spaces:
 
 ```rust,ignore
 let constructors = (0..4)
-    .map(|_| {
-        let device = device.clone();
-        move || CartPoleV1::builder().rng_device(&device).build().unwrap()
-    })
+    .map(|index| move || CartPoleV1::builder().seed(42 + index).build().unwrap())
     .collect();
 let env = MultithreadedVectorizedGymWrapper::new(
     constructors,

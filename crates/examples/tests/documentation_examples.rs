@@ -11,12 +11,7 @@ mod getting_started {
         let device = Device::flex().autodiff();
 
         let envs = (0..4)
-            .map(|_| {
-                CartPoleV1::builder()
-                    .rng_device(&Device::flex())
-                    .build()
-                    .unwrap()
-            })
+            .map(|index| CartPoleV1::builder().seed(42 + index).build().unwrap())
             .collect::<Vec<_>>();
         let mut env = DeviceMultiGymWrapper::new(
             VectorizedGymWrapper::new(envs).unwrap(),
@@ -94,12 +89,7 @@ mod dqn {
         let device = Device::flex().autodiff();
 
         let environment_device = Device::flex();
-        let envs = vec![
-            CartPoleV1::builder()
-                .rng_device(&environment_device)
-                .build()
-                .unwrap(),
-        ];
+        let envs = vec![CartPoleV1::builder().seed(42).build().unwrap()];
         let env = VectorizedGymWrapper::new(envs).unwrap();
         let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
         let observation_space = env.observation_space();
@@ -156,12 +146,7 @@ mod ddqn {
         let device = Device::flex().autodiff();
 
         let environment_device = Device::flex();
-        let envs = vec![
-            CartPoleV1::builder()
-                .rng_device(&environment_device)
-                .build()
-                .unwrap(),
-        ];
+        let envs = vec![CartPoleV1::builder().seed(42).build().unwrap()];
         let env = VectorizedGymWrapper::new(envs).unwrap();
         let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
         let observation_space = env.observation_space();
@@ -350,12 +335,7 @@ mod ppo_configuration {
         let device = Device::flex().autodiff();
 
         let envs = (0..4)
-            .map(|_| {
-                CartPoleV1::builder()
-                    .rng_device(&Device::flex())
-                    .build()
-                    .unwrap()
-            })
+            .map(|index| CartPoleV1::builder().seed(42 + index).build().unwrap())
             .collect::<Vec<_>>();
         let mut env = DeviceMultiGymWrapper::new(
             VectorizedGymWrapper::new(envs).unwrap(),

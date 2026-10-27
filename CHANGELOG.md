@@ -50,6 +50,9 @@ they do not imply that all workspace packages build together. See [Remaining mig
 
 ### Environments and agents
 
+- Classic-control and Box2D environments own a host RNG seeded through the builder's `.seed(u64)`.
+  `rng_device` is removed; unseeded environments use OS entropy and no longer follow `Device::seed`.
+  LunarLander rendering particles use a separate stream so rendering no longer changes physics.
 - `Gym`, `MultiGym`, and `Agent` gain observation and action rank parameters:
   `Gym<I = (), O = 2, A = 2>`, `MultiGym<I = (), O = 2, A = 2>`, and `Agent<I = (), O = 2, A = 2>`.
   These const parameters count batch axes even for `Gym`, whose step and reset values are unbatched.
@@ -102,8 +105,8 @@ they do not imply that all workspace packages build together. See [Remaining mig
 - `FrameStackGym` becomes `FrameStackGym<G, BF = 3, S = BoxSpace<BF>>`.
   Its constructor accepts a pre-stacked observation-space type `S`; the space's first item axis must equal `stack_size`.
   Stacking adds an item axis and preserves native observation kind, including integer and boolean frames.
-- Classic-control and Box2D builders in `modurl_gym` rename `.device(...)` to `.rng_device(...)`.
-  This setting controls random draws only. Observations, space bounds, and physics remain on CPU.
+- Classic-control and Box2D builders in `modurl_gym` initially renamed `.device(...)` to `.rng_device(...)`;
+  environment RNG configuration now uses `.seed(u64)` as described above. Observations, space bounds, and physics remain on CPU.
 - `AntV5`, `HalfCheetahV5`, `HopperV5`, `HumanoidV5`, and `Walker2dV5` remove `.device(...)` from their builders.
   MuJoCo observations and space bounds remain on CPU; environment seeds still control simulation randomness.
   Use a device wrapper around a compatible batched environment for accelerator transfers.
