@@ -21,57 +21,50 @@ where
     G: Gym<Error = EnvironmentError, ObservationSpace = BoxSpace<2>>,
     G::ActionSpace: ActionSpace<2, Kind = K, Item = Tensor<1, K>>,
 {
-    let rollout = || {
-        let mut env = factory();
-        let reset = env.reset().unwrap();
-        assert_eq!(reset.observation.device(), Device::flex());
-        let mut observations = vec![reset.observation.into_data().try_to_vec::<f32>().unwrap()];
-        for _ in 0..3 {
-            let step = env.step(action.clone()).unwrap();
-            assert_eq!(step.observation.device(), Device::flex());
-            observations.push(step.observation.into_data().try_to_vec::<f32>().unwrap());
-        }
-        let next = Tensor::<1>::random([7], Distribution::Uniform(0.0, 1.0), (device, DType::F32))
-            .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-        (observations, next)
-    };
+    let mut env = factory();
+    assert_eq!(env.reset().unwrap().observation.device(), Device::flex());
+    for _ in 0..3 {
+        let step = env.step(action.clone()).unwrap();
+        assert_eq!(step.observation.device(), Device::flex());
+    }
+
     device.seed(42);
-    let first = rollout();
+    let expected =
+        Tensor::<1>::random([7], Distribution::Uniform(0.0, 1.0), (device, DType::F32)).into_data();
     device.seed(42);
+    let mut env = factory();
+    env.reset().unwrap();
+    for _ in 0..3 {
+        env.step(action.clone()).unwrap();
+    }
+    let actual =
+        Tensor::<1>::random([7], Distribution::Uniform(0.0, 1.0), (device, DType::F32)).into_data();
     assert_eq!(
-        first,
-        rollout(),
-        "environment must retain the selected device RNG"
+        actual, expected,
+        "environment draws must not consume device RNG"
     );
 }
 
 #[test]
-fn observations_stay_on_cpu_and_rng_is_seeded() {
+fn observations_stay_on_cpu_and_environment_draws_leave_device_rng_untouched() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex();
     let discrete = || Tensor::from_data([1i32], &device);
     check_environment(
         &device,
-        || CartPoleV1::builder().rng_device(&device).build().unwrap(),
+        || CartPoleV1::builder().seed(42).build().unwrap(),
         discrete(),
     );
     check_environment(
         &device,
-        || {
-            MountainCarV0::builder()
-                .rng_device(&device)
-                .build()
-                .unwrap()
-        },
+        || MountainCarV0::builder().seed(42).build().unwrap(),
         discrete(),
     );
     check_environment(
         &device,
         || {
             AcrobotV1::builder()
-                .rng_device(&device)
+                .seed(42)
                 .torque_noise_max(0.1)
                 .build()
                 .unwrap()
@@ -80,85 +73,18 @@ fn observations_stay_on_cpu_and_rng_is_seeded() {
     );
     check_environment(
         &device,
-        || PendulumV1::builder().rng_device(&device).build().unwrap(),
+        || PendulumV1::builder().seed(42).build().unwrap(),
         Tensor::from_data([0f32], &device),
     );
     check_environment(
         &device,
-        || {
-            LunarLanderV3::builder()
-                .rng_device(device.clone())
-                .build()
-                .unwrap()
-        },
+        || LunarLanderV3::builder().seed(42).build().unwrap(),
         discrete(),
     );
     check_environment(
         &device,
-        || {
-            BipedalWalkerV3::builder()
-                .rng_device(&device)
-                .build()
-                .unwrap()
-        },
+        || BipedalWalkerV3::builder().seed(42).build().unwrap(),
         Tensor::from_data([0f32; 4], &device),
-    );
-}
-
-fn check_reset_rng<G>(device: &Device, mut env: G, size: usize, low: f64, high: f64, dtype: DType)
-where
-    G: Gym<Error = EnvironmentError, ObservationSpace = BoxSpace<2>>,
-{
-    device.seed(123);
-    let _ =
-        Tensor::<1>::random([size], Distribution::Uniform(low, high), (device, dtype)).into_data();
-    let expected =
-        Tensor::<1>::random([7], Distribution::Uniform(0.0, 1.0), (device, DType::F32)).into_data();
-    device.seed(123);
-    assert_eq!(env.reset().unwrap().observation.device(), Device::flex());
-    let actual =
-        Tensor::<1>::random([7], Distribution::Uniform(0.0, 1.0), (device, DType::F32)).into_data();
-    assert_eq!(actual, expected);
-}
-
-#[test]
-fn classic_control_reset_preserves_rng_advancement() {
-    let _guard = RNG_LOCK.lock().unwrap();
-    let device = Device::flex();
-    check_reset_rng(
-        &device,
-        CartPoleV1::builder().rng_device(&device).build().unwrap(),
-        4,
-        -0.05,
-        0.05,
-        DType::F64,
-    );
-    check_reset_rng(
-        &device,
-        MountainCarV0::builder()
-            .rng_device(&device)
-            .build()
-            .unwrap(),
-        1,
-        -0.6,
-        -0.4,
-        DType::F64,
-    );
-    check_reset_rng(
-        &device,
-        AcrobotV1::builder().rng_device(&device).build().unwrap(),
-        4,
-        -0.1,
-        0.1,
-        DType::F32,
-    );
-    check_reset_rng(
-        &device,
-        PendulumV1::builder().rng_device(&device).build().unwrap(),
-        2,
-        0.0,
-        1.0,
-        DType::F32,
     );
 }
 
@@ -167,7 +93,7 @@ fn batch_wrapper_preserves_observation_and_action_axes() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex();
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().rng_device(&device).build().unwrap())
+        .map(|index| CartPoleV1::builder().seed(42 + index).build().unwrap())
         .collect::<Vec<_>>();
     let envs: VectorizedGymWrapper<CartPoleV1> = envs.try_into().unwrap();
     let mut gym = DeviceMultiGymWrapper::new(envs, Device::flex(), device.clone());

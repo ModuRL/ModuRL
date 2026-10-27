@@ -102,8 +102,9 @@ they do not imply that all workspace packages build together. See [Remaining mig
 - `FrameStackGym` becomes `FrameStackGym<G, BF = 3, S = BoxSpace<BF>>`.
   Its constructor accepts a pre-stacked observation-space type `S`; the space's first item axis must equal `stack_size`.
   Stacking adds an item axis and preserves native observation kind, including integer and boolean frames.
-- Classic-control and Box2D builders in `modurl_gym` rename `.device(...)` to `.rng_device(...)`.
-  This setting controls random draws only. Observations, space bounds, and physics remain on CPU.
+- Classic-control and Box2D builders in `modurl_gym` remove `.device(...)`. Each environment owns a host RNG seeded through the builder's `.seed(u64)`;
+  unseeded environments use OS entropy and do not follow `Device::seed`. Observations, space bounds, and physics remain on CPU.
+  LunarLander rendering particles use a separate RNG stream, so rendering no longer changes physics.
 - `AntV5`, `HalfCheetahV5`, `HopperV5`, `HumanoidV5`, and `Walker2dV5` remove `.device(...)` from their builders.
   MuJoCo observations and space bounds remain on CPU; environment seeds still control simulation randomness.
   Use a device wrapper around a compatible batched environment for accelerator transfers.

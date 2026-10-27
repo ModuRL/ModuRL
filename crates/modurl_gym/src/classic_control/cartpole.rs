@@ -1,9 +1,10 @@
 use bon::bon;
-use burn::tensor::{DType, Device, Distribution, Int, Tensor, TensorData, TensorReadError};
+use burn::tensor::{DType, Device, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces,
 };
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 
 use crate::EnvironmentError;
 
@@ -13,7 +14,7 @@ use crate::rendering::Renderer;
 /// The classic CartPole environment.
 /// Converted from the OpenAI Gym CartPole environment.
 pub struct CartPoleV1 {
-    rng_device: Device,
+    rng: StdRng,
     gravity: f32,
     masspole: f32,
     total_mass: f32,
@@ -38,9 +39,8 @@ pub struct CartPoleV1 {
 impl CartPoleV1 {
     #[builder]
     pub fn new(
-        /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = Device::flex(), with = |device: &Device| device.clone())]
-        rng_device: Device,
+        /// Seeds the environment's RNG; when omitted the RNG is seeded from OS entropy.
+        seed: Option<u64>,
         #[builder(default = false)] sutton_barto_reward: bool,
         #[builder(default = true)] is_euler: bool,
         #[cfg(feature = "rendering")]
@@ -87,7 +87,7 @@ impl CartPoleV1 {
             is_euler,
             action_space,
             observation_space,
-            rng_device: rng_device.clone(),
+            rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
             state: Tensor::zeros([4], (&Device::flex(), DType::F32)),
             steps_since_reset: 0,
             sutton_barto_reward,
@@ -241,12 +241,15 @@ impl Gym for CartPoleV1 {
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.steps_beyond_terminated = None;
-        let state = Tensor::<1>::random(
-            [4],
-            Distribution::Uniform(-0.05, 0.05),
-            (&self.rng_device, DType::F64),
+        let state = Tensor::<1>::from_data(
+            TensorData::new(
+                (0..4)
+                    .map(|_| self.rng.random_range(-0.05_f64..0.05_f64))
+                    .collect::<Vec<_>>(),
+                [4],
+            ),
+            &Device::flex(),
         )
-        .to_device(&Device::flex())
         .cast(DType::F32);
         self.state = state;
         self.steps_since_reset = 0;
@@ -499,7 +502,6 @@ mod tests {
                 observation: _,
                 reward: _,
                 done,
-                truncated: _,
                 ..
             } = env.step(action).unwrap();
             if done {

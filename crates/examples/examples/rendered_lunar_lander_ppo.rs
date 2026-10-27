@@ -66,18 +66,13 @@ fn main() {
     let env1 = DebugLunarLander::new(
         LunarLanderV3::builder()
             .render(true)
-            .rng_device(Device::flex())
+            .seed(42)
             .build()
             .unwrap(),
     );
     let mut envs = vec![env1];
-    for _ in 0..15 {
-        let env = DebugLunarLander::new(
-            LunarLanderV3::builder()
-                .rng_device(Device::flex())
-                .build()
-                .unwrap(),
-        );
+    for index in 0..15 {
+        let env = DebugLunarLander::new(LunarLanderV3::builder().seed(43 + index).build().unwrap());
         envs.push(env);
     }
 

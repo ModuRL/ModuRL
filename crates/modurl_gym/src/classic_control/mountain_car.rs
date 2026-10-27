@@ -1,16 +1,17 @@
 use bon::bon;
-use burn::tensor::{DType, Device, Distribution, Int, Tensor, TensorData, TensorReadError};
+use burn::tensor::{DType, Device, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces,
 };
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 
 use crate::EnvironmentError;
 
 /// The classic Mountain Car environment.
 /// Converted from the OpenAI Gym Mountain Car environment.
 pub struct MountainCarV0 {
-    rng_device: Device,
+    rng: StdRng,
     state: Tensor<1>,
     action_space: spaces::Discrete,
     observation_space: spaces::BoxSpace,
@@ -29,9 +30,8 @@ pub struct MountainCarV0 {
 impl MountainCarV0 {
     #[builder]
     pub fn new(
-        /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = Device::flex(), with = |device: &Device| device.clone())]
-        rng_device: Device,
+        /// Seeds the environment's RNG; when omitted the RNG is seeded from OS entropy.
+        seed: Option<u64>,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
@@ -53,7 +53,7 @@ impl MountainCarV0 {
         let observation_space = spaces::BoxSpace::new(low.unsqueeze::<2>(), high.unsqueeze::<2>());
 
         Ok(Self {
-            rng_device: rng_device.clone(),
+            rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
             state: Tensor::zeros([2], (&Device::flex(), DType::F32)),
             action_space,
             observation_space,
@@ -296,13 +296,9 @@ impl Gym for MountainCarV0 {
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         // Initialize position uniformly between -0.6 and -0.4
-        let position = Tensor::<1>::random(
-            [1],
-            Distribution::Uniform(-0.6, -0.4),
-            (&self.rng_device, DType::F64),
-        )
-        .to_device(&Device::flex())
-        .cast(DType::F32);
+        let position =
+            Tensor::<1>::from_data([self.rng.random_range(-0.6_f64..-0.4_f64)], &Device::flex())
+                .cast(DType::F32);
         let velocity = Tensor::zeros([1], (&Device::flex(), DType::F32));
 
         self.state = Tensor::cat(vec![position, velocity], 0);
@@ -476,7 +472,6 @@ mod tests {
                 observation: _,
                 reward: _,
                 done,
-                truncated: _,
                 ..
             } = env.step(action).unwrap();
             env.render().unwrap();

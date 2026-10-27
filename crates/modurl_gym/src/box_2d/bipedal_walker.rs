@@ -15,11 +15,12 @@ use box2d_rs::{
     joints::b2_revolute_joint::B2revoluteJointDef,
     shapes::{b2_edge_shape::B2edgeShape, b2_polygon_shape::B2polygonShape},
 };
-use burn::tensor::{DType, Device, Distribution, Tensor, TensorData, TensorReadError};
+use burn::tensor::{DType, Device, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces::BoxSpace,
 };
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 
 const FPS: f32 = 50.0;
 const SCALE: f32 = 30.0;
@@ -122,7 +123,7 @@ pub struct BipedalWalkerV3 {
     joints: Vec<B2jointPtr<WalkerUserData>>,
     contact_detector: Option<Rc<RefCell<WalkerContactDetector>>>,
     previous_shaping: Option<f32>,
-    rng_device: Device,
+    rng: StdRng,
     action_space: BoxSpace,
     observation_space: BoxSpace,
     #[cfg(feature = "rendering")]
@@ -134,9 +135,8 @@ impl BipedalWalkerV3 {
     /// Creates the standard Gymnasium v3 walker.
     #[builder]
     pub fn new(
-        /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = Device::flex(), with = |device: &Device| device.clone())]
-        rng_device: Device,
+        /// Seeds the environment's RNG; when omitted the RNG is seeded from OS entropy.
+        seed: Option<u64>,
         #[cfg(feature = "rendering")]
         #[builder(default = false)]
         render: bool,
@@ -188,7 +188,7 @@ impl BipedalWalkerV3 {
             joints: Vec::new(),
             contact_detector: None,
             previous_shaping: None,
-            rng_device: rng_device.clone(),
+            rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
             action_space: BoxSpace::new_with_universal_bounds([1, 4], -1.0, 1.0, &Device::flex()),
             observation_space: BoxSpace::new(
                 Tensor::from_data(TensorData::new(low, [1, 24]), &Device::flex()),
@@ -207,19 +207,13 @@ impl BipedalWalkerV3 {
         })
     }
 
-    fn random_uniform(&self, low: f32, high: f32) -> Result<f32, EnvironmentError> {
+    fn random_uniform(&mut self, low: f32, high: f32) -> Result<f32, EnvironmentError> {
         if !low.is_finite() || !high.is_finite() || low >= high {
             return Err(EnvironmentError::InvalidConfiguration(
                 "BipedalWalker received an invalid random-sampling range",
             ));
         }
-        Ok(Tensor::<1>::random(
-            [1],
-            Distribution::Uniform(f64::from(low), f64::from(high)),
-            (&self.rng_device, DType::F32),
-        )
-        .clone()
-        .try_into_scalar::<f32>()?)
+        Ok(self.rng.random_range(low..high))
     }
 
     fn clear_world(&mut self) {

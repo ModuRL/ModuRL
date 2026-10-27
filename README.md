@@ -32,7 +32,7 @@ use modurl_gym::EnvironmentError;
 
 fn main() -> Result<(), EnvironmentError> {
     let device = Device::flex();
-    let mut env = CartPoleV1::builder().rng_device(&device).build()?;
+    let mut env = CartPoleV1::builder().seed(7).build()?;
 
     let observation = env.reset()?.observation;
     let action = env.action_space().sample_batch(1, &device)?.squeeze_dim::<1>(0);

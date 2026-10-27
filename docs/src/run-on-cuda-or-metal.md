@@ -39,14 +39,15 @@ platform.
 
 ## Transfer at the Environment Batch Boundary
 
-CPU environments always return CPU observations. Set `rng_device` only to
-choose where classic-control and Box2D random draws occur; it does not change
-observation placement. MuJoCo uses its existing seeded CPU RNG and has no
-device setting. Wrap vectorized environments to transfer actions and observations
-once per batch, and build model parameters on the agent device.
+CPU environments always return CPU observations. Classic-control and Box2D
+environments own host RNGs; set `.seed(u64)` for reproducibility. Omitted
+seeds use OS entropy and are independent of `Device::seed`. MuJoCo uses its
+existing seeded CPU RNG and has no device setting. Wrap vectorized environments
+to transfer actions and observations once per batch, and build model parameters
+on the agent device.
 
 ```rust,ignore
-let env = CartPoleV1::builder().rng_device(&device).build().unwrap();
+let env = CartPoleV1::builder().seed(42).build().unwrap();
 let mut envs = DeviceMultiGymWrapper::new(
     VectorizedGymWrapper::from(env), Device::flex(), device.clone(),
 );
@@ -68,7 +69,7 @@ use modurl::prelude::*;
 
 let optimization_device = Device::cuda(0).autodiff();
 let storage_device = Device::flex();
-let env = CartPoleV1::builder().rng_device(&storage_device).build()?;
+let env = CartPoleV1::builder().seed(42).build()?;
 let mut envs = DeviceMultiGymWrapper::new(
     VectorizedGymWrapper::from(env), storage_device.clone(), optimization_device.clone(),
 );

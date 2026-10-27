@@ -65,10 +65,8 @@ fn cartpole_tensors_are_device_deterministic() {
     let cpu = Device::flex();
     let mut previous = None;
     for _ in 0..10 {
-        cpu.seed(42);
         device.seed(42);
-        let env =
-            VectorizedGymWrapper::from(CartPoleV1::builder().rng_device(&cpu).build().unwrap());
+        let env = VectorizedGymWrapper::from(CartPoleV1::builder().seed(42).build().unwrap());
         let mut env = DeviceMultiGymWrapper::new(env, cpu.clone(), device.clone());
         let mut observations = env.reset().unwrap();
         for _ in 0..10 {
@@ -90,11 +88,10 @@ fn ppo_training_is_device_deterministic() {
     let cpu = Device::flex();
     let mut previous = None;
     for _ in 0..3 {
-        cpu.seed(42);
         device.seed(42);
         let env = VectorizedGymWrapper::new(
             (0..2)
-                .map(|_| CartPoleV1::builder().rng_device(&cpu).build().unwrap())
+                .map(|index| CartPoleV1::builder().seed(42 + index).build().unwrap())
                 .collect(),
         )
         .unwrap();

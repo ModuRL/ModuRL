@@ -2,11 +2,12 @@ use std::f64::consts::PI;
 
 use crate::EnvironmentError;
 use bon::bon;
-use burn::tensor::{DType, Device, Distribution, Int, Tensor, TensorData, TensorReadError};
+use burn::tensor::{Device, Int, Tensor, TensorData};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces::{BoxSpace, Discrete},
 };
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 
 const MAX_VELOCITY_1: f64 = 4.0 * PI;
 const MAX_VELOCITY_2: f64 = 9.0 * PI;
@@ -24,7 +25,7 @@ pub struct AcrobotV1 {
     state: [f64; 4],
     use_nips_dynamics: bool,
     torque_noise_max: f64,
-    rng_device: Device,
+    rng: StdRng,
     action_space: Discrete,
     observation_space: BoxSpace,
     #[cfg(feature = "rendering")]
@@ -36,9 +37,8 @@ impl AcrobotV1 {
     /// Creates an Acrobot. The default equations match Sutton and Barto's book.
     #[builder]
     pub fn new(
-        /// Device used only for random draws; observations and space bounds stay on CPU.
-        #[builder(default = Device::flex(), with = |device: &Device| device.clone())]
-        rng_device: Device,
+        /// Seeds the environment's RNG; when omitted the RNG is seeded from OS entropy.
+        seed: Option<u64>,
         #[builder(default = false)] use_nips_dynamics: bool,
         #[builder(default = 0.0)] torque_noise_max: f64,
         #[cfg(feature = "rendering")]
@@ -51,7 +51,7 @@ impl AcrobotV1 {
             ));
         }
         Self::from_config(
-            &rng_device,
+            seed,
             use_nips_dynamics,
             torque_noise_max,
             #[cfg(feature = "rendering")]
@@ -60,7 +60,7 @@ impl AcrobotV1 {
     }
 
     fn from_config(
-        rng_device: &Device,
+        seed: Option<u64>,
         use_nips_dynamics: bool,
         torque_noise_max: f64,
         #[cfg(feature = "rendering")] render: bool,
@@ -78,7 +78,7 @@ impl AcrobotV1 {
             state: [0.0; 4],
             use_nips_dynamics,
             torque_noise_max,
-            rng_device: rng_device.clone(),
+            rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
             action_space: Discrete::new(3),
             observation_space: BoxSpace::new(
                 Tensor::from_data(TensorData::new(low, [1, 6]), &Device::flex()),
@@ -220,15 +220,7 @@ impl Gym for AcrobotV1 {
     type ActionSpace = Discrete;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
-        let random = Tensor::<1>::random(
-            [4],
-            Distribution::Uniform(f64::from(-0.1_f32), f64::from(0.1_f32)),
-            (&self.rng_device, DType::F32),
-        )
-        .clone()
-        .try_into_data_as::<f32>()
-        .and_then(|data| data.try_to_vec::<f32>().map_err(TensorReadError::from))?;
-        self.state = std::array::from_fn(|index| f64::from(random[index]));
+        self.state = std::array::from_fn(|_| f64::from(self.rng.random_range(-0.1_f32..0.1_f32)));
         #[cfg(feature = "rendering")]
         self.render()?;
         Ok(ResetInfo {
@@ -251,16 +243,9 @@ impl Gym for AcrobotV1 {
             ));
         }
         if self.torque_noise_max > 0.0 {
-            let noise = Tensor::<1>::random(
-                [1],
-                Distribution::Uniform(
-                    (-self.torque_noise_max as f32) as f64,
-                    (self.torque_noise_max as f32) as f64,
-                ),
-                (&self.rng_device, DType::F32),
-            )
-            .clone()
-            .try_into_scalar::<f32>()?;
+            let noise = self
+                .rng
+                .random_range((-self.torque_noise_max as f32)..(self.torque_noise_max as f32));
             torque += f64::from(noise);
         }
         let integrated = self.integrate([
@@ -312,6 +297,7 @@ fn wrap(mut value: f64, minimum: f64, maximum: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::testing::PARITY_STEPS;
+    use burn::tensor::TensorReadError;
 
     #[derive(serde::Deserialize)]
     struct Transition {

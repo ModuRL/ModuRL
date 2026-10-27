@@ -90,7 +90,7 @@ environments and wrap them as one vectorized environment:
 
 ```rust,ignore
     let envs = (0..4)
-        .map(|_| CartPoleV1::builder().rng_device(&Device::flex()).build().unwrap())
+        .map(|index| CartPoleV1::builder().seed(42 + index).build().unwrap())
         .collect::<Vec<_>>();
     let mut env = DeviceMultiGymWrapper::new(
         VectorizedGymWrapper::new(envs).unwrap(), Device::flex(), device.clone(),
@@ -241,12 +241,7 @@ fn main() {
     let device = Device::flex().autodiff();
 
     let envs = (0..4)
-        .map(|_| {
-            CartPoleV1::builder()
-                .rng_device(&Device::flex())
-                .build()
-                .unwrap()
-        })
+        .map(|index| CartPoleV1::builder().seed(42 + index).build().unwrap())
         .collect::<Vec<_>>();
     let mut env = DeviceMultiGymWrapper::new(
         VectorizedGymWrapper::new(envs).unwrap(),

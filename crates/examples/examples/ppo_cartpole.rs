@@ -32,11 +32,8 @@ fn ppo_cartpole() {
     println!("Using device: {:?}", device);
 
     let mut envs = vec![];
-    for _ in 0..8 {
-        let env = CartPoleV1::builder()
-            .rng_device(&Device::flex())
-            .build()
-            .unwrap();
+    for index in 0..8 {
+        let env = CartPoleV1::builder().seed(42 + index).build().unwrap();
         envs.push(env);
     }
     let vec_env: VectorizedGymWrapper<CartPoleV1> = VectorizedGymWrapper::new(envs).unwrap();
