@@ -225,9 +225,9 @@ environment.edit_model(|model| {
 Call this whenever your application needs a physics change, including during an
 episode. Integer, flag, and enum edits are rejected except contact filtering,
 groups, priorities, and limit/active flags. Solver/integrator selection, SDF/CCD
-settings, flex-strain equality data, and new non-finite values are also rejected.
-Sampling, curriculum schedules, and restoration of baseline values are ordinary
-application code. `MjModel` and `MjtObj` are re-exported in the prelude.
+settings and flex-strain equality data are also rejected. Sampling, curriculum
+schedules, and restoration of baseline values are ordinary application code.
+`MjModel` and `MjtObj` are re-exported in the prelude.
 
 Successful edits persist across resets. Changes to `qpos0` update the pose used
 by subsequent resets, without moving the current episode to that pose. An open

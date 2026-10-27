@@ -165,8 +165,8 @@ impl<T: MujocoTask> CustomMujoco<T> {
     /// Structural changes (a different compiled signature) are rejected. Integer,
     /// flag, and enum edits are rejected except contact filtering, groups,
     /// priorities, and limit/active flags; solver/integrator selection, SDF/CCD
-    /// settings, flex-strain equality data, and new non-finite values are also
-    /// rejected. Randomness, scheduling, and baselines belong to the caller.
+    /// settings and flex-strain equality data are also rejected. Randomness,
+    /// scheduling, and baselines belong to the caller.
     /// Rebuild the environment to change model structure or render assets.
     pub fn edit_model(
         &mut self,

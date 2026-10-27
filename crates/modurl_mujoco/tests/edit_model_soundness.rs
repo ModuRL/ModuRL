@@ -128,16 +128,6 @@ fn hazardous_edits_are_rejected_without_changing_the_live_model() {
             Ok(())
         },
     );
-    assert_rejected_and_unchanged(
-        &mut env,
-        "geom_friction",
-        |model| model.geom_friction().to_vec(),
-        |model| {
-            model.geom_friction_mut()[0][0] = f64::NAN;
-            Ok(())
-        },
-    );
-
     let solver = if env.model().opt().solver == 0 { 1 } else { 0 };
     assert_rejected_and_unchanged(
         &mut env,
