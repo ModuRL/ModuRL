@@ -76,6 +76,53 @@ fn lunar_lander_rollout(render: bool) -> Vec<Vec<f32>> {
     observations
 }
 
+#[test]
+fn lunar_lander_seeded_trajectory_matches_golden() {
+    let device = Device::flex();
+    let mut env = LunarLanderV3::builder().seed(42).build().unwrap();
+    let reset_observation = env
+        .reset()
+        .unwrap()
+        .observation
+        .into_data()
+        .try_to_vec::<f32>()
+        .unwrap();
+    let mut total_reward = 0.0;
+    let mut final_observation = Vec::new();
+    for index in 0..20 {
+        let step = env.step(Tensor::from_data([index % 4], &device)).unwrap();
+        total_reward += step.reward;
+        final_observation = step.observation.into_data().try_to_vec::<f32>().unwrap();
+    }
+    let actual = (reset_observation, final_observation, total_reward);
+    assert_eq!(
+        actual,
+        (
+            vec![
+                -0.0024300576,
+                1.416066,
+                -0.2461533,
+                0.22869912,
+                0.0028189588,
+                0.055681963,
+                0.0,
+                0.0,
+            ],
+            vec![
+                -0.052530956,
+                1.4581959,
+                -0.26300734,
+                -0.038651336,
+                0.10441409,
+                0.100221366,
+                0.0,
+                0.0,
+            ],
+            -9.250286,
+        )
+    );
+}
+
 #[cfg(feature = "rendering")]
 #[test]
 #[ignore = "needs a display"]

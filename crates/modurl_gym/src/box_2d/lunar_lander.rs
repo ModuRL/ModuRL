@@ -26,9 +26,6 @@ use crate::EnvironmentError;
 
 #[cfg(feature = "rendering")]
 use crate::rendering::{Flag, Renderer};
-#[cfg(feature = "rendering")]
-use rand::Rng;
-
 // Constants from Python code
 const FPS: f32 = 50.0;
 const SCALE: f32 = 30.0; // affects how fast-paced the game is, forces should be adjusted as well
@@ -58,6 +55,10 @@ const MAIN_ENGINE_Y_LOCATION: f32 = 4.0; // The Y location of the main engine on
 
 const VIEWPORT_W: f32 = 600.0;
 const VIEWPORT_H: f32 = 400.0;
+
+/// Keeps rendering randomness independent of physics draws.
+#[cfg(feature = "rendering")]
+const PARTICLE_STREAM: u64 = 0x9E37_79B9_7F4A_7C15;
 
 // Rendering colors (ARGB format)
 #[cfg(feature = "rendering")]
@@ -300,11 +301,9 @@ impl LunarLanderV3 {
 
         let rng = seed.map_or_else(rand::make_rng, StdRng::seed_from_u64);
         #[cfg(feature = "rendering")]
-        let (rng, particle_rng) = {
-            let mut rng = rng;
-            let particle_rng = StdRng::seed_from_u64(rng.next_u64());
-            (rng, particle_rng)
-        };
+        let particle_rng = seed.map_or_else(rand::make_rng, |s| {
+            StdRng::seed_from_u64(s ^ PARTICLE_STREAM)
+        });
 
         Ok(Self {
             gravity,
