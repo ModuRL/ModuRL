@@ -114,10 +114,8 @@ fn main() {
         .critic_network(critic)
         .actor_optimizer(optimizer_config.init())
         .critic_optimizer(optimizer_config.init())
-        .actor_learning_rate(3e-4)
-        .critic_learning_rate(3e-4)
-        .actor_lr_scheduler(LinearSchedule::new(3e-4, 0.0))
-        .critic_lr_scheduler(LinearSchedule::new(3e-4, 0.0))
+        .actor_learning_rate(LinearSchedule::new(3e-4, 0.0))
+        .critic_learning_rate(LinearSchedule::new(3e-4, 0.0))
         .combined_loss(true)
         .build()
         .unwrap();

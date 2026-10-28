@@ -11,7 +11,7 @@ use burn::tensor::{
     Bool, DType, Int, Tensor, TensorData, TensorReadError,
     kind::{Autodiff, Basic},
 };
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use crate::{
     buffers::experience::{self, Experience, ExperienceBatchError},
@@ -1102,8 +1102,14 @@ where
         Ok(())
     }
 
-    pub fn set_learning_rate(&mut self, lr: f64) {
-        self.network_info.set_learning_rate(lr);
+    /// Replaces the learning-rate schedule with an `f64` or any `ParameterSchedule`, continuing from the current training progress.
+    /// Rejects a nonpositive or non-finite rate at the current progress.
+    pub fn set_learning_rate(
+        &mut self,
+        learning_rate: impl ParameterSchedule + Send + Sync + 'static,
+    ) -> Result<(), PPOConfigurationError> {
+        self.network_info
+            .set_learning_rate(Arc::new(learning_rate), &self.schedule_progress)
     }
 
     /// Selects the policy distribution's mode without sampling.

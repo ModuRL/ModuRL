@@ -63,6 +63,12 @@ where
 }
 
 /// A constant schedule that always returns the same value.
+impl ParameterSchedule for f64 {
+    fn value(&self, _t: f64) -> f64 {
+        *self
+    }
+}
+
 #[derive(Clone)]
 pub struct ConstantSchedule {
     value: f64,
@@ -142,6 +148,12 @@ mod tests {
             (actual - expected).abs() < 1e-12,
             "actual {actual} differs from expected {expected}"
         );
+    }
+
+    #[test]
+    fn fixed_rate_is_a_constant_schedule() {
+        assert_eq!(3e-4.value(0.0), 3e-4);
+        assert_eq!(3e-4.value(0.7), 3e-4);
     }
 
     #[test]

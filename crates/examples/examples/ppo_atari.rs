@@ -154,8 +154,7 @@ fn main() {
         ))
         .critic_head(critic)
         .optimizer(optimizer)
-        .learning_rate(LEARNING_RATE)
-        .lr_scheduler(learning_rate)
+        .learning_rate(learning_rate)
         .build()
         .unwrap();
 
