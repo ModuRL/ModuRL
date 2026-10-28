@@ -55,10 +55,6 @@ fn dqn_updates_f64_networks_from_native_f32_observations() {
         .learning_rate(0.01)
         .action_space(env.action_space())
         .observation_space(env.observation_space())
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-            storage_device: Device::flex(),
-            optimization_device: device,
-        }))
         .replay_capacity(8)
         .batch_size(2)
         .training_start(0)
@@ -81,10 +77,6 @@ fn ddqn_updates_f64_networks_from_native_f32_observations() {
         .learning_rate(0.01)
         .action_space(env.action_space())
         .observation_space(env.observation_space())
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-            storage_device: Device::flex(),
-            optimization_device: device,
-        }))
         .replay_capacity(8)
         .batch_size(2)
         .training_start(0)
@@ -194,10 +186,6 @@ fn sac_updates_f64_networks_from_native_f32_observations() {
         .entropy_configuration(SACEntropyConfiguration::fixed(0.1).unwrap())
         .action_space(env.action_space())
         .observation_space(env.observation_space())
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-            storage_device: Device::flex(),
-            optimization_device: device,
-        }))
         .replay_capacity(8)
         .batch_size(2)
         .training_start(0)
@@ -277,10 +265,6 @@ fn ddpg_updates_f64_networks_from_native_f32_observations() {
         .actor_learning_rate(0.01)
         .action_space(env.action_space())
         .observation_space(env.observation_space())
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-            storage_device: Device::flex(),
-            optimization_device: device,
-        }))
         .replay_capacity(8)
         .batch_size(2)
         .training_start(0)
@@ -313,10 +297,6 @@ fn td3_updates_f64_networks_from_native_f32_observations() {
         .actor_learning_rate(0.01)
         .action_space(env.action_space())
         .observation_space(env.observation_space())
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-            storage_device: Device::flex(),
-            optimization_device: device,
-        }))
         .replay_capacity(8)
         .batch_size(2)
         .training_start(0)

@@ -346,10 +346,7 @@ fn dqn(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
             .epsilon_schedule(move |progress: f64| {
                 1.0 - 0.99 * (progress * horizon as f64 / 1_000_000.0).min(1.0)
             })
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-                storage_device: Device::flex(),
-                optimization_device: device.clone(),
-            }))
+            .replay_device(Device::flex())
             .build(),
     )?;
     debug_result(agent.learn(&mut envs, horizon))?;
@@ -550,10 +547,7 @@ mod tests {
             .target_update_interval(2)
             .training_horizon(4)
             .logger(&mut logger)
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-                storage_device: Device::flex(),
-                optimization_device: device.clone(),
-            }))
+            .replay_device(Device::flex())
             .build()
             .unwrap();
         agent.learn(&mut envs, 4).unwrap();

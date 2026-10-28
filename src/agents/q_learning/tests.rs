@@ -1,7 +1,6 @@
 use super::*;
 use crate::tensor_rank::TensorBatchTypes;
 use crate::{
-    agents::ReplayDeviceStrategy,
     gym::{Gym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
     objectives::bellman_targets,
     spaces::BoxSpace,
@@ -224,9 +223,6 @@ fn float_agent(
         .update_frequency(2)
         .target_update_interval(4)
         .training_horizon(10)
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device.clone().autodiff(),
-        )))
         .build()
         .unwrap()
 }
@@ -486,9 +482,6 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
         .batch_size(2)
         .training_horizon(10)
         .dtype(DType::F64)
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device.clone(),
-        )))
         .build()
         .unwrap();
     let observations = Tensor::<3, Bool>::from_data([[[true]], [[false]]], &device);
@@ -718,9 +711,6 @@ fn builder_rejects_invalid_learning_rates_and_compute_dtypes() {
             .learning_rate(rate)
             .training_horizon(10)
             .dtype(dtype)
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device.clone(),
-            )))
             .build()
     };
     assert!(matches!(

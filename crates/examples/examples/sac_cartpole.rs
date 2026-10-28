@@ -91,9 +91,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .batch_size(64)
         .training_horizon(total_timesteps)
         .logger(&mut grapher)
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device,
-        )))
         .build()?;
     agent.learn(&mut env, total_timesteps)?;
     grapher.display();

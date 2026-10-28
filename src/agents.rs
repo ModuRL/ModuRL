@@ -13,7 +13,7 @@ pub mod q_learning;
 mod replay_device_strategy;
 pub mod sac;
 
-pub use replay_device_strategy::{ReplayDeviceStrategy, ReplayStorageConfig};
+pub(crate) use replay_device_strategy::ReplayStorageConfig;
 
 /// Selects native environment actions and trains through batched environment interaction.
 /// Ranks `O` and `A` include the batch axis; `PrevRank` determines each unbatched terminal observation type.

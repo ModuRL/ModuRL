@@ -110,10 +110,6 @@ fn main() {
     let observation_space = envs.observation_space();
     let online_q_network = AtariQNetwork::new(action_space.get_possible_values(), &device).unwrap();
     let optimizer = AdamWConfig::new().with_weight_decay(0.0).init();
-    let replay_storage_config = ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-        storage_device: Device::flex(),
-        optimization_device: device,
-    });
     let mut grapher = DQNGrapher::atari();
     let mut agent = DQNAgent::builder()
         .dtype(DType::F32)
@@ -135,7 +131,7 @@ fn main() {
             1.0 + (0.01 - 1.0) * annealing
         })
         .logger(&mut grapher)
-        .replay_storage_config(replay_storage_config)
+        .replay_device(Device::flex())
         .build()
         .unwrap();
     println!(

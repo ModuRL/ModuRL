@@ -23,7 +23,9 @@ use bon::bon;
 use burn::{
     module::Module,
     optim::{GradientsParams, ModuleOptimizer},
-    tensor::{DType, Distribution, Float, Tensor, TensorData, TensorReadError, kind::Autodiff},
+    tensor::{
+        DType, Device, Distribution, Float, Tensor, TensorData, TensorReadError, kind::Autodiff,
+    },
 };
 use std::{fmt::Debug, marker::PhantomData};
 
@@ -90,7 +92,7 @@ pub enum DeterministicActorCriticConfigurationError {
     InvalidActorLearningRate,
     #[error("compute dtype must be floating-point, got {0:?}")]
     InvalidDType(DType),
-    #[error("actor and critic parameters must use the optimization device")]
+    #[error("actor and critic parameters must share one device")]
     ModelDevice,
     #[error("{field} space has {actual} item axes, expected {expected}")]
     SpaceRank {
@@ -490,7 +492,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
         strategy: S,
         action_space: AS,
         observation_space: OS,
-        replay_storage_config: ReplayStorageConfig,
+        replay_device: Option<Device>,
         #[builder(default = 0.99)] gamma: f64,
         #[builder(default = 0.005)] tau: f64,
         #[builder(default = 0.1)] exploration_noise: f64,
@@ -555,21 +557,15 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             action_space.policy_shape(),
             replay_capacity,
         )?;
-        let optimization_device = replay_storage_config.optimization_device();
-        if online_actor
-            .devices()
-            .iter()
-            .any(|device| *device != optimization_device)
-            || critics.iter().any(|critic| {
-                critic
-                    .online_network()
-                    .devices()
+        let replay_storage_config = ReplayStorageConfig::from_models(
+            online_actor.devices().into_iter().chain(
+                critics
                     .iter()
-                    .any(|device| *device != optimization_device)
-            })
-        {
-            return Err(DeterministicActorCriticConfigurationError::ModelDevice);
-        }
+                    .flat_map(|critic| critic.online_network().devices()),
+            ),
+            replay_device,
+        )
+        .ok_or(DeterministicActorCriticConfigurationError::ModelDevice)?;
         let online_actor = online_actor.train();
         let target_actor = online_actor.clone().valid();
         Ok(Self {
