@@ -58,7 +58,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `PrevRank` determines each unbatched tensor type.
 - `Gym` and `MultiGym` replace `SpaceError` and boxed combined spaces with associated `ObservationSpace` and `ActionSpace` types.
   Their space accessors return those types directly. Trait objects must specify both associated space types.
-  `Agent` also adds associated space types, while retaining `SpaceError` for its action-space error.
+  `Agent` also adds associated space types. Its action-space error is `ActionSpace::Error`; `Agent::SpaceError` is removed.
 - Renamed `ResetInfo::state` and `StepInfo::state` to `observation`.
   Both structures gain an observation tensor type parameter: `ResetInfo<I, T>` and `StepInfo<I, T>`.
 - Renamed `MultiGymStepInfo::states` to `observations`, `terminal_states` to `terminal_observations`,

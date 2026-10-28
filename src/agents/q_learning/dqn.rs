@@ -15,7 +15,7 @@ use crate::{
     models::Forward,
     objectives::bellman_targets,
     parameter_schedule::{LinearSchedule, ParameterSchedule},
-    spaces::{Discrete, ObservationSpace, SpaceError},
+    spaces::{Discrete, ObservationSpace},
     tensor_rank::{NextRank, PrevRank},
 };
 
@@ -162,7 +162,6 @@ where
 {
     type Error = QAgentError<GE, M::Error>;
     type GymError = GE;
-    type SpaceError = SpaceError;
     type ObservationSpace = S;
     type ActionSpace = Discrete;
 

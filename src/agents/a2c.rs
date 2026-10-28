@@ -340,7 +340,6 @@ where
 {
     type Error = A2CError<N::Error, GE, AS::Error>;
     type GymError = GE;
-    type SpaceError = AS::Error;
     type ObservationSpace = OS;
     type ActionSpace = AS;
 
