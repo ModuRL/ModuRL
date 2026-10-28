@@ -64,7 +64,6 @@ fn getting_started_program_trains_one_rollout() {
         .mini_batch_size(64)
         .clip_range(ConstantSchedule::new(0.2))
         .training_horizon(1024)
-        .device(device)
         .build()
         .unwrap();
 

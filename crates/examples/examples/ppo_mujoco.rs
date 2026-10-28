@@ -138,7 +138,6 @@ fn main() {
         .vf_coef(0.5)
         .training_horizon(TOTAL_TIMESTEPS)
         .logging_info(&mut grapher)
-        .device(device)
         .build()
         .unwrap();
 

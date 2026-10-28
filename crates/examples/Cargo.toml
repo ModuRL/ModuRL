@@ -88,4 +88,5 @@ multithreading = ["modurl/multithreading"]
 rendering = ["modurl_ale?/rendering", "modurl_gym/rendering", "modurl_mujoco?/rendering"]
 
 [dev-dependencies]
+burn = { version = "=0.22.0", default-features = false, features = ["ndarray"] }
 thiserror = '2.0.20'

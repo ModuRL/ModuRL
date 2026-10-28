@@ -96,7 +96,6 @@ let mut agent = PPOAgent::builder()
     .mini_batch_size(64)
     .clip_range(ConstantSchedule::new(0.2))
     .training_horizon(100_000)
-    .device(device)
     .logging_info(&mut logger)
     .build()?;
 ```
@@ -108,7 +107,7 @@ The public boundaries make each part replaceable:
 | Environment execution | Implement `Gym` for one environment or `MultiGym` for a batch. Collect `Gym` implementations with `VectorizedGymWrapper::from(envs)`, or enable `multithreading` and use `MultithreadedVectorizedGymWrapper`. |
 | Network topology | Use `SeparatePPONetwork` for independent actor and critic modules, or `SharedPPONetwork` for one trunk with policy and value heads. |
 | Policy representation | Wrap a model in `ProbabilisticPolicyModel`. Choose a categorical, Gaussian, transformed, or application-defined `Distribution`. |
-| Training state and devices | On-policy agents use rollout storage. Replay agents use `ReplayStorageConfig` to select one-device or hybrid storage; observations retain their native dtype. |
+| Training state and devices | On-policy agents use rollout storage. Replay agents optimize on the model device and store replay there or on an optional `.replay_device(..)`; observations retain their native dtype. |
 | Schedules and logging | Use constant, linear, exponential, or application-defined `ParameterSchedule` values. Pass a logger implementation to the agent builder, or omit logging. |
 
 Agents train against these contracts instead of concrete environment, network, or logger types. See [Core Concepts](https://modurl.github.io/ModuRL/dev/core-concepts.html) for how the parts interact.

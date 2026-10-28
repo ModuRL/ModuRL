@@ -342,7 +342,6 @@ mod schedule_tests {
             .mini_batch_size(2)
             .clip_value_loss(true)
             .training_horizon(2)
-            .device(device)
             .build()
             .unwrap();
         let mut observations = agent.prepare_rollout_collection(&mut env).unwrap();
@@ -351,14 +350,14 @@ mod schedule_tests {
             .collect_rollout(&validation, &mut env, &mut observations)
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
-        for transition in agent.rollout_buffer.get_raw() {
+        for transition in &agent.rollout_buffer {
             assert!(!transition.values.is_require_grad());
             assert_eq!(transition.values.clone().into_scalar::<f32>(), 1.0);
         }
 
         agent.add_advantages_and_returns(&validation).unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 3);
-        for (transition, expected) in agent.rollout_buffer.get_raw().iter().zip([1.99f32, 1.0]) {
+        for (transition, expected) in agent.rollout_buffer.iter().zip([1.99f32, 1.0]) {
             let prepared = transition.prepared.as_ref().unwrap();
             let old_values = prepared.old_values.as_ref().unwrap();
             assert!(!old_values.is_require_grad());
@@ -449,7 +448,6 @@ mod schedule_tests {
             .num_epochs(1)
             .training_horizon(2)
             .logging_info(&mut logger)
-            .device(device.clone())
             .build()
             .unwrap();
         agent.learn(&mut env, 2).unwrap();
@@ -514,7 +512,6 @@ mod schedule_tests {
             .action_space(Discrete::new(2).unwrap())
             .network_info(networks)
             .training_horizon(1)
-            .device(device.clone())
             .build()
             .unwrap();
         assert_eq!(
@@ -551,7 +548,6 @@ mod schedule_tests {
             .action_space(Discrete::new(2).unwrap())
             .network_info(networks)
             .training_horizon(1)
-            .device(device.clone())
             .build()
             .unwrap();
         assert_eq!(
@@ -699,7 +695,6 @@ mod schedule_tests {
             .mini_batch_size(2)
             .num_epochs(1)
             .training_horizon(2)
-            .device(device)
             .build()
             .unwrap();
         let mut observations = agent.prepare_rollout_collection(&mut env).unwrap();
@@ -715,7 +710,7 @@ mod schedule_tests {
         agent
             .collect_rollout(&agent.network_info.valid(), &mut env, &mut observations)
             .unwrap();
-        let transition = &agent.rollout_buffer.get_raw()[0];
+        let transition = &agent.rollout_buffer[0];
         assert!(matches!(transition.observations.dtype(), DType::Bool(_)));
         assert_eq!(
             transition
@@ -735,7 +730,7 @@ mod schedule_tests {
         let explained_variance = agent
             .add_advantages_and_returns(&agent.network_info.valid())
             .unwrap();
-        let prepared = agent.rollout_buffer.get_raw()[0].prepared.as_ref().unwrap();
+        let prepared = agent.rollout_buffer[0].prepared.as_ref().unwrap();
         assert_eq!(prepared.returns.dtype(), DType::F64);
         assert!((prepared.returns.clone().into_scalar::<f64>() - expected).abs() < 1e-12);
         agent.optimize(explained_variance).unwrap();
@@ -822,7 +817,6 @@ mod schedule_tests {
             .num_epochs(1)
             .training_horizon(2)
             .logging_info(&mut logger)
-            .device(device)
             .build()
             .unwrap();
         assert!(matches!(
@@ -924,7 +918,6 @@ mod schedule_tests {
                     .num_epochs(1)
                     .training_horizon(2)
                     .logging_info(&mut logger)
-                    .device(device)
                     .build()
                     .unwrap();
 
@@ -972,7 +965,6 @@ mod schedule_tests {
                 .num_epochs(2)
                 .training_horizon(8)
                 .logging_info(&mut logger)
-                .device(device.clone())
                 .build()
                 .unwrap();
             device.seed(42);
@@ -1070,7 +1062,6 @@ mod schedule_tests {
             .num_epochs(1)
             .gamma(0.9)
             .training_horizon(1)
-            .device(device)
             .build()
             .unwrap();
         let mut next_observations = agent.prepare_rollout_collection(&mut env).unwrap();
@@ -1085,7 +1076,7 @@ mod schedule_tests {
             next_observations.into_data().try_to_vec::<f32>().unwrap(),
             [0.0; 4]
         );
-        let item = &agent.rollout_buffer.get_raw()[0];
+        let item = &agent.rollout_buffer[0];
         assert_eq!(
             item.next_observations
                 .clone()
@@ -1116,7 +1107,7 @@ mod schedule_tests {
         agent
             .add_advantages_and_returns(&agent.network_info.valid())
             .unwrap();
-        let returns = agent.rollout_buffer.get_raw()[0]
+        let returns = agent.rollout_buffer[0]
             .prepared
             .as_ref()
             .unwrap()
@@ -1254,7 +1245,6 @@ mod schedule_tests {
             .batch_size(2)
             .mini_batch_size(2)
             .training_horizon(2)
-            .device(device.clone())
             .build()
             .unwrap();
         let observations = Tensor::zeros([2, 4], (&device, DType::F32));
@@ -1359,7 +1349,6 @@ mod schedule_tests {
             .num_epochs(1)
             .training_horizon(4)
             .logging_info(&mut logger)
-            .device(device)
             .build()
             .unwrap();
         agent.learn(&mut env, 2).unwrap();
@@ -1432,7 +1421,6 @@ mod schedule_tests {
             .ent_coef(0.001)
             .clip_value_loss(true)
             .training_horizon(4)
-            .device(device.clone())
             .build()
             .unwrap();
 
@@ -1530,7 +1518,6 @@ mod schedule_tests {
             .training_horizon(6)
             .gamma(0.9)
             .gae_lambda(0.8)
-            .device(device.clone())
             .build()
             .unwrap();
         agent.learn(&mut env, 0).unwrap();

@@ -7,9 +7,9 @@ use modurl::{agents::action_value_critic::ScalarStateActionCritic, prelude::*};
 use modurl_gym::classic_control::pendulum::PendulumV1;
 
 #[test]
+#[allow(deprecated)]
 fn ddpg_trains_with_cpu_environment_and_separate_replay_device() {
-    let cpu = Device::flex();
-    let device = cpu.clone().autodiff();
+    let device = Device::flex().autodiff();
     let mut env =
         VectorizedGymWrapper::from(TimeLimitGym::new(PendulumV1::builder().build().unwrap(), 2));
     let actor = MLP::builder()
@@ -41,10 +41,7 @@ fn ddpg_trains_with_cpu_environment_and_separate_replay_device() {
         .actor_learning_rate(0.001)
         .action_space(env.action_space())
         .observation_space(env.observation_space())
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-            storage_device: cpu,
-            optimization_device: device,
-        }))
+        .replay_device(Device::ndarray())
         .replay_capacity(8)
         .batch_size(2)
         .training_start(0)

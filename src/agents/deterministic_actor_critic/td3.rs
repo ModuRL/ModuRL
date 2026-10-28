@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     agents::{
-        Agent, ReplayStorageConfig,
+        Agent,
         action_value_critic::{
             ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
             ActionValueCriticNetwork, aggregate_critic_values,
@@ -25,7 +25,7 @@ use bon::bon;
 use burn::{
     module::Module,
     optim::ModuleOptimizer,
-    tensor::{DType, Float, Tensor, kind::Autodiff},
+    tensor::{DType, Device, Float, Tensor, kind::Autodiff},
 };
 use std::fmt::Debug;
 
@@ -139,7 +139,7 @@ impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
         critics: Vec<ActionValueCritic<N>>,
         action_space: AS,
         observation_space: OS,
-        replay_storage_config: ReplayStorageConfig,
+        replay_device: Option<Device>,
         logger: Option<&'a mut dyn TD3Logger<I, A>>,
         #[builder(default = 0.99)] gamma: f64,
         #[builder(default = 0.005)] tau: f64,
@@ -206,7 +206,7 @@ impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
             .strategy(strategy)
             .action_space(action_space)
             .observation_space(observation_space)
-            .replay_storage_config(replay_storage_config)
+            .maybe_replay_device(replay_device)
             .gamma(gamma)
             .tau(tau)
             .exploration_noise(exploration_noise)
@@ -320,7 +320,6 @@ where
 {
     type Error = DeterministicActorCriticError<AE, GE, SE, CE>;
     type GymError = GE;
-    type SpaceError = SE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
 
@@ -353,7 +352,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        agents::ReplayDeviceStrategy, agents::action_value_critic::ScalarStateActionCritic,
+        agents::action_value_critic::ScalarStateActionCritic,
         agents::test_support::FixedContinuousEnv, gym::VectorizedGymWrapper, models::MLP,
         spaces::BoxSpace,
     };
@@ -463,9 +462,6 @@ mod tests {
                     &device,
                 ))
                 .observation_space(BoxSpace::new_unbounded([1, 4], &device))
-                .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                    device.clone(),
-                )))
                 .training_horizon(4)
                 .build()
         };
@@ -611,9 +607,6 @@ mod tests {
                     &device,
                 ))
                 .observation_space(env.observation_space())
-                .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                    device.clone(),
-                )))
                 .dtype(dtype)
                 .exploration_noise(0.0)
                 .replay_capacity(4)

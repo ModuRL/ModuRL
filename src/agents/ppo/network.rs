@@ -1055,7 +1055,6 @@ mod tests {
                 .normalize_advantage(false)
                 .gradient_clip(100.0)
                 .training_horizon(1)
-                .device(device.clone())
                 .build()
                 .unwrap();
             let losses = agent
@@ -1112,7 +1111,6 @@ mod tests {
             .num_epochs(1)
             .training_horizon(10)
             .logging_info(&mut logger)
-            .device(device.clone())
             .build()
             .unwrap();
         agent.learn(&mut env, 2).unwrap();
@@ -1171,7 +1169,6 @@ mod tests {
             .clip_range(LinearSchedule::new(0.2, 0.1))
             .training_horizon(10)
             .logging_info(&mut logger)
-            .device(device.clone())
             .build()
             .unwrap();
         for (steps, rate, clip) in [(2, 0.00082, 0.18), (4, 0.00064, 0.16)] {
@@ -1231,7 +1228,6 @@ mod tests {
             .mini_batch_size(2)
             .num_epochs(1)
             .clip_range(LinearSchedule::new(0.2, 0.1))
-            .device(device.clone())
             .build()
             .unwrap();
         assert!(matches!(

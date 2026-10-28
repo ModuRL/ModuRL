@@ -64,7 +64,6 @@ mod getting_started {
             .mini_batch_size(64)
             .clip_range(ConstantSchedule::new(0.2))
             .training_horizon(10_000)
-            .device(device)
             .build()
             .unwrap();
 
@@ -119,9 +118,6 @@ mod dqn {
                 let exploration_progress = (progress / 0.5).min(1.0);
                 1.0 + (0.05 - 1.0) * exploration_progress
             })
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device,
-            )))
             .build()
             .expect("DQN configuration should be valid");
 
@@ -175,9 +171,6 @@ mod ddqn {
                 let exploration_progress = (progress / 0.5).min(1.0);
                 1.0 + (0.05 - 1.0) * exploration_progress
             })
-            .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-                device.clone(),
-            )))
             .build()
             .expect("DDQN configuration should be valid");
 
@@ -390,7 +383,6 @@ mod ppo_configuration {
             .clip_range(ConstantSchedule::new(0.2))
             .training_horizon(120_000)
             .num_epochs(10)
-            .device(device)
             .build()
             .unwrap();
 

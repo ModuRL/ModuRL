@@ -208,9 +208,6 @@ let mut agent = SACAgent::builder()
     .observation_space(observation_space)
     .aggregation_mode(ActionValueCriticAggregationMode::Min)
     .training_horizon(total_timesteps)
-    .replay_storage_config(ReplayStorageConfig::new(
-        ReplayDeviceStrategy::OneDevice(device),
-    ))
     .build()?;
 
 agent.learn(&mut env, total_timesteps)?;

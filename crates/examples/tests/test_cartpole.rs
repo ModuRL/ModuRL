@@ -96,7 +96,6 @@ fn ppo_cartpole() {
         .gae_lambda(0.95)
         .num_epochs(10)
         .training_horizon(120_000)
-        .device(device.clone())
         .build()
         .unwrap();
     for _ in 0..6 {
@@ -181,7 +180,6 @@ fn ppo_cartpole_shared() {
         .num_epochs(10)
         .gradient_clip(gradient_clip)
         .training_horizon(120_000)
-        .device(device.clone())
         .build()
         .unwrap();
     for _ in 0..6 {
@@ -223,7 +221,6 @@ fn ppo_cartpole_shared_multithreaded() {
         .gae_lambda(0.95)
         .num_epochs(10)
         .training_horizon(120_000)
-        .device(device.clone())
         .build()
         .unwrap();
     for _ in 0..6 {
@@ -272,9 +269,6 @@ fn dqn_cartpole() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         })
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device,
-        )))
         .build()
         .unwrap();
     const TRAINING_TIMESTEPS: usize = 500_000;
@@ -333,9 +327,6 @@ fn ddqn_cartpole() {
             let exploration_progress = (progress / 0.5).min(1.0);
             1.0 + (0.05 - 1.0) * exploration_progress
         })
-        .replay_storage_config(ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(
-            device,
-        )))
         .build()
         .unwrap();
     const TRAINING_TIMESTEPS: usize = 500_000;

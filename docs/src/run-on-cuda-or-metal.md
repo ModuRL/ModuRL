@@ -73,10 +73,6 @@ let env = CartPoleV1::builder().seed(42).build()?;
 let mut envs = DeviceMultiGymWrapper::new(
     VectorizedGymWrapper::from(env), storage_device.clone(), optimization_device.clone(),
 );
-let replay_storage_config = ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-    optimization_device: optimization_device.clone(),
-    storage_device,
-});
 
 let mut agent = SACAgent::builder()
     .policy(policy)
@@ -87,11 +83,11 @@ let mut agent = SACAgent::builder()
     .action_space(envs.action_space())
     .observation_space(envs.observation_space())
     .training_horizon(total_timesteps)
-    .replay_storage_config(replay_storage_config)
+    .replay_device(storage_device)
     .build()?;
 ```
 
-`ReplayStorageConfig` selects replay and optimization devices. SAC stores the native observation kind and dtype from the first batch. It does not
+`.replay_device(..)` selects the replay storage device; optimization runs on the device of the model parameters. SAC stores the native observation kind and dtype from the first batch. It does not
 move an environment or model parameters for you.
 
 Build SAC's actor, critics, target critics, optimizers, and automatic entropy
@@ -105,5 +101,5 @@ it adds them to replay. It transfers sampled replay batches back to
 `optimization_device` before each update.
 
 This strategy trades transfer time for accelerator memory. Start with
-`ReplayDeviceStrategy::OneDevice` and measure the run. Switch to `Hybrid` when
+the default (replay on the model device) and measure the run. Set `.replay_device(..)` when
 replay memory is the limiting resource and the transfer cost is acceptable.

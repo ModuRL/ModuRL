@@ -80,12 +80,12 @@ The [DDPG chapter](./ddpg.md) shows this construction.
 
 ## Keep Replay and Models on the Intended Devices
 
-Wrap `ReplayDeviceStrategy::OneDevice(device)` in `ReplayStorageConfig` to
-store replay and run optimization on the same device. A configuration using
-`ReplayDeviceStrategy::Hybrid` can keep detached replay transitions on one
-device, such as the CPU, and move sampled batches to the optimization device.
+Optimization runs on the device of the actor and critic parameters, which must
+all share one device. Replay is stored there too unless `.replay_device(..)`
+keeps detached transitions on another device, such as the CPU, and moves
+sampled batches to the optimization device.
 
-The strategy does not move models or environments. Build actors and critics on the optimization device.
+The agent does not move models or environments. Build actors and critics on the optimization device.
 Target networks inherit their online network device.
 Keep CPU environments on CPU and use `DeviceMultiGymWrapper` for transfers.
 Read [Run on CUDA or Metal](./run-on-cuda-or-metal.md) before splitting replay

@@ -58,7 +58,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `PrevRank` determines each unbatched tensor type.
 - `Gym` and `MultiGym` replace `SpaceError` and boxed combined spaces with associated `ObservationSpace` and `ActionSpace` types.
   Their space accessors return those types directly. Trait objects must specify both associated space types.
-  `Agent` also adds associated space types, while retaining `SpaceError` for its action-space error.
+  `Agent` also adds associated space types. Its action-space error is `ActionSpace::Error`; `Agent::SpaceError` is removed.
 - Renamed `ResetInfo::state` and `StepInfo::state` to `observation`.
   Both structures gain an observation tensor type parameter: `ResetInfo<I, T>` and `StepInfo<I, T>`.
 - Renamed `MultiGymStepInfo::states` to `observations`, `terminal_states` to `terminal_observations`,
@@ -84,6 +84,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Added `VectorizedGymError::Empty` and feature-gated `WorkerDisconnected` variants for threaded failures.
   Candle tensor-error conversions are removed;
   callers must satisfy the documented tensor layouts and backend requirements.
+- `PPOAgent` and `A2CAgent` builders remove `.device(...)`. Rollout collection uses the observation device.
 - PPO and A2C network builders merge `lr_scheduler`, `actor_lr_scheduler` and `critic_lr_scheduler` into
   `learning_rate`, `actor_learning_rate` and `critic_learning_rate`, which take an `f64` or any `ParameterSchedule`.
   `f64` implements `ParameterSchedule` as a constant. PPO and A2C `set_learning_rate` take the same input,
@@ -181,16 +182,17 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Both objective helpers leave gradient detachment to their callers.
 - `sample_u32_inclusive` and `shuffle_with_device_rng` use Burn devices and return `SamplingError`.
   Inclusive integer sampling now rejects endpoints above `2^24 - 1` and reversed ranges.
-- `RolloutBuffer::new` takes a Burn device. Shuffling failures become `RolloutBufferError::SamplingError`
-  instead of `TensorError`. The public `Experience` trait remains unchanged;
+- Removed `RolloutBuffer` and `RolloutBufferError`; PPO stores rollouts in a `Vec` and batches them itself.
+  The public `Experience` trait remains unchanged;
   added `ExperienceBatchError` for incompatible tensor or boolean fields.
 - Replay tensor storage uses native rank/kind types and removes autodiff associations from stored experience.
   Public `ExperienceReplay` and `ReplayStorage` method names remain unchanged.
   `ExperienceReplayError::TensorError` and `ReplayStorageError::TensorError`, `MissingBatchDimension`,
   and `ItemShapeMismatch` are removed. `UninitializedEnvironmentCount` becomes `EnvironmentCountNotSet`.
   Added `ReplayStorageError::IndexTooLarge` for indices outside the signed 64-bit range.
-- `ReplayDeviceStrategy` and `ReplayStorageConfig` now use Burn devices.
-  Removed `ReplayStorageConfig::with_observation_dtype`; configuration selects devices only.
+- Removed `ReplayDeviceStrategy` and `ReplayStorageConfig`. SAC, DDPG, TD3, DQN and DDQN optimize on the device of their model parameters,
+  which must share one device (`ModelDevice` otherwise, now also on `QLearningConfigurationError`).
+  Replay is stored on that device unless the builder sets `.replay_device(..)`.
   Migrated Q-learning replay preserves incoming observation kind and the first batch's dtype, rejecting later dtype changes.
   Environment output mapping, model input conversion, or another explicit caller composition can select the representation.
   The unmigrated SAC and deterministic actor-critic storage paths retain their former default F32 observation storage.

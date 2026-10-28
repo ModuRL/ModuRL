@@ -1,58 +1,35 @@
 use burn::tensor::Device;
 
-/// Strategy for selecting devices used by replay-based agents.
-///
-/// `OneDevice` keeps replay and optimization on one device.
-/// `Hybrid` stores replay on one device and transfers sampled batches to the
-/// device used for network optimization.
-pub enum ReplayDeviceStrategy {
-    /// Stores replay and runs optimization on the same device.
-    OneDevice(Device),
-    /// Stores replay separately and transfers sampled batches for optimization.
-    Hybrid {
-        /// Device holding model parameters and tensors during optimization.
-        optimization_device: Device,
-        /// Device holding detached transitions while they remain in replay.
-        storage_device: Device,
-    },
-}
-
-/// Configuration for replay storage and optimization devices.
-pub struct ReplayStorageConfig {
-    device_strategy: ReplayDeviceStrategy,
+/// Replay devices: optimization runs on the models' device, and replay storage
+/// defaults to it unless a separate replay device is configured.
+pub(crate) struct ReplayStorageConfig {
+    optimization_device: Device,
+    storage_device: Device,
 }
 
 impl ReplayStorageConfig {
-    /// Selects devices for replay storage and optimization.
-    pub fn new(device_strategy: ReplayDeviceStrategy) -> Self {
-        Self { device_strategy }
+    /// Returns `None` unless `model_devices` contains exactly one distinct device.
+    pub(crate) fn from_models(
+        model_devices: impl IntoIterator<Item = Device>,
+        replay_device: Option<Device>,
+    ) -> Option<Self> {
+        let mut model_devices = model_devices.into_iter();
+        let optimization_device = model_devices.next()?;
+        if model_devices.any(|device| device != optimization_device) {
+            return None;
+        }
+        Some(Self {
+            storage_device: replay_device.unwrap_or_else(|| optimization_device.clone()),
+            optimization_device,
+        })
     }
 
     pub(crate) fn storage_device(&self) -> Device {
-        self.device_strategy.storage_device()
+        self.storage_device.clone()
     }
 
     pub(crate) fn optimization_device(&self) -> Device {
-        self.device_strategy.optimization_device()
-    }
-}
-
-impl ReplayDeviceStrategy {
-    pub(crate) fn storage_device(&self) -> Device {
-        match self {
-            ReplayDeviceStrategy::OneDevice(device) => device.clone(),
-            ReplayDeviceStrategy::Hybrid { storage_device, .. } => storage_device.clone(),
-        }
-    }
-
-    pub(crate) fn optimization_device(&self) -> Device {
-        match self {
-            ReplayDeviceStrategy::OneDevice(device) => device.clone(),
-            ReplayDeviceStrategy::Hybrid {
-                optimization_device,
-                ..
-            } => optimization_device.clone(),
-        }
+        self.optimization_device.clone()
     }
 }
 
@@ -61,24 +38,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hybrid_keeps_storage_separate_from_autodiff_optimization() {
-        let storage = Device::flex();
-        let optimization = storage.clone().autodiff();
-        let config = ReplayStorageConfig::new(ReplayDeviceStrategy::Hybrid {
-            optimization_device: optimization.clone(),
-            storage_device: storage.clone(),
-        });
+    #[allow(deprecated)]
+    fn replay_device_keeps_storage_separate_from_optimization() {
+        let storage = Device::ndarray();
+        let optimization = Device::flex().autodiff();
+        let config =
+            ReplayStorageConfig::from_models([optimization.clone()], Some(storage.clone()))
+                .unwrap();
         assert_eq!(config.storage_device(), storage);
         assert_eq!(config.optimization_device(), optimization);
+        assert_ne!(config.storage_device(), config.optimization_device());
         assert!(!config.storage_device().is_autodiff());
         assert!(config.optimization_device().is_autodiff());
     }
 
     #[test]
-    fn one_device_keeps_storage_and_optimization_together() {
+    fn storage_defaults_to_model_device() {
         let device = Device::flex();
-        let config = ReplayStorageConfig::new(ReplayDeviceStrategy::OneDevice(device.clone()));
+        let config =
+            ReplayStorageConfig::from_models([device.clone(), device.clone()], None).unwrap();
         assert_eq!(config.storage_device(), device);
         assert_eq!(config.optimization_device(), device);
+    }
+
+    #[test]
+    fn models_without_parameters_have_no_device() {
+        assert!(ReplayStorageConfig::from_models([], None).is_none());
     }
 }
