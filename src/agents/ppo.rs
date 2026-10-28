@@ -8,16 +8,13 @@ mod tests;
 
 use bon::bon;
 use burn::tensor::{
-    Bool, DType, Device, Int, Tensor, TensorData, TensorReadError,
+    Bool, DType, Int, Tensor, TensorData, TensorReadError,
     kind::{Autodiff, Basic},
 };
 use std::marker::PhantomData;
 
 use crate::{
-    buffers::{
-        experience::{self, Experience, ExperienceBatchError},
-        rollout_buffer::RolloutBuffer,
-    },
+    buffers::experience::{self, Experience, ExperienceBatchError},
     gym::{MultiGym, MultiGymStepInfo},
     objectives::clipped_value_loss,
     parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
@@ -394,7 +391,7 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     observation_space: OS,
     action_space: AS,
     network_info: G::Network,
-    rollout_buffer: RolloutBuffer<PPOExperience<G::Observation, G::Action>>,
+    rollout_buffer: Vec<PPOExperience<G::Observation, G::Action>>,
     mini_batch_size: usize,
     num_epochs: usize,
     batch_size: usize,
@@ -459,7 +456,6 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
         #[builder(default = 0.5)] gradient_clip: f32,
         training_horizon: Option<usize>,
         logging_info: Option<&'a mut dyn PPOLogger<I>>,
-        device: Device,
     ) -> Result<Self, PPOConfigurationError>
     where
         N: PPONetwork<O, H, L, InputKind = OS::Kind, ModelGroup = G>,
@@ -518,7 +514,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
             network_info,
             observation_space,
             action_space,
-            rollout_buffer: RolloutBuffer::new(0, device),
+            rollout_buffer: Vec::new(),
             num_epochs,
             batch_size,
             schedule_progress: ScheduleProgress::new(training_horizon),
@@ -567,7 +563,7 @@ where
         Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
         Tensor<L>: NextRank<Next = Tensor<BL>>,
     {
-        let batch = PPOExperience::<OS::Batch, Tensor<L>>::batch(self.rollout_buffer.get_raw())?;
+        let batch = PPOExperience::<OS::Batch, Tensor<L>>::batch(&self.rollout_buffer)?;
         let all_observations = batch.observations.flatten::<O>(0, 1);
         let all_actions = batch.actions.flatten::<L>(0, 1);
         let all_log_probs = batch.log_probs.flatten::<2>(0, 1);
@@ -646,7 +642,7 @@ where
         &mut self,
         validation: &N,
     ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>> {
-        let experiences = self.rollout_buffer.get_raw();
+        let experiences = &self.rollout_buffer;
         let values_tensor: Tensor<3> =
             experience::stack_tensor_field(experiences, |experience| experience.values.clone())?;
         let final_experience = experiences.last().ok_or(ExperienceBatchError::EmptyBatch)?;
@@ -691,7 +687,7 @@ where
         let returns = (values_tensor.clone() + advantages.clone()).detach();
         let rollout_explained_variance = compute_explained_variance(&returns, &values_tensor);
 
-        let experiences = self.rollout_buffer.get_raw_mut();
+        let experiences = &mut self.rollout_buffer;
 
         for (i, experience) in experiences.iter_mut().enumerate() {
             experience.prepared = Some(PPOPreparedExperience {
@@ -1151,10 +1147,7 @@ where
         if !self.batch_size.is_multiple_of(environment_count) {
             return Err(PPOConfigurationError::BatchNotDivisibleByEnvironmentCount.into());
         }
-        self.rollout_buffer = RolloutBuffer::new(
-            self.mini_batch_size / environment_count,
-            observations.device(),
-        );
+        self.rollout_buffer.clear();
         if self.logging_info.is_some()
             && self.episode_tracker.environment_count() != environment_count
         {
@@ -1219,7 +1212,7 @@ where
                 &next_dones,
                 &truncateds,
             )?;
-            self.rollout_buffer.add(
+            self.rollout_buffer.push(
                 PPOExperience::builder()
                     .observations(observations.without_autodiff())
                     .next_observations(training_next_observations.without_autodiff())

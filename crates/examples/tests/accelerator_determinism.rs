@@ -126,7 +126,6 @@ fn ppo_training_is_device_deterministic() {
             .mini_batch_size(4)
             .num_epochs(2)
             .training_horizon(32)
-            .device(device.clone())
             .build()
             .unwrap();
         agent.learn(&mut env, 32).unwrap();

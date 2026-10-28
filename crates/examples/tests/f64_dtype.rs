@@ -119,7 +119,6 @@ fn ppo_updates_f64_networks_from_native_f32_observations() {
         .mini_batch_size(2)
         .num_epochs(1)
         .training_horizon(4)
-        .device(device)
         .build()
         .unwrap();
     agent.learn(&mut env, 4).unwrap();
@@ -156,7 +155,6 @@ fn a2c_updates_f64_networks_from_native_f32_observations() {
         .observation_space(env.observation_space())
         .batch_size(4)
         .training_horizon(4)
-        .device(device)
         .build()
         .unwrap();
     agent.learn(&mut env, 4).unwrap();

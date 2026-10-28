@@ -84,6 +84,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Added `VectorizedGymError::Empty` and feature-gated `WorkerDisconnected` variants for threaded failures.
   Candle tensor-error conversions are removed;
   callers must satisfy the documented tensor layouts and backend requirements.
+- `PPOAgent` and `A2CAgent` builders remove `.device(...)`. Rollout collection uses the observation device.
 - Agent builders make `.training_horizon(...)` optional. Without it, schedules span the first `learn` call's `num_timesteps`; set it explicitly for chunked training.
 
 ### Environment wrappers and device placement
@@ -177,8 +178,8 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Both objective helpers leave gradient detachment to their callers.
 - `sample_u32_inclusive` and `shuffle_with_device_rng` use Burn devices and return `SamplingError`.
   Inclusive integer sampling now rejects endpoints above `2^24 - 1` and reversed ranges.
-- `RolloutBuffer::new` takes a Burn device. Shuffling failures become `RolloutBufferError::SamplingError`
-  instead of `TensorError`. The public `Experience` trait remains unchanged;
+- Removed `RolloutBuffer` and `RolloutBufferError`; PPO stores rollouts in a `Vec` and batches them itself.
+  The public `Experience` trait remains unchanged;
   added `ExperienceBatchError` for incompatible tensor or boolean fields.
 - Replay tensor storage uses native rank/kind types and removes autodiff associations from stored experience.
   Public `ExperienceReplay` and `ReplayStorage` method names remain unchanged.

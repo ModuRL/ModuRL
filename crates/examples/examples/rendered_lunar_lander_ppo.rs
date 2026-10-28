@@ -146,7 +146,6 @@ fn main() {
         .gae_lambda(0.98)
         .num_epochs(4)
         .training_horizon(10_000_000)
-        .device(device)
         .build()
         .unwrap();
 
