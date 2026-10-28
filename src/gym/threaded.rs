@@ -477,7 +477,7 @@ mod tests {
         let mut env = MultithreadedVectorizedGymWrapper::new(
             vec![|| CounterEnv::new(0), || CounterEnv::new(1)],
             BoxSpace::new_unbounded([1, 2], &Device::flex()),
-            Discrete::new(10),
+            Discrete::new(10).unwrap(),
         )
         .unwrap();
 
@@ -612,7 +612,7 @@ mod tests {
         let mut env = MultithreadedVectorizedGymWrapper::new(
             factories,
             BoxSpace::new_unbounded([1, 2], &Device::flex()),
-            Discrete::new(10),
+            Discrete::new(10).unwrap(),
         )
         .unwrap();
         env.reset().unwrap();
@@ -661,7 +661,7 @@ mod tests {
         let mut env = MultithreadedVectorizedGymWrapper::new(
             env_constructors,
             BoxSpace::new_unbounded([1, 2], &Device::flex()),
-            Discrete::new(10),
+            Discrete::new(10).unwrap(),
         )
         .unwrap();
         env.reset().unwrap();
@@ -878,7 +878,7 @@ mod tests {
         let mut env = MultithreadedVectorizedGymWrapper::new(
             factories,
             BoxSpace::new_unbounded([1, 2], &Device::flex()),
-            Discrete::new(10),
+            Discrete::new(10).unwrap(),
         )
         .unwrap();
         env.reset().unwrap();
@@ -923,7 +923,7 @@ mod tests {
             MultithreadedVectorizedGymWrapper::new(
                 vec![failed_constructor],
                 BoxSpace::new_unbounded([1, 2], &Device::flex()),
-                Discrete::new(2)
+                Discrete::new(2).unwrap()
             ),
             Err(VectorizedGymError::WorkerDisconnected {
                 environment_index: 0

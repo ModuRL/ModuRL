@@ -223,7 +223,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
         #[builder(default = 0.0)] ent_coef: f32,
         #[builder(default = 1024)] batch_size: usize,
         #[builder(default = 0.5)] gradient_clip: f32,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
         logging_info: Option<&'a mut dyn A2CLogger<I>>,
     ) -> Result<Self, PPOConfigurationError>
     where
@@ -252,7 +252,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
             .mini_batch_size(batch_size)
             .num_epochs(1)
             .gradient_clip(gradient_clip)
-            .training_horizon(training_horizon)
+            .maybe_training_horizon(training_horizon)
             .maybe_logging_info(logging_info)
             .build()?;
         Ok(Self { inner })
@@ -542,7 +542,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        let mut progress = crate::parameter_schedule::ScheduleProgress::new(8);
+        let mut progress = crate::parameter_schedule::ScheduleProgress::new(Some(8));
         progress.advance_steps(2);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut shared.inner, &progress);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut separate.inner, &progress);

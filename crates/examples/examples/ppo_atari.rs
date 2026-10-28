@@ -75,11 +75,10 @@ fn main() {
     // Load one environment on the main thread to discover the ROM's minimal
     // action set. Worker environments are constructed inside their own threads
     // because ALE instances are intentionally not Send.
-    let action_count = {
+    let action_space = {
         let probe_env = make_atari_env(rom_path.clone(), SEED, MAX_EPISODE_FRAMES, false);
-        probe_env.action_space().get_possible_values()
+        probe_env.action_space()
     };
-    let action_space = Discrete::new(action_count);
 
     #[cfg(feature = "multithreading")]
     let envs = {
@@ -117,7 +116,7 @@ fn main() {
     let cnn = NatureCnn::new(&device, true).expect("failed to build Nature CNN");
     let actor = MLP::builder()
         .input_size(512)
-        .output_size(action_count)
+        .output_size(action_space.get_possible_values())
         .hidden_layer_sizes(vec![])
         .output_initializer(Initializer::Orthogonal { gain: 0.01 })
         .options((&device, DType::F32))

@@ -203,7 +203,8 @@ fn ppo_cartpole_shared_multithreaded() {
         .collect();
     let space = CartPoleV1::builder().build().unwrap().observation_space();
     let env =
-        MultithreadedVectorizedGymWrapper::new(constructors, space, Discrete::new(2)).unwrap();
+        MultithreadedVectorizedGymWrapper::new(constructors, space, Discrete::new(2).unwrap())
+            .unwrap();
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let mut agent = PPOAgent::builder()
         .network_info(shared_network(&device))

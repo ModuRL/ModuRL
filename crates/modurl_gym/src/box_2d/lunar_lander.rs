@@ -1243,7 +1243,7 @@ impl Gym for LunarLanderV3 {
 
     fn action_space(&self) -> Self::ActionSpace {
         // Discrete action space: 0=nop, 1=left engine, 2=main engine, 3=right engine
-        spaces::Discrete::new(4)
+        spaces::Discrete::new(4).expect("4 is a valid action count")
     }
 }
 

@@ -101,7 +101,7 @@ impl Gym for EpisodeEnv {
     }
 
     fn action_space(&self) -> Self::ActionSpace {
-        Discrete::new(2)
+        Discrete::new(2).unwrap()
     }
 }
 
@@ -146,7 +146,7 @@ impl Gym for CountingEpisodeEnv {
     }
 
     fn action_space(&self) -> Self::ActionSpace {
-        Discrete::new(2)
+        Discrete::new(2).unwrap()
     }
 }
 
@@ -212,7 +212,7 @@ fn float_agent(
     device: &Device,
 ) -> QLearningAgent<TestNetwork, BoxSpace<2>, VectorizedGymError<Infallible>, TestTarget> {
     QLearningAgent::builder()
-        .action_space(Discrete::new(2))
+        .action_space(Discrete::new(2).unwrap())
         .observation_space(BoxSpace::new_unbounded([1, 1], device))
         .online_q_network(network(&device.clone().autodiff(), DType::F32))
         .optimizer(SgdConfig::new().init())
@@ -241,7 +241,7 @@ fn epsilon_greedy_preserves_layout_kind_and_seeded_host_randomness() {
     let greedy = epsilon_greedy_actions(
         &observations,
         0.0,
-        &Discrete::new(3),
+        &Discrete::new(3).unwrap(),
         &mut StdRng::seed_from_u64(1),
         |input| Ok::<_, Infallible>(input.clone()),
     )
@@ -255,7 +255,7 @@ fn epsilon_greedy_preserves_layout_kind_and_seeded_host_randomness() {
         epsilon_greedy_actions(
             &input,
             1.0,
-            &Discrete::new(3),
+            &Discrete::new(3).unwrap(),
             &mut StdRng::seed_from_u64(2),
             |_| -> Result<Tensor<2>, Infallible> {
                 panic!("full exploration must not evaluate the model")
@@ -280,7 +280,7 @@ fn mixed_exploration_forwards_only_greedy_native_observations() {
     let actions = epsilon_greedy_actions(
         &observations,
         0.5,
-        &Discrete::new(2),
+        &Discrete::new(2).unwrap(),
         &mut StdRng::seed_from_u64(3),
         |input| {
             assert_eq!(input.dtype(), DType::I64);
@@ -476,7 +476,7 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut agent = QLearningAgent::<_, _, Infallible, TestTarget, 3>::builder()
-        .action_space(Discrete::new(2))
+        .action_space(Discrete::new(2).unwrap())
         .observation_space(ObservationFixture::<3, Bool> { _kind: PhantomData })
         .online_q_network(network(&device, DType::F64))
         .optimizer(SgdConfig::new().init())
@@ -711,7 +711,7 @@ fn builder_rejects_invalid_learning_rates_and_compute_dtypes() {
     let device = Device::flex().autodiff();
     let build = |rate, dtype| {
         QLearningAgent::<_, _, Infallible, TestTarget>::builder()
-            .action_space(Discrete::new(2))
+            .action_space(Discrete::new(2).unwrap())
             .observation_space(BoxSpace::new_unbounded([1, 1], &device))
             .online_q_network(network(&device, DType::F32))
             .optimizer(SgdConfig::new().init())

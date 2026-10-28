@@ -454,7 +454,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
         #[builder(default = 128)] mini_batch_size: usize,
         #[builder(default = 4)] num_epochs: usize,
         #[builder(default = 0.5)] gradient_clip: f32,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
         logging_info: Option<&'a mut dyn PPOLogger<I>>,
     ) -> Result<Self, PPOConfigurationError>
     where
@@ -482,7 +482,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
         if num_epochs == 0 {
             return Err(PPOConfigurationError::ZeroEpochs);
         }
-        if training_horizon == 0 {
+        if training_horizon == Some(0) {
             return Err(PPOConfigurationError::ZeroTrainingHorizon);
         }
         if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
@@ -1325,6 +1325,7 @@ where
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_rollout_collection(env)?;
+        self.schedule_progress.default_horizon(num_timesteps);
 
         while elapsed_timesteps < num_timesteps {
             let (collected_timesteps, rollout_explained_variance) = {
