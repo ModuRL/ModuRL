@@ -6,19 +6,27 @@ pub trait ParameterSchedule {
 /// Tracks progress through a fixed training horizon for parameter schedules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScheduleProgress {
-    training_horizon: usize,
+    training_horizon: Option<usize>,
     elapsed_steps: usize,
 }
 
 impl ScheduleProgress {
-    pub fn new(training_horizon: usize) -> Self {
+    /// `None` defers the horizon to the first nonzero [`Self::default_horizon`] call.
+    pub fn new(training_horizon: Option<usize>) -> Self {
         assert!(
-            training_horizon > 0,
+            training_horizon != Some(0),
             "training horizon must be greater than zero"
         );
         Self {
             training_horizon,
             elapsed_steps: 0,
+        }
+    }
+
+    /// Sets the horizon to `num_timesteps` if none was configured.
+    pub fn default_horizon(&mut self, num_timesteps: usize) {
+        if num_timesteps > 0 {
+            self.training_horizon.get_or_insert(num_timesteps);
         }
     }
 
@@ -35,7 +43,9 @@ impl ScheduleProgress {
     }
 
     pub fn get_elapsed_fraction(&self) -> f64 {
-        (self.elapsed_steps as f64 / self.training_horizon as f64).clamp(0.0, 1.0)
+        self.training_horizon.map_or(0.0, |horizon| {
+            (self.elapsed_steps as f64 / horizon as f64).clamp(0.0, 1.0)
+        })
     }
 
     pub fn parameter(&self, schedule: &dyn ParameterSchedule) -> f64 {
@@ -182,7 +192,7 @@ mod tests {
 
     #[test]
     fn schedule_progress_tracks_and_clamps_elapsed_fraction() {
-        let mut progress = ScheduleProgress::new(100);
+        let mut progress = ScheduleProgress::new(Some(100));
         assert_close(progress.get_elapsed_fraction(), 0.0);
 
         progress.set_elapsed_steps(25);
@@ -196,5 +206,23 @@ mod tests {
 
         progress.set_elapsed_steps(150);
         assert_close(progress.get_elapsed_fraction(), 1.0);
+    }
+
+    #[test]
+    fn deferred_horizon_uses_first_nonzero_default() {
+        let mut progress = ScheduleProgress::new(None);
+        progress.set_elapsed_steps(10);
+        assert_close(progress.get_elapsed_fraction(), 0.0);
+
+        progress.default_horizon(0);
+        assert_close(progress.get_elapsed_fraction(), 0.0);
+        progress.default_horizon(40);
+        progress.default_horizon(1000);
+        assert_close(progress.get_elapsed_fraction(), 0.25);
+
+        let mut configured = ScheduleProgress::new(Some(20));
+        configured.default_horizon(40);
+        configured.set_elapsed_steps(10);
+        assert_close(configured.get_elapsed_fraction(), 0.5);
     }
 }

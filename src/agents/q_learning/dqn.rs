@@ -113,7 +113,7 @@ where
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
         logger: Option<&'a mut dyn DQNLogger<I>>,
         replay_storage_config: ReplayStorageConfig,
         #[builder(default = DType::F32)] dtype: DType,
@@ -131,7 +131,7 @@ where
             .gamma(gamma)
             .update_frequency(update_frequency)
             .training_start(training_start)
-            .training_horizon(training_horizon)
+            .maybe_training_horizon(training_horizon)
             .replay_storage_config(replay_storage_config)
             .dtype(dtype)
             .build()?;
@@ -237,7 +237,7 @@ mod tests {
             .unwrap();
             let mut logger = RecordingLogger::default();
             let mut agent = DQNAgent::builder()
-                .action_space(Discrete::new(2))
+                .action_space(Discrete::new(2).unwrap())
                 .observation_space(env.observation_space())
                 .online_q_network(network(&device, dtype))
                 .optimizer(SgdConfig::new().init())
@@ -277,7 +277,7 @@ mod tests {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let mut agent = DQNAgent::<_, _, VectorizedGymError<Infallible>, (), 3>::builder()
-            .action_space(Discrete::new(2))
+            .action_space(Discrete::new(2).unwrap())
             .observation_space(ObservationFixture::<3, Bool> { _kind: PhantomData })
             .online_q_network(network(&device, DType::F64))
             .optimizer(SgdConfig::new().init())

@@ -79,7 +79,7 @@ impl AcrobotV1 {
             use_nips_dynamics,
             torque_noise_max,
             rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
-            action_space: Discrete::new(3),
+            action_space: Discrete::new(3).expect("3 is a valid action count"),
             observation_space: BoxSpace::new(
                 Tensor::from_data(TensorData::new(low, [1, 6]), &Device::flex()),
                 Tensor::from_data(TensorData::new(high, [1, 6]), &Device::flex()),

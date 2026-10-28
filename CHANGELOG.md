@@ -28,6 +28,8 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `ActionSpace<A>` for action checks and sampling, and `ActionMap<L, A>` for policy-to-environment conversion.
 - Both space roles have an associated tensor `Kind`. `ObservationSpace` has no associated error type;
   `ActionSpace` retains `Error`. `contains()` returns `bool`, and `shape()` returns the item shape without a batch axis.
+- `Discrete::new` returns `Result<Discrete, SpaceError>` and rejects category counts outside `1..=2^24`
+  with `SpaceError::InvalidCategoryCount`. Sampling, policy decoding and the DQN/DDQN builders no longer re-check the count.
 - Removed unbatched `Space::sample`. Use `ActionSpace::sample_batch(batch_size, device)`.
   Observation-space sampling is no longer part of the observation trait.
 - Moved `tensor_from_neurons` to `ActionMap`. Added `policy_shape()` to distinguish policy output shape from environment action shape.
@@ -86,6 +88,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `learning_rate`, `actor_learning_rate` and `critic_learning_rate`, which take an `f64` or any `ParameterSchedule`.
   `f64` implements `ParameterSchedule` as a constant. PPO and A2C `set_learning_rate` take the same input,
   replace the schedule from the current training progress, and return `PPOConfigurationError::InvalidLearningRate` for a nonpositive or non-finite rate.
+- Agent builders make `.training_horizon(...)` optional. Without it, schedules span the first `learn` call's `num_timesteps`; set it explicitly for chunked training.
 
 ### Environment wrappers and device placement
 
