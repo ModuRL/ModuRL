@@ -70,7 +70,7 @@ impl CartPoleV1 {
         let high: Tensor<1> = Tensor::from_data(TensorData::new(high, [4]), &Device::flex());
         let low: Tensor<1> = Tensor::from_data(TensorData::new(low, [4]), &Device::flex());
 
-        let action_space = spaces::Discrete::new(2);
+        let action_space = spaces::Discrete::new(2).expect("2 is a valid action count");
         let observation_space = spaces::BoxSpace::new(low.unsqueeze::<2>(), high.unsqueeze::<2>());
 
         Ok(Self {

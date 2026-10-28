@@ -92,7 +92,7 @@ impl Gym<usize> for TwoStepTestGym {
     }
 
     fn action_space(&self) -> Self::ActionSpace {
-        Discrete::new(2)
+        Discrete::new(2).unwrap()
     }
 }
 
@@ -421,7 +421,7 @@ mod schedule_tests {
             }
 
             fn action_space(&self) -> Self::ActionSpace {
-                Discrete::new(2)
+                Discrete::new(2).unwrap()
             }
         }
 
@@ -511,7 +511,7 @@ mod schedule_tests {
             .unwrap();
         let mut boolean_agent = PPOAgent::<_, _, _, Infallible>::builder()
             .observation_space(BoolSpace)
-            .action_space(Discrete::new(2))
+            .action_space(Discrete::new(2).unwrap())
             .network_info(networks)
             .training_horizon(1)
             .device(device.clone())
@@ -547,8 +547,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut integer_agent = PPOAgent::<_, _, _, Infallible>::builder()
-            .observation_space(Discrete::new(2))
-            .action_space(Discrete::new(2))
+            .observation_space(Discrete::new(2).unwrap())
+            .action_space(Discrete::new(2).unwrap())
             .network_info(networks)
             .training_horizon(1)
             .device(device.clone())
@@ -652,7 +652,7 @@ mod schedule_tests {
             }
 
             fn action_space(&self) -> Discrete {
-                Discrete::new(2)
+                Discrete::new(2).unwrap()
             }
         }
 
@@ -1040,7 +1040,7 @@ mod schedule_tests {
             }
 
             fn action_space(&self) -> Self::ActionSpace {
-                Discrete::new(2)
+                Discrete::new(2).unwrap()
             }
         }
         let device = Device::flex().autodiff();
@@ -1249,7 +1249,7 @@ mod schedule_tests {
             .unwrap();
         let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
             .observation_space(BoxSpace::new_unbounded([1, 4], &device))
-            .action_space(Discrete::new(2))
+            .action_space(Discrete::new(2).unwrap())
             .network_info(networks)
             .batch_size(2)
             .mini_batch_size(2)

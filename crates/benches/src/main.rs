@@ -223,7 +223,7 @@ impl Forward<4, 2> for AtariQNetwork {
 }
 
 fn ppo(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
-    let action_space = Discrete::new(4);
+    let action_space = Discrete::new(4)?;
     let constructors = (0..PPO_ENV_COUNT)
         .map(|index| {
             let rom = args.rom.clone();
@@ -518,7 +518,7 @@ mod tests {
         }
 
         fn action_space(&self) -> Discrete {
-            Discrete::new(4)
+            Discrete::new(4).unwrap()
         }
     }
 
@@ -579,7 +579,7 @@ mod tests {
         let mut envs = MultithreadedVectorizedGymWrapper::new(
             constructors,
             atari::FrameObservationSpace,
-            Discrete::new(4),
+            Discrete::new(4).unwrap(),
         )
         .unwrap();
         let observations = envs.reset().unwrap();
