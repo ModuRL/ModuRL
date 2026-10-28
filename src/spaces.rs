@@ -85,7 +85,7 @@ pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceError {
-    #[error("discrete sampling requires 1..=2^24 categories, got {0}")]
+    #[error("discrete spaces require 1..=2^24 categories, got {0}")]
     InvalidCategoryCount(usize),
     #[error("invalid policy output shape: expected {expected:?}, got {actual:?}")]
     InvalidPolicyShape {
@@ -153,9 +153,6 @@ impl ActionSpace<2> for Discrete {
         batch_size: usize,
         device: &Device,
     ) -> Result<Tensor<2, Int>, Self::Error> {
-        if self.possible_values == 0 || self.possible_values > (1 << 24) {
-            return Err(SpaceError::InvalidCategoryCount(self.possible_values));
-        }
         Ok(Tensor::random(
             [batch_size, 1],
             Distribution::Uniform(0.0, self.possible_values as f64),
@@ -173,7 +170,7 @@ impl ActionMap<2, 2> for Discrete {
     /// Converts `[batch_size, action_count]` logits to `[batch_size, 1]` indices.
     fn tensor_from_neurons(&self, neurons: Tensor<2>) -> Result<Tensor<2, Int>, Self::Error> {
         let [batch_size, categories] = neurons.dims();
-        if categories != self.possible_values || categories == 0 {
+        if categories != self.possible_values {
             return Err(SpaceError::InvalidPolicyShape {
                 expected: vec![batch_size, self.possible_values],
                 actual: neurons.dims().to_vec(),
@@ -184,8 +181,12 @@ impl ActionMap<2, 2> for Discrete {
 }
 
 impl Discrete {
-    pub fn new(possible_values: usize) -> Self {
-        Self { possible_values }
+    /// Creates a space with `possible_values` actions, which must be in `1..=2^24`.
+    pub fn new(possible_values: usize) -> Result<Self, SpaceError> {
+        if possible_values == 0 || possible_values > (1 << 24) {
+            return Err(SpaceError::InvalidCategoryCount(possible_values));
+        }
+        Ok(Self { possible_values })
     }
     pub fn get_possible_values(&self) -> usize {
         self.possible_values
@@ -385,7 +386,7 @@ mod tests {
     fn discrete_samples_indices_and_decodes_logits() {
         let _guard = RNG_LOCK.lock().unwrap();
         let device = Device::flex();
-        let space = Discrete::new(3);
+        let space = Discrete::new(3).unwrap();
         let actions = space.sample_batch(128, &device).unwrap();
         assert_eq!(actions.dims(), [128, 1]);
         assert_eq!(actions.dtype(), DType::I32);
@@ -413,18 +414,21 @@ mod tests {
         assert!(space.contains(&Tensor::from_data([[0i32], [1]], &device)));
         assert!(!space.contains(&Tensor::from_data([[0i32], [3]], &device)));
         assert!(!space.contains(&Tensor::from_data([[0i32, 1]], &device)));
-        assert!(Discrete::new(0).sample_batch(1, &device).is_err());
-        assert!(
-            Discrete::new((1 << 24) + 1)
-                .sample_batch(1, &device)
-                .is_err()
-        );
+        assert!(matches!(
+            Discrete::new(0),
+            Err(SpaceError::InvalidCategoryCount(0))
+        ));
+        assert!(matches!(
+            Discrete::new((1 << 24) + 1),
+            Err(SpaceError::InvalidCategoryCount(16_777_217))
+        ));
+        assert!(Discrete::new(1 << 24).is_ok());
         assert!(
             space
                 .tensor_from_neurons(Tensor::zeros([1, 2], &device))
                 .is_err()
         );
-        let single = Discrete::new(1);
+        let single = Discrete::new(1).unwrap();
         assert_eq!(single.shape(), vec![1]);
         assert_eq!(single.policy_shape(), vec![1]);
         assert_eq!(
@@ -552,7 +556,7 @@ mod tests {
         let _guard = RNG_LOCK.lock().unwrap();
         let device = Device::flex();
         let space = BoxSpace::<2>::new_unbounded([1, 3], &device);
-        let discrete = Discrete::new(5);
+        let discrete = Discrete::new(5).unwrap();
         let draw = || {
             device.seed(123);
             let continuous = space.sample_batch(16, &device).unwrap().into_data();
@@ -567,7 +571,11 @@ mod tests {
         let _guard = RNG_LOCK.lock().unwrap();
         let device = Device::flex();
         assert_eq!(
-            Discrete::new(3).sample_batch(0, &device).unwrap().dims(),
+            Discrete::new(3)
+                .unwrap()
+                .sample_batch(0, &device)
+                .unwrap()
+                .dims(),
             [0, 1]
         );
         let space = BoxSpace::<2>::new_with_universal_bounds([1, 3], -1.0, 1.0, &device);
@@ -594,7 +602,7 @@ mod tests {
                     Item = Tensor<1, Int>,
                     Batch = Tensor<2, Int>,
                 >,
-        > = Box::new(Discrete::new(3));
+        > = Box::new(Discrete::new(3).unwrap());
         assert_eq!(observations.shape(), vec![2, 3, 4]);
         assert!(observations.contains(&Tensor::zeros([5, 2, 3, 4], &device)));
         assert!(!observations.contains(&Tensor::zeros([5, 2, 4, 3], &device)));

@@ -12,7 +12,7 @@ version:
 
 ```rust,ignore
 let mut agent = DDQNAgent::builder()
-    .action_space(Discrete::new(2))
+    .action_space(Discrete::new(2).unwrap())
     .observation_space(observation_space)
     .online_q_network(online_q_network)
     .optimizer(optimizer)

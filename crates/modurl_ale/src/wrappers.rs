@@ -670,7 +670,7 @@ mod tests {
         }
 
         fn action_space(&self) -> Discrete {
-            Discrete::new(4)
+            Discrete::new(4).unwrap()
         }
     }
 
@@ -718,7 +718,7 @@ mod tests {
         }
 
         fn action_space(&self) -> Discrete {
-            Discrete::new(4)
+            Discrete::new(4).unwrap()
         }
 
         fn observation_space(&self) -> Self::ObservationSpace {

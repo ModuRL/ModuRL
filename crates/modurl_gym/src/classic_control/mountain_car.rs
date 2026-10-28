@@ -49,7 +49,7 @@ impl MountainCarV0 {
         let low: Tensor<1> = Tensor::from_data(TensorData::new(low, [2]), &Device::flex());
         let high: Tensor<1> = Tensor::from_data(TensorData::new(high, [2]), &Device::flex());
 
-        let action_space = spaces::Discrete::new(3);
+        let action_space = spaces::Discrete::new(3).expect("3 is a valid action count");
         let observation_space = spaces::BoxSpace::new(low.unsqueeze::<2>(), high.unsqueeze::<2>());
 
         Ok(Self {
