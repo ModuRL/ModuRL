@@ -227,7 +227,10 @@ impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
 }
 
 fn initial_learning_rate(schedule: &dyn ParameterSchedule) -> Result<f64, PPOConfigurationError> {
-    let learning_rate = schedule.value(0.0);
+    checked_learning_rate(schedule.value(0.0))
+}
+
+fn checked_learning_rate(learning_rate: f64) -> Result<f64, PPOConfigurationError> {
     if !learning_rate.is_finite() || learning_rate <= 0.0 {
         return Err(PPOConfigurationError::InvalidLearningRate);
     }
@@ -287,11 +290,16 @@ pub trait PPONetwork<const O: usize, const H: usize, const L: usize>: Module {
         gradient_clip: f32,
     ) -> Result<(), TensorReadError>;
 
-    /// Updates configured learning rates from the current training progress and each optional schedule.
+    /// Updates each learning rate from its schedule at the current training progress.
     fn update_learning_rates(&mut self, progress: &ScheduleProgress);
 
-    /// Sets the shared rate or both separate rates. Scheduled rates are replaced at the next schedule update.
-    fn set_learning_rate(&mut self, learning_rate: f64);
+    /// Replaces the shared schedule or both separate schedules, setting each rate to the new schedule's value at `progress`.
+    /// Rejects a nonpositive or non-finite rate at `progress` and leaves the current schedules unchanged.
+    fn set_learning_rate(
+        &mut self,
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
+        progress: &ScheduleProgress,
+    ) -> Result<(), PPOConfigurationError>;
 }
 
 impl<T, P, C, const O: usize, const H: usize, const L: usize> PPONetwork<O, H, L>
@@ -372,9 +380,14 @@ where
         self.learning_rate = progress.parameter(&*self.learning_rate_schedule);
     }
 
-    fn set_learning_rate(&mut self, learning_rate: f64) {
-        self.learning_rate = learning_rate;
-        self.learning_rate_schedule = Arc::new(learning_rate);
+    fn set_learning_rate(
+        &mut self,
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
+        progress: &ScheduleProgress,
+    ) -> Result<(), PPOConfigurationError> {
+        self.learning_rate = checked_learning_rate(progress.parameter(&*learning_rate))?;
+        self.learning_rate_schedule = learning_rate;
+        Ok(())
     }
 }
 
@@ -501,11 +514,17 @@ where
         self.critic_learning_rate = progress.parameter(&*self.critic_learning_rate_schedule);
     }
 
-    fn set_learning_rate(&mut self, learning_rate: f64) {
-        self.actor_learning_rate = learning_rate;
-        self.critic_learning_rate = learning_rate;
-        self.actor_learning_rate_schedule = Arc::new(learning_rate);
-        self.critic_learning_rate_schedule = Arc::new(learning_rate);
+    fn set_learning_rate(
+        &mut self,
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
+        progress: &ScheduleProgress,
+    ) -> Result<(), PPOConfigurationError> {
+        let rate = checked_learning_rate(progress.parameter(&*learning_rate))?;
+        self.actor_learning_rate = rate;
+        self.critic_learning_rate = rate;
+        self.actor_learning_rate_schedule = learning_rate.clone();
+        self.critic_learning_rate_schedule = learning_rate;
+        Ok(())
     }
 }
 
@@ -1106,9 +1125,15 @@ mod tests {
         assert_eq!(agent.episode_tracker.environment_count(), 2);
         let network = &agent.network_info;
         assert_close(network.learning_rate, 0.00082);
-        agent.set_learning_rate(0.25);
-        let network = &agent.network_info;
-        assert_close(network.learning_rate, 0.25);
+        agent
+            .set_learning_rate(LinearSchedule::new(0.5, 0.0))
+            .unwrap();
+        assert_close(agent.network_info.learning_rate, 0.4);
+        assert!(matches!(
+            agent.set_learning_rate(-1.0),
+            Err(PPOConfigurationError::InvalidLearningRate)
+        ));
+        assert_close(agent.network_info.learning_rate, 0.4);
         agent.reset_current_observations();
         assert!(agent.current_observations.is_none());
         assert_eq!(agent.episode_tracker.environment_count(), 0);
@@ -1163,10 +1188,16 @@ mod tests {
             agent.act_deterministic(&observations).unwrap().dims(),
             [2, 1]
         );
-        agent.set_learning_rate(0.25);
+        agent
+            .set_learning_rate(LinearSchedule::new(0.5, 0.0))
+            .unwrap();
         let network = &agent.network_info;
-        assert_close(network.actor_learning_rate, 0.25);
-        assert_close(network.critic_learning_rate, 0.25);
-        assert_eq!(logger.updates, 2);
+        assert_close(network.actor_learning_rate, 0.3);
+        assert_close(network.critic_learning_rate, 0.3);
+        agent.learn(&mut env, 2).unwrap();
+        let network = &agent.network_info;
+        assert_close(network.actor_learning_rate, 0.2);
+        assert_close(network.critic_learning_rate, 0.2);
+        assert_eq!(logger.updates, 3);
     }
 }

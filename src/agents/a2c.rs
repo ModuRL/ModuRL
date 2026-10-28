@@ -269,8 +269,13 @@ where
     Tensor<L>: NextRank,
     GE: std::fmt::Debug,
 {
-    pub fn set_learning_rate(&mut self, learning_rate: f64) {
-        self.inner.set_learning_rate(learning_rate);
+    /// Replaces the learning-rate schedule with an `f64` or any `ParameterSchedule`, continuing from the current training progress.
+    /// Rejects a nonpositive or non-finite rate at the current progress.
+    pub fn set_learning_rate(
+        &mut self,
+        learning_rate: impl ParameterSchedule + Send + Sync + 'static,
+    ) -> Result<(), PPOConfigurationError> {
+        self.inner.set_learning_rate(learning_rate)
     }
 
     /// Maps rank-O observation batches to rank-A deterministic environment actions, preserving the batch axis.
@@ -438,7 +443,7 @@ mod tests {
             agent.act_deterministic(&observations).unwrap().dims(),
             [2, 1]
         );
-        agent.set_learning_rate(0.25);
+        agent.set_learning_rate(0.25).unwrap();
         agent.reset_current_observations();
         assert_eq!(logger.updates, 1);
         assert_eq!(logger.collections, 1);
