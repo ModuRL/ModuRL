@@ -38,14 +38,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replay_device_keeps_storage_separate_from_autodiff_optimization() {
-        let storage = Device::flex();
-        let optimization = storage.clone().autodiff();
+    #[allow(deprecated)]
+    fn replay_device_keeps_storage_separate_from_optimization() {
+        let storage = Device::ndarray();
+        let optimization = Device::flex().autodiff();
         let config =
             ReplayStorageConfig::from_models([optimization.clone()], Some(storage.clone()))
                 .unwrap();
         assert_eq!(config.storage_device(), storage);
         assert_eq!(config.optimization_device(), optimization);
+        assert_ne!(config.storage_device(), config.optimization_device());
         assert!(!config.storage_device().is_autodiff());
         assert!(config.optimization_device().is_autodiff());
     }

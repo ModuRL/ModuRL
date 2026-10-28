@@ -656,6 +656,7 @@ impl MultiGym<(), 3, 2> for BooleanEnv {
 }
 
 #[test]
+#[allow(deprecated)]
 fn native_high_rank_boolean_collection_trains_and_rejects_invalid_terminals() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
@@ -689,6 +690,7 @@ fn native_high_rank_boolean_collection_trains_and_rejects_invalid_terminals() {
         })
         .action_space(env.action_space())
         .observation_space(BooleanSpace)
+        .replay_device(Device::ndarray())
         .dtype(DType::F64)
         .replay_capacity(8)
         .batch_size(2)
@@ -718,6 +720,8 @@ fn native_high_rank_boolean_collection_trains_and_rejects_invalid_terminals() {
         .storage_mut()
         .gather(&[0, 1])
         .unwrap();
+    assert_eq!(batch.observations.device(), Device::ndarray());
+    assert_eq!(batch.actions.device(), Device::ndarray());
     assert_eq!(batch.observations.dims(), [2, 1, 1]);
     assert_eq!(
         batch

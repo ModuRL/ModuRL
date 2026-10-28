@@ -496,6 +496,7 @@ fn actor_update_changes_policy_without_updating_critics_or_targets() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let environment_device = Device::flex();
@@ -535,6 +536,7 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
         .entropy_configuration(entropy)
         .action_space(environment.action_space())
         .observation_space(environment.observation_space())
+        .replay_device(Device::ndarray())
         .replay_capacity(16)
         .batch_size(2)
         .training_start(2)
@@ -550,6 +552,7 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
     assert!(agent.replay.is_none());
     agent.learn(&mut environment, 2).unwrap();
     let batch = agent.replay.as_ref().unwrap().sample().unwrap();
+    assert_eq!(batch.next_observations.device(), Device::ndarray());
     assert_eq!(numbers(batch.next_observations), [10.0; 2]);
     assert_eq!(numbers(batch.collection_policy_entropies), [0.0; 2]);
     assert_eq!(numbers(batch.entropy_change_weights), [0.0; 2]);
