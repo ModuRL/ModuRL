@@ -535,7 +535,6 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
         .entropy_configuration(entropy)
         .action_space(environment.action_space())
         .observation_space(environment.observation_space())
-        .replay_device(Device::flex())
         .replay_capacity(16)
         .batch_size(2)
         .training_start(2)

@@ -689,7 +689,6 @@ fn native_high_rank_boolean_collection_trains_and_rejects_invalid_terminals() {
         })
         .action_space(env.action_space())
         .observation_space(BooleanSpace)
-        .replay_device(env.device.clone())
         .dtype(DType::F64)
         .replay_capacity(8)
         .batch_size(2)
