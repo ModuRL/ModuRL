@@ -435,7 +435,7 @@ where
         #[builder(default = 0.99)] gamma: f32,
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
         replay_device: Option<Device>,
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, QAgentError<GE, ME>> {
@@ -457,7 +457,7 @@ where
             .final_epsilon(epsilon_schedule.value(1.0))
             .update_frequency(update_frequency)
             .target_update_interval(target_update_interval)
-            .training_horizon(training_horizon)
+            .maybe_training_horizon(training_horizon)
             .call()?;
 
         let mut observation_storage_shape = vec![replay_capacity];
@@ -715,6 +715,7 @@ where
             .storage_mut()
             .validate_environment_count(environment_count)?;
         let mut observations = env.reset().map_err(QAgentError::GymError)?;
+        self.schedule_progress.default_horizon(num_timesteps);
         let mut episodes = QEpisodeTracker::new(environment_count);
         while elapsed_timesteps < num_timesteps {
             self.current_epsilon = validate_epsilon(
@@ -776,7 +777,7 @@ impl QLearningConfigurationValidator {
         final_epsilon: f64,
         update_frequency: usize,
         target_update_interval: usize,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
     ) -> Result<(), QLearningConfigurationError> {
         if replay_capacity == 0 {
             return Err(QLearningConfigurationError::ZeroReplayCapacity);
@@ -790,7 +791,7 @@ impl QLearningConfigurationValidator {
         if update_frequency == 0 {
             return Err(QLearningConfigurationError::ZeroUpdateFrequency);
         }
-        if training_horizon == 0 {
+        if training_horizon == Some(0) {
             return Err(QLearningConfigurationError::ZeroTrainingHorizon);
         }
         if replay_capacity < batch_size {

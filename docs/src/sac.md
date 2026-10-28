@@ -227,7 +227,7 @@ Important defaults and constraints are:
 | `batch_size` | `256` | Nonzero |
 | `training_start` | `1_000` | Random-action collection before optimization |
 | `samples` | `1` | Continuous expectation candidates per observation |
-| `training_horizon` | Required | Nonzero schedule horizon in transitions |
+| `training_horizon` | First `learn` call's `num_timesteps` | Nonzero schedule horizon in transitions |
 | `actor_learning_rate` | Required | Finite and positive |
 | `dtype` | `F32` | Floating-point training statistics; does not cast observations |
 

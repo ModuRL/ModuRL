@@ -138,7 +138,7 @@ impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
         #[builder(default = 256)] batch_size: usize,
         #[builder(default = 1)] update_frequency: usize,
         #[builder(default = 1_000)] training_start: usize,
-        training_horizon: usize,
+        training_horizon: Option<usize>,
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, DeterministicActorCriticConfigurationError>
     where
@@ -182,7 +182,7 @@ impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
             .batch_size(batch_size)
             .update_frequency(update_frequency)
             .training_start(training_start)
-            .training_horizon(training_horizon)
+            .maybe_training_horizon(training_horizon)
             .dtype(dtype)
             .build()?;
         Ok(Self {

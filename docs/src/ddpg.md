@@ -119,7 +119,7 @@ Important defaults and constraints are:
 | `batch_size` | `256` | Nonzero |
 | `update_frequency` | `1` | Nonzero transition interval |
 | `training_start` | `1_000` | Random-action transitions before optimization |
-| `training_horizon` | Required | Nonzero global transition horizon |
+| `training_horizon` | First `learn` call's `num_timesteps` | Nonzero global transition horizon |
 
 The example overrides `training_start` to collect 10,000 random transitions.
 Those transitions remain in replay. After warm-up, the agent adds exploration

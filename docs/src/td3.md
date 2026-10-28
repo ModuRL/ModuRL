@@ -116,7 +116,7 @@ Important defaults and constraints are:
 | `batch_size` | `256` | Nonzero |
 | `update_frequency` | `1` | Nonzero transition interval |
 | `training_start` | `1_000` | Random-action transitions before optimization |
-| `training_horizon` | Required | Nonzero global transition horizon |
+| `training_horizon` | First `learn` call's `num_timesteps` | Nonzero global transition horizon |
 
 Collection exploration noise and target-policy noise solve different problems.
 `exploration_noise` changes actions sent to the environment after warm-up.
