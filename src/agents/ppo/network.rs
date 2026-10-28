@@ -1220,7 +1220,6 @@ mod tests {
             .mini_batch_size(2)
             .num_epochs(1)
             .clip_range(LinearSchedule::new(0.2, 0.1))
-            .device(device.clone())
             .build()
             .unwrap();
         assert!(matches!(
