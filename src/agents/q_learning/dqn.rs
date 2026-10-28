@@ -237,7 +237,7 @@ mod tests {
             .unwrap();
             let mut logger = RecordingLogger::default();
             let mut agent = DQNAgent::builder()
-                .action_space(Discrete::new(2))
+                .action_space(Discrete::new(2).unwrap())
                 .observation_space(env.observation_space())
                 .online_q_network(network(&device, dtype))
                 .optimizer(SgdConfig::new().init())
@@ -274,7 +274,7 @@ mod tests {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let mut agent = DQNAgent::<_, _, VectorizedGymError<Infallible>, (), 3>::builder()
-            .action_space(Discrete::new(2))
+            .action_space(Discrete::new(2).unwrap())
             .observation_space(ObservationFixture::<3, Bool> { _kind: PhantomData })
             .online_q_network(network(&device, DType::F64))
             .optimizer(SgdConfig::new().init())

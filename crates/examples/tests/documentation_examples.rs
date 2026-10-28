@@ -157,7 +157,7 @@ mod ddqn {
         let optimizer = AdamWConfig::new().init();
 
         let mut agent = DDQNAgent::builder()
-            .action_space(Discrete::new(2))
+            .action_space(Discrete::new(2).unwrap())
             .observation_space(observation_space)
             .online_q_network(online_q_network)
             .optimizer(optimizer)
@@ -249,7 +249,7 @@ mod counter_env {
         }
 
         fn action_space(&self) -> Self::ActionSpace {
-            Discrete::new(2)
+            Discrete::new(2).unwrap()
         }
     }
 }

@@ -171,7 +171,7 @@ impl Gym for EndingEnv {
     }
 
     fn action_space(&self) -> Discrete {
-        Discrete::new(2)
+        Discrete::new(2).unwrap()
     }
 }
 
@@ -302,7 +302,7 @@ fn categorical_bellman_targets_and_half_mse_preserve_f64() {
         .actor_learning_rate(0.1)
         .critics(vec![discrete_critic(&device, DType::F64)])
         .entropy_configuration(SACEntropyConfiguration::fixed(0.5).unwrap())
-        .action_space(Discrete::new(2))
+        .action_space(Discrete::new(2).unwrap())
         .observation_space(BoxSpace::new(
             Tensor::zeros([1, 1], &device),
             Tensor::full([1, 1], 100.0, &device),
@@ -371,10 +371,10 @@ fn agent_builder_rejects_invalid_sizes_ranges_and_dtype() {
             .actor_learning_rate(if case == 5 { 0.0 } else { 0.1 })
             .critics(critics)
             .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
-            .action_space(Discrete::new(if case == 11 { 0 } else { 2 }))
+            .action_space(Discrete::new(2).unwrap())
             .observation_space(BoxSpace::new(
-                Tensor::zeros([1, 1], &device),
-                Tensor::ones([1, 1], &device),
+                Tensor::zeros([1, if case == 11 { 0 } else { 1 }], &device),
+                Tensor::ones([1, if case == 11 { 0 } else { 1 }], &device),
             ))
             .replay_capacity(if case == 0 {
                 0
@@ -423,7 +423,7 @@ fn mismatched_critic_dtype_is_rejected_before_training_arithmetic() {
         .actor_learning_rate(0.1)
         .critics(vec![discrete_critic(&device, DType::F64)])
         .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
-        .action_space(Discrete::new(2))
+        .action_space(Discrete::new(2).unwrap())
         .observation_space(BoxSpace::new(
             Tensor::zeros([1, 1], &device),
             Tensor::ones([1, 1], &device),
@@ -459,7 +459,7 @@ fn actor_update_changes_policy_without_updating_critics_or_targets() {
         .actor_learning_rate(0.1)
         .critics(vec![discrete_critic(&device, DType::F32)])
         .entropy_configuration(SACEntropyConfiguration::fixed(0.5).unwrap())
-        .action_space(Discrete::new(2))
+        .action_space(Discrete::new(2).unwrap())
         .observation_space(BoxSpace::new(
             Tensor::zeros([1, 1], &device),
             Tensor::full([1, 1], 100.0, &device),
@@ -717,8 +717,8 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         .actor_learning_rate(0.01)
         .critics(vec![critic])
         .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
-        .action_space(Discrete::new(2))
-        .observation_space(Discrete::new(10))
+        .action_space(Discrete::new(2).unwrap())
+        .observation_space(Discrete::new(10).unwrap())
         .dtype(DType::F64)
         .training_horizon(4)
         .build()
@@ -760,7 +760,7 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         .actor_learning_rate(0.01)
         .critics(vec![critic])
         .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
-        .action_space(Discrete::new(2))
+        .action_space(Discrete::new(2).unwrap())
         .observation_space(BooleanSpace)
         .training_horizon(4)
         .build()

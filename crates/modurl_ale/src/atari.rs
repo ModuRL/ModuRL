@@ -157,6 +157,8 @@ pub enum AtariGymError {
     ActionDevice,
     #[error("Atari action {action} must be in 0..{count}")]
     ActionIndex { action: i64, count: usize },
+    #[error("Atari action space is invalid: {0}")]
+    ActionSpace(#[from] modurl::spaces::SpaceError),
 }
 
 #[bon]
@@ -218,7 +220,7 @@ impl<M: AtariObservationMode> AtariGym<M> {
             } else {
                 vec![ale.screen_height(), ale.screen_width()]
             };
-            let action_space = Discrete::new(ale.minimal_action_set().len());
+            let action_space = Discrete::new(ale.minimal_action_set().len())?;
             let lives = ale.lives() as u32;
             (ale, shape, action_space, lives)
         };

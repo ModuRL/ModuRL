@@ -103,7 +103,7 @@ pub(crate) mod test_support {
         }
 
         fn action_space(&self) -> Self::ActionSpace {
-            Discrete::new(2)
+            Discrete::new(2).unwrap()
         }
     }
 

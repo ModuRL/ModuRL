@@ -448,12 +448,6 @@ where
         if !learning_rate.is_finite() || learning_rate <= 0.0 {
             return Err(QLearningConfigurationError::InvalidLearningRate.into());
         }
-        if action_space.get_possible_values() == 0 || action_space.get_possible_values() > (1 << 24)
-        {
-            return Err(
-                SpaceError::InvalidCategoryCount(action_space.get_possible_values()).into(),
-            );
-        }
         let initial_epsilon = epsilon_schedule.value(0.0);
         QLearningConfigurationValidator::validate_configuration()
             .replay_capacity(replay_capacity)

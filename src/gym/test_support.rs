@@ -88,7 +88,7 @@ impl Gym<TestInfo> for CounterEnv {
     }
 
     fn action_space(&self) -> Self::ActionSpace {
-        Discrete::new(10)
+        Discrete::new(10).unwrap()
     }
 }
 
