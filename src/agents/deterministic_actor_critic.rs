@@ -1093,7 +1093,6 @@ where
                 "terminal observation rank must omit the batch axis"
             );
         }
-        self.schedule_progress.default_horizon(num_timesteps);
         let count = env.num_envs();
         validate_replay_alignment(self.replay_capacity, count)?;
         if let Some(expected) = self.environment_count
@@ -1119,6 +1118,7 @@ where
                 actual: vec![observations.dims()[0]],
             });
         }
+        self.schedule_progress.default_horizon(num_timesteps);
         self.environment_count = Some(count);
         let mut episodes = EpisodeTracker::new(count);
         let mut elapsed = 0;

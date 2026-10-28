@@ -1330,9 +1330,9 @@ where
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         num_timesteps: usize,
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
-        self.schedule_progress.default_horizon(num_timesteps);
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_rollout_collection(env)?;
+        self.schedule_progress.default_horizon(num_timesteps);
 
         while elapsed_timesteps < num_timesteps {
             let (collected_timesteps, rollout_explained_variance) = {

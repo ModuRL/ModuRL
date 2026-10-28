@@ -1412,9 +1412,9 @@ where
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
-        self.schedule_progress.default_horizon(num_timesteps);
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_replay_collection(env)?;
+        self.schedule_progress.default_horizon(num_timesteps);
         let mut episodes = SACEpisodeTracker::new(env.num_envs());
 
         while elapsed_timesteps < num_timesteps {

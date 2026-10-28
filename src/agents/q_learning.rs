@@ -710,13 +710,13 @@ where
         Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
         Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
     {
-        self.schedule_progress.default_horizon(num_timesteps);
         let mut elapsed_timesteps = 0;
         let environment_count = env.num_envs();
         self.experience_replay
             .storage_mut()
             .validate_environment_count(environment_count)?;
         let mut observations = env.reset().map_err(QAgentError::GymError)?;
+        self.schedule_progress.default_horizon(num_timesteps);
         let mut episodes = QEpisodeTracker::new(environment_count);
         while elapsed_timesteps < num_timesteps {
             self.current_epsilon = validate_epsilon(
