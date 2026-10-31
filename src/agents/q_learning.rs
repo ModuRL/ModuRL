@@ -670,16 +670,13 @@ where
         Ok(completed_episodes)
     }
 
-    /// Stores one transition after validating its leading environment batch shape.
-    fn collect_timestep<I, const U: usize>(
+    /// Validates one transition's leading environment batch shape.
+    fn validate_timestep<I, const U: usize>(
         &mut self,
         observations: &Tensor<R, K>,
-        actions: AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
-        episodes: &mut QEpisodeTracker,
-        logger: &mut dyn QLearningLogger<I>,
-        caller_owned: bool,
-    ) -> Result<(), QAgentError<GE, ME>>
+        actions: &AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+        step: &MultiGymStepInfo<I, Tensor<U, K>>,
+    ) -> Result<usize, QAgentError<GE, ME>>
     where
         S: ObservationSpace<R, Kind = K, Item = Tensor<U, K>>,
         Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
@@ -688,7 +685,6 @@ where
         let count = step.dones.len();
         for (field, actual) in [
             ("observations", observations.dims()[0]),
-            ("environment actions", actions.environment.dims()[0]),
             ("raw actions", actions.raw.dims()[0]),
             ("truncation flags", step.truncateds.len()),
             ("terminal observations", step.terminal_observations.len()),
@@ -705,10 +701,24 @@ where
                 .into());
             }
         }
-        self.experience_replay
-            .storage_mut()
-            .validate_environment_count(count)?;
+        Ok(count)
+    }
 
+    /// Stores one already-validated transition with batch shape `[num_envs, ...]`.
+    fn collect_timestep<I, const U: usize>(
+        &mut self,
+        observations: &Tensor<R, K>,
+        actions: AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        episodes: &mut QEpisodeTracker,
+        logger: &mut dyn QLearningLogger<I>,
+    ) -> Result<(), QAgentError<GE, ME>>
+    where
+        S: ObservationSpace<R, Kind = K, Item = Tensor<U, K>>,
+        Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
+        Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
+    {
+        let count = step.dones.len();
         let first_timestep = self.schedule_progress.elapsed_steps();
         let transition_next_observations = step.transition_next_observations();
         let collection_rewards = step.rewards.clone();
@@ -734,12 +744,10 @@ where
         self.run_scheduled_updates(first_timestep, count, logger)?;
         logger.log_collection(&entry);
         self.schedule_progress.advance_steps(count);
-        if caller_owned {
-            self.current_epsilon = validate_epsilon(
-                self.schedule_progress
-                    .parameter(self.epsilon_schedule.as_ref()),
-            )?;
-        }
+        self.current_epsilon = validate_epsilon(
+            self.schedule_progress
+                .parameter(self.epsilon_schedule.as_ref()),
+        )?;
         Ok(())
     }
 
@@ -799,20 +807,24 @@ where
                     .parameter(self.epsilon_schedule.as_ref()),
             )?;
             let actions = self.act(&observations)?;
-            let step_info = env.step(actions.clone()).map_err(QAgentError::GymError)?;
+            let agent_actions = AgentActions {
+                raw: actions.clone(),
+                environment: actions,
+            };
+            let step_info = env
+                .step(agent_actions.environment.clone())
+                .map_err(QAgentError::GymError)?;
             let observations_before = observations.clone();
+            let collected_count =
+                self.validate_timestep(&observations_before, &agent_actions, &step_info)?;
             observations = step_info.observations.clone();
-            elapsed_timesteps += environment_count;
+            elapsed_timesteps += collected_count;
             self.collect_timestep(
                 &observations_before,
-                AgentActions {
-                    raw: actions.clone(),
-                    environment: actions,
-                },
+                agent_actions,
                 step_info,
                 &mut episodes,
                 logger,
-                false,
             )?;
         }
         Ok(())
@@ -831,39 +843,15 @@ where
         Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
         Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
     {
-        let count = step.dones.len();
-        for (field, actual) in [
-            ("observations", observations.dims()[0]),
-            ("environment actions", actions.environment.dims()[0]),
-            ("raw actions", actions.raw.dims()[0]),
-            ("environment observations", step.observations.dims()[0]),
-            ("environment rewards", step.rewards.dims()[0]),
-            ("truncation flags", step.truncateds.len()),
-            ("terminal observations", step.terminal_observations.len()),
-            ("environment infos", step.infos.len()),
-        ] {
-            if actual != count {
-                return Err(ReplayStorageError::BatchLengthMismatch {
-                    field,
-                    expected: count,
-                    actual,
-                }
-                .into());
-            }
-        }
+        let count = self.validate_timestep(observations, &actions, &step)?;
         self.experience_replay
             .storage_mut()
             .validate_environment_count(count)?;
-        if self
-            .timestep_episodes
-            .as_ref()
-            .is_none_or(|episodes| episodes.returns.len() != count)
-        {
-            self.timestep_episodes = Some(QEpisodeTracker::new(count));
-        }
-        let mut episodes = self.timestep_episodes.take().unwrap();
-        let result =
-            self.collect_timestep(observations, actions, step, &mut episodes, logger, true);
+        let mut episodes = match self.timestep_episodes.take() {
+            Some(episodes) if episodes.returns.len() == count => episodes,
+            _ => QEpisodeTracker::new(count),
+        };
+        let result = self.collect_timestep(observations, actions, step, &mut episodes, logger);
         self.timestep_episodes = Some(episodes);
         result
     }

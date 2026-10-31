@@ -301,28 +301,35 @@ mod tests {
     fn caller_collected_training_matches_learn() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
+        let build_env = || {
+            VectorizedGymWrapper::new(vec![
+                FixedEnv::new(device.clone().without_autodiff()),
+                FixedEnv::new(device.clone().without_autodiff()),
+            ])
+            .unwrap()
+        };
+        let build_agent = |observation_space| {
+            DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
+                .action_space(Discrete::new(2).unwrap())
+                .observation_space(observation_space)
+                .online_q_network(network(&device, DType::F32))
+                .optimizer(SgdConfig::new().init())
+                .learning_rate(0.01)
+                .epsilon_schedule(ConstantSchedule::new(0.0))
+                .replay_capacity(8)
+                .batch_size(1)
+                .training_start(1)
+                .update_frequency(1)
+                .target_update_interval(2)
+                .training_horizon(8)
+                .build()
+                .unwrap()
+        };
+
         device.seed(153);
-        let mut learned_env = VectorizedGymWrapper::new(vec![
-            FixedEnv::new(device.clone().without_autodiff()),
-            FixedEnv::new(device.clone().without_autodiff()),
-        ])
-        .unwrap();
-        let mut learned_agent = DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
-            .action_space(Discrete::new(2).unwrap())
-            .observation_space(learned_env.observation_space())
-            .online_q_network(network(&device, DType::F32))
-            .optimizer(SgdConfig::new().init())
-            .learning_rate(0.01)
-            .epsilon_schedule(ConstantSchedule::new(0.0))
-            .replay_capacity(8)
-            .batch_size(1)
-            .training_start(1)
-            .update_frequency(1)
-            .target_update_interval(2)
-            .training_horizon(8)
-            .build()
-            .unwrap();
-        learned_agent.learn(&mut learned_env, 2).unwrap();
+        let mut learned_env = build_env();
+        let mut learned_agent = build_agent(learned_env.observation_space());
+        learned_agent.learn(&mut learned_env, 4).unwrap();
         let learned_parameters = learned_agent
             .inner
             .online_q_network
@@ -331,36 +338,59 @@ mod tests {
             .into_data();
 
         device.seed(153);
-        let mut caller_env = VectorizedGymWrapper::new(vec![
-            FixedEnv::new(device.clone().without_autodiff()),
-            FixedEnv::new(device.clone().without_autodiff()),
-        ])
-        .unwrap();
-        let mut caller_agent = DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
-            .action_space(Discrete::new(2).unwrap())
-            .observation_space(caller_env.observation_space())
-            .online_q_network(network(&device, DType::F32))
-            .optimizer(SgdConfig::new().init())
-            .learning_rate(0.01)
-            .epsilon_schedule(ConstantSchedule::new(0.0))
-            .replay_capacity(8)
-            .batch_size(1)
-            .training_start(1)
-            .update_frequency(1)
-            .target_update_interval(2)
-            .training_horizon(8)
-            .build()
-            .unwrap();
-        let observations = caller_env.reset().unwrap();
-        let actions = caller_agent.act_raw(&observations).unwrap();
-        let step = caller_env.step(actions.environment.clone()).unwrap();
-        caller_agent
-            .learn_from_timesteps(&observations, actions, step)
-            .unwrap();
+        let mut caller_env = build_env();
+        let mut caller_agent = build_agent(caller_env.observation_space());
+        let mut observations = caller_env.reset().unwrap();
+        for _ in 0..2 {
+            let actions = caller_agent.act_raw(&observations).unwrap();
+            let step = caller_env.step(actions.environment.clone()).unwrap();
+            let next_observations = step.observations.clone();
+            caller_agent
+                .learn_from_timesteps(&observations, actions, step)
+                .unwrap();
+            observations = next_observations;
+        }
         assert_eq!(
             learned_parameters,
             caller_agent.inner.online_q_network.values.val().into_data()
         );
+    }
+
+    #[test]
+    fn caller_collected_steps_advance_the_epsilon_schedule() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone().without_autodiff()),
+            FixedEnv::new(device.clone().without_autodiff()),
+        ])
+        .unwrap();
+        let mut agent = DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
+            .action_space(Discrete::new(2).unwrap())
+            .observation_space(env.observation_space())
+            .online_q_network(network(&device, DType::F32))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .epsilon_schedule(crate::parameter_schedule::LinearSchedule::new(1.0, 0.0))
+            .replay_capacity(8)
+            .batch_size(1)
+            .training_start(10)
+            .update_frequency(1)
+            .target_update_interval(2)
+            .training_horizon(4)
+            .build()
+            .unwrap();
+        let mut observations = env.reset().unwrap();
+        for expected_epsilon in [0.5, 0.0] {
+            let actions = agent.act_raw(&observations).unwrap();
+            let step = env.step(actions.environment.clone()).unwrap();
+            let next_observations = step.observations.clone();
+            agent
+                .learn_from_timesteps(&observations, actions, step)
+                .unwrap();
+            assert_eq!(agent.inner.current_epsilon, expected_epsilon);
+            observations = next_observations;
+        }
     }
 
     #[test]

@@ -1091,22 +1091,15 @@ where
     /// and termination entry per environment.
     fn log_collection(
         &mut self,
+        tracker: &mut PPOEpisodeTracker,
         rewards: &Tensor<2>,
         infos: Vec<I>,
         dones: &[bool],
         truncateds: &[bool],
         first_collection_timestep: usize,
-        caller_owned: bool,
     ) -> Result<(), TensorReadError> {
         let Some(logging_info) = &mut self.logging_info else {
             return Ok(());
-        };
-        let tracker = if caller_owned {
-            self.timestep_episode_tracker
-                .as_mut()
-                .expect("caller episode tracker was prepared")
-        } else {
-            &mut self.episode_tracker
         };
 
         let rewards_vec = rewards
@@ -1220,33 +1213,47 @@ where
         Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     {
         let environment_count = env.num_envs();
-        while self.rollout_buffer.len() * environment_count < self.batch_size {
-            let observations = next_observations.clone();
-            let collection_action = self.sample_collection_action(validation, &observations)?;
-            let step_info = env
-                .step(collection_action.environment_actions.clone())
-                .map_err(PPOError::GymError)?;
-            let first_collection_timestep = self
-                .schedule_progress
-                .elapsed_steps()
-                .saturating_add(self.rollout_buffer.len() * environment_count);
-            *next_observations = self.store_timestep(
-                validation,
-                &observations,
-                collection_action,
-                step_info,
-                first_collection_timestep,
-                false,
-            )?;
-        }
+        let mut episode_tracker =
+            std::mem::replace(&mut self.episode_tracker, PPOEpisodeTracker::new(0));
+        let result = (|| {
+            while self.rollout_buffer.len() * environment_count < self.batch_size {
+                let observations = next_observations.clone();
+                let collection_action = self.sample_collection_action(validation, &observations)?;
+                let step_info = env
+                    .step(collection_action.environment_actions.clone())
+                    .map_err(PPOError::GymError)?;
+                Self::validate_timestep_batch(
+                    &observations,
+                    &collection_action.policy_actions,
+                    &collection_action.environment_actions,
+                    &step_info,
+                )?;
+                Self::check_critic_dtype(&collection_action.values, step_info.rewards.dtype())?;
+                let first_collection_timestep = self
+                    .schedule_progress
+                    .elapsed_steps()
+                    .saturating_add(self.rollout_buffer.len() * environment_count);
+                *next_observations = self.store_timestep(
+                    validation,
+                    &observations,
+                    collection_action,
+                    step_info,
+                    first_collection_timestep,
+                    &mut episode_tracker,
+                )?;
+            }
 
-        Ok(self.rollout_buffer.len() * environment_count)
+            Ok(self.rollout_buffer.len() * environment_count)
+        })();
+        self.episode_tracker = episode_tracker;
+        result
     }
 
-    /// Checks leading environment dimensions across observation, action, and step shapes.
+    /// Checks leading environment batch shape across observations, actions, and step values.
     fn validate_timestep_batch<K: Basic, const U: usize>(
         observations: &Tensor<O, K>,
-        actions: &AgentActions<Tensor<L>, AS::Batch>,
+        raw_actions: &Tensor<L>,
+        environment_actions: &AS::Batch,
         step: &MultiGymStepInfo<I, Tensor<U, K>>,
     ) -> Result<usize, PPOError<N::Error, GE, AS::Error>>
     where
@@ -1255,8 +1262,8 @@ where
     {
         let count = observations.dims()[0];
         for (field, actual) in [
-            ("raw actions", actions.raw.dims()[0]),
-            ("environment actions", actions.environment.dims()[0]),
+            ("raw actions", raw_actions.dims()[0]),
+            ("environment actions", environment_actions.dims()[0]),
             ("done flags", step.dones.len()),
             ("truncation flags", step.truncateds.len()),
             ("terminal observations", step.terminal_observations.len()),
@@ -1282,7 +1289,7 @@ where
         Ok(count)
     }
 
-    /// Stores one caller or environment transition with validated batch shapes.
+    /// Stores one already-validated caller or environment transition with batch shape `[num_envs, ...]`.
     fn store_timestep<K: Autodiff, const U: usize>(
         &mut self,
         validation: &N,
@@ -1290,21 +1297,12 @@ where
         collection_action: PPOCollectionAction<AS, L>,
         step: MultiGymStepInfo<I, Tensor<U, K>>,
         first_collection_timestep: usize,
-        caller_owned: bool,
+        episode_tracker: &mut PPOEpisodeTracker,
     ) -> Result<OS::Batch, PPOError<N::Error, GE, AS::Error>>
     where
         OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
         Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     {
-        Self::validate_timestep_batch(
-            observations,
-            &AgentActions {
-                raw: collection_action.policy_actions.clone(),
-                environment: collection_action.environment_actions.clone(),
-            },
-            &step,
-        )?;
-        Self::check_critic_dtype(&collection_action.values, step.rewards.dtype())?;
         let training_next_observations = step.transition_next_observations();
         let MultiGymStepInfo {
             observations: next_observations,
@@ -1315,12 +1313,12 @@ where
             terminal_observations: _,
         } = step;
         self.log_collection(
+            episode_tracker,
             &rewards,
             infos,
             &dones,
             &truncateds,
             first_collection_timestep,
-            caller_owned,
         )?;
         let training_rewards = self.bootstrap_truncated_rewards(
             validation,
@@ -1471,19 +1469,13 @@ where
         actions: AgentActions<Tensor<L>, AS::Batch>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<(), Self::Error> {
-        let environment_count = step.dones.len();
+        let environment_count =
+            Self::validate_timestep_batch(observations, &actions.raw, &actions.environment, &step)?;
         if environment_count == 0 {
             return Err(PPOConfigurationError::ZeroEnvironments.into());
         }
         if !self.batch_size.is_multiple_of(environment_count) {
             return Err(PPOConfigurationError::BatchNotDivisibleByEnvironmentCount.into());
-        }
-        if observations.dims()[0] != environment_count {
-            return Err(PPOError::BatchLengthMismatch {
-                field: "observations",
-                expected: environment_count,
-                actual: observations.dims()[0],
-            });
         }
         if !self.rollout_buffer.is_empty() {
             let expected = self.rollout_buffer[0].observations.dims()[0];
@@ -1495,48 +1487,47 @@ where
                 });
             }
         }
-        Self::validate_timestep_batch(observations, &actions, &step)?;
-        if self.logging_info.is_some()
-            && self
-                .timestep_episode_tracker
-                .as_ref()
-                .is_none_or(|tracker| tracker.environment_count() != environment_count)
-        {
-            self.timestep_episode_tracker = Some(PPOEpisodeTracker::new(environment_count));
-        }
-
-        let validation = self.network_info.valid();
-        let latent_observations = validation
-            .forward_observations(observations.clone().without_autodiff())
-            .map_err(PPOError::NetworkError)?;
-        let evaluated =
-            self.evaluate_collection_action(&validation, &latent_observations, &actions.raw)?;
-        let first_collection_timestep = self
-            .schedule_progress
-            .elapsed_steps()
-            .saturating_add(self.rollout_buffer.len() * environment_count);
-        let collection_action = PPOCollectionAction {
-            policy_actions: actions.raw,
-            environment_actions: actions.environment,
-            log_probs: evaluated.log_probs,
-            values: evaluated.values,
+        let mut episode_tracker = match self.timestep_episode_tracker.take() {
+            Some(tracker) if tracker.environment_count() == environment_count => tracker,
+            _ => PPOEpisodeTracker::new(environment_count),
         };
-        self.store_timestep(
-            &validation,
-            observations,
-            collection_action,
-            step,
-            first_collection_timestep,
-            true,
-        )?;
-
-        if self.rollout_buffer.len() * environment_count >= self.batch_size {
-            let rollout_explained_variance = self.add_advantages_and_returns(&validation)?;
-            self.train_on_collected_rollout(
-                self.rollout_buffer.len() * environment_count,
-                rollout_explained_variance,
+        let result = (|| {
+            let validation = self.network_info.valid();
+            let latent_observations = validation
+                .forward_observations(observations.clone().without_autodiff())
+                .map_err(PPOError::NetworkError)?;
+            let evaluated =
+                self.evaluate_collection_action(&validation, &latent_observations, &actions.raw)?;
+            Self::check_critic_dtype(&evaluated.values, step.rewards.dtype())?;
+            let first_collection_timestep = self
+                .schedule_progress
+                .elapsed_steps()
+                .saturating_add(self.rollout_buffer.len() * environment_count);
+            let collection_action = PPOCollectionAction {
+                policy_actions: actions.raw,
+                environment_actions: actions.environment,
+                log_probs: evaluated.log_probs,
+                values: evaluated.values,
+            };
+            self.store_timestep(
+                &validation,
+                observations,
+                collection_action,
+                step,
+                first_collection_timestep,
+                &mut episode_tracker,
             )?;
-        }
-        Ok(())
+
+            if self.rollout_buffer.len() * environment_count >= self.batch_size {
+                let rollout_explained_variance = self.add_advantages_and_returns(&validation)?;
+                self.train_on_collected_rollout(
+                    self.rollout_buffer.len() * environment_count,
+                    rollout_explained_variance,
+                )?;
+            }
+            Ok(())
+        })();
+        self.timestep_episode_tracker = Some(episode_tracker);
+        result
     }
 }

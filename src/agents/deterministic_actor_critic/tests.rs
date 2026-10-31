@@ -301,10 +301,10 @@ impl DeterministicActorCriticLogger for Logger {
     }
 }
 
-struct EpisodeEnv {
-    device: Device,
-    truncate: bool,
-    steps: usize,
+pub(super) struct EpisodeEnv {
+    pub(super) device: Device,
+    pub(super) truncate: bool,
+    pub(super) steps: usize,
 }
 
 impl Gym for EpisodeEnv {
@@ -526,72 +526,6 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
         )
         .unwrap();
     assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
-}
-
-#[test]
-fn caller_collected_training_matches_learn() {
-    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-    let device = Device::flex().autodiff();
-    let env_device = device.clone().without_autodiff();
-    device.seed(153);
-    let mut learned_agent = agent(&device, DType::F64, 2);
-    let mut learned_env = VectorizedGymWrapper::new(vec![
-        EpisodeEnv {
-            device: env_device.clone(),
-            truncate: false,
-            steps: 0,
-        },
-        EpisodeEnv {
-            device: env_device.clone(),
-            truncate: false,
-            steps: 0,
-        },
-    ])
-    .unwrap();
-    let mut learned_logger = Logger::default();
-    learned_agent
-        .learn(&mut learned_env, 4, &mut learned_logger)
-        .unwrap();
-    let learned_actor = learned_agent.online_actor.weight.val().into_data();
-
-    device.seed(153);
-    let mut caller_agent = agent(&device, DType::F64, 2);
-    let mut caller_env = VectorizedGymWrapper::new(vec![
-        EpisodeEnv {
-            device: env_device.clone(),
-            truncate: false,
-            steps: 0,
-        },
-        EpisodeEnv {
-            device: env_device,
-            truncate: false,
-            steps: 0,
-        },
-    ])
-    .unwrap();
-    let mut caller_logger = Logger::default();
-    let mut observations = caller_env.reset().unwrap();
-    for _ in 0..2 {
-        let actions = caller_agent.act(&observations).unwrap().without_autodiff();
-        let step = caller_env.step(actions.clone()).unwrap();
-        let next_observations = step.observations.clone();
-        caller_agent
-            .learn_from_timesteps(
-                &observations,
-                crate::agents::AgentActions {
-                    raw: actions.clone(),
-                    environment: actions,
-                },
-                step,
-                &mut caller_logger,
-            )
-            .unwrap();
-        observations = next_observations;
-    }
-    assert_eq!(
-        learned_actor,
-        caller_agent.online_actor.weight.val().into_data()
-    );
 }
 
 #[test]

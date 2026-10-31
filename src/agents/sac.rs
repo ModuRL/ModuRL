@@ -1113,19 +1113,14 @@ where
         })
     }
 
-    /// Resets the environment and validates rank-O observations `[num_envs, ...observation_shape]` and replay alignment.
+    /// Resets the environment and validates rank-O observations `[num_envs, ...observation_shape]`.
     /// Preserves native observation kind, dtype, and device. Each learn call starts a new collection sequence.
     fn prepare_replay_collection(
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
     ) -> Result<Tensor<O, OS::Kind>, SACError<PE, GE, SE, CE>> {
         let count = env.num_envs();
-        if let Some(replay) = self.replay.as_mut() {
-            replay.validate_environment_count(count)?;
-        } else {
-            validate_replay_alignment(self.replay_capacity, count).map_err(SACReplayError::from)?;
-        }
-
+        self.validate_replay_environment_count(count)?;
         let observations = env.reset().map_err(SACError::GymError)?;
         self.validate_observations(&observations)?;
         if observations.dims()[0] != count {
@@ -1137,6 +1132,19 @@ where
         }
 
         Ok(observations)
+    }
+
+    /// Checks that replay can collect the configured number of environments.
+    fn validate_replay_environment_count(
+        &mut self,
+        count: usize,
+    ) -> Result<(), SACError<PE, GE, SE, CE>> {
+        if let Some(replay) = self.replay.as_mut() {
+            replay.validate_environment_count(count)?;
+        } else {
+            validate_replay_alignment(self.replay_capacity, count).map_err(SACReplayError::from)?;
+        }
+        Ok(())
     }
 
     #[cfg_attr(
@@ -1185,19 +1193,19 @@ where
         };
 
         let step = env.step(actions.clone()).map_err(SACError::GymError)?;
+        self.validate_timestep(observations, &actions, &step)?;
         let stored = self.store_timestep(observations, actions, step, episodes)?;
-        *observations = stored.next_observations.clone();
+        *observations = stored.next_observations;
         Ok(stored.log_entry)
     }
 
-    /// Stores a transition after validating observation, action, and step batch shapes.
-    fn store_timestep<K: Autodiff, const U: usize>(
-        &mut self,
+    /// Validates observation, action, and step shapes before collection.
+    fn validate_timestep<K: Autodiff, const U: usize>(
+        &self,
         observations: &Tensor<O, K>,
-        actions: Tensor<A, AS::Kind>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
-        episodes: &mut SACEpisodeTracker,
-    ) -> Result<SACStoredTimestep<I, O, K>, SACError<PE, GE, SE, CE>>
+        actions: &Tensor<A, AS::Kind>,
+        step: &MultiGymStepInfo<I, Tensor<U, K>>,
+    ) -> Result<usize, SACError<PE, GE, SE, CE>>
     where
         OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
         Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
@@ -1212,7 +1220,7 @@ where
         let count = observations.dims()[0];
         for (field, actual) in [
             ("observations", observations.dims()[0]),
-            ("environment actions", actions.dims()[0]),
+            ("raw actions", actions.dims()[0]),
             ("done flags", step.dones.len()),
             ("truncation flags", step.truncateds.len()),
             ("terminal observations", step.terminal_observations.len()),
@@ -1232,11 +1240,6 @@ where
             }
         }
 
-        if let Some(replay) = self.replay.as_mut() {
-            replay.validate_environment_count(count)?;
-        } else {
-            validate_replay_alignment(self.replay_capacity, count).map_err(SACReplayError::from)?;
-        }
         self.validate_observations(observations)?;
         self.validate_observations(&step.observations)?;
         if step.rewards.dims() != [count, 1] {
@@ -1270,6 +1273,29 @@ where
             }
         }
 
+        Ok(count)
+    }
+
+    /// Stores one already-validated transition with batch shape `[num_envs, ...]`.
+    fn store_timestep<K: Autodiff, const U: usize>(
+        &mut self,
+        observations: &Tensor<O, K>,
+        actions: Tensor<A, AS::Kind>,
+        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        episodes: &mut SACEpisodeTracker,
+    ) -> Result<SACStoredTimestep<I, O, K>, SACError<PE, GE, SE, CE>>
+    where
+        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    {
+        const {
+            assert!(
+                O == U + 1,
+                "terminal observation rank must omit the batch axis"
+            );
+        }
+
+        let count = observations.dims()[0];
         let first_timestep = self.schedule_progress.elapsed_steps();
         let entropy = self.collection_entropy_metadata(
             observations,
@@ -1479,45 +1505,30 @@ where
     }
 
     /// Stores a caller-collected batch with observation shape `[num_envs, ...observation_shape]`.
-    /// Schedules need `training_horizon`; `learn` clears any partial caller-collected rollout.
+    /// Schedules need `training_horizon`.
     fn learn_from_timesteps(
         &mut self,
         observations: &Tensor<O, K>,
         actions: AgentActions<Tensor<A, AS::Kind>, Tensor<A, AS::Kind>>,
         step: MultiGymStepInfo<I, Tensor<U, K>>,
     ) -> Result<(), Self::Error> {
-        self.validate_observations(observations)?;
-        let count = observations.dims()[0];
-        if let Some(replay) = self.replay.as_mut() {
-            replay.validate_environment_count(count)?;
-        } else {
-            validate_replay_alignment(self.replay_capacity, count).map_err(SACReplayError::from)?;
-        }
-        if actions.environment.dims()[0] != count {
-            return Err(
-                SACReplayError::Storage(ReplayStorageError::BatchLengthMismatch {
-                    field: "environment actions",
-                    expected: count,
-                    actual: actions.environment.dims()[0],
-                })
-                .into(),
-            );
-        }
-
-        let mut episodes = self
-            .timestep_episodes
-            .as_ref()
-            .filter(|episodes| episodes.returns.len() == count)
-            .cloned()
-            .unwrap_or_else(|| SACEpisodeTracker::new(count));
-        let collection = self.store_timestep(observations, actions.raw, step, &mut episodes)?;
-        let collected_timesteps = collection.log_entry.collection_rewards.dims()[0];
+        self.validate_replay_environment_count(observations.dims()[0])?;
+        let count = self.validate_timestep(observations, &actions.raw, &step)?;
+        let mut episodes = match self.timestep_episodes.take() {
+            Some(episodes) if episodes.returns.len() == count => episodes,
+            _ => SACEpisodeTracker::new(count),
+        };
+        let result = (|| {
+            let collection = self.store_timestep(observations, actions.raw, step, &mut episodes)?;
+            let collected_timesteps = collection.log_entry.collection_rewards.dims()[0];
+            self.train_on_collected_transitions(collected_timesteps)?;
+            if let Some(logger) = &mut self.logger {
+                logger.log_collection(&collection.log_entry);
+            }
+            Ok(())
+        })();
         self.timestep_episodes = Some(episodes);
-        self.train_on_collected_transitions(collected_timesteps)?;
-        if let Some(logger) = &mut self.logger {
-            logger.log_collection(&collection.log_entry);
-        }
-        Ok(())
+        result
     }
 }
 

@@ -1063,7 +1063,7 @@ where
         Ok(completed)
     }
 
-    /// Checks observation, action, and step batch shapes before collection.
+    /// Checks observation, action, and step shapes before collection.
     fn validate_timestep<I, K: Autodiff, const U: usize>(
         &self,
         observations: &Tensor<O, K>,
@@ -1095,14 +1095,6 @@ where
         }
         self.validate_observations(observations)?;
         self.validate_observations(&step.observations)?;
-        if step.observations.dims()[0] != count {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "environment observations",
-                expected: count,
-                actual: step.observations.dims()[0],
-            }
-            .into());
-        }
         let expected_rewards = [count, 1];
         if step.rewards.dims() != expected_rewards {
             return Err(DeterministicActorCriticError::Shape {
@@ -1143,7 +1135,28 @@ where
         Ok(count)
     }
 
-    /// Stores one transition after validating its leading environment batch shape.
+    /// Validates environment-count compatibility with replay before collection.
+    fn validate_environment_count(
+        &mut self,
+        count: usize,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
+        validate_replay_alignment(self.replay_capacity, count)?;
+        if let Some(expected) = self.environment_count
+            && expected != count
+        {
+            return Err(ReplayStorageError::EnvironmentCountMismatch {
+                expected,
+                actual: count,
+            }
+            .into());
+        }
+        if let Some(replay) = &mut self.replay {
+            replay.validate_environment_count(count)?;
+        }
+        Ok(())
+    }
+
+    /// Stores one already-validated transition with batch shape `[num_envs, ...]`.
     fn collect_timestep<I, K: Autodiff, const U: usize>(
         &mut self,
         observations: &Tensor<O, K>,
@@ -1156,7 +1169,7 @@ where
         OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
         Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     {
-        let count = self.validate_timestep(observations, &actions, &step)?;
+        let count = step.dones.len();
         let first_timestep = self.schedule_progress.elapsed_steps();
         let next_observations = step.transition_next_observations();
         let completed_episodes = self.store_transitions(
@@ -1218,19 +1231,7 @@ where
         }
         let count = env.num_envs();
         self.timestep_episodes = None;
-        validate_replay_alignment(self.replay_capacity, count)?;
-        if let Some(expected) = self.environment_count
-            && expected != count
-        {
-            return Err(ReplayStorageError::EnvironmentCountMismatch {
-                expected,
-                actual: count,
-            }
-            .into());
-        }
-        if let Some(replay) = &mut self.replay {
-            replay.validate_environment_count(count)?;
-        }
+        self.validate_environment_count(count)?;
         let mut observations = env
             .reset()
             .map_err(DeterministicActorCriticError::GymError)?;
@@ -1259,6 +1260,7 @@ where
                 .map_err(DeterministicActorCriticError::GymError)?;
             elapsed += count;
             let observations_before = observations.clone();
+            self.validate_timestep(&observations_before, &actions, &step)?;
             observations = step.observations.clone();
             self.collect_timestep(&observations_before, actions, step, &mut episodes, logger)?;
         }
@@ -1278,37 +1280,13 @@ where
         Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     {
         let count = step.dones.len();
-        if actions.environment.dims()[0] != count {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "environment actions",
-                expected: count,
-                actual: actions.environment.dims()[0],
-            }
-            .into());
-        }
-        validate_replay_alignment(self.replay_capacity, count)?;
-        if let Some(expected) = self.environment_count
-            && expected != count
-        {
-            return Err(ReplayStorageError::EnvironmentCountMismatch {
-                expected,
-                actual: count,
-            }
-            .into());
-        }
-        if let Some(replay) = &mut self.replay {
-            replay.validate_environment_count(count)?;
-        }
+        self.validate_environment_count(count)?;
         let validated_count = self.validate_timestep(observations, &actions.raw, &step)?;
         self.environment_count = Some(validated_count);
-        if self
-            .timestep_episodes
-            .as_ref()
-            .is_none_or(|episodes| episodes.returns.len() != count)
-        {
-            self.timestep_episodes = Some(EpisodeTracker::new(count));
-        }
-        let mut episodes = self.timestep_episodes.take().unwrap();
+        let mut episodes = match self.timestep_episodes.take() {
+            Some(episodes) if episodes.returns.len() == count => episodes,
+            _ => EpisodeTracker::new(count),
+        };
         let result = self.collect_timestep(observations, actions.raw, step, &mut episodes, logger);
         self.timestep_episodes = Some(episodes);
         result

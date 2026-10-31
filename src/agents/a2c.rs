@@ -650,6 +650,7 @@ mod tests {
         struct Parameters(Vec<f32>);
 
         impl ModuleVisitor for Parameters {
+            /// Visits parameter values while preserving their tensor shape.
             fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
                 self.0
                     .extend(param.val().into_data().try_to_vec::<f32>().unwrap());
@@ -658,67 +659,56 @@ mod tests {
 
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
-        device.seed(153);
-        let mut learned_env = VectorizedGymWrapper::new(vec![
-            FixedEnv::new(device.clone()),
-            FixedEnv::new(device.clone()),
-        ])
-        .unwrap();
-        let learned_network = SeparateA2CNetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::new(
-                model(2, &device),
-                CategoricalDistribution,
-            ))
-            .critic_network(model(1, &device))
-            .actor_optimizer(SgdConfig::new().init())
-            .critic_optimizer(SgdConfig::new().init())
-            .actor_learning_rate(1e-3)
-            .critic_learning_rate(1e-3)
-            .build()
-            .unwrap();
-        let mut learned_agent = A2CAgent::builder()
-            .observation_space(learned_env.observation_space())
-            .action_space(learned_env.action_space())
-            .network_info(learned_network.into())
-            .batch_size(2)
-            .training_horizon(8)
-            .build()
-            .unwrap();
-        learned_agent.learn(&mut learned_env, 2).unwrap();
-
-        device.seed(153);
-        let mut caller_env = VectorizedGymWrapper::new(vec![
-            FixedEnv::new(device.clone()),
-            FixedEnv::new(device.clone()),
-        ])
-        .unwrap();
-        let caller_network = SeparateA2CNetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::new(
-                model(2, &device),
-                CategoricalDistribution,
-            ))
-            .critic_network(model(1, &device))
-            .actor_optimizer(SgdConfig::new().init())
-            .critic_optimizer(SgdConfig::new().init())
-            .actor_learning_rate(1e-3)
-            .critic_learning_rate(1e-3)
-            .build()
-            .unwrap();
-        let mut caller_agent =
-            A2CAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
-                .observation_space(caller_env.observation_space())
-                .action_space(caller_env.action_space())
-                .network_info(caller_network.into())
-                .batch_size(2)
-                .training_horizon(8)
+        let build_env = || {
+            VectorizedGymWrapper::new(vec![
+                FixedEnv::new(device.clone()),
+                FixedEnv::new(device.clone()),
+            ])
+            .unwrap()
+        };
+        let build_agent = |observation_space, action_space| {
+            let network = SeparateA2CNetwork::builder()
+                .actor_network(ProbabilisticPolicyModel::new(
+                    model(2, &device),
+                    CategoricalDistribution,
+                ))
+                .critic_network(model(1, &device))
+                .actor_optimizer(SgdConfig::new().init())
+                .critic_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(1e-3)
+                .critic_learning_rate(1e-3)
                 .build()
                 .unwrap();
-        let observations = caller_env.reset().unwrap();
-        let actions = caller_agent.act_raw(&observations).unwrap();
-        let step = caller_env.step(actions.environment.clone()).unwrap();
-        caller_agent
-            .learn_from_timesteps(&observations, actions, step)
-            .unwrap();
+            A2CAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
+                .observation_space(observation_space)
+                .action_space(action_space)
+                .network_info(network.into())
+                .batch_size(4)
+                .training_horizon(8)
+                .build()
+                .unwrap()
+        };
+
+        device.seed(153);
+        let mut learned_env = build_env();
+        let mut learned_agent =
+            build_agent(learned_env.observation_space(), learned_env.action_space());
+        learned_agent.learn(&mut learned_env, 4).unwrap();
+
+        device.seed(153);
+        let mut caller_env = build_env();
+        let mut caller_agent =
+            build_agent(caller_env.observation_space(), caller_env.action_space());
+        let mut observations = caller_env.reset().unwrap();
+        for _ in 0..2 {
+            let actions = caller_agent.act_raw(&observations).unwrap();
+            let step = caller_env.step(actions.environment.clone()).unwrap();
+            let next_observations = step.observations.clone();
+            caller_agent
+                .learn_from_timesteps(&observations, actions, step)
+                .unwrap();
+            observations = next_observations;
+        }
 
         let learned_network = learned_agent.inner.network();
         let mut learned_parameters = Parameters(Vec::new());

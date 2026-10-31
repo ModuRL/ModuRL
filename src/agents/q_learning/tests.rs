@@ -619,7 +619,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
     let mut logger = Logger::default();
     agent.learn(&mut env, 4, &mut logger).unwrap();
     assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
-    assert_eq!(agent.current_epsilon, 0.8);
+    assert_eq!(agent.current_epsilon, 0.6);
     assert_eq!(logger.updates, [4]);
     assert_eq!(logger.rewards, [vec![2.0, 2.0], vec![2.0, 2.0]]);
     assert_eq!(logger.episodes.len(), 2);

@@ -353,24 +353,31 @@ mod tests {
         tensor::{Device, Tensor},
     };
 
-    struct DTypeEnv {
-        inner: FixedContinuousEnv,
+    struct DTypeEnv<G> {
+        inner: G,
         dtype: DType,
     }
 
-    impl crate::gym::Gym for DTypeEnv {
+    impl<G> crate::gym::Gym for DTypeEnv<G>
+    where
+        G: crate::gym::Gym<
+                Error = std::convert::Infallible,
+                ObservationSpace = BoxSpace<2>,
+                ActionSpace = BoxSpace<2>,
+            >,
+    {
         type Error = std::convert::Infallible;
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = BoxSpace<2>;
 
-        /// Accepts Float actions [1] and returns observations [4] in the fixture dtype; rewards remain F32.
+        /// Accepts Float actions [1] and returns observations in the fixture dtype; rewards remain F32.
         fn step(&mut self, action: Tensor<1>) -> Result<crate::gym::StepInfo, Self::Error> {
             let mut step = self.inner.step(action)?;
             step.observation = step.observation.cast(self.dtype);
             Ok(step)
         }
 
-        /// Returns native Float observations [4] in the fixture dtype.
+        /// Returns native Float observations in the fixture dtype.
         fn reset(&mut self) -> Result<crate::gym::ResetInfo, Self::Error> {
             let mut reset = self.inner.reset()?;
             reset.observation = reset.observation.cast(self.dtype);
@@ -508,6 +515,7 @@ mod tests {
         struct Parameters(Vec<f32>);
 
         impl ModuleVisitor for Parameters {
+            /// Visits parameter values while preserving their tensor shape.
             fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
                 self.0
                     .extend(param.val().into_data().try_to_vec::<f32>().unwrap());
@@ -516,48 +524,54 @@ mod tests {
 
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
+        let env_device = device.clone().without_autodiff();
         let build_env = || {
             VectorizedGymWrapper::new(vec![
                 DTypeEnv {
-                    inner: FixedContinuousEnv::new(device.clone()),
+                    inner: super::super::tests::EpisodeEnv {
+                        device: env_device.clone(),
+                        truncate: false,
+                        steps: 0,
+                    },
                     dtype: DType::F32,
                 },
                 DTypeEnv {
-                    inner: FixedContinuousEnv::new(device.clone()),
+                    inner: super::super::tests::EpisodeEnv {
+                        device: env_device.clone(),
+                        truncate: false,
+                        steps: 0,
+                    },
                     dtype: DType::F32,
                 },
             ])
             .unwrap()
         };
-
-        device.seed(153);
-        let mut learned_env = build_env();
-        let learned_actor = MLP::builder()
-            .input_size(4)
-            .output_size(1)
-            .hidden_layer_sizes(vec![4])
-            .output_activation(Tanh)
-            .options((&device, DType::F32))
-            .build()
-            .unwrap();
-        let learned_critic = ActionValueCritic::builder()
-            .online_network(ScalarStateActionCritic::new(
-                MLP::builder()
-                    .input_size(5)
-                    .output_size(1)
-                    .hidden_layer_sizes(vec![4])
-                    .options((&device, DType::F32))
-                    .build()
-                    .unwrap(),
-            ))
-            .optimizer(SgdConfig::new().init())
-            .learning_rate(0.01)
-            .build()
-            .unwrap();
-        let mut learned_agent =
+        let build_agent = |observation_space: BoxSpace<2>| {
+            let actor = MLP::builder()
+                .input_size(1)
+                .output_size(1)
+                .hidden_layer_sizes(vec![4])
+                .output_activation(Tanh)
+                .options((&device, DType::F32))
+                .build()
+                .unwrap();
+            let critic = ActionValueCritic::builder()
+                .online_network(ScalarStateActionCritic::new(
+                    MLP::builder()
+                        .input_size(2)
+                        .output_size(1)
+                        .hidden_layer_sizes(vec![4])
+                        .options((&device, DType::F32))
+                        .build()
+                        .unwrap(),
+                ))
+                .optimizer(SgdConfig::new().init())
+                .learning_rate(0.01)
+                .build()
+                .unwrap();
             DDPGAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
-                .online_actor(learned_actor)
-                .critic(learned_critic)
+                .online_actor(actor)
+                .critic(critic)
                 .actor_optimizer(SgdConfig::new().init())
                 .actor_learning_rate(0.01)
                 .action_space(BoxSpace::new_with_universal_bounds(
@@ -566,17 +580,23 @@ mod tests {
                     1.0,
                     &device,
                 ))
-                .observation_space(learned_env.observation_space())
+                .observation_space(observation_space)
                 .dtype(DType::F32)
                 .exploration_noise(0.0)
-                .replay_capacity(8)
-                .batch_size(1)
+                .replay_capacity(4)
+                .batch_size(4)
+                .update_frequency(4)
                 .training_start(0)
                 .training_horizon(8)
                 .build()
-                .unwrap();
-        learned_agent.learn(&mut learned_env, 2).unwrap();
-        assert_eq!(learned_agent.inner.optimization_steps, 2);
+                .unwrap()
+        };
+
+        device.seed(153);
+        let mut learned_env = build_env();
+        let mut learned_agent = build_agent(learned_env.observation_space());
+        learned_agent.learn(&mut learned_env, 4).unwrap();
+        assert_eq!(learned_agent.inner.optimization_steps, 1);
         let mut learned_parameters = Parameters(Vec::new());
         learned_agent
             .inner
@@ -588,56 +608,18 @@ mod tests {
 
         device.seed(153);
         let mut caller_env = build_env();
-        let caller_actor = MLP::builder()
-            .input_size(4)
-            .output_size(1)
-            .hidden_layer_sizes(vec![4])
-            .output_activation(Tanh)
-            .options((&device, DType::F32))
-            .build()
-            .unwrap();
-        let caller_critic = ActionValueCritic::builder()
-            .online_network(ScalarStateActionCritic::new(
-                MLP::builder()
-                    .input_size(5)
-                    .output_size(1)
-                    .hidden_layer_sizes(vec![4])
-                    .options((&device, DType::F32))
-                    .build()
-                    .unwrap(),
-            ))
-            .optimizer(SgdConfig::new().init())
-            .learning_rate(0.01)
-            .build()
-            .unwrap();
-        let mut caller_agent =
-            DDPGAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
-                .online_actor(caller_actor)
-                .critic(caller_critic)
-                .actor_optimizer(SgdConfig::new().init())
-                .actor_learning_rate(0.01)
-                .action_space(BoxSpace::new_with_universal_bounds(
-                    [1, 1],
-                    -1.0,
-                    1.0,
-                    &device,
-                ))
-                .observation_space(caller_env.observation_space())
-                .dtype(DType::F32)
-                .exploration_noise(0.0)
-                .replay_capacity(8)
-                .batch_size(1)
-                .training_start(0)
-                .training_horizon(8)
-                .build()
+        let mut caller_agent = build_agent(caller_env.observation_space());
+        let mut observations = caller_env.reset().unwrap();
+        for _ in 0..2 {
+            let actions = caller_agent.act_raw(&observations).unwrap();
+            let step = caller_env.step(actions.environment.clone()).unwrap();
+            let next_observations = step.observations.clone();
+            caller_agent
+                .learn_from_timesteps(&observations, actions, step)
                 .unwrap();
-        let observations = caller_env.reset().unwrap();
-        let actions = caller_agent.act_raw(&observations).unwrap();
-        let step = caller_env.step(actions.environment.clone()).unwrap();
-        caller_agent
-            .learn_from_timesteps(&observations, actions, step)
-            .unwrap();
-        assert_eq!(caller_agent.inner.optimization_steps, 2);
+            observations = next_observations;
+        }
+        assert_eq!(caller_agent.inner.optimization_steps, 1);
         let mut caller_parameters = Parameters(Vec::new());
         caller_agent
             .inner
