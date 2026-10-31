@@ -4,7 +4,7 @@
 //! and trains on the complete rollout as one minibatch.
 
 use super::{
-    Agent,
+    Agent, AgentActions,
     ppo::{
         PPOAgent, PPOConfigurationError, PPOError, PPOModelGroup, PPOModelTypes, PPONetwork,
         SeparatePPONetwork, SharedPPONetwork,
@@ -12,7 +12,7 @@ use super::{
 };
 use crate::{buffers::experience::ExperienceBatchError, sampling::SamplingError};
 use crate::{
-    gym::MultiGym,
+    gym::{MultiGym, MultiGymStepInfo},
     parameter_schedule::ParameterSchedule,
     spaces::{ActionMap, ObservationSpace},
     tensor_rank::{NextRank, PrevRank},
@@ -55,6 +55,12 @@ where
     ConfigurationError(#[source] PPOConfigurationError),
     #[error("termination batches differ in length: {dones} dones and {truncateds} truncations")]
     MismatchedTerminationBatch { dones: usize, truncateds: usize },
+    #[error("batch length mismatch for {field}: expected {expected}, got {actual}")]
+    BatchLengthMismatch {
+        field: &'static str,
+        expected: usize,
+        actual: usize,
+    },
     #[error("no prepared rollout is available")]
     MissingPreparedRollout,
     #[error("old value estimates are missing")]
@@ -79,6 +85,15 @@ impl<AE: std::fmt::Debug, GE: std::fmt::Debug, SE: std::fmt::Debug> From<PPOErro
             PPOError::MismatchedTerminationBatch { dones, truncateds } => {
                 Self::MismatchedTerminationBatch { dones, truncateds }
             }
+            PPOError::BatchLengthMismatch {
+                field,
+                expected,
+                actual,
+            } => Self::BatchLengthMismatch {
+                field,
+                expected,
+                actual,
+            },
             PPOError::MissingPreparedRollout => Self::MissingPreparedRollout,
             PPOError::MissingOldValues => Self::MissingOldValues,
         }
@@ -333,10 +348,14 @@ where
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
+    type RawAction = Tensor<L>;
 
     /// Maps rank-O observations `[batch_size, ...observation_shape]` to rank-A actions `[batch_size, ...action_shape]`, preserving native kinds and device.
-    fn act(&mut self, observations: &OS::Batch) -> Result<AS::Batch, Self::Error> {
-        self.inner.act(observations).map_err(A2CError::from)
+    fn act_raw(
+        &mut self,
+        observations: &OS::Batch,
+    ) -> Result<AgentActions<Tensor<L>, AS::Batch>, Self::Error> {
+        self.inner.act_raw(observations).map_err(A2CError::from)
     }
 
     #[cfg_attr(
@@ -357,6 +376,18 @@ where
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps).map_err(A2CError::from)
     }
+
+    /// Stores a caller-collected batch with observation shape `[num_envs, ...observation_shape]`.
+    fn learn_from_timesteps(
+        &mut self,
+        observations: &OS::Batch,
+        actions: AgentActions<Tensor<L>, AS::Batch>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .learn_from_timesteps(observations, actions, step)
+            .map_err(A2CError::from)
+    }
 }
 
 #[cfg(test)]
@@ -365,7 +396,7 @@ mod tests {
     use crate::{
         agents::test_support::FixedEnv,
         distributions::CategoricalDistribution,
-        gym::VectorizedGymWrapper,
+        gym::{VectorizedGymError, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
     };
     use burn::{
@@ -426,15 +457,16 @@ mod tests {
             .build()
             .unwrap();
         let mut logger = RecordingLogger::default();
-        let mut agent = A2CAgent::builder()
-            .observation_space(env.observation_space())
-            .action_space(env.action_space())
-            .network_info(network.into())
-            .batch_size(2)
-            .training_horizon(4)
-            .logging_info(&mut logger)
-            .build()
-            .unwrap();
+        let mut agent =
+            A2CAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
+                .observation_space(env.observation_space())
+                .action_space(env.action_space())
+                .network_info(network.into())
+                .batch_size(2)
+                .training_horizon(4)
+                .logging_info(&mut logger)
+                .build()
+                .unwrap();
         agent.learn(&mut env, 2).unwrap();
         let observations = Tensor::zeros([2, 4], (&device, DType::F32));
         assert_eq!(agent.act(&observations).unwrap().dims(), [2, 1]);
@@ -538,5 +570,168 @@ mod tests {
         assert_eq!(*shared_progress.lock().unwrap(), [0.0, 0.25]);
         assert_eq!(*actor_progress.lock().unwrap(), [0.0, 0.25]);
         assert_eq!(*critic_progress.lock().unwrap(), [0.0, 0.25]);
+    }
+
+    #[test]
+    fn caller_collected_rollout_rejects_environment_count_changes() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone()),
+            FixedEnv::new(device.clone()),
+        ])
+        .unwrap();
+        let network = SeparateA2CNetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                model(2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(model(1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent =
+            A2CAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
+                .observation_space(env.observation_space())
+                .action_space(env.action_space())
+                .network_info(network.into())
+                .batch_size(4)
+                .training_horizon(8)
+                .build()
+                .unwrap();
+
+        let observations = env.reset().unwrap();
+        let mut bad_actions = agent.act_raw(&observations).unwrap();
+        let bad_step = env.step(bad_actions.environment.clone()).unwrap();
+        bad_actions.raw = Tensor::zeros([1, 1], &device);
+        assert!(matches!(
+            agent.learn_from_timesteps(&observations, bad_actions, bad_step),
+            Err(A2CError::BatchLengthMismatch {
+                field: "raw actions",
+                expected: 2,
+                actual: 1,
+            })
+        ));
+
+        let observations = env.reset().unwrap();
+        let actions = agent.act_raw(&observations).unwrap();
+        let step = env.step(actions.environment.clone()).unwrap();
+        let next_observations = step.observations.clone();
+        agent
+            .learn_from_timesteps(&observations, actions, step)
+            .unwrap();
+
+        let mut single_env = VectorizedGymWrapper::from(FixedEnv::new(device.clone()));
+        let single_observations = single_env.reset().unwrap();
+        let single_actions = agent.act_raw(&single_observations).unwrap();
+        let single_step = single_env.step(single_actions.environment.clone()).unwrap();
+        assert!(matches!(
+            agent.learn_from_timesteps(&single_observations, single_actions, single_step),
+            Err(A2CError::BatchLengthMismatch {
+                field: "environment count",
+                expected: 2,
+                actual: 1,
+            })
+        ));
+
+        let actions = agent.act_raw(&next_observations).unwrap();
+        let step = env.step(actions.environment.clone()).unwrap();
+        agent
+            .learn_from_timesteps(&next_observations, actions, step)
+            .unwrap();
+    }
+
+    #[test]
+    fn caller_collected_rollout_matches_learn() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        device.seed(153);
+        let mut learned_env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone()),
+            FixedEnv::new(device.clone()),
+        ])
+        .unwrap();
+        let learned_network = SeparateA2CNetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                model(2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(model(1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut learned_agent = A2CAgent::builder()
+            .observation_space(learned_env.observation_space())
+            .action_space(learned_env.action_space())
+            .network_info(learned_network.into())
+            .batch_size(2)
+            .training_horizon(8)
+            .build()
+            .unwrap();
+        learned_agent.learn(&mut learned_env, 2).unwrap();
+
+        device.seed(153);
+        let mut caller_env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone()),
+            FixedEnv::new(device.clone()),
+        ])
+        .unwrap();
+        let caller_network = SeparateA2CNetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                model(2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(model(1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut caller_agent =
+            A2CAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
+                .observation_space(caller_env.observation_space())
+                .action_space(caller_env.action_space())
+                .network_info(caller_network.into())
+                .batch_size(2)
+                .training_horizon(8)
+                .build()
+                .unwrap();
+        let observations = caller_env.reset().unwrap();
+        let actions = caller_agent.act_raw(&observations).unwrap();
+        let step = caller_env.step(actions.environment.clone()).unwrap();
+        caller_agent
+            .learn_from_timesteps(&observations, actions, step)
+            .unwrap();
+
+        let learned_network = learned_agent.inner.network();
+        let learned_latent = learned_network
+            .forward_observations(Tensor::zeros([2, 4], &device))
+            .unwrap();
+        let learned_snapshot = (
+            learned_network
+                .forward_values(learned_latent.clone())
+                .unwrap()
+                .into_data(),
+            learned_network.mode(learned_latent).unwrap().into_data(),
+        );
+        let caller_network = caller_agent.inner.network();
+        let caller_latent = caller_network
+            .forward_observations(Tensor::zeros([2, 4], &device))
+            .unwrap();
+        let caller_snapshot = (
+            caller_network
+                .forward_values(caller_latent.clone())
+                .unwrap()
+                .into_data(),
+            caller_network.mode(caller_latent).unwrap().into_data(),
+        );
+        assert_eq!(learned_snapshot, caller_snapshot);
     }
 }

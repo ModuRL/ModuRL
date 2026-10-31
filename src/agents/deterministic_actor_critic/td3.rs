@@ -10,13 +10,13 @@ use super::{
 };
 use crate::{
     agents::{
-        Agent,
+        Agent, AgentActions,
         action_value_critic::{
             ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
             ActionValueCriticNetwork, aggregate_critic_values,
         },
     },
-    gym::MultiGym,
+    gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     spaces::{ActionMap, ObservationSpace},
     tensor_rank::{NextRank, PrevRank},
@@ -322,11 +322,19 @@ where
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
+    type RawAction = Tensor<A>;
 
     /// Maps native observations [batch_size, ...observation_shape] to Float exploration actions [batch_size, ...action_shape].
     /// Preserves input kind and dtype; returned actions use the configured dtype and optimization device.
-    fn act(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
-        self.inner.act(observations)
+    fn act_raw(
+        &mut self,
+        observations: &Tensor<O, K>,
+    ) -> Result<AgentActions<Tensor<A>, Tensor<A>>, Self::Error> {
+        let actions = self.inner.act(observations)?.without_autodiff();
+        Ok(AgentActions {
+            raw: actions.clone(),
+            environment: actions,
+        })
     }
 
     /// Trains from native observation batches, Float action batches, and rewards [num_envs, 1].
@@ -346,6 +354,17 @@ where
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)
+    }
+
+    /// Stores one caller-collected batch with observation shape `[num_envs, ...observation_shape]`.
+    fn learn_from_timesteps(
+        &mut self,
+        observations: &Tensor<O, K>,
+        actions: AgentActions<Tensor<A>, Tensor<A>>,
+        step: MultiGymStepInfo<I, Tensor<U, K>>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .learn_from_timesteps(observations, actions, step, &mut self.logging_info)
     }
 }
 #[cfg(test)]
@@ -663,9 +682,17 @@ mod tests {
                 target_before
             );
             assert_eq!(agent.inner.optimization_steps, 4);
-            assert_eq!(logger.updates, 4);
-            assert_eq!(logger.collections, 2);
-            assert_eq!(logger.actor_updates, [false, false, true, false]);
+
+            let observations = env.reset().unwrap();
+            let actions = agent.act_raw(&observations).unwrap();
+            let step = env.step(actions.environment.clone()).unwrap();
+            agent
+                .learn_from_timesteps(&observations, actions, step)
+                .unwrap();
+            drop(agent);
+            assert_eq!(logger.updates, 6);
+            assert_eq!(logger.collections, 3);
+            assert_eq!(&logger.actor_updates[..4], [false, false, true, false]);
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::tensor_rank::TensorBatchTypes;
 use crate::{
-    gym::MultiGym,
+    gym::{MultiGym, MultiGymStepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
 
@@ -15,6 +15,15 @@ pub mod sac;
 
 pub(crate) use replay_device_strategy::ReplayStorageConfig;
 
+/// Actions returned by [`Agent::act_raw`].
+///
+/// `raw` is used for training; `environment` is passed to the environment.
+#[derive(Debug, Clone)]
+pub struct AgentActions<R, A> {
+    pub raw: R,
+    pub environment: A,
+}
+
 /// Selects native environment actions and trains through batched environment interaction.
 /// Ranks `O` and `A` include the batch axis; `PrevRank` determines each unbatched terminal observation type.
 /// Scalar observations use `[batch_size, 1]` and terminal observations use `[1]`.
@@ -26,12 +35,27 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
 
-    /// Selects rank-`A` actions `[batch_size, ...action_shape]` from rank-`O` observations `[batch_size, ...observation_shape]`.
-    /// Preserves the batch axis. The agent defines supported observation dtypes/devices and returned action dtypes/devices.
+    /// Raw policy output used by `learn_from_timesteps`.
+    /// PPO/A2C use rank-L policy samples before action mapping; other agents use environment action batches.
+    type RawAction;
+
+    /// Selects actions from observations shaped `[batch_size, ...observation_shape]`.
+    #[allow(clippy::type_complexity)]
+    fn act_raw(
+        &mut self,
+        observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
+    ) -> Result<
+        AgentActions<Self::RawAction, <Self::ActionSpace as TensorBatchTypes>::Batch>,
+        Self::Error,
+    >;
+
+    /// Selects environment actions from observations shaped `[batch_size, ...observation_shape]`.
     fn act(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
-    ) -> Result<<Self::ActionSpace as TensorBatchTypes>::Batch, Self::Error>;
+    ) -> Result<<Self::ActionSpace as TensorBatchTypes>::Batch, Self::Error> {
+        Ok(self.act_raw(observations)?.environment)
+    }
 
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
     /// Terminal observations have rank `O - 1`; scalar terminal observations use `[1]`.
@@ -47,6 +71,16 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
             ActionSpace = Self::ActionSpace,
         >,
         num_timesteps: usize,
+    ) -> Result<(), Self::Error>;
+
+    /// Stores one caller-collected step from observations shaped `[num_envs, ...observation_shape]`.
+    /// `actions` must come from `act_raw` on those observations; steps must be consecutive for the same environments.
+    /// Schedules need the builder's `training_horizon` because this method has no total timestep count.
+    fn learn_from_timesteps(
+        &mut self,
+        observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
+        actions: AgentActions<Self::RawAction, <Self::ActionSpace as TensorBatchTypes>::Batch>,
+        step: MultiGymStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>,
     ) -> Result<(), Self::Error>;
 }
 
@@ -152,10 +186,10 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::Agent;
     use super::test_support::{FixedContinuousEnv, FixedEnv};
+    use super::{Agent, AgentActions};
     use crate::{
-        gym::{Gym, MultiGym, VectorizedGymError, VectorizedGymWrapper},
+        gym::{Gym, MultiGym, MultiGymStepInfo, VectorizedGymError, VectorizedGymWrapper},
         spaces::{BoxSpace, Discrete},
     };
     use burn::tensor::{DType, Device, Int, Tensor};
@@ -168,13 +202,18 @@ mod tests {
         type GymError = VectorizedGymError<Infallible>;
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type RawAction = Tensor<2, Int>;
 
         /// Returns zero Int actions `[batch_size, 1]` for Float observations `[batch_size, features]` on the observation device.
-        fn act(&mut self, observations: &Tensor<2>) -> Result<Tensor<2, Int>, Self::Error> {
-            Ok(Tensor::zeros(
-                [observations.dims()[0], 1],
-                &observations.device(),
-            ))
+        fn act_raw(
+            &mut self,
+            observations: &Tensor<2>,
+        ) -> Result<AgentActions<Tensor<2, Int>, Tensor<2, Int>>, Self::Error> {
+            let actions = Tensor::zeros([observations.dims()[0], 1], &observations.device());
+            Ok(AgentActions {
+                raw: actions.clone(),
+                environment: actions,
+            })
         }
 
         /// Steps observation batches `[num_envs, 4]` with scalar action batches `[num_envs, 1]`.
@@ -193,6 +232,16 @@ mod tests {
             }
             Ok(())
         }
+
+        /// Accepts observations and step data with matching environment batch shapes.
+        fn learn_from_timesteps(
+            &mut self,
+            _observations: &Tensor<2>,
+            _actions: AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+            _step: MultiGymStepInfo<(), Tensor<1>>,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -204,6 +253,7 @@ mod tests {
             GymError = VectorizedGymError<Infallible>,
             ObservationSpace = BoxSpace<2>,
             ActionSpace = Discrete,
+            RawAction = Tensor<2, Int>,
         > = &mut agent;
         let mut single = VectorizedGymWrapper::from(FixedEnv::new(device.clone()));
         let mut multiple = VectorizedGymWrapper::new(vec![

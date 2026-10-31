@@ -554,6 +554,49 @@ fn matching_replay_rejects_dtype_changes_without_overwriting_existing_rows() {
 }
 
 #[test]
+fn caller_collected_steps_reject_length_mismatches_and_advance_epsilon() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex();
+    let mut agent = float_agent(&device);
+    let mut env = counting_envs(2, &device, Arc::new(GymCallCounts::default()));
+    let epsilon_before = agent.current_epsilon;
+
+    let observations = env.reset().unwrap();
+    let actions = agent.act(&observations).unwrap();
+    let mut bad_step = env.step(actions.clone()).unwrap();
+    bad_step.dones.pop();
+    assert!(
+        agent
+            .learn_from_timesteps(
+                &observations,
+                crate::agents::AgentActions {
+                    raw: actions.clone(),
+                    environment: actions,
+                },
+                bad_step,
+                &mut Logger::default(),
+            )
+            .is_err()
+    );
+
+    let observations = env.reset().unwrap();
+    let actions = agent.act(&observations).unwrap();
+    let step = env.step(actions.clone()).unwrap();
+    agent
+        .learn_from_timesteps(
+            &observations,
+            crate::agents::AgentActions {
+                raw: actions.clone(),
+                environment: actions,
+            },
+            step,
+            &mut Logger::default(),
+        )
+        .unwrap();
+    assert!(agent.current_epsilon < epsilon_before);
+}
+
+#[test]
 fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metrics() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex();

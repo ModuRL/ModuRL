@@ -12,7 +12,7 @@ use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use std::marker::PhantomData;
 
 use crate::{
-    agents::ReplayStorageConfig,
+    agents::{AgentActions, ReplayStorageConfig},
     buffers::experience_replay::{
         AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
         ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_replay_alignment,
@@ -404,6 +404,7 @@ where
     dtype: DType,
     optimization_steps: usize,
     action_rng: StdRng,
+    timestep_episodes: Option<QEpisodeTracker>,
     _phantom: PhantomData<(GE, T)>,
 }
 
@@ -507,6 +508,7 @@ where
             dtype,
             optimization_steps: 0,
             action_rng: StdRng::seed_from_u64(u64::from(action_seed)),
+            timestep_episodes: None,
             _phantom: PhantomData,
         })
     }
@@ -638,6 +640,18 @@ where
             .try_into_data_as::<f32>()?
             .try_to_vec::<f32>()
             .map_err(TensorReadError::from)?;
+        let next_dones = Tensor::<2, Bool>::from_data(
+            TensorData::new(transitions.dones.to_vec(), [environment_count, 1]),
+            &self.replay_storage_config.storage_device(),
+        );
+        self.experience_replay.add(QLearningInsert {
+            observations: transitions.observations.clone(),
+            next_observations: transitions.next_observations.clone(),
+            actions: transitions.actions.clone(),
+            rewards: transitions.rewards.clone(),
+            next_dones,
+            truncateds: transitions.truncateds.to_vec(),
+        })?;
         let mut completed_episodes = Vec::new();
         for (environment_index, reward) in reward_values.into_iter().enumerate() {
             let collection_timestep = transitions
@@ -653,19 +667,80 @@ where
                 completed_episodes.push(entry);
             }
         }
-        let next_dones = Tensor::<2, Bool>::from_data(
-            TensorData::new(transitions.dones.to_vec(), [environment_count, 1]),
-            &self.replay_storage_config.storage_device(),
-        );
-        self.experience_replay.add(QLearningInsert {
-            observations: transitions.observations.clone(),
-            next_observations: transitions.next_observations.clone(),
-            actions: transitions.actions.clone(),
-            rewards: transitions.rewards.clone(),
-            next_dones,
-            truncateds: transitions.truncateds.to_vec(),
-        })?;
         Ok(completed_episodes)
+    }
+
+    /// Stores one transition after validating its leading environment batch shape.
+    fn collect_timestep<I, const U: usize>(
+        &mut self,
+        observations: &Tensor<R, K>,
+        actions: AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        episodes: &mut QEpisodeTracker,
+        logger: &mut dyn QLearningLogger<I>,
+        caller_owned: bool,
+    ) -> Result<(), QAgentError<GE, ME>>
+    where
+        S: ObservationSpace<R, Kind = K, Item = Tensor<U, K>>,
+        Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
+        Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
+    {
+        let count = step.dones.len();
+        for (field, actual) in [
+            ("observations", observations.dims()[0]),
+            ("environment actions", actions.environment.dims()[0]),
+            ("raw actions", actions.raw.dims()[0]),
+            ("truncation flags", step.truncateds.len()),
+            ("terminal observations", step.terminal_observations.len()),
+            ("environment infos", step.infos.len()),
+            ("environment observations", step.observations.dims()[0]),
+            ("environment rewards", step.rewards.dims()[0]),
+        ] {
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field,
+                    expected: count,
+                    actual,
+                }
+                .into());
+            }
+        }
+        self.experience_replay
+            .storage_mut()
+            .validate_environment_count(count)?;
+
+        let first_timestep = self.schedule_progress.elapsed_steps();
+        let transition_next_observations = step.transition_next_observations();
+        let collection_rewards = step.rewards.clone();
+        let completed_episodes = self.store_vectorized_transitions(
+            QCollectedTransitions {
+                observations,
+                next_observations: &transition_next_observations,
+                actions: &actions.raw,
+                rewards: &step.rewards,
+                dones: &step.dones,
+                truncateds: &step.truncateds,
+                first_timestep,
+            },
+            episodes,
+        )?;
+        let entry = QCollectionLogEntry {
+            collection_rewards,
+            infos: step.infos,
+            epsilon: self.current_epsilon,
+            collection_timestep: first_timestep.saturating_add(count),
+            completed_episodes,
+        };
+        self.run_scheduled_updates(first_timestep, count, logger)?;
+        logger.log_collection(&entry);
+        self.schedule_progress.advance_steps(count);
+        if caller_owned {
+            self.current_epsilon = validate_epsilon(
+                self.schedule_progress
+                    .parameter(self.epsilon_schedule.as_ref()),
+            )?;
+        }
+        Ok(())
     }
 
     fn run_scheduled_updates<I>(
@@ -711,6 +786,7 @@ where
     {
         let mut elapsed_timesteps = 0;
         let environment_count = env.num_envs();
+        self.timestep_episodes = None;
         self.experience_replay
             .storage_mut()
             .validate_environment_count(environment_count)?;
@@ -724,44 +800,72 @@ where
             )?;
             let actions = self.act(&observations)?;
             let step_info = env.step(actions.clone()).map_err(QAgentError::GymError)?;
-            let transition_next_observations = step_info.transition_next_observations();
-            let MultiGymStepInfo {
-                observations: reset_next_observations,
-                rewards,
-                infos,
-                dones,
-                truncateds,
-                ..
-            } = step_info;
-            let collection_rewards = rewards.clone();
-            let first_timestep = self.schedule_progress.elapsed_steps();
-            let completed_episodes = self.store_vectorized_transitions(
-                QCollectedTransitions {
-                    observations: &observations,
-                    next_observations: &transition_next_observations,
-                    actions: &actions,
-                    rewards: &rewards,
-                    dones: &dones,
-                    truncateds: &truncateds,
-                    first_timestep,
-                },
-                &mut episodes,
-            )?;
-            observations = reset_next_observations;
-            let collection_timestep = first_timestep.saturating_add(environment_count);
-            let entry = QCollectionLogEntry {
-                collection_rewards,
-                infos,
-                epsilon: self.current_epsilon,
-                collection_timestep,
-                completed_episodes,
-            };
+            let observations_before = observations.clone();
+            observations = step_info.observations.clone();
             elapsed_timesteps += environment_count;
-            self.run_scheduled_updates(first_timestep, environment_count, logger)?;
-            logger.log_collection(&entry);
-            self.schedule_progress.advance_steps(environment_count);
+            self.collect_timestep(
+                &observations_before,
+                AgentActions {
+                    raw: actions.clone(),
+                    environment: actions,
+                },
+                step_info,
+                &mut episodes,
+                logger,
+                false,
+            )?;
         }
         Ok(())
+    }
+
+    /// Processes a caller-collected transition with matching environment batch shapes.
+    pub(crate) fn learn_from_timesteps<I, const U: usize>(
+        &mut self,
+        observations: &Tensor<R, K>,
+        actions: AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        logger: &mut dyn QLearningLogger<I>,
+    ) -> Result<(), QAgentError<GE, ME>>
+    where
+        S: ObservationSpace<R, Kind = K, Item = Tensor<U, K>>,
+        Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
+        Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
+    {
+        let count = step.dones.len();
+        for (field, actual) in [
+            ("observations", observations.dims()[0]),
+            ("environment actions", actions.environment.dims()[0]),
+            ("raw actions", actions.raw.dims()[0]),
+            ("environment observations", step.observations.dims()[0]),
+            ("environment rewards", step.rewards.dims()[0]),
+            ("truncation flags", step.truncateds.len()),
+            ("terminal observations", step.terminal_observations.len()),
+            ("environment infos", step.infos.len()),
+        ] {
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field,
+                    expected: count,
+                    actual,
+                }
+                .into());
+            }
+        }
+        self.experience_replay
+            .storage_mut()
+            .validate_environment_count(count)?;
+        if self
+            .timestep_episodes
+            .as_ref()
+            .is_none_or(|episodes| episodes.returns.len() != count)
+        {
+            self.timestep_episodes = Some(QEpisodeTracker::new(count));
+        }
+        let mut episodes = self.timestep_episodes.take().unwrap();
+        let result =
+            self.collect_timestep(observations, actions, step, &mut episodes, logger, true);
+        self.timestep_episodes = Some(episodes);
+        result
     }
 }
 struct QLearningConfigurationValidator;

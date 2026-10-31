@@ -4,7 +4,7 @@ use crate::{
     distributions::{
         CategoricalDistribution, GaussianDistribution, TanhTransform, TransformedDistribution,
     },
-    gym::{Gym, ResetInfo, StepInfo, VectorizedGymWrapper},
+    gym::{Gym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
     models::{Forward, probabilistic_model::ProbabilisticPolicyModel},
     spaces::{BoxSpace, Discrete},
     tensor_rank::TensorBatchTypes,
@@ -693,6 +693,144 @@ fn malformed_terminal_observations_return_errors_before_replay_insertion() {
         assert!(agent.replay.is_none());
         assert_eq!(agent.optimization_steps, 0);
     }
+}
+
+#[test]
+fn caller_collected_steps_reject_length_mismatches_and_recover() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let env_device = Device::flex();
+    let device = env_device.clone().autodiff();
+    let mut env = VectorizedGymWrapper::new(vec![
+        EndingEnv {
+            device: env_device.clone(),
+            terminated: false,
+            terminal_width: 1,
+        },
+        EndingEnv {
+            device: env_device,
+            terminated: true,
+            terminal_width: 1,
+        },
+    ])
+    .unwrap();
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
+        .policy(ProbabilisticPolicyModel::new(
+            linear_model(1, 2, 0.0, &device),
+            CategoricalDistribution,
+        ))
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![discrete_critic(&device, DType::F32)])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(env.action_space())
+        .observation_space(env.observation_space())
+        .replay_capacity(16)
+        .batch_size(2)
+        .training_start(10)
+        .training_horizon(20)
+        .build()
+        .unwrap();
+
+    let observations = env.reset().unwrap();
+    let actions = agent.act_raw(&observations).unwrap();
+    let mut bad_step = env.step(actions.environment.clone()).unwrap();
+    bad_step.dones.pop();
+    assert!(
+        agent
+            .learn_from_timesteps(&observations, actions, bad_step)
+            .is_err()
+    );
+
+    let observations = env.reset().unwrap();
+    let actions = agent.act_raw(&observations).unwrap();
+    let step = env.step(actions.environment.clone()).unwrap();
+    agent
+        .learn_from_timesteps(&observations, actions, step)
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+}
+
+#[test]
+fn caller_collected_training_matches_learn() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let env_device = Device::flex();
+    let device = env_device.clone().autodiff();
+    device.seed(153);
+    let mut learned_env = VectorizedGymWrapper::new(vec![
+        EndingEnv {
+            device: env_device.clone(),
+            terminated: false,
+            terminal_width: 1,
+        },
+        EndingEnv {
+            device: env_device.clone(),
+            terminated: true,
+            terminal_width: 1,
+        },
+    ])
+    .unwrap();
+    let mut learned_agent = SACAgent::<_, _, _, VectorizedGymError<Infallible>>::builder()
+        .policy(ProbabilisticPolicyModel::new(
+            linear_model(1, 2, 0.0, &device),
+            CategoricalDistribution,
+        ))
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![discrete_critic(&device, DType::F32)])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(learned_env.action_space())
+        .observation_space(learned_env.observation_space())
+        .replay_capacity(8)
+        .batch_size(2)
+        .training_start(0)
+        .training_horizon(8)
+        .build()
+        .unwrap();
+    learned_agent.learn(&mut learned_env, 2).unwrap();
+    let learned_parameters = numbers(learned_agent.policy.module().weight.val());
+
+    device.seed(153);
+    let mut caller_env = VectorizedGymWrapper::new(vec![
+        EndingEnv {
+            device: env_device.clone(),
+            terminated: false,
+            terminal_width: 1,
+        },
+        EndingEnv {
+            device: env_device,
+            terminated: true,
+            terminal_width: 1,
+        },
+    ])
+    .unwrap();
+    let mut caller_agent = SACAgent::<_, _, _, VectorizedGymError<Infallible>>::builder()
+        .policy(ProbabilisticPolicyModel::new(
+            linear_model(1, 2, 0.0, &device),
+            CategoricalDistribution,
+        ))
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![discrete_critic(&device, DType::F32)])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(caller_env.action_space())
+        .observation_space(caller_env.observation_space())
+        .replay_capacity(8)
+        .batch_size(2)
+        .training_start(0)
+        .training_horizon(8)
+        .build()
+        .unwrap();
+    let observations = caller_env.reset().unwrap();
+    let actions = caller_agent.act_raw(&observations).unwrap();
+    let step = caller_env.step(actions.environment.clone()).unwrap();
+    caller_agent
+        .learn_from_timesteps(&observations, actions, step)
+        .unwrap();
+
+    assert_eq!(
+        learned_parameters,
+        numbers(caller_agent.policy.module().weight.val())
+    );
 }
 
 #[test]

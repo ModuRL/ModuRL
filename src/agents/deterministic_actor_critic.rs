@@ -1,7 +1,7 @@
 //! Shared collection and training for deterministic off-policy actor-critic agents.
 
 use super::{
-    ReplayStorageConfig,
+    AgentActions, ReplayStorageConfig,
     action_value_critic::{
         ActionValueCritic, ActionValueCriticError, ActionValueCriticNetwork,
         interpolate_target_model,
@@ -471,6 +471,7 @@ pub(crate) struct DeterministicActorCriticAgent<
     replay_storage_config: ReplayStorageConfig,
     optimization_steps: usize,
     dtype: DType,
+    timestep_episodes: Option<EpisodeTracker>,
     _errors: PhantomData<GE>,
 }
 
@@ -591,6 +592,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             replay_storage_config,
             optimization_steps: 0,
             dtype,
+            timestep_episodes: None,
             _errors: PhantomData,
         })
     }
@@ -1061,6 +1063,131 @@ where
         Ok(completed)
     }
 
+    /// Checks observation, action, and step batch shapes before collection.
+    fn validate_timestep<I, K: Autodiff, const U: usize>(
+        &self,
+        observations: &Tensor<O, K>,
+        actions: &Tensor<A>,
+        step: &MultiGymStepInfo<I, Tensor<U, K>>,
+    ) -> Result<usize, DeterministicActorCriticError<AE, GE, SE, CE>>
+    where
+        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    {
+        let count = step.dones.len();
+        for (field, actual) in [
+            ("observations", observations.dims()[0]),
+            ("actions", actions.dims()[0]),
+            ("truncation flags", step.truncateds.len()),
+            ("terminal observations", step.terminal_observations.len()),
+            ("environment infos", step.infos.len()),
+            ("environment observations", step.observations.dims()[0]),
+            ("environment rewards", step.rewards.dims()[0]),
+        ] {
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field,
+                    expected: count,
+                    actual,
+                }
+                .into());
+            }
+        }
+        self.validate_observations(observations)?;
+        self.validate_observations(&step.observations)?;
+        if step.observations.dims()[0] != count {
+            return Err(ReplayStorageError::BatchLengthMismatch {
+                field: "environment observations",
+                expected: count,
+                actual: step.observations.dims()[0],
+            }
+            .into());
+        }
+        let expected_rewards = [count, 1];
+        if step.rewards.dims() != expected_rewards {
+            return Err(DeterministicActorCriticError::Shape {
+                field: "environment rewards",
+                expected: expected_rewards.to_vec(),
+                actual: step.rewards.dims().to_vec(),
+            });
+        }
+        if step.observations.dtype() != observations.dtype() {
+            return Err(DeterministicActorCriticError::DType {
+                field: "environment observations",
+                expected: observations.dtype(),
+                actual: step.observations.dtype(),
+            });
+        }
+        for terminal in step.terminal_observations.iter().flatten() {
+            let expected = self.observation_space.shape();
+            if terminal.dims().to_vec() != expected {
+                return Err(DeterministicActorCriticError::Shape {
+                    field: "terminal observations",
+                    expected,
+                    actual: terminal.dims().to_vec(),
+                });
+            }
+            if terminal.dtype() != step.observations.dtype() {
+                return Err(DeterministicActorCriticError::DType {
+                    field: "terminal observations",
+                    expected: step.observations.dtype(),
+                    actual: terminal.dtype(),
+                });
+            }
+            if terminal.device() != step.observations.device() {
+                return Err(DeterministicActorCriticError::Device {
+                    field: "terminal observations",
+                });
+            }
+        }
+        Ok(count)
+    }
+
+    /// Stores one transition after validating its leading environment batch shape.
+    fn collect_timestep<I, K: Autodiff, const U: usize>(
+        &mut self,
+        observations: &Tensor<O, K>,
+        actions: Tensor<A>,
+        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        episodes: &mut EpisodeTracker,
+        logger: &mut dyn DeterministicActorCriticLogger<I, A>,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
+    where
+        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    {
+        let count = self.validate_timestep(observations, &actions, &step)?;
+        let first_timestep = self.schedule_progress.elapsed_steps();
+        let next_observations = step.transition_next_observations();
+        let completed_episodes = self.store_transitions(
+            CollectedTransitions {
+                observations,
+                next_observations: &next_observations,
+                actions: &actions.without_autodiff(),
+                rewards: &step.rewards,
+                dones: &step.dones,
+                truncateds: &step.truncateds,
+                first_timestep,
+            },
+            episodes,
+        )?;
+        self.schedule_progress.advance_steps(count);
+        for offset in 1..=count {
+            let timestep = first_timestep + offset;
+            if timestep >= self.training_start && timestep.is_multiple_of(self.update_frequency) {
+                self.optimize(timestep, logger)?;
+            }
+        }
+        logger.log_collection(&DeterministicActorCriticCollectionLogEntry {
+            collection_rewards: step.rewards.without_autodiff(),
+            infos: step.infos,
+            collection_timestep: self.schedule_progress.elapsed_steps(),
+            completed_episodes,
+            replay_len: self.replay.as_ref().map_or(0, DeterministicReplay::len),
+        });
+        Ok(())
+    }
+
     /// Trains with native observations [num_envs, ...observation_shape] and Float actions [num_envs, ...action_shape].
     /// Terminal observations have rank U = O - 1. Preserves terminal targets, update cadence, and schedule progress across calls.
     /// Resets collection on each call; validates replay alignment and metadata before writing experience.
@@ -1090,6 +1217,7 @@ where
             );
         }
         let count = env.num_envs();
+        self.timestep_episodes = None;
         validate_replay_alignment(self.replay_capacity, count)?;
         if let Some(expected) = self.environment_count
             && expected != count
@@ -1129,107 +1257,61 @@ where
             let step = env
                 .step(actions.clone())
                 .map_err(DeterministicActorCriticError::GymError)?;
-            for (field, actual) in [
-                ("done flags", step.dones.len()),
-                ("truncation flags", step.truncateds.len()),
-                ("terminal observations", step.terminal_observations.len()),
-                ("environment infos", step.infos.len()),
-            ] {
-                if actual != count {
-                    return Err(ReplayStorageError::BatchLengthMismatch {
-                        field,
-                        expected: count,
-                        actual,
-                    }
-                    .into());
-                }
-            }
-            self.validate_observations(&step.observations)?;
-            let expected =
-                space_storage_shape::<O>("observations", self.observation_space.shape(), count)?;
-            if step.observations.dims() != expected {
-                return Err(DeterministicActorCriticError::Shape {
-                    field: "environment observations",
-                    expected: expected.to_vec(),
-                    actual: step.observations.dims().to_vec(),
-                });
-            }
-            if step.rewards.dims() != [count, 1] {
-                return Err(DeterministicActorCriticError::Shape {
-                    field: "environment rewards",
-                    expected: vec![count, 1],
-                    actual: step.rewards.dims().to_vec(),
-                });
-            }
-            if step.observations.dtype() != observations.dtype() {
-                return Err(DeterministicActorCriticError::DType {
-                    field: "environment observations",
-                    expected: observations.dtype(),
-                    actual: step.observations.dtype(),
-                });
-            }
-            for terminal in step.terminal_observations.iter().flatten() {
-                let expected = self.observation_space.shape();
-                if terminal.dims().to_vec() != expected {
-                    return Err(DeterministicActorCriticError::Shape {
-                        field: "terminal observations",
-                        expected,
-                        actual: terminal.dims().to_vec(),
-                    });
-                }
-                if terminal.dtype() != step.observations.dtype() {
-                    return Err(DeterministicActorCriticError::DType {
-                        field: "terminal observations",
-                        expected: step.observations.dtype(),
-                        actual: terminal.dtype(),
-                    });
-                }
-                if terminal.device() != step.observations.device() {
-                    return Err(DeterministicActorCriticError::Device {
-                        field: "terminal observations",
-                    });
-                }
-            }
-            let next_observations = step.transition_next_observations();
-            let MultiGymStepInfo {
-                observations: reset_observations,
-                rewards,
-                infos,
-                dones,
-                truncateds,
-                ..
-            } = step;
-            let completed_episodes = self.store_transitions(
-                CollectedTransitions {
-                    observations: &observations,
-                    next_observations: &next_observations,
-                    actions: &actions,
-                    rewards: &rewards,
-                    dones: &dones,
-                    truncateds: &truncateds,
-                    first_timestep,
-                },
-                &mut episodes,
-            )?;
-            self.schedule_progress.advance_steps(count);
-            for offset in 1..=count {
-                let timestep = first_timestep + offset;
-                if timestep >= self.training_start && timestep.is_multiple_of(self.update_frequency)
-                {
-                    self.optimize(timestep, logger)?;
-                }
-            }
             elapsed += count;
-            observations = reset_observations;
-            logger.log_collection(&DeterministicActorCriticCollectionLogEntry {
-                collection_rewards: rewards.without_autodiff(),
-                infos,
-                collection_timestep: self.schedule_progress.elapsed_steps(),
-                completed_episodes,
-                replay_len: self.replay.as_ref().map_or(0, DeterministicReplay::len),
-            });
+            let observations_before = observations.clone();
+            observations = step.observations.clone();
+            self.collect_timestep(&observations_before, actions, step, &mut episodes, logger)?;
         }
         Ok(())
+    }
+
+    /// Processes a caller-collected transition with matching environment batch shapes.
+    pub(crate) fn learn_from_timesteps<I, K: Autodiff, const U: usize>(
+        &mut self,
+        observations: &Tensor<O, K>,
+        actions: AgentActions<Tensor<A>, Tensor<A>>,
+        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        logger: &mut dyn DeterministicActorCriticLogger<I, A>,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
+    where
+        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    {
+        let count = step.dones.len();
+        if actions.environment.dims()[0] != count {
+            return Err(ReplayStorageError::BatchLengthMismatch {
+                field: "environment actions",
+                expected: count,
+                actual: actions.environment.dims()[0],
+            }
+            .into());
+        }
+        validate_replay_alignment(self.replay_capacity, count)?;
+        if let Some(expected) = self.environment_count
+            && expected != count
+        {
+            return Err(ReplayStorageError::EnvironmentCountMismatch {
+                expected,
+                actual: count,
+            }
+            .into());
+        }
+        if let Some(replay) = &mut self.replay {
+            replay.validate_environment_count(count)?;
+        }
+        let validated_count = self.validate_timestep(observations, &actions.raw, &step)?;
+        self.environment_count = Some(validated_count);
+        if self
+            .timestep_episodes
+            .as_ref()
+            .is_none_or(|episodes| episodes.returns.len() != count)
+        {
+            self.timestep_episodes = Some(EpisodeTracker::new(count));
+        }
+        let mut episodes = self.timestep_episodes.take().unwrap();
+        let result = self.collect_timestep(observations, actions.raw, step, &mut episodes, logger);
+        self.timestep_episodes = Some(episodes);
+        result
     }
 }
 
