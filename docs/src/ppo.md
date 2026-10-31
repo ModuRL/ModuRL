@@ -17,6 +17,11 @@ and returns `Result`. The constructor names remain `new`.
 
 Pass a `SeparatePPONetwork` or `SharedPPONetwork` directly to `.network_info(network)`.
 
+PPO estimates advantages with `GAE` (lambda `0.95`) by default. Pass any
+`AdvantageEstimator` to `.advantage_estimator(..)`, for example
+`.advantage_estimator(GAE::new(0.9)?)`. The critic target is
+`values + advantages`.
+
 The agent infers its model group from `PPONetwork::ModelGroup`.
 Custom `PPONetwork<O, H, L>` implementations must set `ModelGroup` to
 `PPOModelGroup<Self, Tensor<O, Self::InputKind>, Tensor<H, Self::LatentKind>, Tensor<L>>`.

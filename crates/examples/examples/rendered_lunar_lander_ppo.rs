@@ -141,7 +141,7 @@ fn main() {
         .vf_coef(0.5)
         .clip_range(ConstantSchedule::new(0.2))
         .clipped(true)
-        .gae_lambda(0.98)
+        .advantage_estimator(GAE::new(0.98).unwrap())
         .num_epochs(4)
         .training_horizon(10_000_000)
         .build()

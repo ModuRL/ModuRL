@@ -177,7 +177,7 @@ fn main() {
         .mini_batch_size(BATCH_SIZE / NUM_MINIBATCHES)
         .num_epochs(UPDATE_EPOCHS)
         .gamma(GAMMA)
-        .gae_lambda(GAE_LAMBDA)
+        .advantage_estimator(GAE::new(GAE_LAMBDA).unwrap())
         .normalize_advantage(true)
         .normalize_returns(false)
         .clip_range(ConstantSchedule::new(CLIP_COEFFICIENT))

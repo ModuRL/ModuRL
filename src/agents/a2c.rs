@@ -10,10 +10,12 @@ use super::{
         SeparatePPONetwork, SharedPPONetwork,
     },
 };
-use crate::{buffers::experience::ExperienceBatchError, sampling::SamplingError};
 use crate::{
+    advantage_estimation::{AdvantageEstimator, GAE},
+    buffers::experience::ExperienceBatchError,
     gym::MultiGym,
     parameter_schedule::ParameterSchedule,
+    sampling::SamplingError,
     spaces::{ActionMap, ObservationSpace},
     tensor_rank::{NextRank, PrevRank},
 };
@@ -204,7 +206,11 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
         action_space: AS,
         network_info: A2CNetworkInfo<N>,
         #[builder(default = 0.99)] gamma: f32,
-        #[builder(default = 1.0)] gae_lambda: f32,
+        #[builder(
+            default = Box::new(GAE { lambda: 1.0 }),
+            with = |estimator: impl AdvantageEstimator + 'static| Box::new(estimator)
+        )]
+        advantage_estimator: Box<dyn AdvantageEstimator>,
         #[builder(default = false)] normalize_advantage: bool,
         #[builder(default = false)] normalize_returns: bool,
         #[builder(default = 0.5)] vf_coef: f32,
@@ -231,7 +237,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
             .clipped(false)
             .clip_value_loss(false)
             .gamma(gamma)
-            .gae_lambda(gae_lambda)
+            .advantage_estimator(advantage_estimator)
             .normalize_advantage(normalize_advantage)
             .normalize_returns(normalize_returns)
             .vf_coef(vf_coef)
@@ -447,6 +453,62 @@ mod tests {
         assert_eq!(logger.updates, 1);
         assert_eq!(logger.collections, 1);
         assert!(logger.advantages.iter().any(|value| value.abs() > 1e-6));
+    }
+
+    #[test]
+    fn custom_advantage_estimator_is_used_without_normalization() {
+        struct ConstantEstimator;
+
+        impl AdvantageEstimator for ConstantEstimator {
+            /// Returns constant advantages with the same shape as rollout rewards.
+            fn estimate(
+                &self,
+                rewards: &Tensor<3>,
+                _values: &Tensor<3>,
+                _next_dones: &Tensor<3, burn::tensor::Bool>,
+                _next_truncateds: &Tensor<3, burn::tensor::Bool>,
+                _bootstrapped_values: &Tensor<2>,
+                _gamma: f32,
+            ) -> Tensor<3> {
+                rewards.ones_like() * 3.0
+            }
+        }
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone()),
+            FixedEnv::new(device.clone()),
+        ])
+        .unwrap();
+        let network = SeparateA2CNetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                model(2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(model(1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut logger = RecordingLogger::default();
+        let mut agent = A2CAgent::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(network.into())
+            .batch_size(2)
+            .training_horizon(4)
+            .advantage_estimator(ConstantEstimator)
+            .normalize_advantage(false)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+
+        agent.learn(&mut env, 2).unwrap();
+
+        assert_eq!(logger.advantages, vec![3.0, 3.0]);
     }
 
     #[test]

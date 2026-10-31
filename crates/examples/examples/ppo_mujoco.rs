@@ -133,7 +133,7 @@ fn main() {
         .clip_range(ConstantSchedule::new(0.2))
         .clip_value_loss(true)
         .gamma(0.99)
-        .gae_lambda(0.95)
+        .advantage_estimator(GAE::new(0.95).unwrap())
         .ent_coef(0.0)
         .vf_coef(0.5)
         .training_horizon(TOTAL_TIMESTEPS)

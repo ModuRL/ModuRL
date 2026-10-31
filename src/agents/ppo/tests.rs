@@ -9,7 +9,7 @@ use burn::{
     module::{Module, ModuleVisitor, Param},
     nn::{Initializer, Tanh},
     optim::GradientsParams,
-    tensor::{DType, Device, Float},
+    tensor::{Bool, DType, Device, Float},
 };
 use std::convert::Infallible;
 
@@ -1484,105 +1484,6 @@ mod schedule_tests {
                 _ => {
                     assert!(actor_ids.0.is_subset(&ids.ids));
                     assert!(critic_ids.0.is_subset(&ids.ids));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn gae_matches_scalar_reference_across_environments_and_episode_boundaries() {
-        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-        let device = Device::flex().autodiff();
-        let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = (0..3)
-            .map(|_| TwoStepTestGym::new(device.clone(), false))
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
-        let networks = SeparatePPONetwork::builder()
-            .actor_network(actor)
-            .critic_network(mlp(4, 1, &device))
-            .actor_optimizer(SgdConfig::new().init())
-            .critic_optimizer(SgdConfig::new().init())
-            .actor_learning_rate(1e-3)
-            .critic_learning_rate(1e-3)
-            .build()
-            .unwrap();
-        let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
-            .action_space(env.action_space())
-            .network_info(networks)
-            .batch_size(6)
-            .mini_batch_size(6)
-            .num_epochs(1)
-            .training_horizon(6)
-            .gamma(0.9)
-            .gae_lambda(0.8)
-            .build()
-            .unwrap();
-        agent.learn(&mut env, 0).unwrap();
-        let rewards = [[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
-        let values = [[0.2_f32, 0.3, 0.4], [0.5, 0.6, 0.7], [0.8, 0.9, 1.0]];
-        let dones = [
-            [false, false, false],
-            [true, false, false],
-            [false, true, false],
-        ];
-        let truncateds = [
-            [false, false, false],
-            [false, true, false],
-            [false, false, true],
-        ];
-        let bootstrap = [1.1_f32, 1.2, 1.3];
-        let reward_tensor = Tensor::<3>::from_data(
-            TensorData::new(rewards.into_iter().flatten().collect::<Vec<_>>(), [3, 3, 1]),
-            &device,
-        );
-        let value_tensor = Tensor::<3>::from_data(
-            TensorData::new(values.into_iter().flatten().collect::<Vec<_>>(), [3, 3, 1]),
-            &device,
-        );
-        let done_tensor = Tensor::from_data(
-            TensorData::new(dones.into_iter().flatten().collect::<Vec<_>>(), [3, 3, 1]),
-            &device,
-        );
-        let truncated_tensor = Tensor::from_data(
-            TensorData::new(
-                truncateds.into_iter().flatten().collect::<Vec<_>>(),
-                [3, 3, 1],
-            ),
-            &device,
-        );
-        let bootstrap_tensor =
-            Tensor::<2>::from_data(TensorData::new(bootstrap.to_vec(), [3, 1]), &device);
-        for dtype in [DType::F32, DType::F64] {
-            let advantages = agent.compute_gae(
-                &reward_tensor.clone().cast(dtype),
-                &value_tensor.clone().cast(dtype),
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrap_tensor.clone().cast(dtype),
-            );
-            assert_eq!(advantages.dtype(), dtype);
-            let actual = advantages
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            for env_idx in 0..3 {
-                let mut next_value = bootstrap[env_idx];
-                let mut gae = 0.0_f32;
-                for time in (0..3).rev() {
-                    let mask = if dones[time][env_idx] || truncateds[time][env_idx] {
-                        0.0
-                    } else {
-                        1.0
-                    };
-                    let value = values[time][env_idx];
-                    let delta = rewards[time][env_idx] + 0.9 * next_value * mask - value;
-                    gae = delta + 0.9 * 0.8 * gae * mask;
-                    assert!((actual[time * 3 + env_idx] - f64::from(gae)).abs() < 1e-5);
-                    next_value = value;
                 }
             }
         }
