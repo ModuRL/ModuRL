@@ -10,6 +10,7 @@ use crate::{
     tensor_rank::TensorBatchTypes,
 };
 use burn::{
+    module::{Module, ModuleVisitor, Param},
     optim::SgdConfig,
     tensor::{Device, Float, Int},
 };
@@ -752,6 +753,15 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
 
 #[test]
 fn caller_collected_training_matches_learn() {
+    struct Parameters(Vec<f32>);
+
+    impl ModuleVisitor for Parameters {
+        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
+            self.0
+                .extend(param.val().into_data().try_to_vec::<f32>().unwrap());
+        }
+    }
+
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let env_device = Device::flex();
     let device = env_device.clone().autodiff();
@@ -787,7 +797,14 @@ fn caller_collected_training_matches_learn() {
         .build()
         .unwrap();
     learned_agent.learn(&mut learned_env, 2).unwrap();
-    let learned_parameters = numbers(learned_agent.policy.module().weight.val());
+    let mut learned_parameters = Parameters(Vec::new());
+    learned_agent
+        .policy()
+        .module()
+        .visit(&mut learned_parameters);
+    for critic in learned_agent.critics() {
+        critic.online_network().visit(&mut learned_parameters);
+    }
 
     device.seed(153);
     let mut caller_env = VectorizedGymWrapper::new(vec![
@@ -827,10 +844,12 @@ fn caller_collected_training_matches_learn() {
         .learn_from_timesteps(&observations, actions, step)
         .unwrap();
 
-    assert_eq!(
-        learned_parameters,
-        numbers(caller_agent.policy.module().weight.val())
-    );
+    let mut caller_parameters = Parameters(Vec::new());
+    caller_agent.policy().module().visit(&mut caller_parameters);
+    for critic in caller_agent.critics() {
+        critic.online_network().visit(&mut caller_parameters);
+    }
+    assert_eq!(learned_parameters.0, caller_parameters.0);
 }
 
 #[test]

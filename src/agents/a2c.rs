@@ -400,6 +400,7 @@ mod tests {
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
     };
     use burn::{
+        module::{Module, ModuleVisitor, Param},
         optim::SgdConfig,
         tensor::{DType, Device},
     };
@@ -646,6 +647,15 @@ mod tests {
 
     #[test]
     fn caller_collected_rollout_matches_learn() {
+        struct Parameters(Vec<f32>);
+
+        impl ModuleVisitor for Parameters {
+            fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
+                self.0
+                    .extend(param.val().into_data().try_to_vec::<f32>().unwrap());
+            }
+        }
+
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         device.seed(153);
@@ -711,6 +721,8 @@ mod tests {
             .unwrap();
 
         let learned_network = learned_agent.inner.network();
+        let mut learned_parameters = Parameters(Vec::new());
+        learned_network.visit(&mut learned_parameters);
         let learned_latent = learned_network
             .forward_observations(Tensor::zeros([2, 4], &device))
             .unwrap();
@@ -733,5 +745,9 @@ mod tests {
             caller_network.mode(caller_latent).unwrap().into_data(),
         );
         assert_eq!(learned_snapshot, caller_snapshot);
+
+        let mut caller_parameters = Parameters(Vec::new());
+        caller_network.visit(&mut caller_parameters);
+        assert_eq!(learned_parameters.0, caller_parameters.0);
     }
 }
