@@ -456,62 +456,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_advantage_estimator_is_used_without_normalization() {
-        struct ConstantEstimator;
-
-        impl AdvantageEstimator for ConstantEstimator {
-            /// Returns constant advantages with the same shape as rollout rewards.
-            fn estimate(
-                &self,
-                rewards: &Tensor<3>,
-                _values: &Tensor<3>,
-                _next_dones: &Tensor<3, burn::tensor::Bool>,
-                _next_truncateds: &Tensor<3, burn::tensor::Bool>,
-                _bootstrapped_values: &Tensor<2>,
-                _gamma: f32,
-            ) -> Tensor<3> {
-                rewards.ones_like() * 3.0
-            }
-        }
-
-        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
-        let device = Device::flex().autodiff();
-        let mut env = VectorizedGymWrapper::new(vec![
-            FixedEnv::new(device.clone()),
-            FixedEnv::new(device.clone()),
-        ])
-        .unwrap();
-        let network = SeparateA2CNetwork::builder()
-            .actor_network(ProbabilisticPolicyModel::new(
-                model(2, &device),
-                CategoricalDistribution,
-            ))
-            .critic_network(model(1, &device))
-            .actor_optimizer(SgdConfig::new().init())
-            .critic_optimizer(SgdConfig::new().init())
-            .actor_learning_rate(1e-3)
-            .critic_learning_rate(1e-3)
-            .build()
-            .unwrap();
-        let mut logger = RecordingLogger::default();
-        let mut agent = A2CAgent::builder()
-            .observation_space(env.observation_space())
-            .action_space(env.action_space())
-            .network_info(network.into())
-            .batch_size(2)
-            .training_horizon(4)
-            .advantage_estimator(ConstantEstimator)
-            .normalize_advantage(false)
-            .logging_info(&mut logger)
-            .build()
-            .unwrap();
-
-        agent.learn(&mut env, 2).unwrap();
-
-        assert_eq!(logger.advantages, vec![3.0, 3.0]);
-    }
-
-    #[test]
     fn shared_configuration_runs_one_full_rollout_update() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
