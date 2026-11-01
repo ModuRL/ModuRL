@@ -51,7 +51,7 @@ pub enum GAEError {
 /// Generalized advantage estimation (Schulman et al., 2016).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GAE {
-    pub(crate) lambda: f32,
+    lambda: f32,
 }
 
 impl GAE {
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn gae_rejects_invalid_lambda() {
-        for lambda in [-0.1, 1.1, f32::NAN, f32::INFINITY] {
+        for lambda in [-0.1, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert_eq!(GAE::new(lambda), Err(GAEError::InvalidLambda));
         }
         assert_eq!(GAE::new(0.0).unwrap().lambda(), 0.0);

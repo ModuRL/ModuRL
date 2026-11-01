@@ -440,7 +440,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
         #[builder(default = false)] clip_value_loss: bool,
         #[builder(default = 0.99)] gamma: f32,
         #[builder(
-            default = Box::new(GAE { lambda: 0.95 }),
+            default = Box::new(GAE::new(0.95).unwrap()),
             with = |estimator: impl AdvantageEstimator + 'static| Box::new(estimator)
         )]
         advantage_estimator: Box<dyn AdvantageEstimator>,
