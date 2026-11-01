@@ -10,10 +10,12 @@ use super::{
         SeparatePPONetwork, SharedPPONetwork,
     },
 };
-use crate::{buffers::experience::ExperienceBatchError, sampling::SamplingError};
 use crate::{
+    advantage_estimation::{AdvantageEstimator, GAE},
+    buffers::experience::ExperienceBatchError,
     gym::MultiGym,
     parameter_schedule::ParameterSchedule,
+    sampling::SamplingError,
     spaces::{ActionMap, ObservationSpace},
     tensor_rank::{NextRank, PrevRank},
 };
@@ -204,7 +206,11 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
         action_space: AS,
         network_info: A2CNetworkInfo<N>,
         #[builder(default = 0.99)] gamma: f32,
-        #[builder(default = 1.0)] gae_lambda: f32,
+        #[builder(
+            default = Box::new(GAE::new(1.0).unwrap()),
+            with = |estimator: impl AdvantageEstimator + 'static| Box::new(estimator)
+        )]
+        advantage_estimator: Box<dyn AdvantageEstimator>,
         #[builder(default = false)] normalize_advantage: bool,
         #[builder(default = false)] normalize_returns: bool,
         #[builder(default = 0.5)] vf_coef: f32,
@@ -231,7 +237,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
             .clipped(false)
             .clip_value_loss(false)
             .gamma(gamma)
-            .gae_lambda(gae_lambda)
+            .advantage_estimator(advantage_estimator)
             .normalize_advantage(normalize_advantage)
             .normalize_returns(normalize_returns)
             .vf_coef(vf_coef)

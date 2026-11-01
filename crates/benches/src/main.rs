@@ -278,7 +278,7 @@ fn ppo(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
             .mini_batch_size(PPO_ROLLOUT_SIZE / 4)
             .num_epochs(4)
             .gamma(0.99)
-            .gae_lambda(0.95)
+            .advantage_estimator(GAE::new(0.95).unwrap())
             .clip_range(ConstantSchedule::new(0.1))
             .clip_value_loss(true)
             .vf_coef(0.25)
