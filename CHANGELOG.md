@@ -96,6 +96,8 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `AdvantageEstimator::estimate` returns `AdvantageEstimate { advantages, value_targets }`,
   PPO trains the critic toward `value_targets`, and mismatched estimates return
   `AdvantageEstimateMismatch`.
+- Add the built-in `NStep::new(n)` advantage estimator for n-step returns; `NStep::new(0)` returns
+  `NStepError::ZeroSteps`.
 
 ### Environment wrappers and device placement
 
