@@ -17,17 +17,19 @@ pub mod sac;
 pub(crate) use replay_device_strategy::ReplayStorageConfig;
 
 /// Action selected by [`Agent::act_raw`]; agents train from it and convert it for the environment on demand.
-pub trait RawAction<E> {
+pub trait RawAction {
     type Environment;
+    type Error;
 
     /// Returns the action batch passed to `MultiGym::step`, shape `[num_envs, ...action_shape]`.
-    fn environment(&self) -> Result<Self::Environment, E>;
+    fn environment(&self) -> Result<Self::Environment, Self::Error>;
 }
 
-impl<E, const D: usize, K: Basic> RawAction<E> for Tensor<D, K> {
+impl<const D: usize, K: Basic> RawAction for Tensor<D, K> {
     type Environment = Self;
+    type Error = std::convert::Infallible;
 
-    fn environment(&self) -> Result<Self, E> {
+    fn environment(&self) -> Result<Self, Self::Error> {
         Ok(self.clone())
     }
 }
@@ -37,14 +39,14 @@ impl<E, const D: usize, K: Basic> RawAction<E> for Tensor<D, K> {
 /// Scalar observations use `[batch_size, 1]` and terminal observations use `[1]`.
 /// Associated spaces determine the native observation and action kinds.
 pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
-    type Error;
+    type Error: From<<Self::RawAction as RawAction>::Error>;
     type GymError;
 
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
 
     /// Action value used by `learn_from_timesteps`.
-    type RawAction: RawAction<Self::Error, Environment = <Self::ActionSpace as TensorBatchTypes>::Batch>;
+    type RawAction: RawAction<Environment = <Self::ActionSpace as TensorBatchTypes>::Batch>;
 
     /// Selects actions from observations shaped `[batch_size, ...observation_shape]`.
     #[allow(clippy::type_complexity)]
@@ -58,7 +60,7 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
     ) -> Result<<Self::ActionSpace as TensorBatchTypes>::Batch, Self::Error> {
-        self.act_raw(observations)?.environment()
+        Ok(self.act_raw(observations)?.environment()?)
     }
 
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
@@ -190,8 +192,8 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::Agent;
     use super::test_support::{FixedContinuousEnv, FixedEnv};
+    use super::{Agent, RawAction};
     use crate::{
         gym::{Gym, MultiGym, MultiGymStepInfo, VectorizedGymError, VectorizedGymWrapper},
         spaces::{BoxSpace, Discrete},
@@ -202,7 +204,7 @@ mod tests {
     struct FixedAgent;
 
     impl Agent for FixedAgent {
-        type Error = VectorizedGymError<Infallible>;
+        type Error = Box<dyn std::error::Error>;
         type GymError = VectorizedGymError<Infallible>;
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
@@ -249,7 +251,7 @@ mod tests {
         let device = Device::flex();
         let mut agent = FixedAgent;
         let agent: &mut dyn Agent<
-            Error = VectorizedGymError<Infallible>,
+            Error = Box<dyn std::error::Error>,
             GymError = VectorizedGymError<Infallible>,
             ObservationSpace = BoxSpace<2>,
             ActionSpace = Discrete,
@@ -262,7 +264,16 @@ mod tests {
         ])
         .unwrap();
         let observations = multiple.reset().unwrap();
+        let raw_actions = (|| {
+            let raw_actions = agent.act_raw(&observations)?;
+            Ok::<_, Box<dyn std::error::Error>>(raw_actions.environment()?)
+        })()
+        .unwrap();
         let actions = agent.act(&observations).unwrap();
+        assert_eq!(
+            raw_actions.into_data().try_to_vec::<i32>().unwrap(),
+            vec![0, 0]
+        );
         assert_eq!(actions.dims(), [2, 1]);
         assert_eq!(actions.device(), device);
         assert_eq!(actions.into_data().try_to_vec::<i32>().unwrap(), vec![0, 0]);

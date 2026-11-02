@@ -19,7 +19,7 @@ use crate::{
     objectives::clipped_value_loss,
     parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
     sampling::{SamplingError, shuffle_with_device_rng},
-    spaces::{ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace},
+    spaces::{ActionMap, ActionSpace, ObservationSpace},
     tensor_operations::{clamp_with_boundary_gradients, normalize_tensor},
     tensor_rank::{NextRank, PrevRank},
 };
@@ -103,106 +103,68 @@ where
 use super::{Agent, RawAction};
 
 /// Policy samples shaped `[num_envs, ...policy_shape]` with their action-space mapping.
-#[derive(Debug, Clone)]
-pub struct PolicyActions<AS, const L: usize> {
-    /// Policy sample tensor with shape `[num_envs, ...policy_shape]`.
+pub struct PolicyActions<AS: ActionSpace<A>, E, const L: usize, const A: usize> {
+    /// Policy samples shaped `[num_envs, ...policy_shape]`.
     pub neurons: Tensor<L>,
     space: AS,
+    map_error: fn(AS::Error) -> E,
 }
 
-impl<AS, const L: usize> PolicyActions<AS, L> {
-    pub(crate) fn new(neurons: Tensor<L>, space: AS) -> Self {
-        Self { neurons, space }
+impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> PolicyActions<AS, E, L, A> {
+    pub(crate) fn new(neurons: Tensor<L>, space: AS, map_error: fn(AS::Error) -> E) -> Self {
+        Self {
+            neurons,
+            space,
+            map_error,
+        }
     }
 
-    #[cfg(test)]
-    pub(crate) fn environment_batch(
-        &self,
-    ) -> Result<<AS as PolicyActionMap<L>>::Environment, <AS as PolicyActionMap<L>>::MappingError>
-    where
-        AS: PolicyActionMap<L>,
-    {
-        self.space.map_policy_action(self.neurons.clone())
-    }
-}
-
-#[doc(hidden)]
-pub trait PolicyActionMap<const L: usize> {
-    type Environment;
-    type MappingError;
-
-    fn map_policy_action(
-        &self,
-        neurons: Tensor<L>,
-    ) -> Result<Self::Environment, Self::MappingError>;
-}
-
-impl PolicyActionMap<2> for Discrete {
-    type Environment = <Self as TensorBatchTypes>::Batch;
-    type MappingError = <Self as ActionSpace<2>>::Error;
-
-    fn map_policy_action(
-        &self,
-        neurons: Tensor<2>,
-    ) -> Result<Self::Environment, Self::MappingError> {
-        <Self as ActionMap<2, 2>>::tensor_from_neurons(self, neurons)
+    pub(crate) fn with_error<F>(self, map_error: fn(AS::Error) -> F) -> PolicyActions<AS, F, L, A> {
+        PolicyActions {
+            neurons: self.neurons,
+            space: self.space,
+            map_error,
+        }
     }
 }
 
-impl<const R: usize> PolicyActionMap<R> for BoxSpace<R>
+impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> Clone for PolicyActions<AS, E, L, A>
 where
-    Tensor<R>: PrevRank,
+    AS: Clone,
 {
-    type Environment = <Self as TensorBatchTypes>::Batch;
-    type MappingError = <Self as ActionSpace<R>>::Error;
-
-    fn map_policy_action(
-        &self,
-        neurons: Tensor<R>,
-    ) -> Result<Self::Environment, Self::MappingError> {
-        <Self as ActionMap<R, R>>::tensor_from_neurons(self, neurons)
+    fn clone(&self) -> Self {
+        Self {
+            neurons: self.neurons.clone(),
+            space: self.space.clone(),
+            map_error: self.map_error,
+        }
     }
 }
 
-impl<AS, const L: usize, AE, GE>
-    RawAction<PPOError<AE, GE, <AS as PolicyActionMap<L>>::MappingError>> for PolicyActions<AS, L>
+impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> std::fmt::Debug
+    for PolicyActions<AS, E, L, A>
 where
-    AS: PolicyActionMap<L>,
-    AE: std::fmt::Debug,
-    GE: std::fmt::Debug,
-    <AS as PolicyActionMap<L>>::MappingError: std::fmt::Debug,
+    AS: std::fmt::Debug,
 {
-    type Environment = <AS as PolicyActionMap<L>>::Environment;
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PolicyActions")
+            .field("neurons", &self.neurons)
+            .field("space", &self.space)
+            .finish()
+    }
+}
 
-    fn environment(
-        &self,
-    ) -> Result<Self::Environment, PPOError<AE, GE, <AS as PolicyActionMap<L>>::MappingError>> {
+impl<AS, E, const L: usize, const A: usize> RawAction for PolicyActions<AS, E, L, A>
+where
+    AS: ActionMap<L, A>,
+{
+    type Environment = <AS as TensorBatchTypes>::Batch;
+    type Error = E;
+
+    fn environment(&self) -> Result<Self::Environment, Self::Error> {
         self.space
-            .map_policy_action(self.neurons.clone())
-            .map_err(PPOError::SpaceError)
-    }
-}
-
-impl<AS, const L: usize, AE, GE>
-    RawAction<super::a2c::A2CError<AE, GE, <AS as PolicyActionMap<L>>::MappingError>>
-    for PolicyActions<AS, L>
-where
-    AS: PolicyActionMap<L>,
-    AE: std::fmt::Debug,
-    GE: std::fmt::Debug,
-    <AS as PolicyActionMap<L>>::MappingError: std::fmt::Debug,
-{
-    type Environment = <AS as PolicyActionMap<L>>::Environment;
-
-    fn environment(
-        &self,
-    ) -> Result<
-        Self::Environment,
-        super::a2c::A2CError<AE, GE, <AS as PolicyActionMap<L>>::MappingError>,
-    > {
-        self.space
-            .map_policy_action(self.neurons.clone())
-            .map_err(super::a2c::A2CError::SpaceError)
+            .tensor_from_neurons(self.neurons.clone())
+            .map_err(self.map_error)
     }
 }
 
@@ -1490,12 +1452,7 @@ impl<
 where
     N: PPONetwork<O, H, L, InputKind = OS::Kind>,
     OS: ObservationSpace<O, Item = Tensor<U, <OS as crate::tensor_rank::TensorBatchTypes>::Kind>>,
-    AS: ActionMap<L, A>
-        + PolicyActionMap<
-            L,
-            Environment = <AS as TensorBatchTypes>::Batch,
-            MappingError = <AS as ActionSpace<A>>::Error,
-        > + Clone,
+    AS: ActionMap<L, A> + Clone,
     <AS as ActionSpace<A>>::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank + NextRank,
@@ -1509,16 +1466,20 @@ where
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
-    type RawAction = PolicyActions<AS, L>;
+    type RawAction = PolicyActions<AS, PPOError<N::Error, GE, AS::Error>, L, A>;
 
     /// Selects policy samples `[batch, ...policy_shape]` for observations
     /// `[batch, ...observation_shape]`.
-    fn act_raw(&mut self, observation: &OS::Batch) -> Result<PolicyActions<AS, L>, Self::Error> {
+    fn act_raw(&mut self, observation: &OS::Batch) -> Result<Self::RawAction, Self::Error> {
         let latent_observations = self
             .latent_observations(observation.clone())
             .map_err(PPOError::NetworkError)?;
         let neurons = self.act_neurons(&latent_observations)?;
-        Ok(PolicyActions::new(neurons, self.action_space.clone()))
+        Ok(PolicyActions::new(
+            neurons,
+            self.action_space.clone(),
+            PPOError::SpaceError,
+        ))
     }
 
     #[cfg_attr(
@@ -1562,7 +1523,7 @@ where
     fn learn_from_timesteps(
         &mut self,
         observations: &OS::Batch,
-        raw_actions: PolicyActions<AS, L>,
+        raw_actions: Self::RawAction,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<(), Self::Error> {
         let environment_count =
@@ -1597,8 +1558,7 @@ where
                 &latent_observations,
                 &raw_actions.neurons,
             )?;
-            let environment_actions =
-                <PolicyActions<AS, L> as RawAction<Self::Error>>::environment(&raw_actions)?;
+            let environment_actions = raw_actions.environment()?;
             Self::check_critic_dtype(&evaluated.values, step.rewards.dtype())?;
             let first_collection_timestep = self
                 .schedule_progress

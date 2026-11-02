@@ -141,6 +141,14 @@ pub enum DeterministicActorCriticError<AE, GE, SE, CE = std::convert::Infallible
     EmptyBatch,
 }
 
+impl<AE, GE, SE, CE> From<std::convert::Infallible>
+    for DeterministicActorCriticError<AE, GE, SE, CE>
+{
+    fn from(error: std::convert::Infallible) -> Self {
+        match error {}
+    }
+}
+
 impl<AE, GE, SE, CE> From<ReplayStorageError> for DeterministicActorCriticError<AE, GE, SE, CE> {
     fn from(error: ReplayStorageError) -> Self {
         Self::ReplayStorageError(error.into())

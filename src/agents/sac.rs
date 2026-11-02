@@ -118,6 +118,12 @@ pub enum SACError<PE, GE, SE, CE = std::convert::Infallible> {
     EmptyBatch,
 }
 
+impl<PE, GE, SE, CE> From<std::convert::Infallible> for SACError<PE, GE, SE, CE> {
+    fn from(error: std::convert::Infallible) -> Self {
+        match error {}
+    }
+}
+
 impl<PE, GE, SE, CE> From<ExperienceReplayError<SACReplayError>> for SACError<PE, GE, SE, CE> {
     fn from(error: ExperienceReplayError<SACReplayError>) -> Self {
         match error {

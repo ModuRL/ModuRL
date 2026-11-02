@@ -83,6 +83,16 @@ where
     SpaceError(#[from] SpaceError),
 }
 
+impl<GE, ME> From<std::convert::Infallible> for QAgentError<GE, ME>
+where
+    GE: std::fmt::Debug,
+    ME: std::fmt::Debug,
+{
+    fn from(error: std::convert::Infallible) -> Self {
+        match error {}
+    }
+}
+
 impl<GE, ME> From<ReplayStorageError> for QAgentError<GE, ME>
 where
     GE: std::fmt::Debug,
