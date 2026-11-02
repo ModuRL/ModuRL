@@ -5,10 +5,11 @@ inner PPO agent. The wrapper disables policy and value clipping, performs one
 optimization epoch, and uses the complete rollout as one minibatch. These
 algorithm-defining settings cannot be changed through the A2C builder.
 
-The remaining defaults follow Stable-Baselines3 A2C: `gamma` is `0.99`,
-`gae_lambda` is `1.0`, advantages and returns are not normalized, `vf_coef` is
-`0.5`, `ent_coef` is `0.0`, and gradient clipping is `0.5`. The application
-supplies Burn models, optimizers, and explicit learning rates as part of its network configuration.
+The remaining defaults follow Stable-Baselines3 A2C: `gamma` is `0.99`, the
+advantage estimator is `GAE` with lambda `1.0`, advantages and returns are not
+normalized, `vf_coef` is `0.5`, `ent_coef` is `0.0`, and gradient clipping is
+`0.5`. The application supplies Burn models, optimizers, and explicit learning
+rates as part of its network configuration.
 
 Use `SharedA2CNetwork` when the actor and critic share a model, or
 `SeparateA2CNetwork` when they have independent models and optimizers. Wrap the

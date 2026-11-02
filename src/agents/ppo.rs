@@ -8,12 +8,13 @@ mod tests;
 
 use bon::bon;
 use burn::tensor::{
-    Bool, DType, Int, Tensor, TensorData, TensorReadError,
+    DType, Int, Tensor, TensorData, TensorReadError,
     kind::{Autodiff, Basic},
 };
 use std::{marker::PhantomData, sync::Arc};
 
 use crate::{
+    advantage_estimation::{AdvantageEstimator, GAE},
     buffers::experience::{self, Experience, ExperienceBatchError},
     gym::{MultiGym, MultiGymStepInfo},
     objectives::clipped_value_loss,
@@ -36,8 +37,6 @@ pub enum PPOConfigurationError {
     ZeroTrainingHorizon,
     #[error("gamma must be finite and in 0..=1")]
     InvalidGamma,
-    #[error("GAE lambda must be finite and in 0..=1")]
-    InvalidGaeLambda,
     #[error("value coefficient must be finite and nonnegative")]
     InvalidValueCoefficient,
     #[error("entropy coefficient must be finite and nonnegative")]
@@ -61,6 +60,10 @@ where
 {
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
     CriticRewardDTypeMismatch { critic: DType, reward: DType },
+    #[error(
+        "advantage estimates must match rollout values: shape {expected:?}, dtype {dtype:?}, and device"
+    )]
+    AdvantageEstimateMismatch { expected: [usize; 3], dtype: DType },
     #[error("network failed: {0}")]
     NetworkError(#[source] AE),
     #[error("gym failed: {0}")]
@@ -465,7 +468,7 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     clipped: bool,
     clip_value_loss: bool,
     gamma: f32,
-    gae_lambda: f32,
+    advantage_estimator: Box<dyn AdvantageEstimator>,
     clip_range: Box<dyn ParameterSchedule>,
     normalize_advantage: bool,
     normalize_returns: bool,
@@ -524,7 +527,11 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
         // research has shown it's often harmful
         #[builder(default = false)] clip_value_loss: bool,
         #[builder(default = 0.99)] gamma: f32,
-        #[builder(default = 0.95)] gae_lambda: f32,
+        #[builder(
+            default = Box::new(GAE::new(0.95).unwrap()),
+            with = |estimator: impl AdvantageEstimator + 'static| Box::new(estimator)
+        )]
+        advantage_estimator: Box<dyn AdvantageEstimator>,
         #[builder(
             default = Box::new(ConstantSchedule::new(0.1)),
             with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule)
@@ -572,9 +579,6 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
         if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
             return Err(PPOConfigurationError::InvalidGamma);
         }
-        if !gae_lambda.is_finite() || !(0.0..=1.0).contains(&gae_lambda) {
-            return Err(PPOConfigurationError::InvalidGaeLambda);
-        }
         if !vf_coef.is_finite() || vf_coef < 0.0 {
             return Err(PPOConfigurationError::InvalidValueCoefficient);
         }
@@ -589,7 +593,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
             clipped,
             clip_value_loss,
             gamma,
-            gae_lambda,
+            advantage_estimator,
             clip_range,
             normalize_advantage,
             normalize_returns,
@@ -759,17 +763,32 @@ where
             |experience| &experience.truncateds,
             &values_tensor.device(),
         )?;
-        let advantages = self
-            .compute_gae(
-                &training_rewards,
-                &values_tensor,
-                &next_dones,
-                &truncateds,
-                &bootstrapped_values,
-            )
-            .detach();
+        let estimate = self.advantage_estimator.estimate(
+            &training_rewards,
+            &values_tensor,
+            &next_dones,
+            &truncateds,
+            &bootstrapped_values,
+            self.gamma,
+        );
+        let expected_shape = values_tensor.dims();
+        let expected_dtype = values_tensor.dtype();
+        let expected_device = values_tensor.device();
+        if estimate.advantages.dims() != expected_shape
+            || estimate.advantages.dtype() != expected_dtype
+            || estimate.advantages.device() != expected_device
+            || estimate.value_targets.dims() != expected_shape
+            || estimate.value_targets.dtype() != expected_dtype
+            || estimate.value_targets.device() != expected_device
+        {
+            return Err(PPOError::AdvantageEstimateMismatch {
+                expected: expected_shape,
+                dtype: expected_dtype,
+            });
+        }
 
-        let returns = (values_tensor.clone() + advantages.clone()).detach();
+        let advantages = estimate.advantages.detach();
+        let returns = estimate.value_targets.detach();
         let rollout_explained_variance = compute_explained_variance(&returns, &values_tensor);
 
         let experiences = &mut self.rollout_buffer;
@@ -796,53 +815,6 @@ where
         }
 
         Ok(rollout_explained_variance)
-    }
-
-    /// Computes advantages `[time, env_count, 1]` from rewards, values, done
-    /// masks, and truncation masks with that same shape; `bootstrapped_values`
-    /// is `[env_count, 1]`.
-    /// Float inputs share the environment reward dtype and device. Bool masks are converted to that dtype.
-    /// Float inputs share a device. Detaches critic values and bootstrap values; rewards include corrections for truncated transitions.
-    fn compute_gae(
-        &self,
-        rewards: &Tensor<3>,
-        values: &Tensor<3>,
-        next_dones: &Tensor<3, Bool>,
-        next_truncateds: &Tensor<3, Bool>,
-        bootstrapped_values: &Tensor<2>,
-    ) -> Tensor<3> {
-        let device = values.device();
-        let dtype = values.dtype();
-        let rewards = rewards.clone();
-        let next_dones = next_dones.clone().float().cast(dtype);
-        let next_truncateds = next_truncateds.clone().float().cast(dtype);
-        let bootstrapped_values = bootstrapped_values.clone();
-        let values = values.clone().detach();
-        let masks = (1.0f64 - next_dones) * (1.0f64 - next_truncateds);
-        let mut next_value = bootstrapped_values.detach();
-        let mut gae = Tensor::zeros(next_value.dims(), (&device, dtype));
-        let mut advantages = Vec::with_capacity(rewards.dims()[0]);
-        // Environments are independent; only time has a recurrence.
-        for time in (0..rewards.dims()[0]).rev() {
-            let mask = masks
-                .clone()
-                .slice_dim(0, time..time + 1)
-                .squeeze_dim::<2>(0);
-            let value = values
-                .clone()
-                .slice_dim(0, time..time + 1)
-                .squeeze_dim::<2>(0);
-            let reward = rewards
-                .clone()
-                .slice_dim(0, time..time + 1)
-                .squeeze_dim::<2>(0);
-            let delta = reward + next_value * mask.clone() * f64::from(self.gamma) - value.clone();
-            gae = delta + gae * mask * (f64::from(self.gamma) * f64::from(self.gae_lambda));
-            advantages.push(gae.clone());
-            next_value = value;
-        }
-        advantages.reverse();
-        Tensor::stack(advantages, 0)
     }
 
     /// Maps rank-O observations `[batch, ...observation_shape]` to rank-H model inputs, preserving the batch axis.

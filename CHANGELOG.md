@@ -93,6 +93,16 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `f64` implements `ParameterSchedule` as a constant. PPO and A2C `set_learning_rate` take the same input,
   replace the schedule from the current training progress, and return `PPOConfigurationError::InvalidLearningRate` for a nonpositive or non-finite rate.
 - Agent builders make `.training_horizon(...)` optional. Without it, schedules span the first `learn` call's `num_timesteps`; set it explicitly for chunked training.
+- PPO and A2C builders replace `gae_lambda` with `advantage_estimator`, which accepts any `AdvantageEstimator`.
+  `GAE::new(lambda)` returns `GAEError::InvalidLambda` for invalid lambdas instead of
+  `PPOConfigurationError::InvalidGaeLambda`; defaults remain 0.95 for PPO and 1.0 for A2C.
+  `AdvantageEstimator::estimate` returns `AdvantageEstimate { advantages, value_targets }`,
+  PPO trains the critic toward `value_targets`, and mismatched estimates return
+  `AdvantageEstimateMismatch`.
+- Add the built-in `NStep::new(n)` advantage estimator for n-step returns; `NStep::new(0)` returns
+  `NStepError::ZeroSteps`.
+- Add `GAE::with_value_lambda(..)` to use a separate lambda for value targets.
+- Add the built-in `UPGO::new(value_estimator)` advantage estimator for upgoing policy updates.
 
 ### Environment wrappers and device placement
 

@@ -1,3 +1,4 @@
+pub mod advantage_estimation;
 pub mod agents;
 pub mod buffers;
 pub mod distributions;
