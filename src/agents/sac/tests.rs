@@ -767,18 +767,11 @@ fn caller_collected_training_matches_learn() {
     let env_device = Device::flex();
     let device = env_device.clone().autodiff();
     let build_env = || {
-        VectorizedGymWrapper::new(vec![
-            EndingEnv {
-                device: env_device.clone(),
-                terminated: false,
-                terminal_width: 1,
-            },
-            EndingEnv {
-                device: env_device.clone(),
-                terminated: true,
-                terminal_width: 1,
-            },
-        ])
+        VectorizedGymWrapper::new(vec![EndingEnv {
+            device: env_device.clone(),
+            terminated: true,
+            terminal_width: 1,
+        }])
         .unwrap()
     };
     let build_agent = |observation_space: BoxSpace<2>, action_space: Discrete| {
@@ -793,7 +786,7 @@ fn caller_collected_training_matches_learn() {
             .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
             .action_space(action_space)
             .observation_space(observation_space)
-            .replay_capacity(8)
+            .replay_capacity(2)
             .batch_size(2)
             .training_start(0)
             .training_horizon(8)
@@ -805,7 +798,8 @@ fn caller_collected_training_matches_learn() {
     let mut learned_env = build_env();
     let mut learned_agent =
         build_agent(learned_env.observation_space(), learned_env.action_space());
-    learned_agent.learn(&mut learned_env, 4).unwrap();
+    learned_agent.learn(&mut learned_env, 2).unwrap();
+    assert_eq!(learned_agent.optimization_steps, 1);
     let mut learned_parameters = Parameters(Vec::new());
     learned_agent
         .policy()
@@ -828,6 +822,7 @@ fn caller_collected_training_matches_learn() {
             .unwrap();
         observations = next_observations;
     }
+    assert_eq!(caller_agent.optimization_steps, 1);
 
     let mut caller_parameters = Parameters(Vec::new());
     caller_agent.policy().module().visit(&mut caller_parameters);

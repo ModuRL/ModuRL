@@ -1370,6 +1370,7 @@ mod schedule_tests {
         struct Parameters(Vec<f32>);
 
         impl ModuleVisitor for Parameters {
+            /// Visits network parameters shaped `[parameter_shape]`.
             fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
                 self.0
                     .extend(param.val().into_data().try_to_vec::<f32>().unwrap());

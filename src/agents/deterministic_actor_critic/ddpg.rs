@@ -577,8 +577,8 @@ mod tests {
                 .dtype(DType::F32)
                 .exploration_noise(0.0)
                 .replay_capacity(4)
-                .batch_size(4)
-                .update_frequency(4)
+                .batch_size(2)
+                .update_frequency(6)
                 .training_start(0)
                 .training_horizon(8)
                 .build()
@@ -588,7 +588,7 @@ mod tests {
         device.seed(153);
         let mut learned_env = build_env();
         let mut learned_agent = build_agent(learned_env.observation_space());
-        learned_agent.learn(&mut learned_env, 4).unwrap();
+        learned_agent.learn(&mut learned_env, 6).unwrap();
         assert_eq!(learned_agent.inner.optimization_steps, 1);
         let mut learned_parameters = Parameters(Vec::new());
         learned_agent
@@ -603,7 +603,7 @@ mod tests {
         let mut caller_env = build_env();
         let mut caller_agent = build_agent(caller_env.observation_space());
         let mut observations = caller_env.reset().unwrap();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let actions = caller_agent.act_raw(&observations).unwrap();
             let step = caller_env.step(actions.clone()).unwrap();
             let next_observations = step.observations.clone();

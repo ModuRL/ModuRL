@@ -110,6 +110,7 @@ pub struct PolicyActions<AS: ActionSpace<A>, E, const L: usize, const A: usize> 
 }
 
 impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> PolicyActions<AS, E, L, A> {
+    /// Wraps policy samples shaped `[num_envs, ...policy_shape]`.
     pub(crate) fn new(neurons: Tensor<L>, space: AS, map_error: fn(AS::Error) -> E) -> Self {
         Self {
             neurons,

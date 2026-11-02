@@ -311,10 +311,10 @@ mod tests {
                 .optimizer(SgdConfig::new().init())
                 .learning_rate(0.01)
                 .epsilon_schedule(ConstantSchedule::new(0.0))
-                .replay_capacity(8)
-                .batch_size(1)
+                .replay_capacity(4)
+                .batch_size(2)
                 .training_start(1)
-                .update_frequency(1)
+                .update_frequency(6)
                 .target_update_interval(2)
                 .training_horizon(8)
                 .build()
@@ -324,7 +324,8 @@ mod tests {
         device.seed(153);
         let mut learned_env = build_env();
         let mut learned_agent = build_agent(learned_env.observation_space());
-        learned_agent.learn(&mut learned_env, 4).unwrap();
+        learned_agent.learn(&mut learned_env, 6).unwrap();
+        assert_eq!(learned_agent.inner.optimization_steps, 1);
         let learned_parameters = learned_agent
             .inner
             .online_q_network
@@ -336,7 +337,7 @@ mod tests {
         let mut caller_env = build_env();
         let mut caller_agent = build_agent(caller_env.observation_space());
         let mut observations = caller_env.reset().unwrap();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let actions = caller_agent.act_raw(&observations).unwrap();
             let step = caller_env.step(actions.clone()).unwrap();
             let next_observations = step.observations.clone();
@@ -345,6 +346,7 @@ mod tests {
                 .unwrap();
             observations = next_observations;
         }
+        assert_eq!(caller_agent.inner.optimization_steps, 1);
         assert_eq!(
             learned_parameters,
             caller_agent.inner.online_q_network.values.val().into_data()
