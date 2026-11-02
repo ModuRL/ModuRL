@@ -15,7 +15,7 @@ use std::{fmt::Debug, marker::PhantomData, num::NonZeroUsize};
 
 use self::replay::{SACOptimizationBatch, SACReplay, SACReplayInsert, SACReplayStorage};
 use super::{
-    Agent, AgentActions, ReplayStorageConfig,
+    Agent, ReplayStorageConfig,
     action_value_critic::{
         ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
         ActionValueCriticNetwork, aggregate_critic_values,
@@ -1459,15 +1459,8 @@ where
 
     /// Samples detached rank-A environment actions `[batch_size, ...action_shape]` from native rank-O observations `[batch_size, ...observation_shape]`.
     /// Preserves observation dtype and kind, transfers to the optimization device, and lets the model perform any input conversions.
-    fn act_raw(
-        &mut self,
-        observations: &Tensor<O, K>,
-    ) -> Result<AgentActions<Tensor<A, AS::Kind>, Tensor<A, AS::Kind>>, Self::Error> {
-        let actions = self.stochastic_action(observations)?;
-        Ok(AgentActions {
-            raw: actions.clone(),
-            environment: actions,
-        })
+    fn act_raw(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A, AS::Kind>, Self::Error> {
+        self.stochastic_action(observations)
     }
 
     #[cfg_attr(
@@ -1509,17 +1502,17 @@ where
     fn learn_from_timesteps(
         &mut self,
         observations: &Tensor<O, K>,
-        actions: AgentActions<Tensor<A, AS::Kind>, Tensor<A, AS::Kind>>,
+        actions: Tensor<A, AS::Kind>,
         step: MultiGymStepInfo<I, Tensor<U, K>>,
     ) -> Result<(), Self::Error> {
         self.validate_replay_environment_count(observations.dims()[0])?;
-        let count = self.validate_timestep(observations, &actions.raw, &step)?;
+        let count = self.validate_timestep(observations, &actions, &step)?;
         let mut episodes = match self.timestep_episodes.take() {
             Some(episodes) if episodes.returns.len() == count => episodes,
             _ => SACEpisodeTracker::new(count),
         };
         let result = (|| {
-            let collection = self.store_timestep(observations, actions.raw, step, &mut episodes)?;
+            let collection = self.store_timestep(observations, actions, step, &mut episodes)?;
             let collected_timesteps = collection.log_entry.collection_rewards.dims()[0];
             self.train_on_collected_transitions(collected_timesteps)?;
             if let Some(logger) = &mut self.logger {

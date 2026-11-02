@@ -12,7 +12,7 @@ use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use std::marker::PhantomData;
 
 use crate::{
-    agents::{AgentActions, ReplayStorageConfig},
+    agents::ReplayStorageConfig,
     buffers::experience_replay::{
         AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
         ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_replay_alignment,
@@ -674,7 +674,7 @@ where
     fn validate_timestep<I, const U: usize>(
         &mut self,
         observations: &Tensor<R, K>,
-        actions: &AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+        actions: &Tensor<2, Int>,
         step: &MultiGymStepInfo<I, Tensor<U, K>>,
     ) -> Result<usize, QAgentError<GE, ME>>
     where
@@ -685,7 +685,7 @@ where
         let count = step.dones.len();
         for (field, actual) in [
             ("observations", observations.dims()[0]),
-            ("raw actions", actions.raw.dims()[0]),
+            ("raw actions", actions.dims()[0]),
             ("truncation flags", step.truncateds.len()),
             ("terminal observations", step.terminal_observations.len()),
             ("environment infos", step.infos.len()),
@@ -708,7 +708,7 @@ where
     fn collect_timestep<I, const U: usize>(
         &mut self,
         observations: &Tensor<R, K>,
-        actions: AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+        actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, K>>,
         episodes: &mut QEpisodeTracker,
         logger: &mut dyn QLearningLogger<I>,
@@ -726,7 +726,7 @@ where
             QCollectedTransitions {
                 observations,
                 next_observations: &transition_next_observations,
-                actions: &actions.raw,
+                actions: &actions,
                 rewards: &step.rewards,
                 dones: &step.dones,
                 truncateds: &step.truncateds,
@@ -807,21 +807,15 @@ where
                     .parameter(self.epsilon_schedule.as_ref()),
             )?;
             let actions = self.act(&observations)?;
-            let agent_actions = AgentActions {
-                raw: actions.clone(),
-                environment: actions,
-            };
-            let step_info = env
-                .step(agent_actions.environment.clone())
-                .map_err(QAgentError::GymError)?;
+            let step_info = env.step(actions.clone()).map_err(QAgentError::GymError)?;
             let observations_before = observations.clone();
             let collected_count =
-                self.validate_timestep(&observations_before, &agent_actions, &step_info)?;
+                self.validate_timestep(&observations_before, &actions, &step_info)?;
             observations = step_info.observations.clone();
             elapsed_timesteps += collected_count;
             self.collect_timestep(
                 &observations_before,
-                agent_actions,
+                actions,
                 step_info,
                 &mut episodes,
                 logger,
@@ -834,7 +828,7 @@ where
     pub(crate) fn learn_from_timesteps<I, const U: usize>(
         &mut self,
         observations: &Tensor<R, K>,
-        actions: AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+        actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, K>>,
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>

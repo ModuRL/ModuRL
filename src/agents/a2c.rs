@@ -4,17 +4,17 @@
 //! and trains on the complete rollout as one minibatch.
 
 use super::{
-    Agent, AgentActions,
+    Agent,
     ppo::{
         PPOAgent, PPOConfigurationError, PPOError, PPOModelGroup, PPOModelTypes, PPONetwork,
-        SeparatePPONetwork, SharedPPONetwork,
+        PolicyActionMap, PolicyActions, SeparatePPONetwork, SharedPPONetwork,
     },
 };
 use crate::{buffers::experience::ExperienceBatchError, sampling::SamplingError};
 use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     parameter_schedule::ParameterSchedule,
-    spaces::{ActionMap, ObservationSpace},
+    spaces::{ActionMap, ActionSpace, ObservationSpace, SpaceError},
     tensor_rank::{NextRank, PrevRank},
 };
 use bon::bon;
@@ -334,7 +334,10 @@ impl<
 where
     N: PPONetwork<O, H, L, InputKind = OS::Kind>,
     OS: ObservationSpace<O, Item = Tensor<U, <OS as crate::tensor_rank::TensorBatchTypes>::Kind>>,
-    AS: ActionMap<L, A>,
+    AS: ActionMap<L, A>
+        + ActionSpace<A, Error = SpaceError>
+        + PolicyActionMap<L, Environment = <AS as crate::tensor_rank::TensorBatchTypes>::Batch>
+        + Clone,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank + NextRank,
@@ -348,13 +351,10 @@ where
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
-    type RawAction = Tensor<L>;
+    type RawAction = PolicyActions<AS, L>;
 
-    /// Maps rank-O observations `[batch_size, ...observation_shape]` to rank-A actions `[batch_size, ...action_shape]`, preserving native kinds and device.
-    fn act_raw(
-        &mut self,
-        observations: &OS::Batch,
-    ) -> Result<AgentActions<Tensor<L>, AS::Batch>, Self::Error> {
+    /// Selects policy samples `[batch_size, ...policy_shape]` from rank-O observations `[batch_size, ...observation_shape]`.
+    fn act_raw(&mut self, observations: &OS::Batch) -> Result<PolicyActions<AS, L>, Self::Error> {
         self.inner.act_raw(observations).map_err(A2CError::from)
     }
 
@@ -381,11 +381,11 @@ where
     fn learn_from_timesteps(
         &mut self,
         observations: &OS::Batch,
-        actions: AgentActions<Tensor<L>, AS::Batch>,
+        raw_actions: PolicyActions<AS, L>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<(), Self::Error> {
         self.inner
-            .learn_from_timesteps(observations, actions, step)
+            .learn_from_timesteps(observations, raw_actions, step)
             .map_err(A2CError::from)
     }
 }
@@ -606,8 +606,8 @@ mod tests {
 
         let observations = env.reset().unwrap();
         let mut bad_actions = agent.act_raw(&observations).unwrap();
-        let bad_step = env.step(bad_actions.environment.clone()).unwrap();
-        bad_actions.raw = Tensor::zeros([1, 1], &device);
+        let bad_step = env.step(bad_actions.environment_batch().unwrap()).unwrap();
+        bad_actions.neurons = Tensor::zeros([1, 1], &device);
         assert!(matches!(
             agent.learn_from_timesteps(&observations, bad_actions, bad_step),
             Err(A2CError::BatchLengthMismatch {
@@ -619,7 +619,7 @@ mod tests {
 
         let observations = env.reset().unwrap();
         let actions = agent.act_raw(&observations).unwrap();
-        let step = env.step(actions.environment.clone()).unwrap();
+        let step = env.step(actions.environment_batch().unwrap()).unwrap();
         let next_observations = step.observations.clone();
         agent
             .learn_from_timesteps(&observations, actions, step)
@@ -628,7 +628,9 @@ mod tests {
         let mut single_env = VectorizedGymWrapper::from(FixedEnv::new(device.clone()));
         let single_observations = single_env.reset().unwrap();
         let single_actions = agent.act_raw(&single_observations).unwrap();
-        let single_step = single_env.step(single_actions.environment.clone()).unwrap();
+        let single_step = single_env
+            .step(single_actions.environment_batch().unwrap())
+            .unwrap();
         assert!(matches!(
             agent.learn_from_timesteps(&single_observations, single_actions, single_step),
             Err(A2CError::BatchLengthMismatch {
@@ -639,7 +641,7 @@ mod tests {
         ));
 
         let actions = agent.act_raw(&next_observations).unwrap();
-        let step = env.step(actions.environment.clone()).unwrap();
+        let step = env.step(actions.environment_batch().unwrap()).unwrap();
         agent
             .learn_from_timesteps(&next_observations, actions, step)
             .unwrap();
@@ -702,7 +704,9 @@ mod tests {
         let mut observations = caller_env.reset().unwrap();
         for _ in 0..2 {
             let actions = caller_agent.act_raw(&observations).unwrap();
-            let step = caller_env.step(actions.environment.clone()).unwrap();
+            let step = caller_env
+                .step(actions.environment_batch().unwrap())
+                .unwrap();
             let next_observations = step.observations.clone();
             caller_agent
                 .learn_from_timesteps(&observations, actions, step)

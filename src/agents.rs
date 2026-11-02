@@ -3,6 +3,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
+use burn::tensor::{Tensor, kind::Basic};
 
 pub mod a2c;
 pub mod action_value_critic;
@@ -15,13 +16,20 @@ pub mod sac;
 
 pub(crate) use replay_device_strategy::ReplayStorageConfig;
 
-/// Actions returned by [`Agent::act_raw`].
-///
-/// `raw` is used for training; `environment` is passed to the environment.
-#[derive(Debug, Clone)]
-pub struct AgentActions<R, A> {
-    pub raw: R,
-    pub environment: A,
+/// Action selected by [`Agent::act_raw`]; agents train from it and convert it for the environment on demand.
+pub trait RawAction<E> {
+    type Environment;
+
+    /// Returns the action batch passed to `MultiGym::step`, shape `[num_envs, ...action_shape]`.
+    fn environment(&self) -> Result<Self::Environment, E>;
+}
+
+impl<E, const D: usize, K: Basic> RawAction<E> for Tensor<D, K> {
+    type Environment = Self;
+
+    fn environment(&self) -> Result<Self, E> {
+        Ok(self.clone())
+    }
 }
 
 /// Selects native environment actions and trains through batched environment interaction.
@@ -35,26 +43,22 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
 
-    /// Raw policy output used by `learn_from_timesteps`.
-    /// PPO/A2C use rank-L policy samples before action mapping; other agents use environment action batches.
-    type RawAction;
+    /// Action value used by `learn_from_timesteps`.
+    type RawAction: RawAction<Self::Error, Environment = <Self::ActionSpace as TensorBatchTypes>::Batch>;
 
     /// Selects actions from observations shaped `[batch_size, ...observation_shape]`.
     #[allow(clippy::type_complexity)]
     fn act_raw(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
-    ) -> Result<
-        AgentActions<Self::RawAction, <Self::ActionSpace as TensorBatchTypes>::Batch>,
-        Self::Error,
-    >;
+    ) -> Result<Self::RawAction, Self::Error>;
 
     /// Selects environment actions from observations shaped `[batch_size, ...observation_shape]`.
     fn act(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
     ) -> Result<<Self::ActionSpace as TensorBatchTypes>::Batch, Self::Error> {
-        Ok(self.act_raw(observations)?.environment)
+        self.act_raw(observations)?.environment()
     }
 
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
@@ -79,7 +83,7 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     fn learn_from_timesteps(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
-        actions: AgentActions<Self::RawAction, <Self::ActionSpace as TensorBatchTypes>::Batch>,
+        raw_actions: Self::RawAction,
         step: MultiGymStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>,
     ) -> Result<(), Self::Error>;
 }
@@ -186,8 +190,8 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use super::Agent;
     use super::test_support::{FixedContinuousEnv, FixedEnv};
-    use super::{Agent, AgentActions};
     use crate::{
         gym::{Gym, MultiGym, MultiGymStepInfo, VectorizedGymError, VectorizedGymWrapper},
         spaces::{BoxSpace, Discrete},
@@ -205,15 +209,11 @@ mod tests {
         type RawAction = Tensor<2, Int>;
 
         /// Returns zero Int actions `[batch_size, 1]` for Float observations `[batch_size, features]` on the observation device.
-        fn act_raw(
-            &mut self,
-            observations: &Tensor<2>,
-        ) -> Result<AgentActions<Tensor<2, Int>, Tensor<2, Int>>, Self::Error> {
-            let actions = Tensor::zeros([observations.dims()[0], 1], &observations.device());
-            Ok(AgentActions {
-                raw: actions.clone(),
-                environment: actions,
-            })
+        fn act_raw(&mut self, observations: &Tensor<2>) -> Result<Tensor<2, Int>, Self::Error> {
+            Ok(Tensor::zeros(
+                [observations.dims()[0], 1],
+                &observations.device(),
+            ))
         }
 
         /// Steps observation batches `[num_envs, 4]` with scalar action batches `[num_envs, 1]`.
@@ -237,7 +237,7 @@ mod tests {
         fn learn_from_timesteps(
             &mut self,
             _observations: &Tensor<2>,
-            _actions: AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+            _raw_actions: Tensor<2, Int>,
             _step: MultiGymStepInfo<(), Tensor<1>>,
         ) -> Result<(), Self::Error> {
             Ok(())

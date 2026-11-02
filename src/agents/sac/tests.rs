@@ -734,7 +734,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
 
     let observations = env.reset().unwrap();
     let actions = agent.act_raw(&observations).unwrap();
-    let mut bad_step = env.step(actions.environment.clone()).unwrap();
+    let mut bad_step = env.step(actions.clone()).unwrap();
     bad_step.dones.pop();
     assert!(
         agent
@@ -744,7 +744,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
 
     let observations = env.reset().unwrap();
     let actions = agent.act_raw(&observations).unwrap();
-    let step = env.step(actions.environment.clone()).unwrap();
+    let step = env.step(actions.clone()).unwrap();
     agent
         .learn_from_timesteps(&observations, actions, step)
         .unwrap();
@@ -753,11 +753,11 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
 
 #[test]
 fn caller_collected_training_matches_learn() {
-        struct Parameters(Vec<f32>);
+    struct Parameters(Vec<f32>);
 
-        impl ModuleVisitor for Parameters {
-            /// Visits parameter values while preserving their tensor shape.
-            fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
+    impl ModuleVisitor for Parameters {
+        /// Visits parameter values while preserving their tensor shape.
+        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
             self.0
                 .extend(param.val().into_data().try_to_vec::<f32>().unwrap());
         }
@@ -821,7 +821,7 @@ fn caller_collected_training_matches_learn() {
     let mut observations = caller_env.reset().unwrap();
     for _ in 0..2 {
         let actions = caller_agent.act_raw(&observations).unwrap();
-        let step = caller_env.step(actions.environment.clone()).unwrap();
+        let step = caller_env.step(actions.clone()).unwrap();
         let next_observations = step.observations.clone();
         caller_agent
             .learn_from_timesteps(&observations, actions, step)

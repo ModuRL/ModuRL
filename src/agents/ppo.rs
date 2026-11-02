@@ -19,7 +19,7 @@ use crate::{
     objectives::clipped_value_loss,
     parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
     sampling::{SamplingError, shuffle_with_device_rng},
-    spaces::{ActionMap, ObservationSpace},
+    spaces::{ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace, SpaceError},
     tensor_operations::{clamp_with_boundary_gradients, normalize_tensor},
     tensor_rank::{NextRank, PrevRank},
 };
@@ -100,7 +100,87 @@ where
     }
 }
 
-use super::{Agent, AgentActions};
+use super::{Agent, RawAction};
+
+/// Policy samples shaped `[num_envs, ...policy_shape]` with their action-space mapping.
+#[derive(Debug, Clone)]
+pub struct PolicyActions<AS, const L: usize> {
+    /// Policy sample tensor with shape `[num_envs, ...policy_shape]`.
+    pub neurons: Tensor<L>,
+    space: AS,
+}
+
+impl<AS, const L: usize> PolicyActions<AS, L> {
+    pub(crate) fn new(neurons: Tensor<L>, space: AS) -> Self {
+        Self { neurons, space }
+    }
+
+    pub(crate) fn environment_batch(
+        &self,
+    ) -> Result<<AS as PolicyActionMap<L>>::Environment, SpaceError>
+    where
+        AS: PolicyActionMap<L>,
+    {
+        self.space.map_policy_action(self.neurons.clone())
+    }
+}
+
+#[doc(hidden)]
+pub trait PolicyActionMap<const L: usize> {
+    type Environment;
+
+    fn map_policy_action(&self, neurons: Tensor<L>) -> Result<Self::Environment, SpaceError>;
+}
+
+impl PolicyActionMap<2> for Discrete {
+    type Environment = <Self as TensorBatchTypes>::Batch;
+
+    fn map_policy_action(&self, neurons: Tensor<2>) -> Result<Self::Environment, SpaceError> {
+        <Self as ActionMap<2, 2>>::tensor_from_neurons(self, neurons)
+    }
+}
+
+impl<const R: usize> PolicyActionMap<R> for BoxSpace<R>
+where
+    Tensor<R>: PrevRank,
+{
+    type Environment = <Self as TensorBatchTypes>::Batch;
+
+    fn map_policy_action(&self, neurons: Tensor<R>) -> Result<Self::Environment, SpaceError> {
+        <Self as ActionMap<R, R>>::tensor_from_neurons(self, neurons)
+    }
+}
+
+impl<AS, const L: usize, AE, GE> RawAction<PPOError<AE, GE, SpaceError>> for PolicyActions<AS, L>
+where
+    AS: PolicyActionMap<L>,
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
+{
+    type Environment = <AS as PolicyActionMap<L>>::Environment;
+
+    fn environment(&self) -> Result<Self::Environment, PPOError<AE, GE, SpaceError>> {
+        self.space
+            .map_policy_action(self.neurons.clone())
+            .map_err(PPOError::SpaceError)
+    }
+}
+
+impl<AS, const L: usize, AE, GE> RawAction<super::a2c::A2CError<AE, GE, SpaceError>>
+    for PolicyActions<AS, L>
+where
+    AS: PolicyActionMap<L>,
+    AE: std::fmt::Debug,
+    GE: std::fmt::Debug,
+{
+    type Environment = <AS as PolicyActionMap<L>>::Environment;
+
+    fn environment(&self) -> Result<Self::Environment, super::a2c::A2CError<AE, GE, SpaceError>> {
+        self.space
+            .map_policy_action(self.neurons.clone())
+            .map_err(super::a2c::A2CError::SpaceError)
+    }
+}
 
 #[derive(Debug, Clone)]
 struct PPOPreparedExperience {
@@ -1225,7 +1305,6 @@ where
                 Self::validate_timestep_batch(
                     &observations,
                     &collection_action.policy_actions,
-                    &collection_action.environment_actions,
                     &step_info,
                 )?;
                 Self::check_critic_dtype(&collection_action.values, step_info.rewards.dtype())?;
@@ -1253,7 +1332,6 @@ where
     fn validate_timestep_batch<K: Basic, const U: usize>(
         observations: &Tensor<O, K>,
         raw_actions: &Tensor<L>,
-        environment_actions: &AS::Batch,
         step: &MultiGymStepInfo<I, Tensor<U, K>>,
     ) -> Result<usize, PPOError<N::Error, GE, AS::Error>>
     where
@@ -1263,7 +1341,6 @@ where
         let count = observations.dims()[0];
         for (field, actual) in [
             ("raw actions", raw_actions.dims()[0]),
-            ("environment actions", environment_actions.dims()[0]),
             ("done flags", step.dones.len()),
             ("truncation flags", step.truncateds.len()),
             ("terminal observations", step.terminal_observations.len()),
@@ -1389,7 +1466,10 @@ impl<
 where
     N: PPONetwork<O, H, L, InputKind = OS::Kind>,
     OS: ObservationSpace<O, Item = Tensor<U, <OS as crate::tensor_rank::TensorBatchTypes>::Kind>>,
-    AS: ActionMap<L, A>,
+    AS: ActionMap<L, A>
+        + ActionSpace<A, Error = SpaceError>
+        + PolicyActionMap<L, Environment = <AS as TensorBatchTypes>::Batch>
+        + Clone,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank + NextRank,
@@ -1403,26 +1483,16 @@ where
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
-    type RawAction = Tensor<L>;
+    type RawAction = PolicyActions<AS, L>;
 
-    /// Selects environment actions `[batch, ...action_shape]` for observations
+    /// Selects policy samples `[batch, ...policy_shape]` for observations
     /// `[batch, ...observation_shape]`.
-    fn act_raw(
-        &mut self,
-        observation: &OS::Batch,
-    ) -> Result<AgentActions<Tensor<L>, AS::Batch>, Self::Error> {
+    fn act_raw(&mut self, observation: &OS::Batch) -> Result<PolicyActions<AS, L>, Self::Error> {
         let latent_observations = self
             .latent_observations(observation.clone())
             .map_err(PPOError::NetworkError)?;
         let neurons = self.act_neurons(&latent_observations)?;
-        let actions = self
-            .action_space
-            .tensor_from_neurons(neurons.clone())
-            .map_err(PPOError::SpaceError)?;
-        Ok(AgentActions {
-            raw: neurons,
-            environment: actions,
-        })
+        Ok(PolicyActions::new(neurons, self.action_space.clone()))
     }
 
     #[cfg_attr(
@@ -1466,11 +1536,11 @@ where
     fn learn_from_timesteps(
         &mut self,
         observations: &OS::Batch,
-        actions: AgentActions<Tensor<L>, AS::Batch>,
+        raw_actions: PolicyActions<AS, L>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<(), Self::Error> {
         let environment_count =
-            Self::validate_timestep_batch(observations, &actions.raw, &actions.environment, &step)?;
+            Self::validate_timestep_batch(observations, &raw_actions.neurons, &step)?;
         if environment_count == 0 {
             return Err(PPOConfigurationError::ZeroEnvironments.into());
         }
@@ -1496,16 +1566,22 @@ where
             let latent_observations = validation
                 .forward_observations(observations.clone().without_autodiff())
                 .map_err(PPOError::NetworkError)?;
-            let evaluated =
-                self.evaluate_collection_action(&validation, &latent_observations, &actions.raw)?;
+            let evaluated = self.evaluate_collection_action(
+                &validation,
+                &latent_observations,
+                &raw_actions.neurons,
+            )?;
+            let environment_actions = raw_actions
+                .environment_batch()
+                .map_err(PPOError::SpaceError)?;
             Self::check_critic_dtype(&evaluated.values, step.rewards.dtype())?;
             let first_collection_timestep = self
                 .schedule_progress
                 .elapsed_steps()
                 .saturating_add(self.rollout_buffer.len() * environment_count);
             let collection_action = PPOCollectionAction {
-                policy_actions: actions.raw,
-                environment_actions: actions.environment,
+                policy_actions: raw_actions.neurons,
+                environment_actions,
                 log_probs: evaluated.log_probs,
                 values: evaluated.values,
             };

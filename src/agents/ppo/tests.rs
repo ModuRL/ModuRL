@@ -230,7 +230,7 @@ mod schedule_tests {
     use crate::{
         agents::Agent,
         distributions::{CategoricalDistribution, GaussianDistribution},
-        gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymWrapper},
+        gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
         spaces::{BoxSpace, Discrete},
     };
@@ -1363,6 +1363,144 @@ mod schedule_tests {
             logger.completed_episodes,
             [(0, 2.0, 2, true, false, 3), (1, 2.0, 2, false, true, 4)]
         );
+    }
+
+    #[test]
+    fn caller_collected_rollout_matches_learn() {
+        struct Parameters(Vec<f32>);
+
+        impl ModuleVisitor for Parameters {
+            fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
+                self.0
+                    .extend(param.val().into_data().try_to_vec::<f32>().unwrap());
+            }
+        }
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let build_env = || {
+            VectorizedGymWrapper::new(vec![
+                TwoStepTestGym::new(device.clone(), false),
+                TwoStepTestGym::new(device.clone(), true),
+            ])
+            .unwrap()
+        };
+        let build_agent = |observation_space, action_space| {
+            let networks = SeparatePPONetwork::builder()
+                .actor_network(ProbabilisticPolicyModel::new(
+                    mlp(4, 2, &device),
+                    CategoricalDistribution,
+                ))
+                .critic_network(mlp(4, 1, &device))
+                .actor_optimizer(SgdConfig::new().init())
+                .critic_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(1e-3)
+                .critic_learning_rate(1e-3)
+                .build()
+                .unwrap();
+            PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
+                .observation_space(observation_space)
+                .action_space(action_space)
+                .network_info(networks)
+                .batch_size(4)
+                .mini_batch_size(4)
+                .num_epochs(1)
+                .training_horizon(8)
+                .build()
+                .unwrap()
+        };
+
+        device.seed(153);
+        let mut learned_env = build_env();
+        let mut learned_agent =
+            build_agent(learned_env.observation_space(), learned_env.action_space());
+        learned_agent.learn(&mut learned_env, 4).unwrap();
+        let mut learned_parameters = Parameters(Vec::new());
+        learned_agent.network().visit(&mut learned_parameters);
+
+        device.seed(153);
+        let mut caller_env = build_env();
+        let mut caller_agent =
+            build_agent(caller_env.observation_space(), caller_env.action_space());
+        let mut observations = caller_env.reset().unwrap();
+        for _ in 0..2 {
+            let raw_actions = caller_agent.act_raw(&observations).unwrap();
+            let step = caller_env
+                .step(raw_actions.environment_batch().unwrap())
+                .unwrap();
+            let next_observations = step.observations.clone();
+            caller_agent
+                .learn_from_timesteps(&observations, raw_actions, step)
+                .unwrap();
+            observations = next_observations;
+        }
+        let mut caller_parameters = Parameters(Vec::new());
+        caller_agent.network().visit(&mut caller_parameters);
+        assert_eq!(learned_parameters.0, caller_parameters.0);
+    }
+
+    #[test]
+    fn caller_collected_rollout_rejects_environment_count_changes() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = vec![
+            TwoStepTestGym::new(device.clone(), false),
+            TwoStepTestGym::new(device.clone(), true),
+        ]
+        .try_into()
+        .unwrap();
+        let mut agent = PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(
+                SeparatePPONetwork::builder()
+                    .actor_network(ProbabilisticPolicyModel::new(
+                        mlp(4, 2, &device),
+                        CategoricalDistribution,
+                    ))
+                    .critic_network(mlp(4, 1, &device))
+                    .actor_optimizer(SgdConfig::new().init())
+                    .critic_optimizer(SgdConfig::new().init())
+                    .actor_learning_rate(1e-3)
+                    .critic_learning_rate(1e-3)
+                    .build()
+                    .unwrap(),
+            )
+            .batch_size(4)
+            .mini_batch_size(4)
+            .num_epochs(1)
+            .training_horizon(8)
+            .build()
+            .unwrap();
+
+        let observations = env.reset().unwrap();
+        let raw_actions = agent.act_raw(&observations).unwrap();
+        let step = env.step(raw_actions.environment_batch().unwrap()).unwrap();
+        let next_observations = step.observations.clone();
+        agent
+            .learn_from_timesteps(&observations, raw_actions, step)
+            .unwrap();
+
+        let mut single_env = VectorizedGymWrapper::from(TwoStepTestGym::new(device.clone(), false));
+        let single_observations = single_env.reset().unwrap();
+        let single_actions = agent.act_raw(&single_observations).unwrap();
+        let single_step = single_env
+            .step(single_actions.environment_batch().unwrap())
+            .unwrap();
+        assert!(matches!(
+            agent.learn_from_timesteps(&single_observations, single_actions, single_step),
+            Err(PPOError::BatchLengthMismatch {
+                field: "environment count",
+                expected: 2,
+                actual: 1,
+            })
+        ));
+
+        let raw_actions = agent.act_raw(&next_observations).unwrap();
+        let step = env.step(raw_actions.environment_batch().unwrap()).unwrap();
+        agent
+            .learn_from_timesteps(&next_observations, raw_actions, step)
+            .unwrap();
     }
 
     #[test]

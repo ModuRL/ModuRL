@@ -1,7 +1,7 @@
 //! Shared collection and training for deterministic off-policy actor-critic agents.
 
 use super::{
-    AgentActions, ReplayStorageConfig,
+    ReplayStorageConfig,
     action_value_critic::{
         ActionValueCritic, ActionValueCriticError, ActionValueCriticNetwork,
         interpolate_target_model,
@@ -1271,7 +1271,7 @@ where
     pub(crate) fn learn_from_timesteps<I, K: Autodiff, const U: usize>(
         &mut self,
         observations: &Tensor<O, K>,
-        actions: AgentActions<Tensor<A>, Tensor<A>>,
+        actions: Tensor<A>,
         step: MultiGymStepInfo<I, Tensor<U, K>>,
         logger: &mut dyn DeterministicActorCriticLogger<I, A>,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
@@ -1281,13 +1281,13 @@ where
     {
         let count = step.dones.len();
         self.validate_environment_count(count)?;
-        let validated_count = self.validate_timestep(observations, &actions.raw, &step)?;
+        let validated_count = self.validate_timestep(observations, &actions, &step)?;
         self.environment_count = Some(validated_count);
         let mut episodes = match self.timestep_episodes.take() {
             Some(episodes) if episodes.returns.len() == count => episodes,
             _ => EpisodeTracker::new(count),
         };
-        let result = self.collect_timestep(observations, actions.raw, step, &mut episodes, logger);
+        let result = self.collect_timestep(observations, actions, step, &mut episodes, logger);
         self.timestep_episodes = Some(episodes);
         result
     }

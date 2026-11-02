@@ -12,7 +12,6 @@ use super::{
 };
 use crate::{
     agents::Agent,
-    agents::AgentActions,
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     objectives::bellman_targets,
@@ -177,12 +176,8 @@ where
     fn act_raw(
         &mut self,
         observations: &Tensor<R, S::Kind>,
-    ) -> Result<AgentActions<Tensor<2, Int>, Tensor<2, Int>>, Self::Error> {
-        let actions = self.inner.act(observations)?;
-        Ok(AgentActions {
-            raw: actions.clone(),
-            environment: actions,
-        })
+    ) -> Result<Tensor<2, Int>, Self::Error> {
+        self.inner.act(observations)
     }
 
     /// Trains with native observations [num_envs, ...observation_shape] and Int actions [num_envs, 1].
@@ -210,7 +205,7 @@ where
     fn learn_from_timesteps(
         &mut self,
         observations: &Tensor<R, S::Kind>,
-        actions: AgentActions<Tensor<2, Int>, Tensor<2, Int>>,
+        actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
     ) -> Result<(), Self::Error> {
         self.inner
@@ -291,7 +286,7 @@ mod tests {
 
             let observations = env.reset().unwrap();
             let actions = agent.act_raw(&observations).unwrap();
-            let step = env.step(actions.environment.clone()).unwrap();
+            let step = env.step(actions.clone()).unwrap();
             agent
                 .learn_from_timesteps(&observations, actions, step)
                 .unwrap();

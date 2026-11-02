@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     agents::{
-        Agent, AgentActions,
+        Agent,
         action_value_critic::{
             ActionValueCritic, ActionValueCriticError, ActionValueCriticNetwork,
         },
@@ -294,15 +294,8 @@ where
 
     /// Maps native observations [batch_size, ...observation_shape] to Float exploration actions [batch_size, ...action_shape].
     /// Preserves input kind and dtype; returned actions use the configured dtype and optimization device.
-    fn act_raw(
-        &mut self,
-        observations: &Tensor<O, K>,
-    ) -> Result<AgentActions<Tensor<A>, Tensor<A>>, Self::Error> {
-        let actions = self.inner.act(observations)?.without_autodiff();
-        Ok(AgentActions {
-            raw: actions.clone(),
-            environment: actions,
-        })
+    fn act_raw(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
+        Ok(self.inner.act(observations)?.without_autodiff())
     }
 
     /// Trains from native observation batches, Float action batches, and rewards [num_envs, 1].
@@ -328,7 +321,7 @@ where
     fn learn_from_timesteps(
         &mut self,
         observations: &Tensor<O, K>,
-        actions: AgentActions<Tensor<A>, Tensor<A>>,
+        actions: Tensor<A>,
         step: MultiGymStepInfo<I, Tensor<U, K>>,
     ) -> Result<(), Self::Error> {
         self.inner
@@ -500,7 +493,7 @@ mod tests {
 
             let observations = env.reset().unwrap();
             let actions = agent.act_raw(&observations).unwrap();
-            let step = env.step(actions.environment.clone()).unwrap();
+            let step = env.step(actions.clone()).unwrap();
             agent
                 .learn_from_timesteps(&observations, actions, step)
                 .unwrap();
@@ -612,7 +605,7 @@ mod tests {
         let mut observations = caller_env.reset().unwrap();
         for _ in 0..2 {
             let actions = caller_agent.act_raw(&observations).unwrap();
-            let step = caller_env.step(actions.environment.clone()).unwrap();
+            let step = caller_env.step(actions.clone()).unwrap();
             let next_observations = step.observations.clone();
             caller_agent
                 .learn_from_timesteps(&observations, actions, step)

@@ -569,10 +569,7 @@ fn caller_collected_steps_reject_length_mismatches_and_advance_epsilon() {
         agent
             .learn_from_timesteps(
                 &observations,
-                crate::agents::AgentActions {
-                    raw: actions.clone(),
-                    environment: actions,
-                },
+                actions.clone(),
                 bad_step,
                 &mut Logger::default(),
             )
@@ -583,15 +580,7 @@ fn caller_collected_steps_reject_length_mismatches_and_advance_epsilon() {
     let actions = agent.act(&observations).unwrap();
     let step = env.step(actions.clone()).unwrap();
     agent
-        .learn_from_timesteps(
-            &observations,
-            crate::agents::AgentActions {
-                raw: actions.clone(),
-                environment: actions,
-            },
-            step,
-            &mut Logger::default(),
-        )
+        .learn_from_timesteps(&observations, actions, step, &mut Logger::default())
         .unwrap();
     assert!(agent.current_epsilon < epsilon_before);
 }

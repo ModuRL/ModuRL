@@ -499,15 +499,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     bad_step.dones.pop();
     assert!(
         agent
-            .learn_from_timesteps(
-                &observations,
-                crate::agents::AgentActions {
-                    raw: actions.clone(),
-                    environment: actions,
-                },
-                bad_step,
-                &mut logger,
-            )
+            .learn_from_timesteps(&observations, actions.clone(), bad_step, &mut logger,)
             .is_err()
     );
 
@@ -515,15 +507,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     let actions = agent.act(&observations).unwrap().without_autodiff();
     let step = env.step(actions.clone()).unwrap();
     agent
-        .learn_from_timesteps(
-            &observations,
-            crate::agents::AgentActions {
-                raw: actions.clone(),
-                environment: actions,
-            },
-            step,
-            &mut logger,
-        )
+        .learn_from_timesteps(&observations, actions, step, &mut logger)
         .unwrap();
     assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
 }
