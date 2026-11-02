@@ -62,6 +62,7 @@ pub enum GAEError {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GAE {
     lambda: f32,
+    value_lambda: f32,
 }
 
 impl GAE {
@@ -70,17 +71,35 @@ impl GAE {
         if !lambda.is_finite() || !(0.0..=1.0).contains(&lambda) {
             return Err(GAEError::InvalidLambda);
         }
-        Ok(Self { lambda })
+        Ok(Self {
+            lambda,
+            value_lambda: lambda,
+        })
+    }
+
+    /// Uses `value_lambda` for the value targets' λ-returns; rejects a non-finite value or one
+    /// outside `0..=1`.
+    pub fn with_value_lambda(mut self, value_lambda: f32) -> Result<Self, GAEError> {
+        if !value_lambda.is_finite() || !(0.0..=1.0).contains(&value_lambda) {
+            return Err(GAEError::InvalidLambda);
+        }
+        self.value_lambda = value_lambda;
+        Ok(self)
     }
 
     pub fn lambda(&self) -> f32 {
         self.lambda
     }
+
+    /// Returns the lambda used for value-target λ-returns.
+    pub fn value_lambda(&self) -> f32 {
+        self.value_lambda
+    }
 }
 
 impl AdvantageEstimator for GAE {
-    /// Computes GAE advantages shaped `[time, env_count, 1]`; value targets are the λ-returns
-    /// `values + advantages`.
+    /// Computes GAE advantages shaped `[time, env_count, 1]`; value targets are the
+    /// `value_lambda` λ-returns.
     fn estimate(
         &self,
         rewards: &Tensor<3>,
@@ -90,44 +109,67 @@ impl AdvantageEstimator for GAE {
         bootstrapped_values: &Tensor<2>,
         gamma: f32,
     ) -> AdvantageEstimate {
-        let device = values.device();
         let dtype = values.dtype();
         let rewards = rewards.clone();
         let next_dones = next_dones.clone().float().cast(dtype);
         let next_truncateds = next_truncateds.clone().float().cast(dtype);
-        let bootstrapped_values = bootstrapped_values.clone();
+        let bootstrapped_values = bootstrapped_values.clone().detach();
         let values = values.clone().detach();
         let masks = (1.0f64 - next_dones) * (1.0f64 - next_truncateds);
-        let mut next_value = bootstrapped_values.detach();
-        let mut gae = Tensor::zeros(next_value.dims(), (&device, dtype));
-        let mut advantages = Vec::with_capacity(rewards.dims()[0]);
-        // Environments are independent; only time has a recurrence.
-        for time in (0..rewards.dims()[0]).rev() {
-            let mask = masks
-                .clone()
-                .slice_dim(0, time..time + 1)
-                .squeeze_dim::<2>(0);
-            let value = values
-                .clone()
-                .slice_dim(0, time..time + 1)
-                .squeeze_dim::<2>(0);
-            let reward = rewards
-                .clone()
-                .slice_dim(0, time..time + 1)
-                .squeeze_dim::<2>(0);
-            let delta = reward + next_value * mask.clone() * f64::from(gamma) - value.clone();
-            gae = delta + gae * mask * (f64::from(gamma) * f64::from(self.lambda));
-            advantages.push(gae.clone());
-            next_value = value;
-        }
-        advantages.reverse();
-        let advantages = Tensor::stack(advantages, 0);
-        let value_targets = values.clone() + advantages.clone();
+        let time_steps = rewards.dims()[0];
+        let next_values = if time_steps == 1 {
+            bootstrapped_values.unsqueeze_dim::<3>(0)
+        } else {
+            Tensor::cat(
+                vec![
+                    values.clone().slice_dim(0, 1..time_steps),
+                    bootstrapped_values.unsqueeze_dim::<3>(0),
+                ],
+                0,
+            )
+        };
+        let deltas = rewards + next_values * masks.clone() * f64::from(gamma) - values.clone();
+        let advantages = discounted_sum(&deltas, &masks, f64::from(gamma) * f64::from(self.lambda));
+        let value_advantages = if self.value_lambda == self.lambda {
+            advantages.clone()
+        } else {
+            discounted_sum(
+                &deltas,
+                &masks,
+                f64::from(gamma) * f64::from(self.value_lambda),
+            )
+        };
+
         AdvantageEstimate {
+            value_targets: values + value_advantages,
             advantages,
-            value_targets,
         }
     }
+}
+
+/// Backward recurrence `acc_t = delta_t + discount * mask_t * acc_{t+1}` over time for tensors
+/// shaped `[time, env_count, 1]`.
+fn discounted_sum(deltas: &Tensor<3>, masks: &Tensor<3>, discount: f64) -> Tensor<3> {
+    let dims = deltas.dims();
+    let device = deltas.device();
+    let dtype = deltas.dtype();
+    let mut accumulator = Tensor::zeros([dims[1], dims[2]], (&device, dtype));
+    let mut returns = Vec::with_capacity(dims[0]);
+    // Environments are independent; only time has a recurrence.
+    for time in (0..dims[0]).rev() {
+        let mask = masks
+            .clone()
+            .slice_dim(0, time..time + 1)
+            .squeeze_dim::<2>(0);
+        let delta = deltas
+            .clone()
+            .slice_dim(0, time..time + 1)
+            .squeeze_dim::<2>(0);
+        accumulator = delta + accumulator * mask * discount;
+        returns.push(accumulator.clone());
+    }
+    returns.reverse();
+    Tensor::stack(returns, 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
@@ -332,6 +374,60 @@ mod tests {
     }
 
     #[test]
+    fn gae_handles_single_step_rollout() {
+        let device = Device::flex().autodiff();
+        let reward_values = [1.0_f32, 0.5];
+        let critic_values = [0.2_f32, 0.8];
+        let dones = [false, true];
+        let truncateds = [false, false];
+        let bootstrap_values = [0.4_f32, 1.2];
+        let rewards =
+            Tensor::<3>::from_data(TensorData::new(reward_values.to_vec(), [1, 2, 1]), &device);
+        let values =
+            Tensor::<3>::from_data(TensorData::new(critic_values.to_vec(), [1, 2, 1]), &device);
+        let next_dones = Tensor::from_data(TensorData::new(dones.to_vec(), [1, 2, 1]), &device);
+        let next_truncateds =
+            Tensor::from_data(TensorData::new(truncateds.to_vec(), [1, 2, 1]), &device);
+        let bootstrapped_values =
+            Tensor::<2>::from_data(TensorData::new(bootstrap_values.to_vec(), [2, 1]), &device);
+        let estimate = GAE::new(0.8).unwrap().estimate(
+            &rewards,
+            &values,
+            &next_dones,
+            &next_truncateds,
+            &bootstrapped_values,
+            0.9,
+        );
+        assert_eq!(estimate.advantages.dims(), [1, 2, 1]);
+        assert_eq!(estimate.value_targets.dims(), [1, 2, 1]);
+        let actual_advantages = estimate
+            .advantages
+            .into_data()
+            .convert::<f64>()
+            .try_to_vec::<f64>()
+            .unwrap();
+        let actual_value_targets = estimate
+            .value_targets
+            .into_data()
+            .convert::<f64>()
+            .try_to_vec::<f64>()
+            .unwrap();
+
+        for env in 0..2 {
+            let mask = if dones[env] || truncateds[env] {
+                0.0
+            } else {
+                1.0
+            };
+            let delta =
+                reward_values[env] + 0.9 * bootstrap_values[env] * mask - critic_values[env];
+            let value_target = critic_values[env] + delta;
+            assert!((actual_advantages[env] - f64::from(delta)).abs() < 1e-5);
+            assert!((actual_value_targets[env] - f64::from(value_target)).abs() < 1e-5);
+        }
+    }
+
+    #[test]
     fn n_step_matches_scalar_reference_across_environments_and_episode_boundaries() {
         let device = Device::flex().autodiff();
         let (reward_tensor, value_tensor, done_tensor, truncated_tensor, bootstrap_tensor) =
@@ -477,11 +573,99 @@ mod tests {
     }
 
     #[test]
+    fn gae_with_value_lambda_uses_it_only_for_value_targets() {
+        let device = Device::flex().autodiff();
+        let (reward_tensor, value_tensor, done_tensor, truncated_tensor, bootstrap_tensor) =
+            rollout_tensors(&device);
+        for dtype in [DType::F32, DType::F64] {
+            let rewards = reward_tensor.clone().cast(dtype);
+            let values = value_tensor.clone().cast(dtype);
+            let bootstrapped_values = bootstrap_tensor.clone().cast(dtype);
+            let separate = GAE::new(0.8)
+                .unwrap()
+                .with_value_lambda(1.0)
+                .unwrap()
+                .estimate(
+                    &rewards,
+                    &values,
+                    &done_tensor,
+                    &truncated_tensor,
+                    &bootstrapped_values,
+                    0.9,
+                );
+            let advantage_reference = GAE::new(0.8).unwrap().estimate(
+                &rewards,
+                &values,
+                &done_tensor,
+                &truncated_tensor,
+                &bootstrapped_values,
+                0.9,
+            );
+            let value_target_reference = GAE::new(1.0).unwrap().estimate(
+                &rewards,
+                &values,
+                &done_tensor,
+                &truncated_tensor,
+                &bootstrapped_values,
+                0.9,
+            );
+            let separate_advantages = separate
+                .advantages
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            let advantage_reference = advantage_reference
+                .advantages
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            let separate_value_targets = separate
+                .value_targets
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            let value_target_reference = value_target_reference
+                .value_targets
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            for sample_index in 0..9 {
+                assert!(
+                    (separate_advantages[sample_index] - advantage_reference[sample_index]).abs()
+                        < 1e-5
+                );
+                assert!(
+                    (separate_value_targets[sample_index] - value_target_reference[sample_index])
+                        .abs()
+                        < 1e-5
+                );
+            }
+        }
+    }
+
+    #[test]
     fn gae_rejects_invalid_lambda() {
         for lambda in [-0.1, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert_eq!(GAE::new(lambda), Err(GAEError::InvalidLambda));
+            assert_eq!(
+                GAE::new(0.9).unwrap().with_value_lambda(lambda),
+                Err(GAEError::InvalidLambda)
+            );
         }
         assert_eq!(GAE::new(0.0).unwrap().lambda(), 0.0);
         assert_eq!(GAE::new(1.0).unwrap().lambda(), 1.0);
+        assert_eq!(GAE::new(0.9).unwrap().value_lambda(), 0.9);
+        assert_eq!(
+            GAE::new(0.9)
+                .unwrap()
+                .with_value_lambda(1.0)
+                .unwrap()
+                .value_lambda(),
+            1.0
+        );
     }
 }
