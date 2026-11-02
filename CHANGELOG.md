@@ -99,6 +99,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
 - Add the built-in `NStep::new(n)` advantage estimator for n-step returns; `NStep::new(0)` returns
   `NStepError::ZeroSteps`.
 - Add `GAE::with_value_lambda(..)` to use a separate lambda for value targets.
+- Add the built-in `UPGO::new(value_estimator)` advantage estimator for upgoing policy updates.
 
 ### Environment wrappers and device placement
 

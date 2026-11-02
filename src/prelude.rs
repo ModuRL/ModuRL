@@ -5,7 +5,7 @@
 //! the tensor framework and ModuRL Gym are intentionally left explicit.
 
 pub use crate::advantage_estimation::{
-    AdvantageEstimate, AdvantageEstimator, GAE, GAEError, NStep, NStepError,
+    AdvantageEstimate, AdvantageEstimator, GAE, GAEError, NStep, NStepError, UPGO,
 };
 pub use crate::agents::{
     Agent,

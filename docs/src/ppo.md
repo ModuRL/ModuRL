@@ -24,6 +24,7 @@ PPO estimates advantages with `GAE` (lambda `0.95`) by default. Pass any
 uses `values + advantages` as those targets.
 The built-in `NStep::new(n)?` estimator is an alternative for n-step returns.
 Use `GAE::new(0.95)?.with_value_lambda(1.0)?` to use a separate lambda for value targets.
+The built-in `UPGO::new(GAE::new(0.95)?)` estimator is also available for upgoing policy updates.
 
 The agent infers its model group from `PPONetwork::ModelGroup`.
 Custom `PPONetwork<O, H, L>` implementations must set `ModelGroup` to
