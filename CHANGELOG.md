@@ -93,6 +93,9 @@ they do not imply that all workspace packages build together. See [Remaining mig
 - PPO and A2C builders replace `gae_lambda` with `advantage_estimator`, which accepts any `AdvantageEstimator`.
   `GAE::new(lambda)` returns `GAEError::InvalidLambda` for invalid lambdas instead of
   `PPOConfigurationError::InvalidGaeLambda`; defaults remain 0.95 for PPO and 1.0 for A2C.
+  `AdvantageEstimator::estimate` returns `AdvantageEstimate { advantages, value_targets }`,
+  PPO trains the critic toward `value_targets`, and mismatched estimates return
+  `AdvantageEstimateMismatch`.
 
 ### Environment wrappers and device placement
 

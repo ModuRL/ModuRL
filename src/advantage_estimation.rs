@@ -1,14 +1,24 @@
 use burn::tensor::{Bool, Tensor};
 
-/// Computes per-step advantages for an on-policy rollout.
+/// Advantages and critic value targets for one rollout, each shaped `[time, env_count, 1]`.
+#[derive(Debug, Clone)]
+pub struct AdvantageEstimate {
+    /// Per-step advantages shaped `[time, env_count, 1]`.
+    pub advantages: Tensor<3>,
+    /// Critic value targets shaped `[time, env_count, 1]`.
+    pub value_targets: Tensor<3>,
+}
+
+/// Computes advantages and critic value targets for an on-policy rollout.
 pub trait AdvantageEstimator {
-    /// Returns advantages shaped `[time, env_count, 1]` from `rewards`, `values`, `next_dones`,
-    /// and `next_truncateds` shaped `[time, env_count, 1]`, and `bootstrapped_values` shaped
-    /// `[env_count, 1]` (critic values of the final next observations).
+    /// Returns advantages and value targets shaped `[time, env_count, 1]` from `rewards`,
+    /// `values`, `next_dones`, and `next_truncateds` shaped `[time, env_count, 1]`, and
+    /// `bootstrapped_values` shaped `[env_count, 1]` (critic values of the final next observations).
     ///
-    /// Float inputs share the environment reward dtype and device; the result must too. Rewards
-    /// already include `gamma * V(terminal)` for truncated transitions. Values are detached. PPO
-    /// uses `values + advantages` as value targets.
+    /// Float inputs share the environment reward dtype and device. Both outputs must have shape
+    /// `[time, env_count, 1]` and the reward dtype and device of `values`. Rewards already include
+    /// `gamma * V(terminal)` for truncated transitions. Values are detached. The critic is trained
+    /// toward `value_targets`.
     fn estimate(
         &self,
         rewards: &Tensor<3>,
@@ -17,7 +27,7 @@ pub trait AdvantageEstimator {
         next_truncateds: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f32,
-    ) -> Tensor<3>;
+    ) -> AdvantageEstimate;
 }
 
 impl AdvantageEstimator for Box<dyn AdvantageEstimator> {
@@ -30,7 +40,7 @@ impl AdvantageEstimator for Box<dyn AdvantageEstimator> {
         next_truncateds: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f32,
-    ) -> Tensor<3> {
+    ) -> AdvantageEstimate {
         (**self).estimate(
             rewards,
             values,
@@ -69,7 +79,8 @@ impl GAE {
 }
 
 impl AdvantageEstimator for GAE {
-    /// Computes GAE advantages shaped `[time, env_count, 1]` from rollout tensors.
+    /// Computes GAE advantages shaped `[time, env_count, 1]`; value targets are the λ-returns
+    /// `values + advantages`.
     fn estimate(
         &self,
         rewards: &Tensor<3>,
@@ -78,7 +89,7 @@ impl AdvantageEstimator for GAE {
         next_truncateds: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f32,
-    ) -> Tensor<3> {
+    ) -> AdvantageEstimate {
         let device = values.device();
         let dtype = values.dtype();
         let rewards = rewards.clone();
@@ -110,7 +121,12 @@ impl AdvantageEstimator for GAE {
             next_value = value;
         }
         advantages.reverse();
-        Tensor::stack(advantages, 0)
+        let advantages = Tensor::stack(advantages, 0);
+        let value_targets = values.clone() + advantages.clone();
+        AdvantageEstimate {
+            advantages,
+            value_targets,
+        }
     }
 }
 
@@ -157,7 +173,7 @@ mod tests {
         let bootstrap_tensor =
             Tensor::<2>::from_data(TensorData::new(bootstrap.to_vec(), [3, 1]), &device);
         for dtype in [DType::F32, DType::F64] {
-            let advantages = GAE::new(0.8).unwrap().estimate(
+            let estimate = GAE::new(0.8).unwrap().estimate(
                 &reward_tensor.clone().cast(dtype),
                 &value_tensor.clone().cast(dtype),
                 &done_tensor,
@@ -165,8 +181,16 @@ mod tests {
                 &bootstrap_tensor.clone().cast(dtype),
                 0.9,
             );
-            assert_eq!(advantages.dtype(), dtype);
-            let actual = advantages
+            assert_eq!(estimate.advantages.dtype(), dtype);
+            assert_eq!(estimate.value_targets.dtype(), dtype);
+            let actual_advantages = estimate
+                .advantages
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            let actual_value_targets = estimate
+                .value_targets
                 .into_data()
                 .convert::<f64>()
                 .try_to_vec::<f64>()
@@ -183,7 +207,11 @@ mod tests {
                     let value = values[time][env_idx];
                     let delta = rewards[time][env_idx] + 0.9 * next_value * mask - value;
                     gae = delta + 0.9 * 0.8 * gae * mask;
-                    assert!((actual[time * 3 + env_idx] - f64::from(gae)).abs() < 1e-5);
+                    let sample_index = time * 3 + env_idx;
+                    assert!((actual_advantages[sample_index] - f64::from(gae)).abs() < 1e-5);
+                    assert!(
+                        (actual_value_targets[sample_index] - f64::from(value + gae)).abs() < 1e-5
+                    );
                     next_value = value;
                 }
             }

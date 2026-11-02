@@ -4,7 +4,7 @@
 //! high-use ModuRL types that appear in most examples. External crates such as
 //! the tensor framework and ModuRL Gym are intentionally left explicit.
 
-pub use crate::advantage_estimation::{AdvantageEstimator, GAE, GAEError};
+pub use crate::advantage_estimation::{AdvantageEstimate, AdvantageEstimator, GAE, GAEError};
 pub use crate::agents::{
     Agent,
     a2c::{

@@ -41,6 +41,10 @@ where
 {
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
     CriticRewardDTypeMismatch { critic: DType, reward: DType },
+    #[error(
+        "advantage estimates must match rollout values: shape {expected:?}, dtype {dtype:?}, and device"
+    )]
+    AdvantageEstimateMismatch { expected: [usize; 3], dtype: DType },
     #[error("network failed: {0}")]
     NetworkError(#[source] AE),
     #[error("gym failed: {0}")]
@@ -70,6 +74,9 @@ impl<AE: std::fmt::Debug, GE: std::fmt::Debug, SE: std::fmt::Debug> From<PPOErro
         match error {
             PPOError::CriticRewardDTypeMismatch { critic, reward } => {
                 Self::CriticRewardDTypeMismatch { critic, reward }
+            }
+            PPOError::AdvantageEstimateMismatch { expected, dtype } => {
+                Self::AdvantageEstimateMismatch { expected, dtype }
             }
             PPOError::NetworkError(error) => Self::NetworkError(error),
             PPOError::GymError(error) => Self::GymError(error),

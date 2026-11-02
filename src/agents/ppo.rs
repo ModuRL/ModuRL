@@ -60,6 +60,10 @@ where
 {
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
     CriticRewardDTypeMismatch { critic: DType, reward: DType },
+    #[error(
+        "advantage estimates must match rollout values: shape {expected:?}, dtype {dtype:?}, and device"
+    )]
+    AdvantageEstimateMismatch { expected: [usize; 3], dtype: DType },
     #[error("network failed: {0}")]
     NetworkError(#[source] AE),
     #[error("gym failed: {0}")]
@@ -674,19 +678,32 @@ where
             |experience| &experience.truncateds,
             &values_tensor.device(),
         )?;
-        let advantages = self
-            .advantage_estimator
-            .estimate(
-                &training_rewards,
-                &values_tensor,
-                &next_dones,
-                &truncateds,
-                &bootstrapped_values,
-                self.gamma,
-            )
-            .detach();
+        let estimate = self.advantage_estimator.estimate(
+            &training_rewards,
+            &values_tensor,
+            &next_dones,
+            &truncateds,
+            &bootstrapped_values,
+            self.gamma,
+        );
+        let expected_shape = values_tensor.dims();
+        let expected_dtype = values_tensor.dtype();
+        let expected_device = values_tensor.device();
+        if estimate.advantages.dims() != expected_shape
+            || estimate.advantages.dtype() != expected_dtype
+            || estimate.advantages.device() != expected_device
+            || estimate.value_targets.dims() != expected_shape
+            || estimate.value_targets.dtype() != expected_dtype
+            || estimate.value_targets.device() != expected_device
+        {
+            return Err(PPOError::AdvantageEstimateMismatch {
+                expected: expected_shape,
+                dtype: expected_dtype,
+            });
+        }
 
-        let returns = (values_tensor.clone() + advantages.clone()).detach();
+        let advantages = estimate.advantages.detach();
+        let returns = estimate.value_targets.detach();
         let rollout_explained_variance = compute_explained_variance(&returns, &values_tensor);
 
         let experiences = &mut self.rollout_buffer;
