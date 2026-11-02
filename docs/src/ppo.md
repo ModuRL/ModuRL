@@ -19,8 +19,9 @@ Pass a `SeparatePPONetwork` or `SharedPPONetwork` directly to `.network_info(net
 
 PPO estimates advantages with `GAE` (lambda `0.95`) by default. Pass any
 `AdvantageEstimator` to `.advantage_estimator(..)`, for example
-`.advantage_estimator(GAE::new(0.9)?)`. The critic target is
-`values + advantages`.
+`.advantage_estimator(GAE::new(0.9)?)`. An estimator returns an
+`AdvantageEstimate` with the advantages and the critic's value targets; `GAE`
+uses `values + advantages` as those targets.
 
 The agent infers its model group from `PPONetwork::ModelGroup`.
 Custom `PPONetwork<O, H, L>` implementations must set `ModelGroup` to

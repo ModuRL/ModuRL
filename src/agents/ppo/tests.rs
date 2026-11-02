@@ -228,6 +228,7 @@ mod schedule_tests {
 
     use super::*;
     use crate::{
+        advantage_estimation::AdvantageEstimate,
         agents::Agent,
         distributions::{CategoricalDistribution, GaussianDistribution},
         gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymWrapper},
@@ -371,7 +372,7 @@ mod schedule_tests {
         struct RewardMinusValue;
 
         impl AdvantageEstimator for RewardMinusValue {
-            /// Returns `rewards - values`, shaped `[time, env_count, 1]`, ignoring bootstrap values.
+            /// Returns reward-minus-value advantages and reward value targets, shaped `[time, env_count, 1]`.
             fn estimate(
                 &self,
                 rewards: &Tensor<3>,
@@ -380,8 +381,11 @@ mod schedule_tests {
                 _next_truncateds: &Tensor<3, Bool>,
                 _bootstrapped_values: &Tensor<2>,
                 _gamma: f32,
-            ) -> Tensor<3> {
-                rewards.clone() - values.clone()
+            ) -> AdvantageEstimate {
+                AdvantageEstimate {
+                    advantages: rewards.clone() - values.clone(),
+                    value_targets: rewards.clone(),
+                }
             }
         }
 
@@ -415,6 +419,64 @@ mod schedule_tests {
             .unwrap();
 
         agent.learn(&mut env, 6).unwrap();
+    }
+
+    #[test]
+    fn ppo_rejects_mismatched_advantage_estimate() {
+        struct MismatchedEstimator;
+
+        impl AdvantageEstimator for MismatchedEstimator {
+            /// Returns advantages shaped `[time, env_count, 2]` and value targets shaped `[time, env_count, 1]`.
+            fn estimate(
+                &self,
+                rewards: &Tensor<3>,
+                values: &Tensor<3>,
+                _next_dones: &Tensor<3, Bool>,
+                _next_truncateds: &Tensor<3, Bool>,
+                _bootstrapped_values: &Tensor<2>,
+                _gamma: f32,
+            ) -> AdvantageEstimate {
+                let advantages = rewards.clone() - values.clone();
+                AdvantageEstimate {
+                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 2),
+                    value_targets: rewards.clone(),
+                }
+            }
+        }
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = (0..3)
+            .map(|_| TwoStepTestGym::new(device.clone(), false))
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(actor)
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(networks)
+            .batch_size(6)
+            .mini_batch_size(6)
+            .num_epochs(1)
+            .training_horizon(6)
+            .advantage_estimator(MismatchedEstimator)
+            .build()
+            .unwrap();
+
+        assert!(matches!(
+            agent.learn(&mut env, 6),
+            Err(PPOError::AdvantageEstimateMismatch { .. })
+        ));
     }
 
     #[test]
