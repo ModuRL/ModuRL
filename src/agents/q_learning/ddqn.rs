@@ -169,11 +169,11 @@ where
     type GymError = GE;
     type ObservationSpace = S;
     type ActionSpace = Discrete;
-    type RawAction = Tensor<2, Int>;
+    type TrainingActions = Tensor<2, Int>;
 
     /// Selects U32 Int actions [batch_size, 1] for native rank-R observations [batch_size, ...observation_shape].
     /// Transfers observations to the optimization device and preserves their kind and dtype.
-    fn act_raw(
+    fn act_for_training(
         &mut self,
         observations: &Tensor<R, S::Kind>,
     ) -> Result<Tensor<2, Int>, Self::Error> {
@@ -285,7 +285,7 @@ mod tests {
             assert_eq!(agent.inner.dtype, dtype);
 
             let observations = env.reset().unwrap();
-            let actions = agent.act_raw(&observations).unwrap();
+            let actions = agent.act_for_training(&observations).unwrap();
             let step = env.step(actions.clone()).unwrap();
             agent
                 .learn_from_timesteps(&observations, actions, step)

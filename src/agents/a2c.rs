@@ -7,7 +7,7 @@ use super::{
     Agent,
     ppo::{
         PPOAgent, PPOConfigurationError, PPOError, PPOModelGroup, PPOModelTypes, PPONetwork,
-        PolicyActions, SeparatePPONetwork, SharedPPONetwork,
+        PolicySamples, SeparatePPONetwork, SharedPPONetwork,
     },
 };
 use crate::{buffers::experience::ExperienceBatchError, sampling::SamplingError};
@@ -348,13 +348,16 @@ where
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
-    type RawAction = PolicyActions<AS, A2CError<N::Error, GE, AS::Error>, L, A>;
+    type TrainingActions = PolicySamples<AS, A2CError<N::Error, GE, AS::Error>, L, A>;
 
     /// Selects policy samples `[batch_size, ...policy_shape]` from rank-O observations `[batch_size, ...observation_shape]`.
-    fn act_raw(&mut self, observations: &OS::Batch) -> Result<Self::RawAction, Self::Error> {
+    fn act_for_training(
+        &mut self,
+        observations: &OS::Batch,
+    ) -> Result<Self::TrainingActions, Self::Error> {
         Ok(self
             .inner
-            .act_raw(observations)
+            .act_for_training(observations)
             .map_err(A2CError::from)?
             .with_error(A2CError::SpaceError))
     }
@@ -382,13 +385,13 @@ where
     fn learn_from_timesteps(
         &mut self,
         observations: &OS::Batch,
-        raw_actions: Self::RawAction,
+        training_actions: Self::TrainingActions,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<(), Self::Error> {
         self.inner
             .learn_from_timesteps(
                 observations,
-                raw_actions.with_error(PPOError::SpaceError),
+                training_actions.with_error(PPOError::SpaceError),
                 step,
             )
             .map_err(A2CError::from)
@@ -399,7 +402,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        agents::{RawAction, test_support::FixedEnv},
+        agents::{ToEnvironmentActions, test_support::FixedEnv},
         distributions::CategoricalDistribution,
         gym::{VectorizedGymError, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
@@ -610,9 +613,9 @@ mod tests {
                 .unwrap();
 
         let observations = env.reset().unwrap();
-        let actions = agent.act_raw(&observations).unwrap();
-        let bad_step = env.step(actions.environment().unwrap()).unwrap();
-        let bad_actions = PolicyActions::new(
+        let actions = agent.act_for_training(&observations).unwrap();
+        let bad_step = env.step(actions.to_environment_actions().unwrap()).unwrap();
+        let bad_actions = PolicySamples::new(
             Tensor::zeros([1, 1], &device),
             env.action_space(),
             A2CError::SpaceError,
@@ -620,15 +623,15 @@ mod tests {
         assert!(matches!(
             agent.learn_from_timesteps(&observations, bad_actions, bad_step),
             Err(A2CError::BatchLengthMismatch {
-                field: "raw actions",
+                field: "training actions",
                 expected: 2,
                 actual: 1,
             })
         ));
 
         let observations = env.reset().unwrap();
-        let actions = agent.act_raw(&observations).unwrap();
-        let step = env.step(actions.environment().unwrap()).unwrap();
+        let actions = agent.act_for_training(&observations).unwrap();
+        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         let next_observations = step.observations.clone();
         agent
             .learn_from_timesteps(&observations, actions, step)
@@ -636,9 +639,9 @@ mod tests {
 
         let mut single_env = VectorizedGymWrapper::from(FixedEnv::new(device.clone()));
         let single_observations = single_env.reset().unwrap();
-        let single_actions = agent.act_raw(&single_observations).unwrap();
+        let single_actions = agent.act_for_training(&single_observations).unwrap();
         let single_step = single_env
-            .step(single_actions.environment().unwrap())
+            .step(single_actions.to_environment_actions().unwrap())
             .unwrap();
         assert!(matches!(
             agent.learn_from_timesteps(&single_observations, single_actions, single_step),
@@ -649,8 +652,8 @@ mod tests {
             })
         ));
 
-        let actions = agent.act_raw(&next_observations).unwrap();
-        let step = env.step(actions.environment().unwrap()).unwrap();
+        let actions = agent.act_for_training(&next_observations).unwrap();
+        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         agent
             .learn_from_timesteps(&next_observations, actions, step)
             .unwrap();
@@ -712,8 +715,10 @@ mod tests {
             build_agent(caller_env.observation_space(), caller_env.action_space());
         let mut observations = caller_env.reset().unwrap();
         for _ in 0..2 {
-            let actions = caller_agent.act_raw(&observations).unwrap();
-            let step = caller_env.step(actions.environment().unwrap()).unwrap();
+            let actions = caller_agent.act_for_training(&observations).unwrap();
+            let step = caller_env
+                .step(actions.to_environment_actions().unwrap())
+                .unwrap();
             let next_observations = step.observations.clone();
             caller_agent
                 .learn_from_timesteps(&observations, actions, step)

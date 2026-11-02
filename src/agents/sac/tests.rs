@@ -733,7 +733,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
         .unwrap();
 
     let observations = env.reset().unwrap();
-    let actions = agent.act_raw(&observations).unwrap();
+    let actions = agent.act_for_training(&observations).unwrap();
     let mut bad_step = env.step(actions.clone()).unwrap();
     bad_step.dones.pop();
     assert!(
@@ -743,7 +743,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     );
 
     let observations = env.reset().unwrap();
-    let actions = agent.act_raw(&observations).unwrap();
+    let actions = agent.act_for_training(&observations).unwrap();
     let step = env.step(actions.clone()).unwrap();
     agent
         .learn_from_timesteps(&observations, actions, step)
@@ -814,7 +814,7 @@ fn caller_collected_training_matches_learn() {
     let mut caller_agent = build_agent(caller_env.observation_space(), caller_env.action_space());
     let mut observations = caller_env.reset().unwrap();
     for _ in 0..2 {
-        let actions = caller_agent.act_raw(&observations).unwrap();
+        let actions = caller_agent.act_for_training(&observations).unwrap();
         let step = caller_env.step(actions.clone()).unwrap();
         let next_observations = step.observations.clone();
         caller_agent

@@ -100,16 +100,16 @@ where
     }
 }
 
-use super::{Agent, RawAction};
+use super::{Agent, ToEnvironmentActions};
 
 /// Policy samples shaped `[num_envs, ...policy_shape]` with their action-space mapping.
-pub struct PolicyActions<AS: ActionSpace<A>, E, const L: usize, const A: usize> {
+pub struct PolicySamples<AS: ActionSpace<A>, E, const L: usize, const A: usize> {
     neurons: Tensor<L>,
     space: AS,
     map_error: fn(AS::Error) -> E,
 }
 
-impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> PolicyActions<AS, E, L, A> {
+impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> PolicySamples<AS, E, L, A> {
     /// Wraps policy samples shaped `[num_envs, ...policy_shape]`.
     pub(crate) fn new(neurons: Tensor<L>, space: AS, map_error: fn(AS::Error) -> E) -> Self {
         Self {
@@ -124,8 +124,8 @@ impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> PolicyActions<AS, E,
         &self.neurons
     }
 
-    pub(crate) fn with_error<F>(self, map_error: fn(AS::Error) -> F) -> PolicyActions<AS, F, L, A> {
-        PolicyActions {
+    pub(crate) fn with_error<F>(self, map_error: fn(AS::Error) -> F) -> PolicySamples<AS, F, L, A> {
+        PolicySamples {
             neurons: self.neurons,
             space: self.space,
             map_error,
@@ -133,7 +133,7 @@ impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> PolicyActions<AS, E,
     }
 }
 
-impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> Clone for PolicyActions<AS, E, L, A>
+impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> Clone for PolicySamples<AS, E, L, A>
 where
     AS: Clone,
 {
@@ -147,26 +147,26 @@ where
 }
 
 impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> std::fmt::Debug
-    for PolicyActions<AS, E, L, A>
+    for PolicySamples<AS, E, L, A>
 where
     AS: std::fmt::Debug,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PolicyActions")
+        f.debug_struct("PolicySamples")
             .field("neurons", &self.neurons)
             .field("space", &self.space)
             .finish()
     }
 }
 
-impl<AS, E, const L: usize, const A: usize> RawAction for PolicyActions<AS, E, L, A>
+impl<AS, E, const L: usize, const A: usize> ToEnvironmentActions for PolicySamples<AS, E, L, A>
 where
     AS: ActionMap<L, A>,
 {
-    type Environment = <AS as TensorBatchTypes>::Batch;
+    type Actions = <AS as TensorBatchTypes>::Batch;
     type Error = E;
 
-    fn environment(&self) -> Result<Self::Environment, Self::Error> {
+    fn to_environment_actions(&self) -> Result<Self::Actions, Self::Error> {
         self.space
             .tensor_from_neurons(self.neurons.clone())
             .map_err(self.map_error)
@@ -1322,7 +1322,7 @@ where
     /// Checks leading environment batch shape across observations, actions, and step values.
     fn validate_timestep_batch<K: Basic, const U: usize>(
         observations: &Tensor<O, K>,
-        raw_actions: &Tensor<L>,
+        training_actions: &Tensor<L>,
         step: &MultiGymStepInfo<I, Tensor<U, K>>,
     ) -> Result<usize, PPOError<N::Error, GE, AS::Error>>
     where
@@ -1331,7 +1331,7 @@ where
     {
         let count = observations.dims()[0];
         for (field, actual) in [
-            ("raw actions", raw_actions.dims()[0]),
+            ("training actions", training_actions.dims()[0]),
             ("done flags", step.dones.len()),
             ("truncation flags", step.truncateds.len()),
             ("terminal observations", step.terminal_observations.len()),
@@ -1471,16 +1471,19 @@ where
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
-    type RawAction = PolicyActions<AS, PPOError<N::Error, GE, AS::Error>, L, A>;
+    type TrainingActions = PolicySamples<AS, PPOError<N::Error, GE, AS::Error>, L, A>;
 
     /// Selects policy samples `[batch, ...policy_shape]` for observations
     /// `[batch, ...observation_shape]`.
-    fn act_raw(&mut self, observation: &OS::Batch) -> Result<Self::RawAction, Self::Error> {
+    fn act_for_training(
+        &mut self,
+        observation: &OS::Batch,
+    ) -> Result<Self::TrainingActions, Self::Error> {
         let latent_observations = self
             .latent_observations(observation.clone())
             .map_err(PPOError::NetworkError)?;
         let neurons = self.act_neurons(&latent_observations)?;
-        Ok(PolicyActions::new(
+        Ok(PolicySamples::new(
             neurons,
             self.action_space.clone(),
             PPOError::SpaceError,
@@ -1528,11 +1531,11 @@ where
     fn learn_from_timesteps(
         &mut self,
         observations: &OS::Batch,
-        raw_actions: Self::RawAction,
+        training_actions: Self::TrainingActions,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<(), Self::Error> {
         let environment_count =
-            Self::validate_timestep_batch(observations, &raw_actions.neurons, &step)?;
+            Self::validate_timestep_batch(observations, &training_actions.neurons, &step)?;
         if environment_count == 0 {
             return Err(PPOConfigurationError::ZeroEnvironments.into());
         }
@@ -1561,16 +1564,16 @@ where
             let evaluated = self.evaluate_collection_action(
                 &validation,
                 &latent_observations,
-                &raw_actions.neurons,
+                &training_actions.neurons,
             )?;
-            let environment_actions = raw_actions.environment()?;
+            let environment_actions = training_actions.to_environment_actions()?;
             Self::check_critic_dtype(&evaluated.values, step.rewards.dtype())?;
             let first_collection_timestep = self
                 .schedule_progress
                 .elapsed_steps()
                 .saturating_add(self.rollout_buffer.len() * environment_count);
             let collection_action = PPOCollectionAction {
-                policy_actions: raw_actions.neurons,
+                policy_actions: training_actions.neurons,
                 environment_actions,
                 log_probs: evaluated.log_probs,
                 values: evaluated.values,

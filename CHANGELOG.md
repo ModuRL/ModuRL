@@ -59,8 +59,8 @@ they do not imply that all workspace packages build together. See [Remaining mig
 - `Gym` and `MultiGym` replace `SpaceError` and boxed combined spaces with associated `ObservationSpace` and `ActionSpace` types.
   Their space accessors return those types directly. Trait objects must specify both associated space types.
   `Agent` also adds associated space types. Its action-space error is `ActionSpace::Error`; `Agent::SpaceError` is removed.
-- `Agent` gains `type RawAction`, `act_raw`, and `learn_from_timesteps` for caller-owned loops; `act` is now provided.
-  `RawAction` converts raw actions to environment batches on demand; PPO and A2C use `PolicyActions`.
+- `Agent` gains `type TrainingActions`, `act_for_training`, and `learn_from_timesteps` for caller-owned loops; `act` is now provided.
+  `ToEnvironmentActions` converts training actions to environment batches on demand; PPO and A2C use `PolicySamples`.
   `PPOError::BatchLengthMismatch` and `A2CError::BatchLengthMismatch` report inconsistent caller-collected batches.
 - Renamed `ResetInfo::state` and `StepInfo::state` to `observation`.
   Both structures gain an observation tensor type parameter: `ResetInfo<I, T>` and `StepInfo<I, T>`.

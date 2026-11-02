@@ -695,7 +695,7 @@ where
         let count = step.dones.len();
         for (field, actual) in [
             ("observations", observations.dims()[0]),
-            ("raw actions", actions.dims()[0]),
+            ("training actions", actions.dims()[0]),
             ("truncation flags", step.truncateds.len()),
             ("terminal observations", step.terminal_observations.len()),
             ("environment infos", step.infos.len()),

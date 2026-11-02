@@ -5,7 +5,7 @@
 //! the tensor framework and ModuRL Gym are intentionally left explicit.
 
 pub use crate::agents::{
-    Agent, RawAction,
+    Agent, ToEnvironmentActions,
     a2c::{
         A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
         A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
@@ -25,7 +25,7 @@ pub use crate::agents::{
     ppo::{
         PPOAgent, PPOCollectionLogEntry, PPOConfigurationError, PPOEpisodeLogEntry, PPOError,
         PPOLogEntry, PPOLogger, PPOModelGroup, PPOModelTypes, PPONetwork, PPONetworkError,
-        PolicyActions, SeparatePPONetwork, SharedPPONetwork,
+        PolicySamples, SeparatePPONetwork, SharedPPONetwork,
     },
     q_learning::{
         QAgentError, QCollectionLogEntry, QEpisodeLogEntry, QLearningConfigurationError,

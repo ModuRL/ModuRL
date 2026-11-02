@@ -1226,7 +1226,7 @@ where
         let count = observations.dims()[0];
         for (field, actual) in [
             ("observations", observations.dims()[0]),
-            ("raw actions", actions.dims()[0]),
+            ("training actions", actions.dims()[0]),
             ("done flags", step.dones.len()),
             ("truncation flags", step.truncateds.len()),
             ("terminal observations", step.terminal_observations.len()),
@@ -1461,11 +1461,14 @@ where
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
-    type RawAction = Tensor<A, AS::Kind>;
+    type TrainingActions = Tensor<A, AS::Kind>;
 
     /// Samples detached rank-A environment actions `[batch_size, ...action_shape]` from native rank-O observations `[batch_size, ...observation_shape]`.
     /// Preserves observation dtype and kind, transfers to the optimization device, and lets the model perform any input conversions.
-    fn act_raw(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A, AS::Kind>, Self::Error> {
+    fn act_for_training(
+        &mut self,
+        observations: &Tensor<O, K>,
+    ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
         self.stochastic_action(observations)
     }
 

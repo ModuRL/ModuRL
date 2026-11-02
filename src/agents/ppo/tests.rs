@@ -228,7 +228,7 @@ mod schedule_tests {
 
     use super::*;
     use crate::{
-        agents::{Agent, RawAction},
+        agents::{Agent, ToEnvironmentActions},
         distributions::{CategoricalDistribution, GaussianDistribution},
         gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
@@ -1425,11 +1425,13 @@ mod schedule_tests {
             build_agent(caller_env.observation_space(), caller_env.action_space());
         let mut observations = caller_env.reset().unwrap();
         for _ in 0..2 {
-            let raw_actions = caller_agent.act_raw(&observations).unwrap();
-            let step = caller_env.step(raw_actions.environment().unwrap()).unwrap();
+            let training_actions = caller_agent.act_for_training(&observations).unwrap();
+            let step = caller_env
+                .step(training_actions.to_environment_actions().unwrap())
+                .unwrap();
             let next_observations = step.observations.clone();
             caller_agent
-                .learn_from_timesteps(&observations, raw_actions, step)
+                .learn_from_timesteps(&observations, training_actions, step)
                 .unwrap();
             observations = next_observations;
         }
@@ -1473,18 +1475,20 @@ mod schedule_tests {
             .unwrap();
 
         let observations = env.reset().unwrap();
-        let raw_actions = agent.act_raw(&observations).unwrap();
-        let step = env.step(raw_actions.environment().unwrap()).unwrap();
+        let training_actions = agent.act_for_training(&observations).unwrap();
+        let step = env
+            .step(training_actions.to_environment_actions().unwrap())
+            .unwrap();
         let next_observations = step.observations.clone();
         agent
-            .learn_from_timesteps(&observations, raw_actions, step)
+            .learn_from_timesteps(&observations, training_actions, step)
             .unwrap();
 
         let mut single_env = VectorizedGymWrapper::from(TwoStepTestGym::new(device.clone(), false));
         let single_observations = single_env.reset().unwrap();
-        let single_actions = agent.act_raw(&single_observations).unwrap();
+        let single_actions = agent.act_for_training(&single_observations).unwrap();
         let single_step = single_env
-            .step(single_actions.environment().unwrap())
+            .step(single_actions.to_environment_actions().unwrap())
             .unwrap();
         assert!(matches!(
             agent.learn_from_timesteps(&single_observations, single_actions, single_step),
@@ -1495,10 +1499,12 @@ mod schedule_tests {
             })
         ));
 
-        let raw_actions = agent.act_raw(&next_observations).unwrap();
-        let step = env.step(raw_actions.environment().unwrap()).unwrap();
+        let training_actions = agent.act_for_training(&next_observations).unwrap();
+        let step = env
+            .step(training_actions.to_environment_actions().unwrap())
+            .unwrap();
         agent
-            .learn_from_timesteps(&next_observations, raw_actions, step)
+            .learn_from_timesteps(&next_observations, training_actions, step)
             .unwrap();
     }
 

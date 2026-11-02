@@ -322,11 +322,11 @@ where
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
-    type RawAction = Tensor<A>;
+    type TrainingActions = Tensor<A>;
 
     /// Maps native observations [batch_size, ...observation_shape] to Float exploration actions [batch_size, ...action_shape].
     /// Preserves input kind and dtype; returned actions use the configured dtype and optimization device.
-    fn act_raw(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
+    fn act_for_training(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
         Ok(self.inner.act(observations)?.without_autodiff())
     }
 
@@ -677,7 +677,7 @@ mod tests {
             assert_eq!(agent.inner.optimization_steps, 4);
 
             let observations = env.reset().unwrap();
-            let actions = agent.act_raw(&observations).unwrap();
+            let actions = agent.act_for_training(&observations).unwrap();
             let step = env.step(actions.clone()).unwrap();
             agent
                 .learn_from_timesteps(&observations, actions, step)
