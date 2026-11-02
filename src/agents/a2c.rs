@@ -610,9 +610,13 @@ mod tests {
                 .unwrap();
 
         let observations = env.reset().unwrap();
-        let mut bad_actions = agent.act_raw(&observations).unwrap();
-        let bad_step = env.step(bad_actions.environment().unwrap()).unwrap();
-        bad_actions.neurons = Tensor::zeros([1, 1], &device);
+        let actions = agent.act_raw(&observations).unwrap();
+        let bad_step = env.step(actions.environment().unwrap()).unwrap();
+        let bad_actions = PolicyActions::new(
+            Tensor::zeros([1, 1], &device),
+            env.action_space(),
+            A2CError::SpaceError,
+        );
         assert!(matches!(
             agent.learn_from_timesteps(&observations, bad_actions, bad_step),
             Err(A2CError::BatchLengthMismatch {

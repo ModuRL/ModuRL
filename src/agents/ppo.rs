@@ -104,8 +104,7 @@ use super::{Agent, RawAction};
 
 /// Policy samples shaped `[num_envs, ...policy_shape]` with their action-space mapping.
 pub struct PolicyActions<AS: ActionSpace<A>, E, const L: usize, const A: usize> {
-    /// Policy samples shaped `[num_envs, ...policy_shape]`.
-    pub neurons: Tensor<L>,
+    neurons: Tensor<L>,
     space: AS,
     map_error: fn(AS::Error) -> E,
 }
@@ -117,6 +116,11 @@ impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> PolicyActions<AS, E,
             space,
             map_error,
         }
+    }
+
+    /// Returns policy samples shaped `[num_envs, ...policy_shape]`.
+    pub fn neurons(&self) -> &Tensor<L> {
+        &self.neurons
     }
 
     pub(crate) fn with_error<F>(self, map_error: fn(AS::Error) -> F) -> PolicyActions<AS, F, L, A> {
