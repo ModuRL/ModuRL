@@ -58,7 +58,7 @@ pub enum GAEError {
     InvalidLambda,
 }
 
-/// Generalized advantage estimation (Schulman et al., 2016).
+/// Generalized advantage estimation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GAE {
     lambda: f32,
@@ -136,8 +136,7 @@ pub enum NStepError {
     ZeroSteps,
 }
 
-/// n-step returns (Mnih et al., 2016): rewards summed over up to `n` steps, then bootstrapped
-/// from the critic.
+/// n-step returns: rewards summed over up to `n` steps, then bootstrapped from the critic.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NStep {
     n: usize,
