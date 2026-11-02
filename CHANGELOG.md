@@ -98,6 +98,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `AdvantageEstimateMismatch`.
 - Add the built-in `NStep::new(n)` advantage estimator for n-step returns; `NStep::new(0)` returns
   `NStepError::ZeroSteps`.
+- Add `GAE::with_value_lambda(..)` to use a separate lambda for value targets.
 
 ### Environment wrappers and device placement
 

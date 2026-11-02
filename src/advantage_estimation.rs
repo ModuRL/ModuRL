@@ -62,6 +62,7 @@ pub enum GAEError {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GAE {
     lambda: f32,
+    value_lambda: f32,
 }
 
 impl GAE {
@@ -70,17 +71,35 @@ impl GAE {
         if !lambda.is_finite() || !(0.0..=1.0).contains(&lambda) {
             return Err(GAEError::InvalidLambda);
         }
-        Ok(Self { lambda })
+        Ok(Self {
+            lambda,
+            value_lambda: lambda,
+        })
+    }
+
+    /// Uses `value_lambda` for the value targets' λ-returns; rejects a non-finite value or one
+    /// outside `0..=1`.
+    pub fn with_value_lambda(mut self, value_lambda: f32) -> Result<Self, GAEError> {
+        if !value_lambda.is_finite() || !(0.0..=1.0).contains(&value_lambda) {
+            return Err(GAEError::InvalidLambda);
+        }
+        self.value_lambda = value_lambda;
+        Ok(self)
     }
 
     pub fn lambda(&self) -> f32 {
         self.lambda
     }
+
+    /// Returns the lambda used for value-target λ-returns.
+    pub fn value_lambda(&self) -> f32 {
+        self.value_lambda
+    }
 }
 
 impl AdvantageEstimator for GAE {
-    /// Computes GAE advantages shaped `[time, env_count, 1]`; value targets are the λ-returns
-    /// `values + advantages`.
+    /// Computes GAE advantages shaped `[time, env_count, 1]`; value targets are the
+    /// `value_lambda` λ-returns.
     fn estimate(
         &self,
         rewards: &Tensor<3>,
@@ -100,7 +119,9 @@ impl AdvantageEstimator for GAE {
         let masks = (1.0f64 - next_dones) * (1.0f64 - next_truncateds);
         let mut next_value = bootstrapped_values.detach();
         let mut gae = Tensor::zeros(next_value.dims(), (&device, dtype));
+        let mut value_gae = Tensor::zeros(next_value.dims(), (&device, dtype));
         let mut advantages = Vec::with_capacity(rewards.dims()[0]);
+        let mut value_returns = Vec::with_capacity(rewards.dims()[0]);
         // Environments are independent; only time has a recurrence.
         for time in (0..rewards.dims()[0]).rev() {
             let mask = masks
@@ -116,13 +137,17 @@ impl AdvantageEstimator for GAE {
                 .slice_dim(0, time..time + 1)
                 .squeeze_dim::<2>(0);
             let delta = reward + next_value * mask.clone() * f64::from(gamma) - value.clone();
-            gae = delta + gae * mask * (f64::from(gamma) * f64::from(self.lambda));
+            gae = delta.clone() + gae * mask.clone() * (f64::from(gamma) * f64::from(self.lambda));
+            value_gae =
+                delta + value_gae * mask * (f64::from(gamma) * f64::from(self.value_lambda));
             advantages.push(gae.clone());
+            value_returns.push(value_gae.clone());
             next_value = value;
         }
         advantages.reverse();
+        value_returns.reverse();
         let advantages = Tensor::stack(advantages, 0);
-        let value_targets = values.clone() + advantages.clone();
+        let value_targets = values.clone() + Tensor::stack(value_returns, 0);
         AdvantageEstimate {
             advantages,
             value_targets,
@@ -477,11 +502,99 @@ mod tests {
     }
 
     #[test]
+    fn gae_with_value_lambda_uses_it_only_for_value_targets() {
+        let device = Device::flex().autodiff();
+        let (reward_tensor, value_tensor, done_tensor, truncated_tensor, bootstrap_tensor) =
+            rollout_tensors(&device);
+        for dtype in [DType::F32, DType::F64] {
+            let rewards = reward_tensor.clone().cast(dtype);
+            let values = value_tensor.clone().cast(dtype);
+            let bootstrapped_values = bootstrap_tensor.clone().cast(dtype);
+            let separate = GAE::new(0.8)
+                .unwrap()
+                .with_value_lambda(1.0)
+                .unwrap()
+                .estimate(
+                    &rewards,
+                    &values,
+                    &done_tensor,
+                    &truncated_tensor,
+                    &bootstrapped_values,
+                    0.9,
+                );
+            let advantage_reference = GAE::new(0.8).unwrap().estimate(
+                &rewards,
+                &values,
+                &done_tensor,
+                &truncated_tensor,
+                &bootstrapped_values,
+                0.9,
+            );
+            let value_target_reference = GAE::new(1.0).unwrap().estimate(
+                &rewards,
+                &values,
+                &done_tensor,
+                &truncated_tensor,
+                &bootstrapped_values,
+                0.9,
+            );
+            let separate_advantages = separate
+                .advantages
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            let advantage_reference = advantage_reference
+                .advantages
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            let separate_value_targets = separate
+                .value_targets
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            let value_target_reference = value_target_reference
+                .value_targets
+                .into_data()
+                .convert::<f64>()
+                .try_to_vec::<f64>()
+                .unwrap();
+            for sample_index in 0..9 {
+                assert!(
+                    (separate_advantages[sample_index] - advantage_reference[sample_index]).abs()
+                        < 1e-5
+                );
+                assert!(
+                    (separate_value_targets[sample_index] - value_target_reference[sample_index])
+                        .abs()
+                        < 1e-5
+                );
+            }
+        }
+    }
+
+    #[test]
     fn gae_rejects_invalid_lambda() {
         for lambda in [-0.1, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert_eq!(GAE::new(lambda), Err(GAEError::InvalidLambda));
+            assert_eq!(
+                GAE::new(0.9).unwrap().with_value_lambda(lambda),
+                Err(GAEError::InvalidLambda)
+            );
         }
         assert_eq!(GAE::new(0.0).unwrap().lambda(), 0.0);
         assert_eq!(GAE::new(1.0).unwrap().lambda(), 1.0);
+        assert_eq!(GAE::new(0.9).unwrap().value_lambda(), 0.9);
+        assert_eq!(
+            GAE::new(0.9)
+                .unwrap()
+                .with_value_lambda(1.0)
+                .unwrap()
+                .value_lambda(),
+            1.0
+        );
     }
 }
