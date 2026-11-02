@@ -19,7 +19,7 @@ use crate::{
     objectives::clipped_value_loss,
     parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
     sampling::{SamplingError, shuffle_with_device_rng},
-    spaces::{ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace, SpaceError},
+    spaces::{ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace},
     tensor_operations::{clamp_with_boundary_gradients, normalize_tensor},
     tensor_rank::{NextRank, PrevRank},
 };
@@ -115,9 +115,10 @@ impl<AS, const L: usize> PolicyActions<AS, L> {
         Self { neurons, space }
     }
 
+    #[cfg(test)]
     pub(crate) fn environment_batch(
         &self,
-    ) -> Result<<AS as PolicyActionMap<L>>::Environment, SpaceError>
+    ) -> Result<<AS as PolicyActionMap<L>>::Environment, <AS as PolicyActionMap<L>>::MappingError>
     where
         AS: PolicyActionMap<L>,
     {
@@ -128,14 +129,22 @@ impl<AS, const L: usize> PolicyActions<AS, L> {
 #[doc(hidden)]
 pub trait PolicyActionMap<const L: usize> {
     type Environment;
+    type MappingError;
 
-    fn map_policy_action(&self, neurons: Tensor<L>) -> Result<Self::Environment, SpaceError>;
+    fn map_policy_action(
+        &self,
+        neurons: Tensor<L>,
+    ) -> Result<Self::Environment, Self::MappingError>;
 }
 
 impl PolicyActionMap<2> for Discrete {
     type Environment = <Self as TensorBatchTypes>::Batch;
+    type MappingError = <Self as ActionSpace<2>>::Error;
 
-    fn map_policy_action(&self, neurons: Tensor<2>) -> Result<Self::Environment, SpaceError> {
+    fn map_policy_action(
+        &self,
+        neurons: Tensor<2>,
+    ) -> Result<Self::Environment, Self::MappingError> {
         <Self as ActionMap<2, 2>>::tensor_from_neurons(self, neurons)
     }
 }
@@ -145,37 +154,52 @@ where
     Tensor<R>: PrevRank,
 {
     type Environment = <Self as TensorBatchTypes>::Batch;
+    type MappingError = <Self as ActionSpace<R>>::Error;
 
-    fn map_policy_action(&self, neurons: Tensor<R>) -> Result<Self::Environment, SpaceError> {
+    fn map_policy_action(
+        &self,
+        neurons: Tensor<R>,
+    ) -> Result<Self::Environment, Self::MappingError> {
         <Self as ActionMap<R, R>>::tensor_from_neurons(self, neurons)
     }
 }
 
-impl<AS, const L: usize, AE, GE> RawAction<PPOError<AE, GE, SpaceError>> for PolicyActions<AS, L>
+impl<AS, const L: usize, AE, GE>
+    RawAction<PPOError<AE, GE, <AS as PolicyActionMap<L>>::MappingError>> for PolicyActions<AS, L>
 where
     AS: PolicyActionMap<L>,
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
+    <AS as PolicyActionMap<L>>::MappingError: std::fmt::Debug,
 {
     type Environment = <AS as PolicyActionMap<L>>::Environment;
 
-    fn environment(&self) -> Result<Self::Environment, PPOError<AE, GE, SpaceError>> {
+    fn environment(
+        &self,
+    ) -> Result<Self::Environment, PPOError<AE, GE, <AS as PolicyActionMap<L>>::MappingError>> {
         self.space
             .map_policy_action(self.neurons.clone())
             .map_err(PPOError::SpaceError)
     }
 }
 
-impl<AS, const L: usize, AE, GE> RawAction<super::a2c::A2CError<AE, GE, SpaceError>>
+impl<AS, const L: usize, AE, GE>
+    RawAction<super::a2c::A2CError<AE, GE, <AS as PolicyActionMap<L>>::MappingError>>
     for PolicyActions<AS, L>
 where
     AS: PolicyActionMap<L>,
     AE: std::fmt::Debug,
     GE: std::fmt::Debug,
+    <AS as PolicyActionMap<L>>::MappingError: std::fmt::Debug,
 {
     type Environment = <AS as PolicyActionMap<L>>::Environment;
 
-    fn environment(&self) -> Result<Self::Environment, super::a2c::A2CError<AE, GE, SpaceError>> {
+    fn environment(
+        &self,
+    ) -> Result<
+        Self::Environment,
+        super::a2c::A2CError<AE, GE, <AS as PolicyActionMap<L>>::MappingError>,
+    > {
         self.space
             .map_policy_action(self.neurons.clone())
             .map_err(super::a2c::A2CError::SpaceError)
@@ -1467,10 +1491,12 @@ where
     N: PPONetwork<O, H, L, InputKind = OS::Kind>,
     OS: ObservationSpace<O, Item = Tensor<U, <OS as crate::tensor_rank::TensorBatchTypes>::Kind>>,
     AS: ActionMap<L, A>
-        + ActionSpace<A, Error = SpaceError>
-        + PolicyActionMap<L, Environment = <AS as TensorBatchTypes>::Batch>
-        + Clone,
-    AS::Error: std::fmt::Debug,
+        + PolicyActionMap<
+            L,
+            Environment = <AS as TensorBatchTypes>::Batch,
+            MappingError = <AS as ActionSpace<A>>::Error,
+        > + Clone,
+    <AS as ActionSpace<A>>::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank + NextRank,
     Tensor<L>: NextRank,
@@ -1571,9 +1597,8 @@ where
                 &latent_observations,
                 &raw_actions.neurons,
             )?;
-            let environment_actions = raw_actions
-                .environment_batch()
-                .map_err(PPOError::SpaceError)?;
+            let environment_actions =
+                <PolicyActions<AS, L> as RawAction<Self::Error>>::environment(&raw_actions)?;
             Self::check_critic_dtype(&evaluated.values, step.rewards.dtype())?;
             let first_collection_timestep = self
                 .schedule_progress

@@ -14,7 +14,7 @@ use crate::{buffers::experience::ExperienceBatchError, sampling::SamplingError};
 use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     parameter_schedule::ParameterSchedule,
-    spaces::{ActionMap, ActionSpace, ObservationSpace, SpaceError},
+    spaces::{ActionMap, ActionSpace, ObservationSpace},
     tensor_rank::{NextRank, PrevRank},
 };
 use bon::bon;
@@ -335,9 +335,11 @@ where
     N: PPONetwork<O, H, L, InputKind = OS::Kind>,
     OS: ObservationSpace<O, Item = Tensor<U, <OS as crate::tensor_rank::TensorBatchTypes>::Kind>>,
     AS: ActionMap<L, A>
-        + ActionSpace<A, Error = SpaceError>
-        + PolicyActionMap<L, Environment = <AS as crate::tensor_rank::TensorBatchTypes>::Batch>
-        + Clone,
+        + PolicyActionMap<
+            L,
+            Environment = <AS as crate::tensor_rank::TensorBatchTypes>::Batch,
+            MappingError = <AS as ActionSpace<A>>::Error,
+        > + Clone,
     AS::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
     Tensor<O, OS::Kind>: PrevRank + NextRank,
