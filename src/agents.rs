@@ -51,7 +51,6 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     >;
 
     /// Selects training actions from observations shaped `[batch_size, ...observation_shape]`.
-    #[allow(clippy::type_complexity)]
     fn act_for_training(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
