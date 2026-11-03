@@ -763,22 +763,27 @@ where
         update_result
     }
 
+    /// Skips remaining updates after a failure but still runs scheduled target syncs.
     fn run_scheduled_updates<I>(
         &mut self,
         first_timestep: usize,
         environment_count: usize,
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>> {
+        let mut result = Ok(());
         for offset in 1..=environment_count {
             let timestep = first_timestep.saturating_add(offset);
-            if timestep.is_multiple_of(self.update_frequency) && timestep >= self.training_start {
-                self.optimize(timestep, logger)?;
+            if result.is_ok()
+                && timestep.is_multiple_of(self.update_frequency)
+                && timestep >= self.training_start
+            {
+                result = self.optimize(timestep, logger);
             }
             if timestep.is_multiple_of(self.target_update_interval) {
                 self.update_target_network();
             }
         }
-        Ok(())
+        result
     }
 
     #[cfg_attr(
