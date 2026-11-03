@@ -88,6 +88,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Candle tensor-error conversions are removed;
   callers must satisfy the documented tensor layouts and backend requirements.
 - `PPOAgent` and `A2CAgent` builders remove `.device(...)`. Rollout collection uses the observation device.
+- PPO and A2C `act`, `act_for_training`, and `act_deterministic` now run the policy in validation mode (e.g. dropout disabled), matching rollout collection.
 - PPO and A2C network builders merge `lr_scheduler`, `actor_lr_scheduler` and `critic_lr_scheduler` into
   `learning_rate`, `actor_learning_rate` and `critic_learning_rate`, which take an `f64` or any `ParameterSchedule`.
   `f64` implements `ParameterSchedule` as a constant. PPO and A2C `set_learning_rate` take the same input,

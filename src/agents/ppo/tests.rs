@@ -227,7 +227,12 @@ mod rollout_batch_tests {
 mod schedule_tests {
     use std::collections::HashSet;
 
-    use burn::{module::ParamId, nn::Initializer, optim::SgdConfig, tensor::kind::Kind};
+    use burn::{
+        module::ParamId,
+        nn::{Dropout, DropoutConfig, Initializer, LinearConfig},
+        optim::SgdConfig,
+        tensor::kind::Kind,
+    };
     use std::convert::Infallible;
 
     use super::*;
@@ -237,8 +242,24 @@ mod schedule_tests {
         distributions::{CategoricalDistribution, GaussianDistribution},
         gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
-        spaces::{BoxSpace, Discrete},
+        spaces::{ActionMap, BoxSpace, Discrete},
     };
+
+    #[derive(Module, Debug)]
+    struct DropoutTrunk {
+        dropout: Dropout,
+    }
+
+    impl Forward<2, 2> for DropoutTrunk {
+        type InputKind = Float;
+        type OutputKind = Float;
+        type Error = Infallible;
+
+        /// Applies dropout to `[batch_size, features]`, preserving shape, dtype, and device.
+        fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+            Ok(self.dropout.forward(observations))
+        }
+    }
 
     #[derive(Module, Debug)]
     struct ObservationModel<K: Basic> {
@@ -272,6 +293,117 @@ mod schedule_tests {
             }
             self.model.forward(FloatDType::cast(input, dtype))
         }
+    }
+
+    #[test]
+    fn act_for_training_samples_in_validation_mode() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let network = SharedPPONetwork::builder()
+            .shared_network(DropoutTrunk {
+                dropout: DropoutConfig::new(0.5).init(),
+            })
+            .actor_head(ProbabilisticPolicyModel::new(
+                mlp(64, 16, &device),
+                GaussianDistribution::default(),
+            ))
+            .critic_head(
+                LinearConfig::new(64, 1)
+                    .with_initializer(Initializer::Constant { value: 0.5 })
+                    .init(&device)
+                    .no_grad(),
+            )
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 64], &device))
+            .action_space(BoxSpace::new_with_universal_bounds(
+                [1, 8],
+                -10.0,
+                10.0,
+                &device,
+            ))
+            .network_info(network)
+            .batch_size(1)
+            .mini_batch_size(1)
+            .num_epochs(1)
+            .training_horizon(1)
+            .build()
+            .unwrap();
+        let observations = Tensor::<2>::ones([1, 64], &device);
+
+        device.seed(153);
+        let training_actions = agent
+            .act_for_training(&observations)
+            .unwrap()
+            .neurons()
+            .clone();
+        device.seed(153);
+        let validation = agent.network_info.valid();
+        let collection_actions = agent
+            .sample_collection_action(&validation, &observations)
+            .unwrap()
+            .policy_actions;
+
+        assert_eq!(training_actions.to_data(), collection_actions.to_data());
+    }
+
+    #[test]
+    fn act_deterministic_ignores_dropout() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let network = SharedPPONetwork::builder()
+            .shared_network(DropoutTrunk {
+                dropout: DropoutConfig::new(0.5).init(),
+            })
+            .actor_head(ProbabilisticPolicyModel::new(
+                mlp(64, 16, &device),
+                GaussianDistribution::default(),
+            ))
+            .critic_head(
+                LinearConfig::new(64, 1)
+                    .with_initializer(Initializer::Constant { value: 0.5 })
+                    .init(&device)
+                    .no_grad(),
+            )
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 64], &device))
+            .action_space(BoxSpace::new_with_universal_bounds(
+                [1, 8],
+                -10.0,
+                10.0,
+                &device,
+            ))
+            .network_info(network)
+            .batch_size(1)
+            .mini_batch_size(1)
+            .num_epochs(1)
+            .training_horizon(1)
+            .build()
+            .unwrap();
+        let observations = Tensor::<2>::ones([1, 64], &device);
+
+        device.seed(1);
+        let first_actions = agent.act_deterministic(&observations).unwrap();
+        device.seed(2);
+        let second_actions = agent.act_deterministic(&observations).unwrap();
+        let validation = agent.network_info.valid();
+        let latent = validation
+            .forward_observations(observations.clone().without_autodiff())
+            .unwrap();
+        let expected_actions = agent
+            .action_space
+            .tensor_from_neurons(validation.mode(latent).unwrap())
+            .unwrap();
+
+        assert_eq!(first_actions.to_data(), second_actions.to_data());
+        assert_eq!(first_actions.to_data(), expected_actions.to_data());
     }
 
     #[test]

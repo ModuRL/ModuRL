@@ -1063,17 +1063,6 @@ where
         Ok(())
     }
 
-    /// Samples rank-L policy actions `[batch, ...action_shape]` from rank-H
-    /// model observations `[batch, ...model_input_shape]`, preserving the batch axis. The policy defines action dtype.
-    fn act_neurons(
-        &mut self,
-        observations: &Tensor<H, N::LatentKind>,
-    ) -> Result<Tensor<L>, PPOError<N::Error, GE, AS::Error>> {
-        self.network_info
-            .sample(observations.clone())
-            .map_err(PPOError::NetworkError)
-    }
-
     /// Samples rank-L policy actions and maps them to rank-A environment actions from native rank-O observations.
     /// All tensors preserve the leading environment axis; log probabilities and critic values are detached `[environment_count, 1]`.
     fn sample_collection_action(
@@ -1190,11 +1179,11 @@ where
         &mut self,
         observation: &OS::Batch,
     ) -> Result<AS::Batch, PPOError<N::Error, GE, AS::Error>> {
-        let latent_observations = self
-            .latent_observations(observation.clone())
+        let validation = self.network_info.valid();
+        let latent_observations = validation
+            .forward_observations(observation.clone().without_autodiff())
             .map_err(PPOError::NetworkError)?;
-        let neurons = self
-            .network_info
+        let neurons = validation
             .mode(latent_observations)
             .map_err(PPOError::NetworkError)?;
         self.action_space
@@ -1479,10 +1468,13 @@ where
         &mut self,
         observation: &OS::Batch,
     ) -> Result<Self::TrainingActions, Self::Error> {
-        let latent_observations = self
-            .latent_observations(observation.clone())
+        let validation = self.network_info.valid();
+        let latent_observations = validation
+            .forward_observations(observation.clone().without_autodiff())
             .map_err(PPOError::NetworkError)?;
-        let neurons = self.act_neurons(&latent_observations)?;
+        let neurons = validation
+            .sample(latent_observations)
+            .map_err(PPOError::NetworkError)?;
         Ok(PolicySamples::new(
             neurons,
             self.action_space.clone(),
