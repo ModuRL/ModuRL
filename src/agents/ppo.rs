@@ -205,11 +205,6 @@ struct PPOCollectionAction<AS: TensorBatchTypes, const L: usize> {
     values: Tensor<2>,
 }
 
-struct PPOEvaluatedAction {
-    log_probs: Tensor<2>,
-    values: Tensor<2>,
-}
-
 struct PPOPreparedRolloutBatch {
     advantages: Tensor<3>,
     returns: Tensor<3>,
@@ -1096,30 +1091,31 @@ where
             .action_space
             .tensor_from_neurons(policy_actions.clone())
             .map_err(PPOError::SpaceError)?;
-        let evaluated =
-            self.evaluate_collection_action(validation, &latent_observations, &policy_actions)?;
-        Ok(PPOCollectionAction {
+        self.collection_action(
+            validation,
+            &latent_observations,
             policy_actions,
             environment_actions,
-            log_probs: evaluated.log_probs,
-            values: evaluated.values,
-        })
+        )
     }
 
     /// Evaluates policy actions and observations with leading shape `[num_envs, ...]`.
-    fn evaluate_collection_action(
+    fn collection_action(
         &self,
         validation: &N,
         latent_observations: &Tensor<H, N::LatentKind>,
-        policy_actions: &Tensor<L>,
-    ) -> Result<PPOEvaluatedAction, PPOError<N::Error, GE, AS::Error>> {
+        policy_actions: Tensor<L>,
+        environment_actions: AS::Batch,
+    ) -> Result<PPOCollectionAction<AS, L>, PPOError<N::Error, GE, AS::Error>> {
         let values = validation
             .forward_values(latent_observations.clone())
             .map_err(PPOError::NetworkError)?;
         let (log_probs, _) = validation
             .log_prob_and_entropy(latent_observations.clone(), policy_actions.clone())
             .map_err(PPOError::NetworkError)?;
-        Ok(PPOEvaluatedAction {
+        Ok(PPOCollectionAction {
+            policy_actions,
+            environment_actions,
             values: values.detach(),
             log_probs: log_probs.detach(),
         })
@@ -1219,12 +1215,7 @@ where
             env.reset().map_err(PPOError::GymError)?
         };
         let environment_count = env.num_envs();
-        if environment_count == 0 {
-            return Err(PPOConfigurationError::ZeroEnvironments.into());
-        }
-        if !self.batch_size.is_multiple_of(environment_count) {
-            return Err(PPOConfigurationError::BatchNotDivisibleByEnvironmentCount.into());
-        }
+        self.validate_environment_count(environment_count)?;
         self.rollout_buffer.clear();
         if self.logging_info.is_some()
             && self.episode_tracker.environment_count() != environment_count
@@ -1232,6 +1223,19 @@ where
             self.episode_tracker = PPOEpisodeTracker::new(environment_count);
         }
         Ok(observations)
+    }
+
+    fn validate_environment_count(
+        &self,
+        count: usize,
+    ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
+        if count == 0 {
+            return Err(PPOConfigurationError::ZeroEnvironments.into());
+        }
+        if !self.batch_size.is_multiple_of(count) {
+            return Err(PPOConfigurationError::BatchNotDivisibleByEnvironmentCount.into());
+        }
+        Ok(())
     }
 
     #[cfg_attr(
@@ -1270,17 +1274,11 @@ where
                     &collection_action.policy_actions,
                     &step_info,
                 )?;
-                Self::check_critic_dtype(&collection_action.values, step_info.rewards.dtype())?;
-                let first_collection_timestep = self
-                    .schedule_progress
-                    .elapsed_steps()
-                    .saturating_add(self.rollout_buffer.len() * environment_count);
                 *next_observations = self.store_timestep(
                     validation,
                     &observations,
                     collection_action,
                     step_info,
-                    first_collection_timestep,
                     &mut episode_tracker,
                 )?;
             }
@@ -1288,6 +1286,31 @@ where
             Ok(self.rollout_buffer.len() * environment_count)
         })();
         self.episode_tracker = episode_tracker;
+        result
+    }
+
+    fn train_if_rollout_full<const BO: usize, const BL: usize>(
+        &mut self,
+        environment_count: usize,
+    ) -> Result<(), PPOError<N::Error, GE, AS::Error>>
+    where
+        Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
+        Tensor<L>: NextRank<Next = Tensor<BL>>,
+    {
+        let collected = self.rollout_buffer.len() * environment_count;
+        if collected < self.batch_size {
+            return Ok(());
+        }
+        let result = (|| {
+            let explained_variance = {
+                let validation = self.network_info.valid();
+                self.add_advantages_and_returns(&validation)?
+            };
+            self.train_on_collected_rollout(collected, explained_variance)
+        })();
+        if result.is_err() {
+            self.rollout_buffer.clear();
+        }
         result
     }
 
@@ -1336,13 +1359,18 @@ where
         observations: &Tensor<O, K>,
         collection_action: PPOCollectionAction<AS, L>,
         step: MultiGymStepInfo<I, Tensor<U, K>>,
-        first_collection_timestep: usize,
         episode_tracker: &mut PPOEpisodeTracker,
     ) -> Result<OS::Batch, PPOError<N::Error, GE, AS::Error>>
     where
         OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
         Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     {
+        Self::check_critic_dtype(&collection_action.values, step.rewards.dtype())?;
+        let environment_count = observations.dims()[0];
+        let first_collection_timestep = self
+            .schedule_progress
+            .elapsed_steps()
+            .saturating_add(self.rollout_buffer.len() * environment_count);
         let training_next_observations = step.transition_next_observations();
         let MultiGymStepInfo {
             observations: next_observations,
@@ -1482,19 +1510,15 @@ where
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_rollout_collection(env)?;
         self.schedule_progress.default_horizon(num_timesteps);
+        let environment_count = env.num_envs();
 
         let result: Result<(), PPOError<N::Error, GE, AS::Error>> = (|| {
             while elapsed_timesteps < num_timesteps {
-                let (collected_timesteps, rollout_explained_variance) = {
-                    let validation = self.network_info.valid();
-                    let collected_timesteps =
-                        self.collect_rollout(&validation, env, &mut next_observations)?;
-                    let rollout_explained_variance =
-                        self.add_advantages_and_returns(&validation)?;
-                    (collected_timesteps, rollout_explained_variance)
-                };
-                elapsed_timesteps += collected_timesteps;
-                self.train_on_collected_rollout(collected_timesteps, rollout_explained_variance)?;
+                let validation = self.network_info.valid();
+                elapsed_timesteps +=
+                    self.collect_rollout(&validation, env, &mut next_observations)?;
+                drop(validation);
+                self.train_if_rollout_full(environment_count)?;
             }
             Ok(())
         })();
@@ -1516,12 +1540,7 @@ where
     ) -> Result<(), Self::Error> {
         let environment_count =
             Self::validate_timestep_batch(observations, &training_actions.neurons, &step)?;
-        if environment_count == 0 {
-            return Err(PPOConfigurationError::ZeroEnvironments.into());
-        }
-        if !self.batch_size.is_multiple_of(environment_count) {
-            return Err(PPOConfigurationError::BatchNotDivisibleByEnvironmentCount.into());
-        }
+        self.validate_environment_count(environment_count)?;
         if !self.rollout_buffer.is_empty() {
             let expected = self.rollout_buffer[0].observations.dims()[0];
             if expected != environment_count {
@@ -1537,50 +1556,27 @@ where
             _ => PPOEpisodeTracker::new(environment_count),
         };
         let result = (|| {
-            let validation = self.network_info.valid();
-            let latent_observations = validation
-                .forward_observations(observations.clone().without_autodiff())
-                .map_err(PPOError::NetworkError)?;
-            let evaluated = self.evaluate_collection_action(
-                &validation,
-                &latent_observations,
-                &training_actions.neurons,
-            )?;
-            let environment_actions = training_actions.to_environment_actions()?;
-            Self::check_critic_dtype(&evaluated.values, step.rewards.dtype())?;
-            let first_collection_timestep = self
-                .schedule_progress
-                .elapsed_steps()
-                .saturating_add(self.rollout_buffer.len() * environment_count);
-            let collection_action = PPOCollectionAction {
-                policy_actions: training_actions.neurons,
-                environment_actions,
-                log_probs: evaluated.log_probs,
-                values: evaluated.values,
-            };
-            self.store_timestep(
-                &validation,
-                observations,
-                collection_action,
-                step,
-                first_collection_timestep,
-                &mut episode_tracker,
-            )?;
-
-            if self.rollout_buffer.len() * environment_count >= self.batch_size {
-                let update_result = (|| {
-                    let rollout_explained_variance =
-                        self.add_advantages_and_returns(&validation)?;
-                    self.train_on_collected_rollout(
-                        self.rollout_buffer.len() * environment_count,
-                        rollout_explained_variance,
-                    )
-                })();
-                if let Err(error) = update_result {
-                    self.rollout_buffer.clear();
-                    return Err(error);
-                }
+            {
+                let validation = self.network_info.valid();
+                let latent_observations = validation
+                    .forward_observations(observations.clone().without_autodiff())
+                    .map_err(PPOError::NetworkError)?;
+                let environment_actions = training_actions.to_environment_actions()?;
+                let collection_action = self.collection_action(
+                    &validation,
+                    &latent_observations,
+                    training_actions.neurons,
+                    environment_actions,
+                )?;
+                self.store_timestep(
+                    &validation,
+                    observations,
+                    collection_action,
+                    step,
+                    &mut episode_tracker,
+                )?;
             }
+            self.train_if_rollout_full(environment_count)?;
             Ok(())
         })();
         self.timestep_episode_tracker = Some(episode_tracker);
