@@ -12,6 +12,10 @@ use burn::{
     tensor::{Bool, DType, Device, Float},
 };
 use std::convert::Infallible;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 pub(super) fn assert_close(actual: f64, expected: f64) {
     assert!(
@@ -1551,6 +1555,150 @@ mod schedule_tests {
         let mut caller_parameters = Parameters(Vec::new());
         caller_agent.network().visit(&mut caller_parameters);
         assert_eq!(learned_parameters.0, caller_parameters.0);
+    }
+
+    struct FailOnceEstimator {
+        fail_next: Arc<AtomicBool>,
+        time_steps: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl AdvantageEstimator for FailOnceEstimator {
+        /// Records rollout lengths and returns mismatched advantages shaped `[time, env_count, 2]` once.
+        fn estimate(
+            &self,
+            rewards: &Tensor<3>,
+            values: &Tensor<3>,
+            _next_dones: &Tensor<3, Bool>,
+            _next_truncateds: &Tensor<3, Bool>,
+            _bootstrapped_values: &Tensor<2>,
+            _gamma: f32,
+        ) -> AdvantageEstimate {
+            self.time_steps.lock().unwrap().push(rewards.dims()[0]);
+            let advantages = rewards.clone() - values.clone();
+            if self.fail_next.swap(false, Ordering::Relaxed) {
+                AdvantageEstimate {
+                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 2),
+                    value_targets: rewards.clone(),
+                }
+            } else {
+                AdvantageEstimate {
+                    advantages,
+                    value_targets: rewards.clone(),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn caller_rollout_discards_steps_after_failed_update() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let fail_next = Arc::new(AtomicBool::new(true));
+        let time_steps = Arc::new(Mutex::new(Vec::new()));
+        let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = (0..3)
+            .map(|index| TwoStepTestGym::new(device.clone(), index == 1))
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(networks)
+            .batch_size(6)
+            .mini_batch_size(6)
+            .num_epochs(1)
+            .training_horizon(12)
+            .advantage_estimator(FailOnceEstimator {
+                fail_next,
+                time_steps: time_steps.clone(),
+            })
+            .build()
+            .unwrap();
+
+        let mut observations = env.reset().unwrap();
+        for step_index in 0..4 {
+            let training_actions = agent.act_for_training(&observations).unwrap();
+            let step = env
+                .step(training_actions.to_environment_actions().unwrap())
+                .unwrap();
+            let next_observations = step.observations.clone();
+            let result = agent.learn_from_timesteps(&observations, training_actions, step);
+            if step_index == 1 {
+                assert!(result.is_err());
+            } else {
+                result.unwrap();
+            }
+            observations = next_observations;
+        }
+
+        assert_eq!(*time_steps.lock().unwrap(), vec![2, 2]);
+    }
+
+    #[test]
+    fn caller_rollout_discards_rollout_after_failed_learn() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let fail_next = Arc::new(AtomicBool::new(true));
+        let time_steps = Arc::new(Mutex::new(Vec::new()));
+        let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = (0..3)
+            .map(|index| TwoStepTestGym::new(device.clone(), index == 1))
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(networks)
+            .batch_size(6)
+            .mini_batch_size(6)
+            .num_epochs(1)
+            .training_horizon(12)
+            .advantage_estimator(FailOnceEstimator {
+                fail_next,
+                time_steps: time_steps.clone(),
+            })
+            .build()
+            .unwrap();
+
+        assert!(agent.learn(&mut env, 6).is_err());
+        let mut observations = env.reset().unwrap();
+        for _ in 0..2 {
+            let training_actions = agent.act_for_training(&observations).unwrap();
+            let step = env
+                .step(training_actions.to_environment_actions().unwrap())
+                .unwrap();
+            let next_observations = step.observations.clone();
+            agent
+                .learn_from_timesteps(&observations, training_actions, step)
+                .unwrap();
+            observations = next_observations;
+        }
+
+        assert_eq!(*time_steps.lock().unwrap(), vec![2, 2]);
     }
 
     #[test]

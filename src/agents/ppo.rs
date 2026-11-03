@@ -1483,17 +1483,25 @@ where
         let mut next_observations = self.prepare_rollout_collection(env)?;
         self.schedule_progress.default_horizon(num_timesteps);
 
-        while elapsed_timesteps < num_timesteps {
-            let (collected_timesteps, rollout_explained_variance) = {
-                let validation = self.network_info.valid();
-                let collected_timesteps =
-                    self.collect_rollout(&validation, env, &mut next_observations)?;
-                let rollout_explained_variance = self.add_advantages_and_returns(&validation)?;
-                (collected_timesteps, rollout_explained_variance)
-            };
-            elapsed_timesteps += collected_timesteps;
-            self.train_on_collected_rollout(collected_timesteps, rollout_explained_variance)?;
+        let result: Result<(), PPOError<N::Error, GE, AS::Error>> = (|| {
+            while elapsed_timesteps < num_timesteps {
+                let (collected_timesteps, rollout_explained_variance) = {
+                    let validation = self.network_info.valid();
+                    let collected_timesteps =
+                        self.collect_rollout(&validation, env, &mut next_observations)?;
+                    let rollout_explained_variance =
+                        self.add_advantages_and_returns(&validation)?;
+                    (collected_timesteps, rollout_explained_variance)
+                };
+                elapsed_timesteps += collected_timesteps;
+                self.train_on_collected_rollout(collected_timesteps, rollout_explained_variance)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.rollout_buffer.clear();
         }
+        result?;
         self.current_observations = Some(next_observations);
         Ok(())
     }
@@ -1560,11 +1568,18 @@ where
             )?;
 
             if self.rollout_buffer.len() * environment_count >= self.batch_size {
-                let rollout_explained_variance = self.add_advantages_and_returns(&validation)?;
-                self.train_on_collected_rollout(
-                    self.rollout_buffer.len() * environment_count,
-                    rollout_explained_variance,
-                )?;
+                let update_result = (|| {
+                    let rollout_explained_variance =
+                        self.add_advantages_and_returns(&validation)?;
+                    self.train_on_collected_rollout(
+                        self.rollout_buffer.len() * environment_count,
+                        rollout_explained_variance,
+                    )
+                })();
+                if let Err(error) = update_result {
+                    self.rollout_buffer.clear();
+                    return Err(error);
+                }
             }
             Ok(())
         })();
