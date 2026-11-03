@@ -769,6 +769,19 @@ where
         )
     }
 
+    /// Selects collection actions `[batch_size, ...action_shape]`: uniform random before `training_start`, otherwise noisy policy actions.
+    pub(crate) fn training_actions(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let actions = if self.schedule_progress.elapsed_steps() < self.training_start {
+            self.random_actions(observations.dims()[0])?
+        } else {
+            self.act(observations)?
+        };
+        Ok(actions.without_autodiff())
+    }
+
     /// Samples Float environment actions [batch_size, ...action_shape] with the existing device RNG and casts to compute dtype.
     fn random_actions(
         &self,
@@ -1256,13 +1269,7 @@ where
         let mut episodes = EpisodeTracker::new(count);
         let mut elapsed = 0;
         while elapsed < num_timesteps {
-            let first_timestep = self.schedule_progress.elapsed_steps();
-            let actions = if first_timestep < self.training_start {
-                self.random_actions(count)?
-            } else {
-                self.act(&observations)?
-            }
-            .without_autodiff();
+            let actions = self.training_actions(&observations)?;
             let step = env
                 .step(actions.clone())
                 .map_err(DeterministicActorCriticError::GymError)?;
