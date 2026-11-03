@@ -438,7 +438,7 @@ mod tests {
             type OutputKind = Float;
             type Error = crate::models::ModelError;
 
-            /// Fails the second update after the first has changed the online parameters.
+            /// Maps observations `[batch_size, ...observation_shape]` to Q-values `[batch_size, actions]`; fails the second update after the first has changed the online parameters.
             fn forward(&self, observations: Tensor<R>) -> Result<Tensor<2>, Self::Error> {
                 if self.forward_calls.fetch_add(1, Ordering::Relaxed) == 3 {
                     Err(crate::models::ModelError::InputDevice)
