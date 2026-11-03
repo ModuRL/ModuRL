@@ -563,6 +563,55 @@ mod tests {
     }
 
     #[test]
+    fn ddpg_act_for_training_rejects_invalid_warmup_observations() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let actor = MLP::builder()
+            .input_size(4)
+            .output_size(1)
+            .hidden_layer_sizes(vec![4])
+            .output_activation(Tanh)
+            .options((&device, DType::F32))
+            .build()
+            .unwrap();
+        let critic = ActionValueCritic::builder()
+            .online_network(ScalarStateActionCritic::new(
+                MLP::builder()
+                    .input_size(5)
+                    .output_size(1)
+                    .hidden_layer_sizes(vec![4])
+                    .options((&device, DType::F32))
+                    .build()
+                    .unwrap(),
+            ))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        let mut agent = DDPGAgent::<_, _, _, std::convert::Infallible>::builder()
+            .online_actor(actor)
+            .critic(critic)
+            .actor_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(0.01)
+            .action_space(BoxSpace::new_with_universal_bounds(
+                [1, 1],
+                -1.0,
+                1.0,
+                &device,
+            ))
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .dtype(DType::F32)
+            .exploration_noise(0.0)
+            .training_start(100)
+            .training_horizon(4)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([2, 3], &device);
+
+        assert!(agent.act_for_training(&observations).is_err());
+    }
+
+    #[test]
     fn ddpg_act_uses_policy_during_warmup() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();

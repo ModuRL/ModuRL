@@ -775,6 +775,7 @@ where
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
         let actions = if self.schedule_progress.elapsed_steps() < self.training_start {
+            self.validate_observations(observations)?;
             self.random_actions(observations.dims()[0])?
         } else {
             self.act(observations)?
