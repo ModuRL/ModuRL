@@ -798,6 +798,32 @@ where
         self.decode_actions(latent, observations.dims()[0])
     }
 
+    /// Selects collection actions `[batch_size, ...action_shape]`: uniform random before `training_start`, otherwise policy samples.
+    fn training_actions(
+        &self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A, AS::Kind>, SACError<PE, GE, SE, CE>> {
+        if self.schedule_progress.elapsed_steps() < self.training_start {
+            self.validate_observations(observations)?;
+            let actions = self
+                .action_space
+                .sample_batch(
+                    observations.dims()[0],
+                    &self.replay_storage_config.optimization_device(),
+                )
+                .map_err(SACError::SpaceError)?;
+            Ok(
+                if const { matches!(AS::Kind::KIND, burn::tensor::kind::Kind::Float) } {
+                    <DType as Cast<A, AS::Kind>>::cast(actions, self.dtype).without_autodiff()
+                } else {
+                    actions.without_autodiff()
+                },
+            )
+        } else {
+            self.stochastic_action(observations)
+        }
+    }
+
     /// Computes detached soft Bellman targets `[batch_size, 1]` from native replay observations, actions, rewards, and Bool termination flags.
     /// Reduces policy candidates after critic aggregation; truncation alone retains bootstrapping. All statistics use dtype and the optimization device.
     fn compute_bellman_targets(
@@ -1180,23 +1206,7 @@ where
             );
         }
 
-        let count = env.num_envs();
-        let first_timestep = self.schedule_progress.elapsed_steps();
-        let random_actions = first_timestep < self.training_start;
-
-        let actions = if random_actions {
-            let actions = self
-                .action_space
-                .sample_batch(count, &self.replay_storage_config.optimization_device())
-                .map_err(SACError::SpaceError)?;
-            if const { matches!(AS::Kind::KIND, burn::tensor::kind::Kind::Float) } {
-                <DType as Cast<A, AS::Kind>>::cast(actions, self.dtype).without_autodiff()
-            } else {
-                actions.without_autodiff()
-            }
-        } else {
-            self.stochastic_action(observations)?
-        };
+        let actions = self.training_actions(observations)?;
 
         let step = env.step(actions.clone()).map_err(SACError::GymError)?;
         self.validate_timestep(observations, &actions, &step)?;
@@ -1463,12 +1473,17 @@ where
     type ActionSpace = AS;
     type TrainingActions = Tensor<A, AS::Kind>;
 
-    /// Samples detached rank-A environment actions `[batch_size, ...action_shape]` from native rank-O observations `[batch_size, ...observation_shape]`.
-    /// Preserves observation dtype and kind, transfers to the optimization device, and lets the model perform any input conversions.
+    /// Selects detached rank-A collection actions `[batch_size, ...action_shape]` from native rank-O observations `[batch_size, ...observation_shape]`.
+    /// Uses uniform random actions before `training_start`, then policy samples; preserves observation kind and dtype.
     fn act_for_training(
         &mut self,
         observations: &Tensor<O, K>,
     ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
+        self.training_actions(observations)
+    }
+
+    /// Maps observations `[batch_size, ...observation_shape]` to stochastic policy actions `[batch_size, ...action_shape]`; never uses warmup random actions.
+    fn act(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A, AS::Kind>, Self::Error> {
         self.stochastic_action(observations)
     }
 
