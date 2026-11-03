@@ -751,14 +751,16 @@ where
             collection_timestep: first_timestep.saturating_add(count),
             completed_episodes,
         };
-        self.run_scheduled_updates(first_timestep, count, logger)?;
-        logger.log_collection(&entry);
+        let update_result = self.run_scheduled_updates(first_timestep, count, logger);
+        if update_result.is_ok() {
+            logger.log_collection(&entry);
+        }
         self.schedule_progress.advance_steps(count);
         self.current_epsilon = validate_epsilon(
             self.schedule_progress
                 .parameter(self.epsilon_schedule.as_ref()),
         )?;
-        Ok(())
+        update_result
     }
 
     fn run_scheduled_updates<I>(

@@ -217,8 +217,19 @@ mod tests {
         gym::{VectorizedGymError, VectorizedGymWrapper},
         parameter_schedule::ConstantSchedule,
     };
-    use burn::{optim::SgdConfig, tensor::Device};
-    use std::{convert::Infallible, marker::PhantomData};
+    use burn::{
+        module::Module,
+        optim::SgdConfig,
+        tensor::{Device, Int, Tensor},
+    };
+    use std::{
+        convert::Infallible,
+        marker::PhantomData,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     #[derive(Default)]
     struct RecordingLogger {
@@ -351,6 +362,66 @@ mod tests {
             learned_parameters,
             caller_agent.inner.online_q_network.values.val().into_data()
         );
+    }
+
+    #[test]
+    fn dqn_counts_stored_transitions_when_update_fails() {
+        #[derive(Module, Debug)]
+        struct FailingQNetwork {
+            inner: crate::agents::q_learning::tests::TestNetwork,
+            #[module(skip)]
+            forward_calls: Arc<AtomicUsize>,
+        }
+
+        impl<const R: usize> Forward<R, 2> for FailingQNetwork {
+            type InputKind = Float;
+            type OutputKind = Float;
+            type Error = crate::models::ModelError;
+
+            /// Returns an error for observations shaped `[batch_size, ...observation_shape]`.
+            fn forward(&self, _observations: Tensor<R>) -> Result<Tensor<2>, Self::Error> {
+                self.forward_calls.fetch_add(1, Ordering::Relaxed);
+                Err(crate::models::ModelError::InputDevice)
+            }
+        }
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone().without_autodiff()),
+            FixedEnv::new(device.clone().without_autodiff()),
+        ])
+        .unwrap();
+        let mut agent = DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
+            .action_space(Discrete::new(2).unwrap())
+            .observation_space(env.observation_space())
+            .online_q_network(FailingQNetwork {
+                inner: network(&device, DType::F32),
+                forward_calls: calls.clone(),
+            })
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .epsilon_schedule(ConstantSchedule::new(0.0))
+            .replay_capacity(4)
+            .batch_size(2)
+            .training_start(0)
+            .update_frequency(1)
+            .target_update_interval(10)
+            .training_horizon(10)
+            .build()
+            .unwrap();
+
+        let observations = env.reset().unwrap();
+        let actions = Tensor::<2, Int>::zeros([2, 1], &observations.device());
+        let step = env.step(actions.clone()).unwrap();
+        assert!(
+            agent
+                .learn_from_timesteps(&observations, actions, step)
+                .is_err()
+        );
+        assert!(calls.load(Ordering::Relaxed) > 0);
+        assert_eq!(agent.inner.schedule_progress.elapsed_steps(), 2);
     }
 
     #[test]
