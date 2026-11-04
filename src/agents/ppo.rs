@@ -481,7 +481,6 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     gradient_clip: f32,
     current_observations: Option<G::Observation>,
     episode_tracker: PPOEpisodeTracker,
-    timestep_episode_tracker: Option<PPOEpisodeTracker>,
     _phantom: PhantomData<GE>,
 }
 
@@ -606,7 +605,6 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
             gradient_clip,
             current_observations: None,
             episode_tracker: PPOEpisodeTracker::new(0),
-            timestep_episode_tracker: None,
             _phantom: PhantomData,
         })
     }
@@ -1206,12 +1204,17 @@ where
         let environment_count = env.num_envs();
         self.validate_environment_count(environment_count)?;
         self.rollout_buffer.clear();
+        self.prepare_episode_tracker(environment_count);
+        Ok(observations)
+    }
+
+    /// Resizes logged episode tracking to `environment_count` environments; keeps partial episodes when the count matches.
+    fn prepare_episode_tracker(&mut self, environment_count: usize) {
         if self.logging_info.is_some()
             && self.episode_tracker.environment_count() != environment_count
         {
             self.episode_tracker = PPOEpisodeTracker::new(environment_count);
         }
-        Ok(observations)
     }
 
     fn validate_environment_count(
@@ -1498,7 +1501,6 @@ where
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         num_timesteps: usize,
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
-        self.timestep_episode_tracker = None;
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_rollout_collection(env)?;
         self.schedule_progress.default_horizon(num_timesteps);
@@ -1543,10 +1545,9 @@ where
                 });
             }
         }
-        let mut episode_tracker = match self.timestep_episode_tracker.take() {
-            Some(tracker) if tracker.environment_count() == environment_count => tracker,
-            _ => PPOEpisodeTracker::new(environment_count),
-        };
+        self.prepare_episode_tracker(environment_count);
+        let mut episode_tracker =
+            std::mem::replace(&mut self.episode_tracker, PPOEpisodeTracker::new(0));
         let result = (|| {
             {
                 let validation = self.network_info.valid();
@@ -1571,7 +1572,7 @@ where
             self.train_if_rollout_full(environment_count)?;
             Ok(())
         })();
-        self.timestep_episode_tracker = Some(episode_tracker);
+        self.episode_tracker = episode_tracker;
         result
     }
 }

@@ -1615,6 +1615,70 @@ mod schedule_tests {
     }
 
     #[test]
+    fn reset_current_observations_restarts_caller_episodes() {
+        struct EpisodeLogger(Vec<(f32, usize)>);
+
+        impl PPOLogger<usize> for EpisodeLogger {
+            fn log(&mut self, _entry: &PPOLogEntry) {}
+
+            fn log_collection(&mut self, entry: &PPOCollectionLogEntry<usize>) {
+                self.0.extend(
+                    entry
+                        .completed_episodes
+                        .iter()
+                        .map(|episode| (episode.episode_return, episode.episode_length)),
+                );
+            }
+        }
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env = VectorizedGymWrapper::from(TwoStepTestGym::new(device.clone(), false));
+        let mut logger = EpisodeLogger(Vec::new());
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(networks)
+            .batch_size(8)
+            .mini_batch_size(8)
+            .num_epochs(1)
+            .training_horizon(4)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+
+        let observations = env.reset().unwrap();
+        let actions = agent.act_for_training(&observations).unwrap();
+        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
+        let next_observations = step.observations.clone();
+        agent
+            .learn_from_timesteps(&observations, actions, step)
+            .unwrap();
+
+        agent.reset_current_observations();
+
+        let actions = agent.act_for_training(&next_observations).unwrap();
+        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
+        agent
+            .learn_from_timesteps(&next_observations, actions, step)
+            .unwrap();
+
+        assert_eq!(logger.0, [(1.0, 1)]);
+    }
+
+    #[test]
     fn caller_collected_rollout_matches_learn() {
         struct Parameters(Vec<f32>);
 
