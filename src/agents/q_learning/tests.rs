@@ -1,5 +1,5 @@
 use super::*;
-use crate::tensor_rank::TensorBatchTypes;
+use crate::tensor_rank::{PrevRank, TensorBatchTypes};
 use crate::{
     gym::{Gym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
     objectives::bellman_targets,

@@ -17,7 +17,7 @@ use crate::{
     objectives::bellman_targets,
     parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, ObservationSpace},
-    tensor_rank::{NextRank, PrevRank},
+    tensor_rank::NextRank,
 };
 
 pub trait DDQNLogger<I = ()> {
@@ -162,7 +162,6 @@ where
     M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float>,
     M::Error: std::fmt::Debug,
     GE: std::fmt::Debug,
-    Tensor<R, S::Kind>: PrevRank<Prev = Tensor<U, S::Kind>>,
     Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
 {
     type Error = QAgentError<GE, M::Error>;

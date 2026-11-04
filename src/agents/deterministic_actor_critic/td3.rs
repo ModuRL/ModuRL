@@ -19,7 +19,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     spaces::{ActionMap, ObservationSpace},
-    tensor_rank::{NextRank, PrevRank},
+    tensor_rank::{NextRank, TensorBatchTypes},
 };
 use bon::bon;
 use burn::{
@@ -290,7 +290,6 @@ impl<
     AS,
     GE,
     I,
-    K: Autodiff,
     AE: Debug,
     CE: Debug,
     SE: Debug,
@@ -301,7 +300,13 @@ impl<
 > Agent<I, O, A>
     for TD3Agent<
         '_,
-        DeterministicActorCriticModelGroup<M, N, Tensor<O, K>, Tensor<A>, Tensor<C>>,
+        DeterministicActorCriticModelGroup<
+            M,
+            N,
+            Tensor<O, <OS as TensorBatchTypes>::Kind>,
+            Tensor<A>,
+            Tensor<C>,
+        >,
         OS,
         AS,
         GE,
@@ -309,13 +314,20 @@ impl<
         A,
     >
 where
-    OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+    OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+    OS::Kind: Autodiff,
     AS: ActionMap<A, A, Kind = Float, Error = SE>,
     Tensor<A>: NextRank<Next = Tensor<C>>,
-    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
-    M: Module + Forward<O, A, InputKind = K, OutputKind = Float, Error = AE>,
-    N: ActionValueCriticNetwork<O, A, C, ObservationKind = K, ActionKind = Float, Error = CE>,
+    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
+    M: Module + Forward<O, A, InputKind = OS::Kind, OutputKind = Float, Error = AE>,
+    N: ActionValueCriticNetwork<
+            O,
+            A,
+            C,
+            ObservationKind = OS::Kind,
+            ActionKind = Float,
+            Error = CE,
+        >,
     GE: Debug,
 {
     type Error = DeterministicActorCriticError<AE, GE, SE, CE>;
@@ -326,12 +338,15 @@ where
 
     /// Maps native observations [batch_size, ...observation_shape] to Float exploration actions [batch_size, ...action_shape].
     /// Preserves input kind and dtype; returned actions use the configured dtype and optimization device.
-    fn act_for_training(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
+    fn act_for_training(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A>, Self::Error> {
         self.inner.training_actions(observations)
     }
 
     /// Maps observations [batch_size, ...observation_shape] to exploration-noised policy actions [batch_size, ...action_shape]; never uses warmup random actions.
-    fn act(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
+    fn act(&mut self, observations: &Tensor<O, OS::Kind>) -> Result<Tensor<A>, Self::Error> {
         Ok(self.inner.act(observations)?.without_autodiff())
     }
 
@@ -357,9 +372,9 @@ where
     /// Stores one caller-collected batch with observation shape `[num_envs, ...observation_shape]`.
     fn learn_from_timesteps(
         &mut self,
-        observations: &Tensor<O, K>,
+        observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<(), Self::Error> {
         self.inner
             .learn_from_timesteps(observations, actions, step, &mut self.logging_info)

@@ -17,7 +17,7 @@ use crate::{
     parameter_schedule::ScheduleProgress,
     spaces::{ActionMap, ObservationSpace},
     tensor_operations::transfer_bool_tensor,
-    tensor_rank::NextRank,
+    tensor_rank::{NextRank, TensorBatchTypes},
 };
 use bon::bon;
 use burn::{
@@ -1086,15 +1086,14 @@ where
     }
 
     /// Checks observation, action, and step shapes before collection.
-    fn validate_timestep<I, K: Autodiff, const U: usize>(
+    fn validate_timestep<I, const U: usize>(
         &self,
-        observations: &Tensor<O, K>,
+        observations: &Tensor<O, OS::Kind>,
         actions: &Tensor<A>,
-        step: &MultiGymStepInfo<I, Tensor<U, K>>,
+        step: &MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<usize, DeterministicActorCriticError<AE, GE, SE, CE>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         let count = step.dones.len();
         for (field, actual) in [
@@ -1179,17 +1178,16 @@ where
     }
 
     /// Stores one already-validated transition with batch shape `[num_envs, ...]`.
-    fn collect_timestep<I, K: Autodiff, const U: usize>(
+    fn collect_timestep<I, const U: usize>(
         &mut self,
-        observations: &Tensor<O, K>,
+        observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
         episodes: &mut EpisodeTracker,
         logger: &mut dyn DeterministicActorCriticLogger<I, A>,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         let count = step.dones.len();
         let first_timestep = self.schedule_progress.elapsed_steps();
@@ -1235,15 +1233,15 @@ where
             fields(num_timesteps)
         )
     )]
-    pub(crate) fn learn<I, K: Autodiff, const U: usize>(
+    pub(crate) fn learn<I, const U: usize>(
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         num_timesteps: usize,
         logger: &mut dyn DeterministicActorCriticLogger<I, A>,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         const {
             assert!(
@@ -1284,16 +1282,15 @@ where
     }
 
     /// Processes a caller-collected transition with matching environment batch shapes.
-    pub(crate) fn learn_from_timesteps<I, K: Autodiff, const U: usize>(
+    pub(crate) fn learn_from_timesteps<I, const U: usize>(
         &mut self,
-        observations: &Tensor<O, K>,
+        observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
         logger: &mut dyn DeterministicActorCriticLogger<I, A>,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         let count = step.dones.len();
         self.validate_environment_count(count)?;

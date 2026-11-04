@@ -31,7 +31,7 @@ use crate::{
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::{ActionMap, ObservationSpace},
     tensor_operations::transfer_bool_tensor,
-    tensor_rank::{NextRank, PrevRank},
+    tensor_rank::{NextRank, TensorBatchTypes},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -283,7 +283,7 @@ struct SACCollectionEntropy {
     change_weight: f32,
 }
 
-struct SACStoredTimestep<I, const O: usize, K: TensorKind + Basic> {
+struct SACStoredTimestep<I, const O: usize, K: Basic> {
     next_observations: Tensor<O, K>,
     log_entry: SACCollectionLogEntry<I>,
 }
@@ -1189,15 +1189,15 @@ where
     )]
     /// Collects one environment batch into replay and replaces observations `[num_envs, ...observation_shape]` with the next collection batch.
     /// Preserves native observations and terminal targets. Returns detached collection rewards `[num_envs, 1]` and episode statistics.
-    fn collect_transitions<K: Autodiff, const U: usize>(
+    fn collect_transitions<const U: usize>(
         &mut self,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
-        observations: &mut Tensor<O, K>,
+        observations: &mut Tensor<O, OS::Kind>,
         episodes: &mut SACEpisodeTracker,
     ) -> Result<SACCollectionLogEntry<I>, SACError<PE, GE, SE, CE>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         const {
             assert!(
@@ -1216,15 +1216,14 @@ where
     }
 
     /// Validates observation, action, and step shapes before collection.
-    fn validate_timestep<K: Autodiff, const U: usize>(
+    fn validate_timestep<const U: usize>(
         &self,
-        observations: &Tensor<O, K>,
+        observations: &Tensor<O, OS::Kind>,
         actions: &Tensor<A, AS::Kind>,
-        step: &MultiGymStepInfo<I, Tensor<U, K>>,
+        step: &MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<usize, SACError<PE, GE, SE, CE>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         const {
             assert!(
@@ -1293,16 +1292,16 @@ where
     }
 
     /// Stores one already-validated transition with batch shape `[num_envs, ...]`.
-    fn store_timestep<K: Autodiff, const U: usize>(
+    #[allow(clippy::type_complexity)]
+    fn store_timestep<const U: usize>(
         &mut self,
-        observations: &Tensor<O, K>,
+        observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A, AS::Kind>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
         episodes: &mut SACEpisodeTracker,
-    ) -> Result<SACStoredTimestep<I, O, K>, SACError<PE, GE, SE, CE>>
+    ) -> Result<SACStoredTimestep<I, O, OS::Kind>, SACError<PE, GE, SE, CE>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         const {
             assert!(
@@ -1436,7 +1435,6 @@ impl<
     AS,
     GE,
     I,
-    K: Autodiff,
     const O: usize,
     const A: usize,
     const L: usize,
@@ -1445,7 +1443,14 @@ impl<
 > Agent<I, O, A>
     for SACAgent<
         '_,
-        SACModelGroup<P, N, Tensor<O, K>, Tensor<A, AS::Kind>, Tensor<L>, Tensor<C, AS::Kind>>,
+        SACModelGroup<
+            P,
+            N,
+            Tensor<O, <OS as TensorBatchTypes>::Kind>,
+            Tensor<A, AS::Kind>,
+            Tensor<L>,
+            Tensor<C, AS::Kind>,
+        >,
         OS,
         AS,
         GE,
@@ -1453,15 +1458,15 @@ impl<
         A,
     >
 where
-    OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+    OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
     AS: ActionMap<L, A>,
+    OS::Kind: Autodiff,
     AS::Kind: Autodiff,
     Tensor<A, AS::Kind>: NextRank<Next = Tensor<C, AS::Kind>>,
     DType: Cast<A, AS::Kind, OutputKind = AS::Kind>,
-    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
-    P: Module + ExpectationPolicy<O, L, C, ObservationKind = K, CandidateKind = AS::Kind>,
-    N: ActionValueCriticNetwork<O, A, C, ObservationKind = K, ActionKind = AS::Kind>,
+    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
+    P: Module + ExpectationPolicy<O, L, C, ObservationKind = OS::Kind, CandidateKind = AS::Kind>,
+    N: ActionValueCriticNetwork<O, A, C, ObservationKind = OS::Kind, ActionKind = AS::Kind>,
     P::Error: Debug,
     N::Error: Debug,
     AS::Error: Debug,
@@ -1477,13 +1482,16 @@ where
     /// Uses uniform random actions before `training_start`, then policy samples; preserves observation kind and dtype.
     fn act_for_training(
         &mut self,
-        observations: &Tensor<O, K>,
+        observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
         self.training_actions(observations)
     }
 
     /// Maps observations `[batch_size, ...observation_shape]` to stochastic policy actions `[batch_size, ...action_shape]`; never uses warmup random actions.
-    fn act(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A, AS::Kind>, Self::Error> {
+    fn act(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
         self.stochastic_action(observations)
     }
 
@@ -1525,9 +1533,9 @@ where
     /// Schedules need `training_horizon`.
     fn learn_from_timesteps(
         &mut self,
-        observations: &Tensor<O, K>,
+        observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A, AS::Kind>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
     ) -> Result<(), Self::Error> {
         self.validate_replay_environment_count(observations.dims()[0])?;
         let count = self.validate_timestep(observations, &actions, &step)?;

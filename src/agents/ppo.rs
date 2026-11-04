@@ -1241,15 +1241,15 @@ where
     /// Fills the rollout buffer, updating `next_observations` shaped
     /// `[environment_count, ...observation_shape]` after each environment step.
     /// Uses the supplied validation view without changing the training models, including on errors.
-    fn collect_rollout<K: Autodiff, const U: usize>(
+    fn collect_rollout<const U: usize>(
         &mut self,
         validation: &N,
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         next_observations: &mut OS::Batch,
     ) -> Result<usize, PPOError<N::Error, GE, AS::Error>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         let environment_count = env.num_envs();
         let mut episode_tracker =
@@ -1307,15 +1307,11 @@ where
     }
 
     /// Checks leading environment batch shape across observations, actions, and step values.
-    fn validate_timestep_batch<K: Basic, const U: usize>(
-        observations: &Tensor<O, K>,
+    fn validate_timestep_batch(
+        observations: &Tensor<O, OS::Kind>,
         training_actions: &Tensor<L>,
-        step: &MultiGymStepInfo<I, Tensor<U, K>>,
-    ) -> Result<usize, PPOError<N::Error, GE, AS::Error>>
-    where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
-    {
+        step: &MultiGymStepInfo<I, <OS as TensorBatchTypes>::Item>,
+    ) -> Result<usize, PPOError<N::Error, GE, AS::Error>> {
         let count = observations.dims()[0];
         for (field, actual) in [
             ("training actions", training_actions.dims()[0]),
@@ -1345,17 +1341,17 @@ where
     }
 
     /// Stores one already-validated caller or environment transition with batch shape `[num_envs, ...]`.
-    fn store_timestep<K: Autodiff, const U: usize>(
+    fn store_timestep<const U: usize>(
         &mut self,
         validation: &N,
-        observations: &Tensor<O, K>,
+        observations: &Tensor<O, OS::Kind>,
         collection_action: PPOCollectionAction<AS, L>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
         episode_tracker: &mut PPOEpisodeTracker,
     ) -> Result<OS::Batch, PPOError<N::Error, GE, AS::Error>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         Self::check_critic_dtype(&collection_action.values, step.rewards.dtype())?;
         let environment_count = observations.dims()[0];
@@ -1452,8 +1448,7 @@ where
     AS: ActionMap<L, A> + Clone,
     <AS as ActionSpace<A>>::Error: std::fmt::Debug,
     OS::Kind: Autodiff,
-    Tensor<O, OS::Kind>: PrevRank + NextRank,
-    Tensor<L>: NextRank,
+    Tensor<O, OS::Kind>: PrevRank,
     Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
     Tensor<L>: NextRank<Next = Tensor<BL>>,
     Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,

@@ -22,7 +22,7 @@ use crate::{
     parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
     spaces::{Discrete, ObservationSpace, SpaceError},
     tensor_operations::transfer_bool_tensor,
-    tensor_rank::{NextRank, PrevRank},
+    tensor_rank::{NextRank, TensorBatchTypes},
 };
 
 pub mod ddqn;
@@ -419,10 +419,11 @@ where
 }
 
 #[bon]
-impl<M, S, GE, T, const R: usize, K: Autodiff, ME: std::fmt::Debug> QLearningAgent<M, S, GE, T, R>
+impl<M, S, GE, T, const R: usize, ME: std::fmt::Debug> QLearningAgent<M, S, GE, T, R>
 where
-    S: ObservationSpace<R, Kind = K>,
-    M: Module + Forward<R, 2, InputKind = K, OutputKind = Float, Error = ME>,
+    S: ObservationSpace<R>,
+    S::Kind: Autodiff,
+    M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float, Error = ME>,
     GE: std::fmt::Debug,
     T: QLearningTarget,
 {
@@ -484,7 +485,7 @@ where
         let replay_storage_config =
             ReplayStorageConfig::from_models(online_q_network.devices(), replay_device)
                 .ok_or(QLearningConfigurationError::ModelDevice)?;
-        let replay_storage = QLearningReplayStorage::<R, K>::new(
+        let replay_storage = QLearningReplayStorage::<R, S::Kind>::new(
             observation_storage_shape,
             replay_storage_config.storage_device(),
         );
@@ -524,10 +525,11 @@ where
     }
 }
 
-impl<M, S, GE, T, const R: usize, K: Autodiff, ME: std::fmt::Debug> QLearningAgent<M, S, GE, T, R>
+impl<M, S, GE, T, const R: usize, ME: std::fmt::Debug> QLearningAgent<M, S, GE, T, R>
 where
-    S: ObservationSpace<R, Kind = K>,
-    M: Module + Forward<R, 2, InputKind = K, OutputKind = Float, Error = ME>,
+    S: ObservationSpace<R>,
+    S::Kind: Autodiff,
+    M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float, Error = ME>,
     GE: std::fmt::Debug,
     T: QLearningTarget,
 {
@@ -541,7 +543,7 @@ where
 
     /// Moves rank-R observations [batch_size, ...observation_shape] to the optimization device.
     /// Preserves every axis, native kind, dtype, and gradient path. The model must accept the observation dtype.
-    fn model_observations(&self, observations: Tensor<R, K>) -> Tensor<R, K> {
+    fn model_observations(&self, observations: Tensor<R, S::Kind>) -> Tensor<R, S::Kind> {
         observations.to_device(&self.replay_storage_config.optimization_device())
     }
 
@@ -549,7 +551,7 @@ where
     /// Selection uses the optimization device and the observations' native kind and dtype.
     pub(crate) fn act(
         &mut self,
-        observations: &Tensor<R, K>,
+        observations: &Tensor<R, S::Kind>,
     ) -> Result<Tensor<2, Int>, QAgentError<GE, ME>> {
         let observations = self.model_observations(observations.clone());
         epsilon_greedy_actions(
@@ -640,7 +642,7 @@ where
     /// Rewards [num_envs, 1] feed episode metrics. Only termination blocks bootstrapping; truncation retains terminal observations.
     fn store_vectorized_transitions(
         &mut self,
-        transitions: QCollectedTransitions<'_, R, K>,
+        transitions: QCollectedTransitions<'_, R, S::Kind>,
         episodes: &mut QEpisodeTracker,
     ) -> Result<Vec<QEpisodeLogEntry>, QAgentError<GE, ME>> {
         let environment_count = transitions.dones.len();
@@ -683,14 +685,12 @@ where
     /// Validates one transition's leading environment batch shape.
     fn validate_timestep<I, const U: usize>(
         &mut self,
-        observations: &Tensor<R, K>,
+        observations: &Tensor<R, S::Kind>,
         actions: &Tensor<2, Int>,
-        step: &MultiGymStepInfo<I, Tensor<U, K>>,
+        step: &MultiGymStepInfo<I, Tensor<U, S::Kind>>,
     ) -> Result<usize, QAgentError<GE, ME>>
     where
-        S: ObservationSpace<R, Kind = K, Item = Tensor<U, K>>,
-        Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
+        Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
         let count = step.dones.len();
         for (field, actual) in [
@@ -717,16 +717,14 @@ where
     /// Stores one already-validated transition with batch shape `[num_envs, ...]`.
     fn collect_timestep<I, const U: usize>(
         &mut self,
-        observations: &Tensor<R, K>,
+        observations: &Tensor<R, S::Kind>,
         actions: Tensor<2, Int>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
         episodes: &mut QEpisodeTracker,
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>
     where
-        S: ObservationSpace<R, Kind = K, Item = Tensor<U, K>>,
-        Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
+        Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
         let count = step.dones.len();
         let first_timestep = self.schedule_progress.elapsed_steps();
@@ -805,9 +803,8 @@ where
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>
     where
-        S: ObservationSpace<R, Kind = K, Item = Tensor<U, K>>,
-        Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
+        S: ObservationSpace<R, Item = Tensor<U, <S as TensorBatchTypes>::Kind>>,
+        Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
         let mut elapsed_timesteps = 0;
         let environment_count = env.num_envs();
@@ -844,15 +841,13 @@ where
     /// Processes a caller-collected transition with matching environment batch shapes.
     pub(crate) fn learn_from_timesteps<I, const U: usize>(
         &mut self,
-        observations: &Tensor<R, K>,
+        observations: &Tensor<R, S::Kind>,
         actions: Tensor<2, Int>,
-        step: MultiGymStepInfo<I, Tensor<U, K>>,
+        step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>
     where
-        S: ObservationSpace<R, Kind = K, Item = Tensor<U, K>>,
-        Tensor<R, K>: PrevRank<Prev = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<R, K>>,
+        Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
         let count = self.validate_timestep(observations, &actions, &step)?;
         self.experience_replay
