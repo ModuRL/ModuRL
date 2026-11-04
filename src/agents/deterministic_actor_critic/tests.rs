@@ -301,10 +301,10 @@ impl DeterministicActorCriticLogger for Logger {
     }
 }
 
-struct EpisodeEnv {
-    device: Device,
-    truncate: bool,
-    steps: usize,
+pub(super) struct EpisodeEnv {
+    pub(super) device: Device,
+    pub(super) truncate: bool,
+    pub(super) steps: usize,
 }
 
 impl Gym for EpisodeEnv {
@@ -470,6 +470,46 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
         ))
     ));
     assert_eq!(agent.replay.as_ref().unwrap().len(), len);
+}
+
+#[test]
+fn caller_collected_steps_reject_length_mismatches_and_recover() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex().autodiff();
+    let env_device = device.clone().without_autodiff();
+    let mut env = VectorizedGymWrapper::new(vec![
+        EpisodeEnv {
+            device: env_device.clone(),
+            truncate: false,
+            steps: 0,
+        },
+        EpisodeEnv {
+            device: env_device,
+            truncate: false,
+            steps: 0,
+        },
+    ])
+    .unwrap();
+    let mut agent = agent(&device, DType::F64, 2);
+    let mut logger = Logger::default();
+
+    let observations = env.reset().unwrap();
+    let actions = agent.act(&observations).unwrap().without_autodiff();
+    let mut bad_step = env.step(actions.clone()).unwrap();
+    bad_step.dones.pop();
+    assert!(
+        agent
+            .learn_from_timesteps(&observations, actions.clone(), bad_step, &mut logger,)
+            .is_err()
+    );
+
+    let observations = env.reset().unwrap();
+    let actions = agent.act(&observations).unwrap().without_autodiff();
+    let step = env.step(actions.clone()).unwrap();
+    agent
+        .learn_from_timesteps(&observations, actions, step, &mut logger)
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
 }
 
 #[test]

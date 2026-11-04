@@ -1,8 +1,9 @@
 use crate::tensor_rank::TensorBatchTypes;
 use crate::{
-    gym::MultiGym,
+    gym::{MultiGym, MultiGymStepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
+use burn::tensor::{Tensor, kind::Basic};
 
 pub mod a2c;
 pub mod action_value_critic;
@@ -15,23 +16,55 @@ pub mod sac;
 
 pub(crate) use replay_device_strategy::ReplayStorageConfig;
 
+/// Training actions selected by [`Agent::act_for_training`] and converted for the environment on demand.
+pub trait ToEnvironmentActions {
+    type Actions;
+    type Error;
+
+    /// Returns the action batch passed to `MultiGym::step`, shape `[num_envs, ...action_shape]`.
+    fn to_environment_actions(&self) -> Result<Self::Actions, Self::Error>;
+}
+
+impl<const D: usize, K: Basic> ToEnvironmentActions for Tensor<D, K> {
+    type Actions = Self;
+    type Error = std::convert::Infallible;
+
+    fn to_environment_actions(&self) -> Result<Self, Self::Error> {
+        Ok(self.clone())
+    }
+}
+
 /// Selects native environment actions and trains through batched environment interaction.
 /// Ranks `O` and `A` include the batch axis; `PrevRank` determines each unbatched terminal observation type.
 /// Scalar observations use `[batch_size, 1]` and terminal observations use `[1]`.
 /// Associated spaces determine the native observation and action kinds.
 pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
-    type Error;
+    type Error: From<<Self::TrainingActions as ToEnvironmentActions>::Error>;
     type GymError;
 
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
 
-    /// Selects rank-`A` actions `[batch_size, ...action_shape]` from rank-`O` observations `[batch_size, ...observation_shape]`.
-    /// Preserves the batch axis. The agent defines supported observation dtypes/devices and returned action dtypes/devices.
+    /// Training actions used by `learn_from_timesteps`.
+    type TrainingActions: ToEnvironmentActions<
+        Actions = <Self::ActionSpace as TensorBatchTypes>::Batch,
+    >;
+
+    /// Selects training actions from observations shaped `[batch_size, ...observation_shape]`.
+    fn act_for_training(
+        &mut self,
+        observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
+    ) -> Result<Self::TrainingActions, Self::Error>;
+
+    /// Selects environment actions from observations shaped `[batch_size, ...observation_shape]`.
     fn act(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
-    ) -> Result<<Self::ActionSpace as TensorBatchTypes>::Batch, Self::Error>;
+    ) -> Result<<Self::ActionSpace as TensorBatchTypes>::Batch, Self::Error> {
+        Ok(self
+            .act_for_training(observations)?
+            .to_environment_actions()?)
+    }
 
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
     /// Terminal observations have rank `O - 1`; scalar terminal observations use `[1]`.
@@ -47,6 +80,16 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
             ActionSpace = Self::ActionSpace,
         >,
         num_timesteps: usize,
+    ) -> Result<(), Self::Error>;
+
+    /// Stores one caller-collected step from observations shaped `[num_envs, ...observation_shape]`.
+    /// `actions` must come from `act_for_training` on those observations; steps must be consecutive for the same environments.
+    /// Schedules need the builder's `training_horizon` because this method has no total timestep count.
+    fn learn_from_timesteps(
+        &mut self,
+        observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
+        training_actions: Self::TrainingActions,
+        step: MultiGymStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>,
     ) -> Result<(), Self::Error>;
 }
 
@@ -152,10 +195,10 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::Agent;
     use super::test_support::{FixedContinuousEnv, FixedEnv};
+    use super::{Agent, ToEnvironmentActions};
     use crate::{
-        gym::{Gym, MultiGym, VectorizedGymError, VectorizedGymWrapper},
+        gym::{Gym, MultiGym, MultiGymStepInfo, VectorizedGymError, VectorizedGymWrapper},
         spaces::{BoxSpace, Discrete},
     };
     use burn::tensor::{DType, Device, Int, Tensor};
@@ -164,13 +207,17 @@ mod tests {
     struct FixedAgent;
 
     impl Agent for FixedAgent {
-        type Error = VectorizedGymError<Infallible>;
+        type Error = Box<dyn std::error::Error>;
         type GymError = VectorizedGymError<Infallible>;
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type TrainingActions = Tensor<2, Int>;
 
         /// Returns zero Int actions `[batch_size, 1]` for Float observations `[batch_size, features]` on the observation device.
-        fn act(&mut self, observations: &Tensor<2>) -> Result<Tensor<2, Int>, Self::Error> {
+        fn act_for_training(
+            &mut self,
+            observations: &Tensor<2>,
+        ) -> Result<Tensor<2, Int>, Self::Error> {
             Ok(Tensor::zeros(
                 [observations.dims()[0], 1],
                 &observations.device(),
@@ -193,6 +240,16 @@ mod tests {
             }
             Ok(())
         }
+
+        /// Accepts observations and step data with matching environment batch shapes.
+        fn learn_from_timesteps(
+            &mut self,
+            _observations: &Tensor<2>,
+            _training_actions: Tensor<2, Int>,
+            _step: MultiGymStepInfo<(), Tensor<1>>,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -200,10 +257,11 @@ mod tests {
         let device = Device::flex();
         let mut agent = FixedAgent;
         let agent: &mut dyn Agent<
-            Error = VectorizedGymError<Infallible>,
+            Error = Box<dyn std::error::Error>,
             GymError = VectorizedGymError<Infallible>,
             ObservationSpace = BoxSpace<2>,
             ActionSpace = Discrete,
+            TrainingActions = Tensor<2, Int>,
         > = &mut agent;
         let mut single = VectorizedGymWrapper::from(FixedEnv::new(device.clone()));
         let mut multiple = VectorizedGymWrapper::new(vec![
@@ -212,7 +270,16 @@ mod tests {
         ])
         .unwrap();
         let observations = multiple.reset().unwrap();
+        let training_actions = (|| {
+            let training_actions = agent.act_for_training(&observations)?;
+            Ok::<_, Box<dyn std::error::Error>>(training_actions.to_environment_actions()?)
+        })()
+        .unwrap();
         let actions = agent.act(&observations).unwrap();
+        assert_eq!(
+            training_actions.into_data().try_to_vec::<i32>().unwrap(),
+            vec![0, 0]
+        );
         assert_eq!(actions.dims(), [2, 1]);
         assert_eq!(actions.device(), device);
         assert_eq!(actions.into_data().try_to_vec::<i32>().unwrap(), vec![0, 0]);

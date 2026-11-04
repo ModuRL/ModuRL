@@ -17,7 +17,7 @@ use crate::{
     parameter_schedule::ScheduleProgress,
     spaces::{ActionMap, ObservationSpace},
     tensor_operations::transfer_bool_tensor,
-    tensor_rank::NextRank,
+    tensor_rank::{NextRank, TensorBatchTypes},
 };
 use bon::bon;
 use burn::{
@@ -139,6 +139,14 @@ pub enum DeterministicActorCriticError<AE, GE, SE, CE = std::convert::Infallible
     Device { field: &'static str },
     #[error("observation batches must be nonempty")]
     EmptyBatch,
+}
+
+impl<AE, GE, SE, CE> From<std::convert::Infallible>
+    for DeterministicActorCriticError<AE, GE, SE, CE>
+{
+    fn from(error: std::convert::Infallible) -> Self {
+        match error {}
+    }
 }
 
 impl<AE, GE, SE, CE> From<ReplayStorageError> for DeterministicActorCriticError<AE, GE, SE, CE> {
@@ -471,6 +479,7 @@ pub(crate) struct DeterministicActorCriticAgent<
     replay_storage_config: ReplayStorageConfig,
     optimization_steps: usize,
     dtype: DType,
+    timestep_episodes: Option<EpisodeTracker>,
     _errors: PhantomData<GE>,
 }
 
@@ -591,6 +600,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             replay_storage_config,
             optimization_steps: 0,
             dtype,
+            timestep_episodes: None,
             _errors: PhantomData,
         })
     }
@@ -757,6 +767,20 @@ where
             add_gaussian_noise(&latent, self.exploration_noise, None),
             observations.dims()[0],
         )
+    }
+
+    /// Selects collection actions `[batch_size, ...action_shape]`: uniform random before `training_start`, otherwise noisy policy actions.
+    pub(crate) fn training_actions(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let actions = if self.schedule_progress.elapsed_steps() < self.training_start {
+            self.validate_observations(observations)?;
+            self.random_actions(observations.dims()[0])?
+        } else {
+            self.act(observations)?
+        };
+        Ok(actions.without_autodiff())
     }
 
     /// Samples Float environment actions [batch_size, ...action_shape] with the existing device RNG and casts to compute dtype.
@@ -1061,35 +1085,82 @@ where
         Ok(completed)
     }
 
-    /// Trains with native observations [num_envs, ...observation_shape] and Float actions [num_envs, ...action_shape].
-    /// Terminal observations have rank U = O - 1. Preserves terminal targets, update cadence, and schedule progress across calls.
-    /// Resets collection on each call; validates replay alignment and metadata before writing experience.
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(
-            name = "deterministic_actor_critic.learn",
-            target = "modurl::performance",
-            skip_all,
-            fields(num_timesteps)
-        )
-    )]
-    pub(crate) fn learn<I, K: Autodiff, const U: usize>(
-        &mut self,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
-        num_timesteps: usize,
-        logger: &mut dyn DeterministicActorCriticLogger<I, A>,
-    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
+    /// Checks observation, action, and step shapes before collection.
+    fn validate_timestep<I, const U: usize>(
+        &self,
+        observations: &Tensor<O, OS::Kind>,
+        actions: &Tensor<A>,
+        step: &MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+    ) -> Result<usize, DeterministicActorCriticError<AE, GE, SE, CE>>
     where
-        OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
-        Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
-        const {
-            assert!(
-                O == U + 1,
-                "terminal observation rank must omit the batch axis"
-            );
+        let count = step.dones.len();
+        for (field, actual) in [
+            ("observations", observations.dims()[0]),
+            ("actions", actions.dims()[0]),
+            ("truncation flags", step.truncateds.len()),
+            ("terminal observations", step.terminal_observations.len()),
+            ("environment infos", step.infos.len()),
+            ("environment observations", step.observations.dims()[0]),
+            ("environment rewards", step.rewards.dims()[0]),
+        ] {
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field,
+                    expected: count,
+                    actual,
+                }
+                .into());
+            }
         }
-        let count = env.num_envs();
+        self.validate_observations(observations)?;
+        self.validate_observations(&step.observations)?;
+        let expected_rewards = [count, 1];
+        if step.rewards.dims() != expected_rewards {
+            return Err(DeterministicActorCriticError::Shape {
+                field: "environment rewards",
+                expected: expected_rewards.to_vec(),
+                actual: step.rewards.dims().to_vec(),
+            });
+        }
+        if step.observations.dtype() != observations.dtype() {
+            return Err(DeterministicActorCriticError::DType {
+                field: "environment observations",
+                expected: observations.dtype(),
+                actual: step.observations.dtype(),
+            });
+        }
+        for terminal in step.terminal_observations.iter().flatten() {
+            let expected = self.observation_space.shape();
+            if terminal.dims().to_vec() != expected {
+                return Err(DeterministicActorCriticError::Shape {
+                    field: "terminal observations",
+                    expected,
+                    actual: terminal.dims().to_vec(),
+                });
+            }
+            if terminal.dtype() != step.observations.dtype() {
+                return Err(DeterministicActorCriticError::DType {
+                    field: "terminal observations",
+                    expected: step.observations.dtype(),
+                    actual: terminal.dtype(),
+                });
+            }
+            if terminal.device() != step.observations.device() {
+                return Err(DeterministicActorCriticError::Device {
+                    field: "terminal observations",
+                });
+            }
+        }
+        Ok(count)
+    }
+
+    /// Validates environment-count compatibility with replay before collection.
+    fn validate_environment_count(
+        &mut self,
+        count: usize,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
         validate_replay_alignment(self.replay_capacity, count)?;
         if let Some(expected) = self.environment_count
             && expected != count
@@ -1103,6 +1174,84 @@ where
         if let Some(replay) = &mut self.replay {
             replay.validate_environment_count(count)?;
         }
+        Ok(())
+    }
+
+    /// Stores one already-validated transition with batch shape `[num_envs, ...]`.
+    fn collect_timestep<I, const U: usize>(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+        actions: Tensor<A>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        episodes: &mut EpisodeTracker,
+        logger: &mut dyn DeterministicActorCriticLogger<I, A>,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
+    where
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
+    {
+        let count = step.dones.len();
+        let first_timestep = self.schedule_progress.elapsed_steps();
+        let next_observations = step.transition_next_observations();
+        let completed_episodes = self.store_transitions(
+            CollectedTransitions {
+                observations,
+                next_observations: &next_observations,
+                actions: &actions.without_autodiff(),
+                rewards: &step.rewards,
+                dones: &step.dones,
+                truncateds: &step.truncateds,
+                first_timestep,
+            },
+            episodes,
+        )?;
+        self.schedule_progress.advance_steps(count);
+        for offset in 1..=count {
+            let timestep = first_timestep + offset;
+            if timestep >= self.training_start && timestep.is_multiple_of(self.update_frequency) {
+                self.optimize(timestep, logger)?;
+            }
+        }
+        logger.log_collection(&DeterministicActorCriticCollectionLogEntry {
+            collection_rewards: step.rewards.without_autodiff(),
+            infos: step.infos,
+            collection_timestep: self.schedule_progress.elapsed_steps(),
+            completed_episodes,
+            replay_len: self.replay.as_ref().map_or(0, DeterministicReplay::len),
+        });
+        Ok(())
+    }
+
+    /// Trains with native observations [num_envs, ...observation_shape] and Float actions [num_envs, ...action_shape].
+    /// Terminal observations have rank U = O - 1. Preserves terminal targets, update cadence, and schedule progress across calls.
+    /// Resets collection on each call; validates replay alignment and metadata before writing experience.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            name = "deterministic_actor_critic.learn",
+            target = "modurl::performance",
+            skip_all,
+            fields(num_timesteps)
+        )
+    )]
+    pub(crate) fn learn<I, const U: usize>(
+        &mut self,
+        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
+        num_timesteps: usize,
+        logger: &mut dyn DeterministicActorCriticLogger<I, A>,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
+    where
+        OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
+    {
+        const {
+            assert!(
+                O == U + 1,
+                "terminal observation rank must omit the batch axis"
+            );
+        }
+        let count = env.num_envs();
+        self.timestep_episodes = None;
+        self.validate_environment_count(count)?;
         let mut observations = env
             .reset()
             .map_err(DeterministicActorCriticError::GymError)?;
@@ -1119,117 +1268,41 @@ where
         let mut episodes = EpisodeTracker::new(count);
         let mut elapsed = 0;
         while elapsed < num_timesteps {
-            let first_timestep = self.schedule_progress.elapsed_steps();
-            let actions = if first_timestep < self.training_start {
-                self.random_actions(count)?
-            } else {
-                self.act(&observations)?
-            }
-            .without_autodiff();
+            let actions = self.training_actions(&observations)?;
             let step = env
                 .step(actions.clone())
                 .map_err(DeterministicActorCriticError::GymError)?;
-            for (field, actual) in [
-                ("done flags", step.dones.len()),
-                ("truncation flags", step.truncateds.len()),
-                ("terminal observations", step.terminal_observations.len()),
-                ("environment infos", step.infos.len()),
-            ] {
-                if actual != count {
-                    return Err(ReplayStorageError::BatchLengthMismatch {
-                        field,
-                        expected: count,
-                        actual,
-                    }
-                    .into());
-                }
-            }
-            self.validate_observations(&step.observations)?;
-            let expected =
-                space_storage_shape::<O>("observations", self.observation_space.shape(), count)?;
-            if step.observations.dims() != expected {
-                return Err(DeterministicActorCriticError::Shape {
-                    field: "environment observations",
-                    expected: expected.to_vec(),
-                    actual: step.observations.dims().to_vec(),
-                });
-            }
-            if step.rewards.dims() != [count, 1] {
-                return Err(DeterministicActorCriticError::Shape {
-                    field: "environment rewards",
-                    expected: vec![count, 1],
-                    actual: step.rewards.dims().to_vec(),
-                });
-            }
-            if step.observations.dtype() != observations.dtype() {
-                return Err(DeterministicActorCriticError::DType {
-                    field: "environment observations",
-                    expected: observations.dtype(),
-                    actual: step.observations.dtype(),
-                });
-            }
-            for terminal in step.terminal_observations.iter().flatten() {
-                let expected = self.observation_space.shape();
-                if terminal.dims().to_vec() != expected {
-                    return Err(DeterministicActorCriticError::Shape {
-                        field: "terminal observations",
-                        expected,
-                        actual: terminal.dims().to_vec(),
-                    });
-                }
-                if terminal.dtype() != step.observations.dtype() {
-                    return Err(DeterministicActorCriticError::DType {
-                        field: "terminal observations",
-                        expected: step.observations.dtype(),
-                        actual: terminal.dtype(),
-                    });
-                }
-                if terminal.device() != step.observations.device() {
-                    return Err(DeterministicActorCriticError::Device {
-                        field: "terminal observations",
-                    });
-                }
-            }
-            let next_observations = step.transition_next_observations();
-            let MultiGymStepInfo {
-                observations: reset_observations,
-                rewards,
-                infos,
-                dones,
-                truncateds,
-                ..
-            } = step;
-            let completed_episodes = self.store_transitions(
-                CollectedTransitions {
-                    observations: &observations,
-                    next_observations: &next_observations,
-                    actions: &actions,
-                    rewards: &rewards,
-                    dones: &dones,
-                    truncateds: &truncateds,
-                    first_timestep,
-                },
-                &mut episodes,
-            )?;
-            self.schedule_progress.advance_steps(count);
-            for offset in 1..=count {
-                let timestep = first_timestep + offset;
-                if timestep >= self.training_start && timestep.is_multiple_of(self.update_frequency)
-                {
-                    self.optimize(timestep, logger)?;
-                }
-            }
             elapsed += count;
-            observations = reset_observations;
-            logger.log_collection(&DeterministicActorCriticCollectionLogEntry {
-                collection_rewards: rewards.without_autodiff(),
-                infos,
-                collection_timestep: self.schedule_progress.elapsed_steps(),
-                completed_episodes,
-                replay_len: self.replay.as_ref().map_or(0, DeterministicReplay::len),
-            });
+            let observations_before = observations.clone();
+            self.validate_timestep(&observations_before, &actions, &step)?;
+            observations = step.observations.clone();
+            self.collect_timestep(&observations_before, actions, step, &mut episodes, logger)?;
         }
         Ok(())
+    }
+
+    /// Processes a caller-collected transition with matching environment batch shapes.
+    pub(crate) fn learn_from_timesteps<I, const U: usize>(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+        actions: Tensor<A>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        logger: &mut dyn DeterministicActorCriticLogger<I, A>,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
+    where
+        Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
+    {
+        let count = step.dones.len();
+        self.validate_environment_count(count)?;
+        let validated_count = self.validate_timestep(observations, &actions, &step)?;
+        self.environment_count = Some(validated_count);
+        let mut episodes = match self.timestep_episodes.take() {
+            Some(episodes) if episodes.returns.len() == count => episodes,
+            _ => EpisodeTracker::new(count),
+        };
+        let result = self.collect_timestep(observations, actions, step, &mut episodes, logger);
+        self.timestep_episodes = Some(episodes);
+        result
     }
 }
 

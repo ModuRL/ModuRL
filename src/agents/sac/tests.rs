@@ -4,14 +4,15 @@ use crate::{
     distributions::{
         CategoricalDistribution, GaussianDistribution, TanhTransform, TransformedDistribution,
     },
-    gym::{Gym, ResetInfo, StepInfo, VectorizedGymWrapper},
+    gym::{Gym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
     models::{Forward, probabilistic_model::ProbabilisticPolicyModel},
-    spaces::{BoxSpace, Discrete},
+    spaces::{ActionSpace, BoxSpace, Discrete},
     tensor_rank::TensorBatchTypes,
 };
 use burn::{
+    module::{Module, ModuleVisitor, Param},
     optim::SgdConfig,
-    tensor::{Device, Float, Int},
+    tensor::{Cast, Device, Float, Int},
 };
 use std::convert::Infallible;
 
@@ -693,6 +694,285 @@ fn malformed_terminal_observations_return_errors_before_replay_insertion() {
         assert!(agent.replay.is_none());
         assert_eq!(agent.optimization_steps, 0);
     }
+}
+
+#[test]
+fn caller_collected_steps_reject_length_mismatches_and_recover() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let env_device = Device::flex();
+    let device = env_device.clone().autodiff();
+    let mut env = VectorizedGymWrapper::new(vec![
+        EndingEnv {
+            device: env_device.clone(),
+            terminated: false,
+            terminal_width: 1,
+        },
+        EndingEnv {
+            device: env_device,
+            terminated: true,
+            terminal_width: 1,
+        },
+    ])
+    .unwrap();
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
+        .policy(ProbabilisticPolicyModel::new(
+            linear_model(1, 2, 0.0, &device),
+            CategoricalDistribution,
+        ))
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![discrete_critic(&device, DType::F32)])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(env.action_space())
+        .observation_space(env.observation_space())
+        .replay_capacity(16)
+        .batch_size(2)
+        .training_start(10)
+        .training_horizon(20)
+        .build()
+        .unwrap();
+
+    let observations = env.reset().unwrap();
+    let actions = agent.act_for_training(&observations).unwrap();
+    let mut bad_step = env.step(actions.clone()).unwrap();
+    bad_step.dones.pop();
+    assert!(
+        agent
+            .learn_from_timesteps(&observations, actions, bad_step)
+            .is_err()
+    );
+
+    let observations = env.reset().unwrap();
+    let actions = agent.act_for_training(&observations).unwrap();
+    let step = env.step(actions.clone()).unwrap();
+    agent
+        .learn_from_timesteps(&observations, actions, step)
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+}
+
+#[test]
+fn act_for_training_uses_random_warmup_actions() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex().autodiff();
+    let policy = ProbabilisticPolicyModel::new(
+        linear_model(1, 2, 0.0, &device),
+        TransformedDistribution::<GaussianDistribution, TanhTransform>::default(),
+    );
+    let critic = ActionValueCritic::builder()
+        .online_network(ScalarStateActionCritic::new(linear_model(
+            2, 1, 1.0, &device,
+        )))
+        .optimizer(SgdConfig::new().init())
+        .learning_rate(0.01)
+        .build()
+        .unwrap();
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
+        .policy(policy)
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![critic])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(BoxSpace::new(
+            Tensor::full([1, 1], -1.0, &device),
+            Tensor::ones([1, 1], &device),
+        ))
+        .observation_space(BoxSpace::new(
+            Tensor::zeros([1, 1], &device),
+            Tensor::full([1, 1], 100.0, &device),
+        ))
+        .training_start(100)
+        .training_horizon(4)
+        .build()
+        .unwrap();
+    let observations = Tensor::zeros([2, 1], &device);
+
+    device.seed(153);
+    let actions = agent.act_for_training(&observations).unwrap();
+    device.seed(153);
+    let sampled_actions = agent
+        .action_space
+        .sample_batch(
+            observations.dims()[0],
+            &agent.replay_storage_config.optimization_device(),
+        )
+        .unwrap();
+    let expected = <DType as Cast<2, Float>>::cast(sampled_actions, agent.dtype).without_autodiff();
+
+    assert_eq!(actions.to_data(), expected.to_data());
+}
+
+#[test]
+fn act_uses_policy_during_warmup() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex().autodiff();
+    let policy = ProbabilisticPolicyModel::new(
+        linear_model(1, 2, 0.0, &device),
+        TransformedDistribution::<GaussianDistribution, TanhTransform>::default(),
+    );
+    let critic = ActionValueCritic::builder()
+        .online_network(ScalarStateActionCritic::new(linear_model(
+            2, 1, 1.0, &device,
+        )))
+        .optimizer(SgdConfig::new().init())
+        .learning_rate(0.01)
+        .build()
+        .unwrap();
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
+        .policy(policy)
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![critic])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(BoxSpace::new(
+            Tensor::full([1, 1], -1.0, &device),
+            Tensor::ones([1, 1], &device),
+        ))
+        .observation_space(BoxSpace::new(
+            Tensor::zeros([1, 1], &device),
+            Tensor::full([1, 1], 100.0, &device),
+        ))
+        .training_start(100)
+        .training_horizon(4)
+        .build()
+        .unwrap();
+    let observations = Tensor::zeros([2, 1], &device);
+
+    device.seed(153);
+    let actions = agent.act(&observations).unwrap();
+    device.seed(153);
+    let expected = agent.stochastic_action(&observations).unwrap();
+
+    assert_eq!(actions.to_data(), expected.to_data());
+}
+
+#[test]
+fn caller_collection_entropy_weight_is_one_after_warmup() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let environment_device = Device::flex();
+    let device = environment_device.clone().autodiff();
+    let mut environment = VectorizedGymWrapper::new(vec![
+        EndingEnv {
+            device: environment_device.clone(),
+            terminated: false,
+            terminal_width: 1,
+        },
+        EndingEnv {
+            device: environment_device,
+            terminated: true,
+            terminal_width: 1,
+        },
+    ])
+    .unwrap();
+    let mut agent = SACAgent::<_, _, _, VectorizedGymError<Infallible>>::builder()
+        .policy(ProbabilisticPolicyModel::new(
+            linear_model(1, 2, 0.0, &device),
+            CategoricalDistribution,
+        ))
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![discrete_critic(&device, DType::F32)])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(environment.action_space())
+        .observation_space(environment.observation_space())
+        .replay_capacity(8)
+        .batch_size(2)
+        .training_start(0)
+        .training_horizon(4)
+        .entropy_change_penalty(0.5)
+        .build()
+        .unwrap();
+
+    let observations = environment.reset().unwrap();
+    let actions = agent.act_for_training(&observations).unwrap();
+    let step = environment.step(actions.clone()).unwrap();
+    agent
+        .learn_from_timesteps(&observations, actions, step)
+        .unwrap();
+
+    let stored = agent.replay.as_ref().unwrap().sample().unwrap();
+    assert_eq!(numbers(stored.entropy_change_weights), [1.0; 2]);
+}
+
+#[test]
+fn caller_collected_training_matches_learn() {
+    struct Parameters(Vec<f32>);
+
+    impl ModuleVisitor for Parameters {
+        /// Visits parameter values while preserving their tensor shape.
+        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
+            self.0
+                .extend(param.val().into_data().try_to_vec::<f32>().unwrap());
+        }
+    }
+
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let env_device = Device::flex();
+    let device = env_device.clone().autodiff();
+    let build_env = || {
+        VectorizedGymWrapper::new(vec![EndingEnv {
+            device: env_device.clone(),
+            terminated: true,
+            terminal_width: 1,
+        }])
+        .unwrap()
+    };
+    let build_agent = |observation_space: BoxSpace<2>, action_space: Discrete| {
+        SACAgent::<_, _, _, VectorizedGymError<Infallible>>::builder()
+            .policy(ProbabilisticPolicyModel::new(
+                linear_model(1, 2, 0.0, &device),
+                CategoricalDistribution,
+            ))
+            .actor_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(0.01)
+            .critics(vec![discrete_critic(&device, DType::F32)])
+            .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+            .action_space(action_space)
+            .observation_space(observation_space)
+            .replay_capacity(2)
+            .batch_size(2)
+            .training_start(0)
+            .training_horizon(8)
+            .build()
+            .unwrap()
+    };
+
+    device.seed(153);
+    let mut learned_env = build_env();
+    let mut learned_agent =
+        build_agent(learned_env.observation_space(), learned_env.action_space());
+    learned_agent.learn(&mut learned_env, 2).unwrap();
+    assert_eq!(learned_agent.optimization_steps, 1);
+    let mut learned_parameters = Parameters(Vec::new());
+    learned_agent
+        .policy()
+        .module()
+        .visit(&mut learned_parameters);
+    for critic in learned_agent.critics() {
+        critic.online_network().visit(&mut learned_parameters);
+    }
+
+    device.seed(153);
+    let mut caller_env = build_env();
+    let mut caller_agent = build_agent(caller_env.observation_space(), caller_env.action_space());
+    let mut observations = caller_env.reset().unwrap();
+    for _ in 0..2 {
+        let actions = caller_agent.act_for_training(&observations).unwrap();
+        let step = caller_env.step(actions.clone()).unwrap();
+        let next_observations = step.observations.clone();
+        caller_agent
+            .learn_from_timesteps(&observations, actions, step)
+            .unwrap();
+        observations = next_observations;
+    }
+    assert_eq!(caller_agent.optimization_steps, 1);
+
+    let mut caller_parameters = Parameters(Vec::new());
+    caller_agent.policy().module().visit(&mut caller_parameters);
+    for critic in caller_agent.critics() {
+        critic.online_network().visit(&mut caller_parameters);
+    }
+    assert_eq!(learned_parameters.0, caller_parameters.0);
 }
 
 #[test]

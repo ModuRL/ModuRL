@@ -12,12 +12,12 @@ use super::{
 };
 use crate::{
     agents::Agent,
-    gym::MultiGym,
+    gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     objectives::bellman_targets,
     parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, ObservationSpace},
-    tensor_rank::{NextRank, PrevRank},
+    tensor_rank::NextRank,
 };
 
 pub trait DDQNLogger<I = ()> {
@@ -162,17 +162,20 @@ where
     M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float>,
     M::Error: std::fmt::Debug,
     GE: std::fmt::Debug,
-    Tensor<R, S::Kind>: PrevRank<Prev = Tensor<U, S::Kind>>,
     Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
 {
     type Error = QAgentError<GE, M::Error>;
     type GymError = GE;
     type ObservationSpace = S;
     type ActionSpace = Discrete;
+    type TrainingActions = Tensor<2, Int>;
 
     /// Selects U32 Int actions [batch_size, 1] for native rank-R observations [batch_size, ...observation_shape].
     /// Transfers observations to the optimization device and preserves their kind and dtype.
-    fn act(&mut self, observations: &Tensor<R, S::Kind>) -> Result<Tensor<2, Int>, Self::Error> {
+    fn act_for_training(
+        &mut self,
+        observations: &Tensor<R, S::Kind>,
+    ) -> Result<Tensor<2, Int>, Self::Error> {
         self.inner.act(observations)
     }
 
@@ -195,6 +198,17 @@ where
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)
+    }
+
+    /// Stores one caller-collected batch with observation shape `[num_envs, ...observation_shape]`.
+    fn learn_from_timesteps(
+        &mut self,
+        observations: &Tensor<R, S::Kind>,
+        actions: Tensor<2, Int>,
+        step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .learn_from_timesteps(observations, actions, step, &mut self.logging_info)
     }
 }
 
@@ -268,8 +282,17 @@ mod tests {
             let updated_parameters = agent.inner.online_q_network.values.val().into_data();
             assert_ne!(initial_parameters, updated_parameters);
             assert_eq!(agent.inner.dtype, dtype);
-            assert_eq!(logger.collection_timesteps, [2]);
-            assert_eq!(logger.update_timesteps, [1, 2]);
+
+            let observations = env.reset().unwrap();
+            let actions = agent.act_for_training(&observations).unwrap();
+            let step = env.step(actions.clone()).unwrap();
+            agent
+                .learn_from_timesteps(&observations, actions, step)
+                .unwrap();
+            assert_eq!(agent.inner.schedule_progress.elapsed_steps(), 4);
+            drop(agent);
+            assert_eq!(logger.collection_timesteps, [2, 4]);
+            assert_eq!(logger.update_timesteps, [1, 2, 3, 4]);
         }
     }
 

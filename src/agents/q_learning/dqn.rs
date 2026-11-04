@@ -11,12 +11,12 @@ use super::{
 };
 use crate::{
     agents::Agent,
-    gym::MultiGym,
+    gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     objectives::bellman_targets,
     parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, ObservationSpace},
-    tensor_rank::{NextRank, PrevRank},
+    tensor_rank::NextRank,
 };
 
 pub trait DQNLogger<I = ()> {
@@ -157,17 +157,20 @@ where
     M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float>,
     M::Error: std::fmt::Debug,
     GE: std::fmt::Debug,
-    Tensor<R, S::Kind>: PrevRank<Prev = Tensor<U, S::Kind>>,
     Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
 {
     type Error = QAgentError<GE, M::Error>;
     type GymError = GE;
     type ObservationSpace = S;
     type ActionSpace = Discrete;
+    type TrainingActions = Tensor<2, Int>;
 
     /// Selects U32 Int actions [batch_size, 1] for native rank-R observations [batch_size, ...observation_shape].
     /// Transfers observations to the optimization device and preserves their kind and dtype.
-    fn act(&mut self, observations: &Tensor<R, S::Kind>) -> Result<Tensor<2, Int>, Self::Error> {
+    fn act_for_training(
+        &mut self,
+        observations: &Tensor<R, S::Kind>,
+    ) -> Result<Tensor<2, Int>, Self::Error> {
         self.inner.act(observations)
     }
 
@@ -191,6 +194,17 @@ where
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)
     }
+
+    /// Stores one caller-collected batch with observation shape `[num_envs, ...observation_shape]`.
+    fn learn_from_timesteps(
+        &mut self,
+        observations: &Tensor<R, S::Kind>,
+        actions: Tensor<2, Int>,
+        step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .learn_from_timesteps(observations, actions, step, &mut self.logging_info)
+    }
 }
 
 #[cfg(test)]
@@ -202,8 +216,19 @@ mod tests {
         gym::{VectorizedGymError, VectorizedGymWrapper},
         parameter_schedule::ConstantSchedule,
     };
-    use burn::{optim::SgdConfig, tensor::Device};
-    use std::{convert::Infallible, marker::PhantomData};
+    use burn::{
+        module::Module,
+        optim::SgdConfig,
+        tensor::{Device, Int, Tensor},
+    };
+    use std::{
+        convert::Infallible,
+        marker::PhantomData,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     #[derive(Default)]
     struct RecordingLogger {
@@ -263,8 +288,246 @@ mod tests {
             let updated_parameters = agent.inner.online_q_network.values.val().into_data();
             assert_ne!(initial_parameters, updated_parameters);
             assert_eq!(agent.inner.dtype, dtype);
-            assert_eq!(logger.collection_timesteps, [2]);
-            assert_eq!(logger.update_timesteps, [1, 2]);
+
+            let observations = env.reset().unwrap();
+            let actions = agent.act_for_training(&observations).unwrap();
+            let step = env.step(actions.clone()).unwrap();
+            agent
+                .learn_from_timesteps(&observations, actions, step)
+                .unwrap();
+            assert_eq!(agent.inner.schedule_progress.elapsed_steps(), 4);
+            drop(agent);
+            assert_eq!(logger.collection_timesteps, [2, 4]);
+            assert_eq!(logger.update_timesteps, [1, 2, 3, 4]);
+        }
+    }
+
+    #[test]
+    fn caller_collected_training_matches_learn() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let build_env = || {
+            VectorizedGymWrapper::new(vec![
+                FixedEnv::new(device.clone().without_autodiff()),
+                FixedEnv::new(device.clone().without_autodiff()),
+            ])
+            .unwrap()
+        };
+        let build_agent = |observation_space| {
+            DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
+                .action_space(Discrete::new(2).unwrap())
+                .observation_space(observation_space)
+                .online_q_network(network(&device, DType::F32))
+                .optimizer(SgdConfig::new().init())
+                .learning_rate(0.01)
+                .epsilon_schedule(ConstantSchedule::new(0.0))
+                .replay_capacity(4)
+                .batch_size(2)
+                .training_start(1)
+                .update_frequency(6)
+                .target_update_interval(2)
+                .training_horizon(8)
+                .build()
+                .unwrap()
+        };
+
+        device.seed(153);
+        let mut learned_env = build_env();
+        let mut learned_agent = build_agent(learned_env.observation_space());
+        learned_agent.learn(&mut learned_env, 6).unwrap();
+        assert_eq!(learned_agent.inner.optimization_steps, 1);
+        let learned_parameters = learned_agent
+            .inner
+            .online_q_network
+            .values
+            .val()
+            .into_data();
+
+        device.seed(153);
+        let mut caller_env = build_env();
+        let mut caller_agent = build_agent(caller_env.observation_space());
+        let mut observations = caller_env.reset().unwrap();
+        for _ in 0..3 {
+            let actions = caller_agent.act_for_training(&observations).unwrap();
+            let step = caller_env.step(actions.clone()).unwrap();
+            let next_observations = step.observations.clone();
+            caller_agent
+                .learn_from_timesteps(&observations, actions, step)
+                .unwrap();
+            observations = next_observations;
+        }
+        assert_eq!(caller_agent.inner.optimization_steps, 1);
+        assert_eq!(
+            learned_parameters,
+            caller_agent.inner.online_q_network.values.val().into_data()
+        );
+    }
+
+    #[test]
+    fn dqn_counts_stored_transitions_when_update_fails() {
+        #[derive(Module, Debug)]
+        struct FailingQNetwork {
+            inner: crate::agents::q_learning::tests::TestNetwork,
+            #[module(skip)]
+            forward_calls: Arc<AtomicUsize>,
+        }
+
+        impl<const R: usize> Forward<R, 2> for FailingQNetwork {
+            type InputKind = Float;
+            type OutputKind = Float;
+            type Error = crate::models::ModelError;
+
+            /// Returns an error for observations shaped `[batch_size, ...observation_shape]`.
+            fn forward(&self, _observations: Tensor<R>) -> Result<Tensor<2>, Self::Error> {
+                self.forward_calls.fetch_add(1, Ordering::Relaxed);
+                Err(crate::models::ModelError::InputDevice)
+            }
+        }
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone().without_autodiff()),
+            FixedEnv::new(device.clone().without_autodiff()),
+        ])
+        .unwrap();
+        let mut agent = DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
+            .action_space(Discrete::new(2).unwrap())
+            .observation_space(env.observation_space())
+            .online_q_network(FailingQNetwork {
+                inner: network(&device, DType::F32),
+                forward_calls: calls.clone(),
+            })
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .epsilon_schedule(ConstantSchedule::new(0.0))
+            .replay_capacity(4)
+            .batch_size(2)
+            .training_start(0)
+            .update_frequency(1)
+            .target_update_interval(10)
+            .training_horizon(10)
+            .build()
+            .unwrap();
+
+        let observations = env.reset().unwrap();
+        let actions = Tensor::<2, Int>::zeros([2, 1], &observations.device());
+        let step = env.step(actions.clone()).unwrap();
+        assert!(
+            agent
+                .learn_from_timesteps(&observations, actions, step)
+                .is_err()
+        );
+        assert!(calls.load(Ordering::Relaxed) > 0);
+        assert_eq!(agent.inner.schedule_progress.elapsed_steps(), 2);
+    }
+
+    #[test]
+    fn dqn_syncs_target_after_update_fails() {
+        #[derive(Module, Debug)]
+        struct FailOnFourthForwardNetwork {
+            inner: crate::agents::q_learning::tests::TestNetwork,
+            #[module(skip)]
+            forward_calls: Arc<AtomicUsize>,
+        }
+
+        impl<const R: usize> Forward<R, 2> for FailOnFourthForwardNetwork {
+            type InputKind = Float;
+            type OutputKind = Float;
+            type Error = crate::models::ModelError;
+
+            /// Maps observations `[batch_size, ...observation_shape]` to Q-values `[batch_size, actions]`; fails the second update after the first has changed the online parameters.
+            fn forward(&self, observations: Tensor<R>) -> Result<Tensor<2>, Self::Error> {
+                if self.forward_calls.fetch_add(1, Ordering::Relaxed) == 3 {
+                    Err(crate::models::ModelError::InputDevice)
+                } else {
+                    Ok(self.inner.forward(observations).unwrap())
+                }
+            }
+        }
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone().without_autodiff()),
+            FixedEnv::new(device.clone().without_autodiff()),
+        ])
+        .unwrap();
+        let mut agent = DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
+            .action_space(Discrete::new(2).unwrap())
+            .observation_space(env.observation_space())
+            .online_q_network(FailOnFourthForwardNetwork {
+                inner: network(&device, DType::F32),
+                forward_calls: calls.clone(),
+            })
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .epsilon_schedule(ConstantSchedule::new(0.0))
+            .replay_capacity(4)
+            .batch_size(2)
+            .training_start(0)
+            .update_frequency(1)
+            .target_update_interval(2)
+            .training_horizon(10)
+            .build()
+            .unwrap();
+
+        let initial_parameters = agent.inner.online_q_network.inner.values.val().into_data();
+        let observations = env.reset().unwrap();
+        let actions = Tensor::<2, Int>::zeros([2, 1], &observations.device());
+        let step = env.step(actions.clone()).unwrap();
+        assert!(
+            agent
+                .learn_from_timesteps(&observations, actions, step)
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+        assert_eq!(agent.inner.schedule_progress.elapsed_steps(), 2);
+
+        let online_parameters = agent.inner.online_q_network.inner.values.val().into_data();
+        assert_ne!(online_parameters, initial_parameters);
+        assert_eq!(
+            agent.inner.target_q_network.inner.values.val().into_data(),
+            online_parameters
+        );
+    }
+
+    #[test]
+    fn caller_collected_steps_advance_the_epsilon_schedule() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone().without_autodiff()),
+            FixedEnv::new(device.clone().without_autodiff()),
+        ])
+        .unwrap();
+        let mut agent = DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
+            .action_space(Discrete::new(2).unwrap())
+            .observation_space(env.observation_space())
+            .online_q_network(network(&device, DType::F32))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .epsilon_schedule(crate::parameter_schedule::LinearSchedule::new(1.0, 0.0))
+            .replay_capacity(8)
+            .batch_size(1)
+            .training_start(10)
+            .update_frequency(1)
+            .target_update_interval(2)
+            .training_horizon(4)
+            .build()
+            .unwrap();
+        let mut observations = env.reset().unwrap();
+        for expected_epsilon in [0.5, 0.0] {
+            let actions = agent.act_for_training(&observations).unwrap();
+            let step = env.step(actions.clone()).unwrap();
+            let next_observations = step.observations.clone();
+            agent
+                .learn_from_timesteps(&observations, actions, step)
+                .unwrap();
+            assert_eq!(agent.inner.current_epsilon, expected_epsilon);
+            observations = next_observations;
         }
     }
 

@@ -16,10 +16,10 @@ use crate::{
             ActionValueCriticNetwork, aggregate_critic_values,
         },
     },
-    gym::MultiGym,
+    gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     spaces::{ActionMap, ObservationSpace},
-    tensor_rank::{NextRank, PrevRank},
+    tensor_rank::{NextRank, TensorBatchTypes},
 };
 use bon::bon;
 use burn::{
@@ -290,7 +290,6 @@ impl<
     AS,
     GE,
     I,
-    K: Autodiff,
     AE: Debug,
     CE: Debug,
     SE: Debug,
@@ -301,7 +300,13 @@ impl<
 > Agent<I, O, A>
     for TD3Agent<
         '_,
-        DeterministicActorCriticModelGroup<M, N, Tensor<O, K>, Tensor<A>, Tensor<C>>,
+        DeterministicActorCriticModelGroup<
+            M,
+            N,
+            Tensor<O, <OS as TensorBatchTypes>::Kind>,
+            Tensor<A>,
+            Tensor<C>,
+        >,
         OS,
         AS,
         GE,
@@ -309,24 +314,40 @@ impl<
         A,
     >
 where
-    OS: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+    OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
+    OS::Kind: Autodiff,
     AS: ActionMap<A, A, Kind = Float, Error = SE>,
     Tensor<A>: NextRank<Next = Tensor<C>>,
-    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
-    M: Module + Forward<O, A, InputKind = K, OutputKind = Float, Error = AE>,
-    N: ActionValueCriticNetwork<O, A, C, ObservationKind = K, ActionKind = Float, Error = CE>,
+    Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
+    M: Module + Forward<O, A, InputKind = OS::Kind, OutputKind = Float, Error = AE>,
+    N: ActionValueCriticNetwork<
+            O,
+            A,
+            C,
+            ObservationKind = OS::Kind,
+            ActionKind = Float,
+            Error = CE,
+        >,
     GE: Debug,
 {
     type Error = DeterministicActorCriticError<AE, GE, SE, CE>;
     type GymError = GE;
     type ObservationSpace = OS;
     type ActionSpace = AS;
+    type TrainingActions = Tensor<A>;
 
     /// Maps native observations [batch_size, ...observation_shape] to Float exploration actions [batch_size, ...action_shape].
     /// Preserves input kind and dtype; returned actions use the configured dtype and optimization device.
-    fn act(&mut self, observations: &Tensor<O, K>) -> Result<Tensor<A>, Self::Error> {
-        self.inner.act(observations)
+    fn act_for_training(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<Tensor<A>, Self::Error> {
+        self.inner.training_actions(observations)
+    }
+
+    /// Maps observations [batch_size, ...observation_shape] to exploration-noised policy actions [batch_size, ...action_shape]; never uses warmup random actions.
+    fn act(&mut self, observations: &Tensor<O, OS::Kind>) -> Result<Tensor<A>, Self::Error> {
+        Ok(self.inner.act(observations)?.without_autodiff())
     }
 
     /// Trains from native observation batches, Float action batches, and rewards [num_envs, 1].
@@ -346,6 +367,17 @@ where
         num_timesteps: usize,
     ) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)
+    }
+
+    /// Stores one caller-collected batch with observation shape `[num_envs, ...observation_shape]`.
+    fn learn_from_timesteps(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+        actions: Tensor<A>,
+        step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .learn_from_timesteps(observations, actions, step, &mut self.logging_info)
     }
 }
 #[cfg(test)]
@@ -551,6 +583,60 @@ mod tests {
     }
 
     #[test]
+    fn td3_act_for_training_uses_random_warmup_actions() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let actor = MLP::builder()
+            .input_size(4)
+            .output_size(1)
+            .hidden_layer_sizes(vec![4])
+            .output_activation(Tanh)
+            .options((&device, DType::F32))
+            .build()
+            .unwrap();
+        let critic = ActionValueCritic::builder()
+            .online_network(ScalarStateActionCritic::new(
+                MLP::builder()
+                    .input_size(5)
+                    .output_size(1)
+                    .hidden_layer_sizes(vec![4])
+                    .options((&device, DType::F32))
+                    .build()
+                    .unwrap(),
+            ))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        let mut agent = TD3Agent::<_, _, _, std::convert::Infallible>::builder()
+            .online_actor(actor)
+            .critics(vec![critic])
+            .actor_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(0.01)
+            .action_space(BoxSpace::new_with_universal_bounds(
+                [1, 1],
+                -1.0,
+                1.0,
+                &device,
+            ))
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .dtype(DType::F32)
+            .exploration_noise(0.0)
+            .training_start(100)
+            .training_horizon(4)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([2, 4], &device);
+
+        device.seed(153);
+        let actions = agent.act_for_training(&observations).unwrap();
+        device.seed(153);
+        let expected = agent.inner.random_actions(observations.dims()[0]).unwrap();
+
+        assert_eq!(actions.to_data(), expected.to_data());
+    }
+
+    #[test]
     fn public_builder_trains_ensembles_and_delays_actor_and_targets() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         for dtype in [DType::F32, DType::F64] {
@@ -663,9 +749,17 @@ mod tests {
                 target_before
             );
             assert_eq!(agent.inner.optimization_steps, 4);
-            assert_eq!(logger.updates, 4);
-            assert_eq!(logger.collections, 2);
-            assert_eq!(logger.actor_updates, [false, false, true, false]);
+
+            let observations = env.reset().unwrap();
+            let actions = agent.act_for_training(&observations).unwrap();
+            let step = env.step(actions.clone()).unwrap();
+            agent
+                .learn_from_timesteps(&observations, actions, step)
+                .unwrap();
+            drop(agent);
+            assert_eq!(logger.updates, 6);
+            assert_eq!(logger.collections, 3);
+            assert_eq!(&logger.actor_updates[..4], [false, false, true, false]);
         }
     }
 }
