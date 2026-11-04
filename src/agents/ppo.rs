@@ -1199,6 +1199,7 @@ where
         let observations = if let Some(observations) = self.current_observations.take() {
             observations
         } else {
+            self.episode_tracker.clear();
             env.reset().map_err(PPOError::GymError)?
         };
         let environment_count = env.num_envs();

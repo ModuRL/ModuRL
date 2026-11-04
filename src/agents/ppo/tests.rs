@@ -1679,6 +1679,113 @@ mod schedule_tests {
     }
 
     #[test]
+    fn learn_after_reset_restarts_episode_totals() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("scripted step failure")]
+        struct ScriptedGymError;
+
+        struct ScriptedGym {
+            device: Device,
+            steps: usize,
+        }
+
+        impl Gym<usize> for ScriptedGym {
+            type Error = ScriptedGymError;
+            type ObservationSpace = BoxSpace;
+            type ActionSpace = Discrete;
+
+            /// Accepts Int actions [1] and returns Float observations [4] on the fixture device.
+            fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo<usize>, Self::Error> {
+                self.steps += 1;
+                match self.steps {
+                    1 => Ok(StepInfo {
+                        observation: Tensor::zeros([4], (&self.device, DType::F32)),
+                        reward: 1.0,
+                        done: false,
+                        truncated: false,
+                        info: self.steps,
+                    }),
+                    2 | 4 => Err(ScriptedGymError),
+                    3 => Ok(StepInfo {
+                        observation: Tensor::zeros([4], (&self.device, DType::F32)),
+                        reward: 2.0,
+                        done: true,
+                        truncated: false,
+                        info: self.steps,
+                    }),
+                    _ => unreachable!(),
+                }
+            }
+
+            /// Returns Float observations [4] on the fixture device.
+            fn reset(&mut self) -> Result<ResetInfo<usize>, Self::Error> {
+                Ok(ResetInfo {
+                    observation: Tensor::zeros([4], (&self.device, DType::F32)),
+                    info: 0,
+                })
+            }
+
+            fn observation_space(&self) -> Self::ObservationSpace {
+                BoxSpace::new_with_universal_bounds([1, 4], -1.0, 1.0, &self.device)
+            }
+
+            fn action_space(&self) -> Self::ActionSpace {
+                Discrete::new(2).unwrap()
+            }
+        }
+
+        struct EpisodeLogger(Vec<(f32, usize)>);
+
+        impl PPOLogger<usize> for EpisodeLogger {
+            fn log(&mut self, _entry: &PPOLogEntry) {}
+
+            fn log_collection(&mut self, entry: &PPOCollectionLogEntry<usize>) {
+                self.0.extend(
+                    entry
+                        .completed_episodes
+                        .iter()
+                        .map(|episode| (episode.episode_return, episode.episode_length)),
+                );
+            }
+        }
+
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env = VectorizedGymWrapper::from(ScriptedGym {
+            device: device.clone(),
+            steps: 0,
+        });
+        let mut logger = EpisodeLogger(Vec::new());
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, VectorizedGymError<ScriptedGymError>, usize>::builder()
+            .observation_space(env.observation_space())
+            .action_space(env.action_space())
+            .network_info(networks)
+            .batch_size(8)
+            .mini_batch_size(8)
+            .num_epochs(1)
+            .training_horizon(8)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+
+        assert!(agent.learn(&mut env, 2).is_err());
+        assert!(agent.learn(&mut env, 1).is_err());
+        assert_eq!(logger.0, [(2.0, 1)]);
+    }
+
+    #[test]
     fn caller_collected_rollout_matches_learn() {
         struct Parameters(Vec<f32>);
 
