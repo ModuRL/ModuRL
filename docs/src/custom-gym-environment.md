@@ -108,6 +108,8 @@ impl PerfectStateGym for CounterEnv {
 ```
 
 Include the random-number generator state too when an environment uses randomness.
+Wrapping `PerfectStateGym` environments in `VectorizedGymWrapper` provides
+`PerfectStateMultiGym`, which saves and restores individual slots by index.
 
 `reset` returns the initial observation and `step` consumes one action and
 returns the observation that follows it, its reward, and the episode flags.

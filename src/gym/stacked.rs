@@ -1,4 +1,6 @@
-use super::{MultiGym, MultiGymStepInfo, batch_metadata, batch_offsets, combine_steps};
+use super::{
+    MultiGym, MultiGymStepInfo, PerfectStateMultiGym, batch_metadata, batch_offsets, combine_steps,
+};
 use crate::spaces::{ActionSpace, ObservationSpace};
 use crate::tensor_rank::TensorBatchTypes;
 use burn::tensor::{Slice, Tensor};
@@ -31,6 +33,8 @@ pub enum StackedMultiGymError<E> {
     },
     #[error("invalid action batch: expected {expected} rows, got {actual}")]
     InvalidActionBatch { expected: usize, actual: usize },
+    #[error("slot {slot} is out of range for {num_envs} environments")]
+    InvalidSlot { slot: usize, num_envs: usize },
     /// An inner gym returned a tensor or vector that violates the [`MultiGym`] contract.
     #[error(
         "inner gym {gym_index} returned invalid {field} shape {actual:?}, expected {expected:?}"
@@ -97,6 +101,17 @@ where
 
     pub fn num_groups(&self) -> usize {
         self.gyms.len()
+    }
+
+    /// Maps a flattened slot to its inner gym index and that gym's local slot.
+    fn locate_slot(&self, slot: usize) -> Result<(usize, usize), StackedMultiGymError<G::Error>> {
+        self.validate_batch_sizes()?;
+        let num_envs = self.group_offsets[self.group_offsets.len() - 1];
+        if slot >= num_envs {
+            return Err(StackedMultiGymError::InvalidSlot { slot, num_envs });
+        }
+        let gym_index = self.group_offsets.partition_point(|&offset| offset <= slot) - 1;
+        Ok((gym_index, slot - self.group_offsets[gym_index]))
     }
 
     fn validate_batch_sizes(&self) -> Result<(), StackedMultiGymError<G::Error>> {
@@ -201,14 +216,72 @@ where
     }
 }
 
+impl<G, I, const O: usize, const A: usize> PerfectStateMultiGym<I, O, A>
+    for StackedMultiGym<G, I, O, A>
+where
+    G: PerfectStateMultiGym<I, O, A>,
+{
+    type State = G::State;
+
+    fn save_state(&self, slot: usize) -> Result<Self::State, Self::Error> {
+        let (gym_index, local_slot) = self.locate_slot(slot)?;
+        self.gyms[gym_index]
+            .save_state(local_slot)
+            .map_err(|error| StackedMultiGymError::Inner { gym_index, error })
+    }
+
+    fn set_state(&mut self, slot: usize, state: &Self::State) -> Result<(), Self::Error> {
+        let (gym_index, local_slot) = self.locate_slot(slot)?;
+        self.gyms[gym_index]
+            .set_state(local_slot, state)
+            .map_err(|error| StackedMultiGymError::Inner { gym_index, error })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::VectorizedGymWrapper;
     use super::super::test_support::*;
     use super::*;
     use crate::wrappers::OutputMapMultiGymWrapper;
-    use burn::tensor::{DType, Device};
+    use crate::wrappers::state_test_support::{StateTestGym, assert_slot_round_trip};
+    use burn::tensor::{DType, Device, Int};
     use std::convert::Infallible;
+
+    #[test]
+    fn stacked_slots_restore_independently_across_groups() {
+        assert_slot_round_trip::<_, (), 2, 2>(
+            || {
+                StackedMultiGym::new(vec![
+                    VectorizedGymWrapper::new(vec![StateTestGym::new(11)]).unwrap(),
+                    VectorizedGymWrapper::new(vec![StateTestGym::new(22), StateTestGym::new(33)])
+                        .unwrap(),
+                ])
+                .unwrap()
+            },
+            Tensor::<2, Int>::zeros([3, 1], &Device::flex()),
+            2,
+            1,
+            4,
+        );
+    }
+
+    #[test]
+    fn stacked_state_rejects_out_of_range_slot() {
+        let env = StackedMultiGym::new(vec![
+            VectorizedGymWrapper::new(vec![StateTestGym::new(11)]).unwrap(),
+            VectorizedGymWrapper::new(vec![StateTestGym::new(22), StateTestGym::new(33)]).unwrap(),
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            env.save_state(3),
+            Err(StackedMultiGymError::InvalidSlot {
+                slot: 3,
+                num_envs: 3
+            })
+        ));
+    }
 
     #[test]
     fn output_mapping_preserves_stacked_scalar_f64_terminals() {

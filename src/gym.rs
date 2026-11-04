@@ -89,6 +89,21 @@ pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2> {
     -> Result<<Self::ObservationSpace as TensorBatchTypes>::Batch, Self::Error>;
 }
 
+/// A batch whose slots can each be saved and restored independently.
+/// After `set_state(slot, &s)`, stepping with the same actions reproduces that slot's transitions
+/// that followed the `save_state(slot)` that returned `s`, RNG included. Other slots are unaffected.
+pub trait PerfectStateMultiGym<I = (), const O: usize = 2, const A: usize = 2>:
+    MultiGym<I, O, A>
+{
+    type State: Clone;
+
+    /// Saves all mutable state of one slot, including its random-number generator.
+    fn save_state(&self, slot: usize) -> Result<Self::State, Self::Error>;
+
+    /// Restores one slot's state saved earlier; other slots keep their current state.
+    fn set_state(&mut self, slot: usize, state: &Self::State) -> Result<(), Self::Error>;
+}
+
 /// An unbatched observation tensor `T` and environment metadata; scalar observations use native `Tensor<1>` with shape `[1]`.
 /// Rank, kind, dtype, and device follow the environment's observation space.
 #[derive(Debug, Clone)]
