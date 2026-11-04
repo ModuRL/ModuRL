@@ -7,7 +7,7 @@ use burn::tensor::{Device, Slice, Tensor, kind::Basic};
 use std::convert::Infallible;
 
 use crate::{
-    gym::{MultiGym, MultiGymStepInfo},
+    gym::{MultiGym, MultiGymStepInfo, PerfectStateMultiGym},
     spaces::{ActionSpace, ObservationSpace},
 };
 
@@ -89,6 +89,29 @@ where
 
     fn num_envs(&self) -> usize {
         self.gym.num_envs()
+    }
+}
+
+impl<G, F, I, E, const O: usize, const A: usize> PerfectStateMultiGym<I, O, A>
+    for InputMapMultiGymWrapper<G, F>
+where
+    G: PerfectStateMultiGym<I, O, A>,
+    F: FnMut(
+        <G::ActionSpace as TensorBatchTypes>::Batch,
+    ) -> Result<<G::ActionSpace as TensorBatchTypes>::Batch, E>,
+{
+    type State = G::State;
+
+    fn save_state(&self, slot: usize) -> Result<Self::State, Self::Error> {
+        self.gym
+            .save_state(slot)
+            .map_err(TensorMapMultiGymError::Gym)
+    }
+
+    fn set_state(&mut self, slot: usize, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym
+            .set_state(slot, state)
+            .map_err(TensorMapMultiGymError::Gym)
     }
 }
 
@@ -184,6 +207,33 @@ where
 
     fn num_envs(&self) -> usize {
         self.gym.num_envs()
+    }
+}
+
+impl<G, FReset, FStep, I, E, const O: usize, const A: usize> PerfectStateMultiGym<I, O, A>
+    for OutputMapMultiGymWrapper<G, FReset, FStep>
+where
+    G: PerfectStateMultiGym<I, O, A>,
+    FReset: FnMut(
+        <G::ObservationSpace as TensorBatchTypes>::Batch,
+    ) -> Result<<G::ObservationSpace as TensorBatchTypes>::Batch, E>,
+    FStep: FnMut(
+        MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>,
+    )
+        -> Result<MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, E>,
+{
+    type State = G::State;
+
+    fn save_state(&self, slot: usize) -> Result<Self::State, Self::Error> {
+        self.gym
+            .save_state(slot)
+            .map_err(TensorMapMultiGymError::Gym)
+    }
+
+    fn set_state(&mut self, slot: usize, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym
+            .set_state(slot, state)
+            .map_err(TensorMapMultiGymError::Gym)
     }
 }
 
@@ -301,6 +351,30 @@ where
     }
 }
 
+impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic, AK: Basic>
+    PerfectStateMultiGym<I, O, A> for DeviceMultiGymWrapper<G>
+where
+    G: PerfectStateMultiGym<I, O, A>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+    G::ActionSpace: ActionSpace<A, Kind = AK>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+{
+    type State = G::State;
+
+    fn save_state(&self, slot: usize) -> Result<Self::State, Self::Error> {
+        self.gym
+            .save_state(slot)
+            .map_err(TensorMapMultiGymError::Gym)
+    }
+
+    fn set_state(&mut self, slot: usize, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym
+            .set_state(slot, state)
+            .map_err(TensorMapMultiGymError::Gym)
+    }
+}
+
 pub mod info;
 pub mod normalize;
 pub mod observation;
@@ -308,7 +382,7 @@ pub mod reward;
 pub mod time_limit;
 
 #[cfg(test)]
-mod state_test_support;
+pub(crate) mod state_test_support;
 
 pub use info::{
     EpisodeStatistics, EpisodeStatisticsInfo, RawRewardInfo, RecordEpisodeStatisticsGym,
@@ -326,7 +400,70 @@ pub use time_limit::TimeLimitGym;
 mod tests {
     use super::*;
     use crate::spaces::BoxSpace;
+    use crate::wrappers::state_test_support::{StateTestGym, assert_slot_round_trip};
     use burn::tensor::{Bool, DType, Int, TensorData};
+
+    #[test]
+    fn input_map_multi_gym_preserves_slot_state() {
+        assert_slot_round_trip::<_, (), 2, 2>(
+            || {
+                InputMapMultiGymWrapper::new(
+                    crate::gym::VectorizedGymWrapper::new(vec![
+                        StateTestGym::new(11),
+                        StateTestGym::new(22),
+                    ])
+                    .unwrap(),
+                    |actions: Tensor<2, Int>| Ok::<_, Infallible>(actions),
+                )
+            },
+            Tensor::<2, Int>::zeros([2, 1], &Device::flex()),
+            1,
+            1,
+            4,
+        );
+    }
+
+    #[test]
+    fn output_map_multi_gym_preserves_slot_state() {
+        assert_slot_round_trip::<_, (), 2, 2>(
+            || {
+                OutputMapMultiGymWrapper::new(
+                    crate::gym::VectorizedGymWrapper::new(vec![
+                        StateTestGym::new(11),
+                        StateTestGym::new(22),
+                    ])
+                    .unwrap(),
+                    |observations: Tensor<2>| Ok::<_, Infallible>(observations),
+                    |step: MultiGymStepInfo| Ok::<_, Infallible>(step),
+                )
+            },
+            Tensor::<2, Int>::zeros([2, 1], &Device::flex()),
+            1,
+            1,
+            4,
+        );
+    }
+
+    #[test]
+    fn device_multi_gym_preserves_slot_state() {
+        assert_slot_round_trip::<_, (), 2, 2>(
+            || {
+                DeviceMultiGymWrapper::new(
+                    crate::gym::VectorizedGymWrapper::new(vec![
+                        StateTestGym::new(11),
+                        StateTestGym::new(22),
+                    ])
+                    .unwrap(),
+                    Device::flex(),
+                    Device::flex(),
+                )
+            },
+            Tensor::<2, Int>::zeros([2, 1], &Device::flex()),
+            1,
+            1,
+            4,
+        );
+    }
 
     struct TensorMapTestGym;
 

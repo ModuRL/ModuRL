@@ -1,4 +1,4 @@
-use super::{Gym, MultiGym, MultiGymStepInfo};
+use super::{Gym, MultiGym, MultiGymStepInfo, PerfectStateGym, PerfectStateMultiGym};
 use crate::spaces::{ActionSpace, ObservationSpace};
 use crate::tensor_rank::{NextRank, PrevRank};
 use burn::tensor::{DType, Slice, Tensor, TensorData, kind::Basic};
@@ -8,6 +8,8 @@ use std::marker::PhantomData;
 pub enum VectorizedGymError<E> {
     #[error("at least one environment is required")]
     Empty,
+    #[error("slot {slot} is out of range for {num_envs} environments")]
+    InvalidSlot { slot: usize, num_envs: usize },
     #[error("invalid action batch: expected {expected} rows, got {actual}")]
     InvalidActionBatch { expected: usize, actual: usize },
     #[error("single environment failed: {0}")]
@@ -165,12 +167,107 @@ where
     }
 }
 
+/// A slot saved after an episode ended holds the auto-reset state, because ended environments reset inside `step`.
+impl<G, I, const O: usize, const A: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic>
+    PerfectStateMultiGym<I, BO, BA> for VectorizedGymWrapper<G, I, BO, BA>
+where
+    G: PerfectStateGym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK, Item = Tensor<A, AK>>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+    Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,
+    Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
+{
+    type State = G::State;
+
+    fn save_state(&self, slot: usize) -> Result<Self::State, Self::Error> {
+        let num_envs = self.envs.len();
+        let env = self
+            .envs
+            .get(slot)
+            .ok_or(VectorizedGymError::InvalidSlot { slot, num_envs })?;
+        env.save_state().map_err(VectorizedGymError::Single)
+    }
+
+    fn set_state(&mut self, slot: usize, state: &Self::State) -> Result<(), Self::Error> {
+        let num_envs = self.envs.len();
+        let env = self
+            .envs
+            .get_mut(slot)
+            .ok_or(VectorizedGymError::InvalidSlot { slot, num_envs })?;
+        env.set_state(state).map_err(VectorizedGymError::Single)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{ResetInfo, StepInfo, test_support::*};
     use super::*;
     use crate::spaces::{BoxSpace, Discrete};
+    use crate::wrappers::state_test_support::{StateTestGym, assert_slot_round_trip};
     use burn::tensor::{Device, Int};
+
+    #[test]
+    fn vectorized_slots_restore_independently() {
+        assert_slot_round_trip::<_, (), 2, 2>(
+            || {
+                VectorizedGymWrapper::new(vec![
+                    StateTestGym::new(11),
+                    StateTestGym::new(22),
+                    StateTestGym::new(33),
+                ])
+                .unwrap()
+            },
+            Tensor::<2, Int>::zeros([3, 1], &Device::flex()),
+            1,
+            1,
+            4,
+        );
+    }
+
+    #[test]
+    fn vectorized_invalid_state_slots_leave_environments_unchanged() {
+        let make = || {
+            VectorizedGymWrapper::new(vec![
+                StateTestGym::new(11),
+                StateTestGym::new(22),
+                StateTestGym::new(33),
+            ])
+            .unwrap()
+        };
+        let mut env = make();
+        let mut twin = make();
+        env.reset().unwrap();
+        twin.reset().unwrap();
+        let state = env.save_state(0).unwrap();
+
+        assert!(matches!(
+            env.save_state(3),
+            Err(VectorizedGymError::InvalidSlot {
+                slot: 3,
+                num_envs: 3
+            })
+        ));
+        assert!(matches!(
+            env.set_state(3, &state),
+            Err(VectorizedGymError::InvalidSlot {
+                slot: 3,
+                num_envs: 3
+            })
+        ));
+
+        let actions = Tensor::<2, Int>::zeros([3, 1], &Device::flex());
+        let actual = env.step(actions.clone()).unwrap();
+        let expected = twin.step(actions).unwrap();
+        assert_eq!(
+            actual.observations.into_data(),
+            expected.observations.into_data()
+        );
+        assert_eq!(actual.rewards.into_data(), expected.rewards.into_data());
+        assert_eq!(actual.dones, expected.dones);
+        assert_eq!(actual.truncateds, expected.truncateds);
+    }
 
     #[test]
     fn invalid_action_batches_do_not_advance_environments() {

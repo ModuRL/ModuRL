@@ -4,19 +4,19 @@ use burn::tensor::{Device, Int, Tensor, TensorData};
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 
 use crate::{
-    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
+    gym::{Gym, PerfectStateGym, PerfectStateMultiGym, ResetInfo, StepInfo},
     spaces::{BoxSpace, Discrete},
     tensor_rank::TensorBatchTypes,
 };
 
-pub(super) struct StateTestGym {
+pub(crate) struct StateTestGym {
     rng: Xoshiro256PlusPlus,
     step_count: usize,
     device: Device,
 }
 
 impl StateTestGym {
-    pub(super) fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self {
             rng: Xoshiro256PlusPlus::seed_from_u64(seed),
             step_count: 0,
@@ -73,7 +73,7 @@ impl PerfectStateGym for StateTestGym {
     }
 }
 
-pub(super) fn action() -> Tensor<1, Int> {
+pub(crate) fn action() -> Tensor<1, Int> {
     Tensor::from_data([0i32], &Device::flex())
 }
 
@@ -116,4 +116,106 @@ pub(super) fn assert_state_round_trip<G, I, const O: usize, const A: usize, T>(
     let actual = record(&mut gym);
 
     assert_eq!(actual, expected);
+}
+
+#[derive(Debug, PartialEq)]
+struct SlotStepRecord {
+    observations: TensorData,
+    rewards: TensorData,
+    dones: Vec<bool>,
+    truncateds: Vec<bool>,
+    observation_rows: Vec<TensorData>,
+    reward_rows: Vec<TensorData>,
+}
+
+pub(crate) fn assert_slot_round_trip<G, I, const O: usize, const A: usize>(
+    make: impl Fn() -> G,
+    actions: <G::ActionSpace as TensorBatchTypes>::Batch,
+    slot: usize,
+    prefix_steps: usize,
+    replay_steps: usize,
+) where
+    G: PerfectStateMultiGym<I, O, A>,
+    G::Error: std::fmt::Debug,
+{
+    let mut a = make();
+    let mut b = make();
+    a.reset().unwrap();
+    b.reset().unwrap();
+    for _ in 0..prefix_steps {
+        a.step(actions.clone()).unwrap();
+        b.step(actions.clone()).unwrap();
+    }
+    let state = a.save_state(slot).unwrap();
+
+    let record = |gym: &mut G, count: usize| {
+        (0..count)
+            .map(|_| {
+                let step = gym.step(actions.clone()).unwrap();
+                let observation_rows = (0..gym.num_envs())
+                    .map(|row| {
+                        step.observations
+                            .clone()
+                            .slice_dim(0, row..row + 1)
+                            .into_data()
+                    })
+                    .collect();
+                let reward_rows = (0..gym.num_envs())
+                    .map(|row| step.rewards.clone().slice_dim(0, row..row + 1).into_data())
+                    .collect();
+                SlotStepRecord {
+                    observations: step.observations.into_data(),
+                    rewards: step.rewards.into_data(),
+                    dones: step.dones,
+                    truncateds: step.truncateds,
+                    observation_rows,
+                    reward_rows,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let first_half = record(&mut a, replay_steps);
+    a.set_state(slot, &state).unwrap();
+    let second_half = record(&mut a, replay_steps);
+    let uninterrupted = record(&mut b, replay_steps * 2);
+
+    for (first, second) in first_half.iter().zip(&second_half) {
+        assert_eq!(first.observation_rows[slot], second.observation_rows[slot]);
+        assert_eq!(first.reward_rows[slot], second.reward_rows[slot]);
+        assert_eq!(first.dones[slot], second.dones[slot]);
+        assert_eq!(first.truncateds[slot], second.truncateds[slot]);
+    }
+
+    for (index, (actual, expected)) in first_half
+        .iter()
+        .chain(&second_half)
+        .zip(&uninterrupted)
+        .enumerate()
+    {
+        for other_slot in 0..actual.dones.len() {
+            if other_slot != slot {
+                assert_eq!(
+                    actual.observation_rows[other_slot], expected.observation_rows[other_slot],
+                    "observation row differs at step {index}, slot {other_slot}",
+                );
+                assert_eq!(
+                    actual.reward_rows[other_slot], expected.reward_rows[other_slot],
+                    "reward row differs at step {index}, slot {other_slot}",
+                );
+                assert_eq!(actual.dones[other_slot], expected.dones[other_slot]);
+                assert_eq!(
+                    actual.truncateds[other_slot],
+                    expected.truncateds[other_slot]
+                );
+            }
+        }
+    }
+
+    for (actual, expected) in first_half.iter().zip(&uninterrupted) {
+        assert_eq!(actual.observations, expected.observations);
+        assert_eq!(actual.rewards, expected.rewards);
+        assert_eq!(actual.dones, expected.dones);
+        assert_eq!(actual.truncateds, expected.truncateds);
+    }
 }
