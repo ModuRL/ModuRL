@@ -1,10 +1,10 @@
 use bon::bon;
 use burn::tensor::{DType, Device, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
-    gym::{Gym, ResetInfo, StepInfo},
+    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
     spaces,
 };
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::ChaCha12Rng};
 
 use crate::EnvironmentError;
 
@@ -14,7 +14,7 @@ use crate::rendering::Renderer;
 /// The classic CartPole environment.
 /// Converted from the OpenAI Gym CartPole environment.
 pub struct CartPoleV1 {
-    rng: StdRng,
+    rng: ChaCha12Rng,
     gravity: f32,
     masspole: f32,
     total_mass: f32,
@@ -33,6 +33,15 @@ pub struct CartPoleV1 {
     sutton_barto_reward: bool,
     #[cfg(feature = "rendering")]
     renderer: Option<Renderer>,
+}
+
+/// Saved mutable state for [`CartPoleV1`].
+#[derive(Clone)]
+pub struct CartPoleV1State {
+    rng_state: [u8; 49],
+    state: Tensor<1>,
+    steps_beyond_terminated: Option<usize>,
+    steps_since_reset: usize,
 }
 
 #[bon]
@@ -87,7 +96,7 @@ impl CartPoleV1 {
             is_euler,
             action_space,
             observation_space,
-            rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
+            rng: seed.map_or_else(rand::make_rng, ChaCha12Rng::seed_from_u64),
             state: Tensor::zeros([4], (&Device::flex(), DType::F32)),
             steps_since_reset: 0,
             sutton_barto_reward,
@@ -384,10 +393,31 @@ impl Gym for CartPoleV1 {
     }
 }
 
+impl PerfectStateGym for CartPoleV1 {
+    type State = CartPoleV1State;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        Ok(CartPoleV1State {
+            rng_state: self.rng.serialize_state(),
+            state: self.state.clone(),
+            steps_beyond_terminated: self.steps_beyond_terminated,
+            steps_since_reset: self.steps_since_reset,
+        })
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.rng = ChaCha12Rng::deserialize_state(&state.rng_state);
+        self.state = state.state.clone();
+        self.steps_beyond_terminated = state.steps_beyond_terminated;
+        self.steps_since_reset = state.steps_since_reset;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::check_discrete_parity;
+    use crate::testing::{check_discrete_parity, check_perfect_state_replay, discrete_actions};
     use Gym;
     #[cfg(feature = "rendering")]
     use modurl::spaces::ActionSpace;
@@ -412,6 +442,17 @@ mod tests {
         assert_eq!(next_state.dims()[0], 4);
         assert!(reward == 1.0);
         assert!(!done);
+    }
+
+    #[test]
+    fn perfect_state_replays_resets() {
+        let prefix = discrete_actions(&[0, 1]);
+        let actions = discrete_actions(&[1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0]);
+        check_perfect_state_replay(
+            CartPoleV1::builder().seed(7).build().unwrap(),
+            &prefix,
+            &actions,
+        );
     }
 
     #[test]

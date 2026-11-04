@@ -4,20 +4,27 @@ use crate::EnvironmentError;
 use bon::bon;
 use burn::tensor::{DType, Device, Tensor, TensorData, TensorReadError};
 use modurl::{
-    gym::{Gym, ResetInfo, StepInfo},
+    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
     spaces::BoxSpace,
 };
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::ChaCha12Rng};
 
 /// Gymnasium-compatible `Pendulum-v1` continuous-control environment.
 pub struct PendulumV1 {
     state: [f64; 2],
     gravity: f64,
-    rng: StdRng,
+    rng: ChaCha12Rng,
     action_space: BoxSpace,
     observation_space: BoxSpace,
     #[cfg(feature = "rendering")]
     renderer: Option<crate::rendering::Renderer>,
+}
+
+/// Saved mutable state for [`PendulumV1`].
+#[derive(Clone)]
+pub struct PendulumV1State {
+    rng_state: [u8; 49],
+    state: [f64; 2],
 }
 
 #[bon]
@@ -64,7 +71,7 @@ impl PendulumV1 {
         Ok(Self {
             state: [0.0; 2],
             gravity,
-            rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
+            rng: seed.map_or_else(rand::make_rng, ChaCha12Rng::seed_from_u64),
             action_space,
             observation_space,
             #[cfg(feature = "rendering")]
@@ -193,10 +200,27 @@ impl Gym for PendulumV1 {
     }
 }
 
+impl PerfectStateGym for PendulumV1 {
+    type State = PendulumV1State;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        Ok(PendulumV1State {
+            rng_state: self.rng.serialize_state(),
+            state: self.state,
+        })
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.rng = ChaCha12Rng::deserialize_state(&state.rng_state);
+        self.state = state.state;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::PARITY_STEPS;
+    use crate::testing::{PARITY_STEPS, check_perfect_state_replay};
 
     #[derive(serde::Deserialize)]
     struct Transition {
@@ -236,6 +260,23 @@ mod tests {
             assert!(!actual.done);
             assert!(!actual.truncated);
         }
+    }
+
+    #[test]
+    fn perfect_state_replays_resets() {
+        let prefix = [
+            Tensor::from_data([0.25_f32], &Device::flex()),
+            Tensor::from_data([-0.5_f32], &Device::flex()),
+        ];
+        let actions = [
+            0.2_f32, -0.4, 1.0, 0.0, -1.5, 0.75, 0.3, -0.2, 1.8, 0.1, -0.7, 0.6,
+        ]
+        .map(|action| Tensor::from_data([action], &Device::flex()));
+        check_perfect_state_replay(
+            PendulumV1::builder().seed(7).build().unwrap(),
+            &prefix,
+            &actions,
+        );
     }
 
     #[test]
