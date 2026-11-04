@@ -1117,7 +1117,6 @@ where
     /// and termination entry per environment.
     fn log_collection(
         &mut self,
-        tracker: &mut PPOEpisodeTracker,
         rewards: &Tensor<2>,
         infos: Vec<I>,
         dones: &[bool],
@@ -1137,7 +1136,7 @@ where
         for (environment_index, reward) in rewards_vec.iter().copied().enumerate() {
             let collection_timestep =
                 first_collection_timestep.saturating_add(environment_index + 1);
-            if let Some(entry) = tracker.record(
+            if let Some(entry) = self.episode_tracker.record(
                 environment_index,
                 reward,
                 dones[environment_index],
@@ -1253,33 +1252,22 @@ where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         let environment_count = env.num_envs();
-        let mut episode_tracker =
-            std::mem::replace(&mut self.episode_tracker, PPOEpisodeTracker::new(0));
-        let result = (|| {
-            while self.rollout_buffer.len() * environment_count < self.batch_size {
-                let observations = next_observations.clone();
-                let collection_action = self.sample_collection_action(validation, &observations)?;
-                let step_info = env
-                    .step(collection_action.environment_actions.clone())
-                    .map_err(PPOError::GymError)?;
-                Self::validate_timestep_batch(
-                    &observations,
-                    &collection_action.policy_actions,
-                    &step_info,
-                )?;
-                *next_observations = self.store_timestep(
-                    validation,
-                    &observations,
-                    collection_action,
-                    step_info,
-                    &mut episode_tracker,
-                )?;
-            }
+        while self.rollout_buffer.len() * environment_count < self.batch_size {
+            let observations = next_observations.clone();
+            let collection_action = self.sample_collection_action(validation, &observations)?;
+            let step_info = env
+                .step(collection_action.environment_actions.clone())
+                .map_err(PPOError::GymError)?;
+            Self::validate_timestep_batch(
+                &observations,
+                &collection_action.policy_actions,
+                &step_info,
+            )?;
+            *next_observations =
+                self.store_timestep(validation, &observations, collection_action, step_info)?;
+        }
 
-            Ok(self.rollout_buffer.len() * environment_count)
-        })();
-        self.episode_tracker = episode_tracker;
-        result
+        Ok(self.rollout_buffer.len() * environment_count)
     }
 
     fn train_if_rollout_full<const BO: usize, const BL: usize>(
@@ -1348,7 +1336,6 @@ where
         observations: &Tensor<O, OS::Kind>,
         collection_action: PPOCollectionAction<AS, L>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
-        episode_tracker: &mut PPOEpisodeTracker,
     ) -> Result<OS::Batch, PPOError<N::Error, GE, AS::Error>>
     where
         OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
@@ -1370,7 +1357,6 @@ where
             terminal_observations: _,
         } = step;
         self.log_collection(
-            episode_tracker,
             &rewards,
             infos,
             &dones,
@@ -1542,33 +1528,21 @@ where
             }
         }
         self.prepare_episode_tracker(environment_count);
-        let mut episode_tracker =
-            std::mem::replace(&mut self.episode_tracker, PPOEpisodeTracker::new(0));
-        let result = (|| {
-            {
-                let validation = self.network_info.valid();
-                let latent_observations = validation
-                    .forward_observations(observations.clone().without_autodiff())
-                    .map_err(PPOError::NetworkError)?;
-                let environment_actions = training_actions.to_environment_actions()?;
-                let collection_action = self.collection_action(
-                    &validation,
-                    &latent_observations,
-                    training_actions.neurons,
-                    environment_actions,
-                )?;
-                self.store_timestep(
-                    &validation,
-                    observations,
-                    collection_action,
-                    step,
-                    &mut episode_tracker,
-                )?;
-            }
-            self.train_if_rollout_full(environment_count)?;
-            Ok(())
-        })();
-        self.episode_tracker = episode_tracker;
-        result
+        {
+            let validation = self.network_info.valid();
+            let latent_observations = validation
+                .forward_observations(observations.clone().without_autodiff())
+                .map_err(PPOError::NetworkError)?;
+            let environment_actions = training_actions.to_environment_actions()?;
+            let collection_action = self.collection_action(
+                &validation,
+                &latent_observations,
+                training_actions.neurons,
+                environment_actions,
+            )?;
+            self.store_timestep(&validation, observations, collection_action, step)?;
+        }
+        self.train_if_rollout_full(environment_count)?;
+        Ok(())
     }
 }
