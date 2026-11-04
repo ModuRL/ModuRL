@@ -49,8 +49,8 @@ pub use crate::distributions::{
     TanhTransform, TransformedDistribution, TransformedDistributionError,
 };
 pub use crate::gym::{
-    Gym, MultiGym, MultiGymStepInfo, ResetInfo, StackedMultiGym, StackedMultiGymError, StepInfo,
-    VectorizedGymError, VectorizedGymWrapper,
+    Gym, MultiGym, MultiGymStepInfo, PerfectStateGym, ResetInfo, StackedMultiGym,
+    StackedMultiGymError, StepInfo, VectorizedGymError, VectorizedGymWrapper,
 };
 #[cfg(feature = "multithreading")]
 pub use crate::gym::{MultithreadedStackedMultiGym, MultithreadedVectorizedGymWrapper};
@@ -70,6 +70,7 @@ pub use crate::wrappers::{
     ClipRewardGym, ClipRewardGymError, DeviceMultiGymWrapper, EpisodeStatistics,
     EpisodeStatisticsInfo, FrameStackGym, FrameStackGymError, InputMapMultiGymWrapper,
     MaxAndSkipGym, MaxAndSkipGymError, NormalizeObservationGym, NormalizeObservationGymError,
-    NormalizeRewardGym, OutputMapMultiGymWrapper, RawRewardInfo, RecordEpisodeStatisticsGym,
-    RecordRawRewardGym, TensorMapMultiGymError, TimeLimitGym,
+    NormalizeObservationGymState, NormalizeRewardGym, NormalizeRewardGymState,
+    OutputMapMultiGymWrapper, RawRewardInfo, RecordEpisodeStatisticsGym, RecordRawRewardGym,
+    TensorMapMultiGymError, TimeLimitGym,
 };

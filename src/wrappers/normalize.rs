@@ -4,13 +4,14 @@ use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{Tensor, TensorData, TensorReadError, kind::Basic};
 
 use crate::{
-    gym::{Gym, ResetInfo, StepInfo},
+    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
 
 const RUNNING_STATS_EPSILON: f64 = 1e-4;
 const NORMALIZATION_EPSILON: f64 = 1e-8;
 
+#[derive(Clone)]
 struct RunningMeanStd {
     mean: Vec<f64>,
     variance: Vec<f64>,
@@ -38,6 +39,13 @@ impl RunningMeanStd {
         }
         self.count = total_count;
     }
+}
+
+/// Opaque saved state for observation normalization.
+#[derive(Clone)]
+pub struct NormalizeObservationGymState<S> {
+    inner_state: S,
+    statistics: Option<RunningMeanStd>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -156,6 +164,36 @@ where
     }
 }
 
+impl<G, I, const O: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic>
+    PerfectStateGym<I, BO, BA> for NormalizeObservationGym<G>
+where
+    G: PerfectStateGym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+{
+    type State = NormalizeObservationGymState<G::State>;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        Ok(NormalizeObservationGymState {
+            inner_state: self
+                .gym
+                .save_state()
+                .map_err(NormalizeObservationGymError::GymError)?,
+            statistics: self.statistics.clone(),
+        })
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym
+            .set_state(&state.inner_state)
+            .map_err(NormalizeObservationGymError::GymError)?;
+        self.statistics.clone_from(&state.statistics);
+        Ok(())
+    }
+}
+
 /// Scales immediate rewards by the running standard deviation of discounted rewards.
 pub struct NormalizeRewardGym<G> {
     gym: G,
@@ -183,6 +221,14 @@ impl<G> NormalizeRewardGym<G> {
         self.clip = Some(limit);
         self
     }
+}
+
+/// Opaque saved state for reward normalization.
+#[derive(Clone)]
+pub struct NormalizeRewardGymState<S> {
+    inner_state: S,
+    statistics: RunningMeanStd,
+    discounted_reward: f64,
 }
 
 impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> Gym<I, BO, BA>
@@ -233,11 +279,39 @@ where
     }
 }
 
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> PerfectStateGym<I, BO, BA>
+    for NormalizeRewardGym<G>
+where
+    G: PerfectStateGym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+{
+    type State = NormalizeRewardGymState<G::State>;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        Ok(NormalizeRewardGymState {
+            inner_state: self.gym.save_state()?,
+            statistics: self.statistics.clone(),
+            discounted_reward: self.discounted_reward,
+        })
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym.set_state(&state.inner_state)?;
+        self.statistics.clone_from(&state.statistics);
+        self.discounted_reward = state.discounted_reward;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
         gym::Gym,
-        wrappers::test_support::{TestGym, action, scalar},
+        wrappers::{
+            state_test_support::{StateTestGym, action as state_action, assert_state_round_trip},
+            test_support::{TestGym, action, scalar},
+        },
     };
     use burn::tensor::{DType, Device, Tensor};
 
@@ -307,5 +381,29 @@ mod tests {
 
         wrapper.step(action()).unwrap();
         assert_eq!(wrapper.discounted_reward, 3.0);
+    }
+
+    #[test]
+    fn observation_normalization_restores_running_statistics_and_inner_state() {
+        assert_state_round_trip(
+            NormalizeObservationGym::new(StateTestGym::new(37)),
+            state_action(),
+            2,
+            4,
+            |observation| observation.into_data(),
+            |_: &()| (),
+        );
+    }
+
+    #[test]
+    fn reward_normalization_restores_running_statistics_and_inner_state() {
+        assert_state_round_trip(
+            NormalizeRewardGym::new(StateTestGym::new(41), 0.9),
+            state_action(),
+            1,
+            2,
+            |observation| observation.into_data(),
+            |_: &()| (),
+        );
     }
 }

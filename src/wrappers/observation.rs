@@ -1,6 +1,6 @@
 //! Wrappers that transform observations.
 
-use crate::gym::{Gym, ResetInfo, StepInfo};
+use crate::gym::{Gym, PerfectStateGym, ResetInfo, StepInfo};
 use crate::spaces::{ActionSpace, BoxSpace, ObservationSpace};
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{
@@ -123,6 +123,37 @@ where
     }
 }
 
+impl<G, I, const O: usize, const BA: usize, const F: usize, const BF: usize, S, K: Basic, AK: Basic>
+    PerfectStateGym<I, BF, BA> for FrameStackGym<G, BF, S>
+where
+    G: PerfectStateGym<I, F, BA>,
+    G::ObservationSpace: ObservationSpace<F, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    S: ObservationSpace<BF, Kind = K, Item = Tensor<F, K>> + Clone,
+    Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
+    Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
+{
+    type State = (G::State, VecDeque<Tensor<O, K>>);
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        Ok((
+            self.gym
+                .save_state()
+                .map_err(FrameStackGymError::GymError)?,
+            self.frames.clone(),
+        ))
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym
+            .set_state(&state.0)
+            .map_err(FrameStackGymError::GymError)?;
+        self.frames.clone_from(&state.1);
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MaxAndSkipGymError<E> {
     #[error("wrapped gym error: {0}")]
@@ -201,6 +232,29 @@ where
     }
 }
 
+impl<G, I, const O: usize, const BO: usize, const BA: usize, K: Basic, AK: Basic>
+    PerfectStateGym<I, BO, BA> for MaxAndSkipGym<G>
+where
+    G: PerfectStateGym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+    K: Ordered,
+{
+    type State = G::State;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        self.gym.save_state().map_err(MaxAndSkipGymError::GymError)
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym
+            .set_state(state)
+            .map_err(MaxAndSkipGymError::GymError)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tensor_rank::TensorBatchTypes;
@@ -208,7 +262,10 @@ mod tests {
         gym::Gym,
         spaces::{BoxSpace, ObservationSpace},
         tensor_rank::PrevRank,
-        wrappers::test_support::{TestGym, action, scalar},
+        wrappers::{
+            state_test_support::{StateTestGym, action as state_action, assert_state_round_trip},
+            test_support::{TestGym, action, scalar},
+        },
     };
     use burn::tensor::{Bool, DType, Device, Int, Tensor, kind::Basic};
     use std::marker::PhantomData;
@@ -363,5 +420,31 @@ mod tests {
         assert_eq!(step.reward, 0.5);
         assert!(step.truncated);
         assert_eq!(step.info.sequence, 2);
+    }
+
+    #[test]
+    fn frame_stack_restores_frames_and_inner_state() {
+        let device = Device::flex();
+        let observation_space = BoxSpace::new_unbounded([1, 2, 1], &device);
+        assert_state_round_trip(
+            FrameStackGym::<_, 3>::new(StateTestGym::new(29), 2, observation_space),
+            state_action(),
+            1,
+            1,
+            |observation| observation.into_data(),
+            |_: &()| (),
+        );
+    }
+
+    #[test]
+    fn max_and_skip_restores_inner_state() {
+        assert_state_round_trip(
+            MaxAndSkipGym::new(StateTestGym::new(31), 2),
+            state_action(),
+            1,
+            2,
+            |observation| observation.into_data(),
+            |_: &()| (),
+        );
     }
 }

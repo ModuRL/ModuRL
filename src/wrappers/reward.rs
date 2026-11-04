@@ -4,7 +4,7 @@ use crate::tensor_rank::TensorBatchTypes;
 use burn::tensor::kind::Basic;
 
 use crate::{
-    gym::{Gym, ResetInfo, StepInfo},
+    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
 
@@ -70,11 +70,34 @@ where
     }
 }
 
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> PerfectStateGym<I, BO, BA>
+    for ClipRewardGym<G>
+where
+    G: PerfectStateGym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+{
+    type State = G::State;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        self.gym.save_state().map_err(ClipRewardGymError::GymError)
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym
+            .set_state(state)
+            .map_err(ClipRewardGymError::GymError)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
         gym::Gym,
-        wrappers::test_support::{TestGym, action},
+        wrappers::{
+            state_test_support::{StateTestGym, action as state_action, assert_state_round_trip},
+            test_support::{TestGym, action},
+        },
     };
 
     use super::ClipRewardGym;
@@ -99,5 +122,17 @@ mod tests {
         assert_eq!(positive_zero.reward, 0.0);
         assert_eq!(negative_zero.reward, 0.0);
         assert_eq!(negative_zero.info.sequence, 4);
+    }
+
+    #[test]
+    fn restores_inner_state() {
+        assert_state_round_trip(
+            ClipRewardGym::new(StateTestGym::new(23)),
+            state_action(),
+            2,
+            4,
+            |observation| observation.into_data(),
+            |_: &()| (),
+        );
     }
 }
