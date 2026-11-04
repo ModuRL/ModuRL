@@ -62,7 +62,10 @@ fn dqn_updates_f64_networks_from_native_f32_observations() {
         .build()
         .unwrap();
     agent.learn(&mut env, 4).unwrap();
-    assert_eq!(agent.act(&env.reset().unwrap()).unwrap().dims(), [1, 1]);
+    assert_eq!(
+        agent.act(&env.reset().unwrap(), &mut ()).unwrap().dims(),
+        [1, 1]
+    );
 }
 
 #[test]
@@ -84,7 +87,10 @@ fn ddqn_updates_f64_networks_from_native_f32_observations() {
         .build()
         .unwrap();
     agent.learn(&mut env, 4).unwrap();
-    assert_eq!(agent.act(&env.reset().unwrap()).unwrap().dims(), [1, 1]);
+    assert_eq!(
+        agent.act(&env.reset().unwrap(), &mut ()).unwrap().dims(),
+        [1, 1]
+    );
 }
 
 #[test]

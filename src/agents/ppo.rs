@@ -1445,6 +1445,7 @@ where
     type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
     type ObservationSpace = OS;
     type ActionSpace = AS;
+    type ActContext<'c> = ();
     type TrainingActions = PolicySamples<AS, PPOError<N::Error, GE, AS::Error>, L, A>;
 
     /// Selects policy samples `[batch, ...policy_shape]` for observations
@@ -1452,6 +1453,7 @@ where
     fn act_for_training(
         &mut self,
         observation: &OS::Batch,
+        _context: &mut Self::ActContext<'_>,
     ) -> Result<Self::TrainingActions, Self::Error> {
         let validation = self.network_info.valid();
         let latent_observations = validation
