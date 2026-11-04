@@ -1442,7 +1442,7 @@ where
     GE: std::fmt::Debug,
 {
     type Error = PPOError<N::Error, GE, AS::Error>;
-    type GymError = GE;
+    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
     type ObservationSpace = OS;
     type ActionSpace = AS;
     type TrainingActions = PolicySamples<AS, PPOError<N::Error, GE, AS::Error>, L, A>;
@@ -1480,7 +1480,7 @@ where
     /// Terminal observations omit the batch axis and preserve the environment observation kind, dtype, and device.
     fn learn(
         &mut self,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
+        env: &mut Self::Env<'_>,
         num_timesteps: usize,
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
         let mut elapsed_timesteps = 0;

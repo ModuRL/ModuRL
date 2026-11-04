@@ -331,7 +331,7 @@ where
     GE: Debug,
 {
     type Error = DeterministicActorCriticError<AE, GE, SE, CE>;
-    type GymError = GE;
+    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
     type ObservationSpace = OS;
     type ActionSpace = AS;
     type TrainingActions = Tensor<A>;
@@ -361,11 +361,7 @@ where
             fields(num_timesteps)
         )
     )]
-    fn learn(
-        &mut self,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
-        num_timesteps: usize,
-    ) -> Result<(), Self::Error> {
+    fn learn(&mut self, env: &mut Self::Env<'_>, num_timesteps: usize) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)
     }
 
