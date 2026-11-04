@@ -4,7 +4,7 @@ use crate::tensor_rank::TensorBatchTypes;
 use burn::tensor::kind::Basic;
 
 use crate::{
-    gym::{Gym, ResetInfo, StepInfo},
+    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
 
@@ -120,6 +120,31 @@ where
     }
 }
 
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic>
+    PerfectStateGym<EpisodeStatisticsInfo<I>, BO, BA> for RecordEpisodeStatisticsGym<G>
+where
+    G: PerfectStateGym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+{
+    type State = (G::State, f32, usize);
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        Ok((
+            self.gym.save_state()?,
+            self.episode_return,
+            self.episode_length,
+        ))
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym.set_state(&state.0)?;
+        self.episode_return = state.1;
+        self.episode_length = state.2;
+        Ok(())
+    }
+}
+
 /// Environment metadata augmented with the reward before outer wrappers transform it.
 #[derive(Debug, Clone)]
 pub struct RawRewardInfo<I> {
@@ -197,11 +222,32 @@ where
     }
 }
 
+impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic>
+    PerfectStateGym<RawRewardInfo<I>, BO, BA> for RecordRawRewardGym<G>
+where
+    G: PerfectStateGym<I, BO, BA>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<BA, Kind = AK>,
+{
+    type State = G::State;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        self.gym.save_state()
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym.set_state(state)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
         gym::Gym,
-        wrappers::test_support::{TestGym, action},
+        wrappers::{
+            state_test_support::{StateTestGym, action as state_action, assert_state_round_trip},
+            test_support::{TestGym, action},
+        },
     };
 
     use super::{EpisodeStatistics, RecordEpisodeStatisticsGym, RecordRawRewardGym};
@@ -244,5 +290,29 @@ mod tests {
         assert_eq!(step.reward, 2.5);
         assert_eq!(step.info.raw_reward, Some(2.5));
         assert_eq!(step.info.inner.sequence, 7);
+    }
+
+    #[test]
+    fn restores_episode_statistics_and_inner_state() {
+        assert_state_round_trip(
+            RecordEpisodeStatisticsGym::new(StateTestGym::new(17)),
+            state_action(),
+            1,
+            5,
+            |observation| observation.into_data(),
+            |info: &super::EpisodeStatisticsInfo<()>| info.completed_episode,
+        );
+    }
+
+    #[test]
+    fn restores_inner_state() {
+        assert_state_round_trip(
+            RecordRawRewardGym::new(StateTestGym::new(19)),
+            state_action(),
+            1,
+            4,
+            |observation| observation.into_data(),
+            |_: &super::RawRewardInfo<()>| (),
+        );
     }
 }

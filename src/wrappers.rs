@@ -307,11 +307,17 @@ pub mod observation;
 pub mod reward;
 pub mod time_limit;
 
+#[cfg(test)]
+mod state_test_support;
+
 pub use info::{
     EpisodeStatistics, EpisodeStatisticsInfo, RawRewardInfo, RecordEpisodeStatisticsGym,
     RecordRawRewardGym,
 };
-pub use normalize::{NormalizeObservationGym, NormalizeObservationGymError, NormalizeRewardGym};
+pub use normalize::{
+    NormalizeObservationGym, NormalizeObservationGymError, NormalizeObservationGymState,
+    NormalizeRewardGym, NormalizeRewardGymState,
+};
 pub use observation::{FrameStackGym, FrameStackGymError, MaxAndSkipGym, MaxAndSkipGymError};
 pub use reward::{ClipRewardGym, ClipRewardGymError};
 pub use time_limit::TimeLimitGym;

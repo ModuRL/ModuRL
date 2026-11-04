@@ -46,6 +46,19 @@ pub trait Gym<I = (), const O: usize = 2, const A: usize = 2> {
     fn action_space(&self) -> Self::ActionSpace;
 }
 
+/// A gym whose whole state can be saved and restored.
+/// After `set_state(&s)`, stepping with the same actions reproduces the transitions
+/// that followed the `save_state()` that returned `s`, RNG included.
+pub trait PerfectStateGym<I = (), const O: usize = 2, const A: usize = 2>: Gym<I, O, A> {
+    type State: Clone;
+
+    /// Saves all mutable environment state, including its random-number generator.
+    fn save_state(&self) -> Result<Self::State, Self::Error>;
+
+    /// Restores all mutable environment state saved earlier.
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error>;
+}
+
 /// An ordered batch of environment slots with native tensors.
 /// Slots may be independent environments or coupled players in one world.
 /// Implementations keep batch order and size fixed. Auto-reset implementations retain terminal observations.

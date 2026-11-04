@@ -87,6 +87,28 @@ impl Gym for CounterEnv {
 }
 ```
 
+## Save and Restore State
+
+Implement `PerfectStateGym` when the environment can save and restore all its
+mutable state. For this counter, that state is the current position:
+
+```rust,ignore
+impl PerfectStateGym for CounterEnv {
+    type State = i32;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        Ok(self.state)
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.state = *state;
+        Ok(())
+    }
+}
+```
+
+Include the random-number generator state too when an environment uses randomness.
+
 `reset` returns the initial observation and `step` consumes one action and
 returns the observation that follows it, its reward, and the episode flags.
 The default `Gym` information type is `()`, so ordinary environments use
