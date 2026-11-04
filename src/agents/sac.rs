@@ -1473,7 +1473,7 @@ where
     GE: Debug,
 {
     type Error = SACError<P::Error, GE, AS::Error, N::Error>;
-    type GymError = GE;
+    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
     type ObservationSpace = OS;
     type ActionSpace = AS;
     type TrainingActions = Tensor<A, AS::Kind>;
@@ -1507,11 +1507,7 @@ where
     /// Trains with rank-O native observation batches, rank-A environment action batches, and rewards `[num_envs, 1]`.
     /// Unbatched terminal observations have rank U, with O = U + 1. Preserves terminal targets and native observation kind and dtype.
     /// Resets the environment for each call, retains replay, and attempts one update per eligible collected transition.
-    fn learn(
-        &mut self,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
-        num_timesteps: usize,
-    ) -> Result<(), Self::Error> {
+    fn learn(&mut self, env: &mut Self::Env<'_>, num_timesteps: usize) -> Result<(), Self::Error> {
         self.timestep_episodes = None;
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_replay_collection(env)?;

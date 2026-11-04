@@ -357,7 +357,7 @@ where
     GE: std::fmt::Debug,
 {
     type Error = A2CError<N::Error, GE, AS::Error>;
-    type GymError = GE;
+    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
     type ObservationSpace = OS;
     type ActionSpace = AS;
     type TrainingActions = PolicySamples<AS, A2CError<N::Error, GE, AS::Error>, L, A>;
@@ -385,11 +385,7 @@ where
     )]
     /// Trains with rank-O observation batches `[num_envs, ...observation_shape]`.
     /// Terminal observations omit the batch axis and preserve the environment observation kind, dtype, and device.
-    fn learn(
-        &mut self,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
-        num_timesteps: usize,
-    ) -> Result<(), Self::Error> {
+    fn learn(&mut self, env: &mut Self::Env<'_>, num_timesteps: usize) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps).map_err(A2CError::from)
     }
 

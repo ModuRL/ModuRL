@@ -160,7 +160,8 @@ where
     Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
 {
     type Error = QAgentError<GE, M::Error>;
-    type GymError = GE;
+    type Env<'e> =
+        dyn MultiGym<I, R, 2, Error = GE, ObservationSpace = S, ActionSpace = Discrete> + 'e;
     type ObservationSpace = S;
     type ActionSpace = Discrete;
     type TrainingActions = Tensor<2, Int>;
@@ -187,11 +188,7 @@ where
     )]
     /// Trains with rank-R observation batches `[num_envs, ...observation_shape]`.
     /// Terminal observations omit the batch axis and preserve the environment observation kind, dtype, and device.
-    fn learn(
-        &mut self,
-        env: &mut dyn MultiGym<I, R, 2, Error = GE, ObservationSpace = S, ActionSpace = Discrete>,
-        num_timesteps: usize,
-    ) -> Result<(), Self::Error> {
+    fn learn(&mut self, env: &mut Self::Env<'_>, num_timesteps: usize) -> Result<(), Self::Error> {
         self.inner.learn(env, num_timesteps, &mut self.logging_info)
     }
 

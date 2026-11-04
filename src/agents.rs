@@ -40,7 +40,15 @@ impl<const D: usize, K: Basic> ToEnvironmentActions for Tensor<D, K> {
 /// Associated spaces determine the native observation and action kinds.
 pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     type Error: From<<Self::TrainingActions as ToEnvironmentActions>::Error>;
-    type GymError;
+    /// Environment type accepted by `learn`; built-in agents use `dyn MultiGym + 'e` with their gym error type.
+    type Env<'e>: ?Sized
+        + MultiGym<
+            I,
+            O,
+            A,
+            ObservationSpace = Self::ObservationSpace,
+            ActionSpace = Self::ActionSpace,
+        >;
 
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
@@ -69,18 +77,7 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
     /// Terminal observations have rank `O - 1`; scalar terminal observations use `[1]`.
     /// The environment must use the associated space types and meet the agent's dtype and device requirements.
-    fn learn(
-        &mut self,
-        env: &mut dyn MultiGym<
-            I,
-            O,
-            A,
-            Error = Self::GymError,
-            ObservationSpace = Self::ObservationSpace,
-            ActionSpace = Self::ActionSpace,
-        >,
-        num_timesteps: usize,
-    ) -> Result<(), Self::Error>;
+    fn learn(&mut self, env: &mut Self::Env<'_>, num_timesteps: usize) -> Result<(), Self::Error>;
 
     /// Stores one caller-collected step from observations shaped `[num_envs, ...observation_shape]`.
     /// `actions` must come from `act_for_training` on those observations; steps must be consecutive for the same environments.
@@ -96,7 +93,7 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
 #[cfg(test)]
 pub(crate) mod test_support {
     use burn::tensor::{DType, Device, Int, Tensor};
-    use std::convert::Infallible;
+    use std::{cell::Cell, convert::Infallible};
 
     use crate::{
         gym::{Gym, ResetInfo, StepInfo},
@@ -149,6 +146,45 @@ pub(crate) mod test_support {
         }
     }
 
+    pub(crate) struct BorrowingFixedEnv<'a> {
+        inner: FixedEnv,
+        calls: &'a Cell<usize>,
+    }
+
+    impl<'a> BorrowingFixedEnv<'a> {
+        pub(crate) fn new(device: Device, calls: &'a Cell<usize>) -> Self {
+            Self {
+                inner: FixedEnv::new(device),
+                calls,
+            }
+        }
+    }
+
+    impl Gym for BorrowingFixedEnv<'_> {
+        type Error = Infallible;
+        type ObservationSpace = BoxSpace<2>;
+        type ActionSpace = Discrete;
+
+        /// Accepts one scalar Int action `[1]` and returns unbatched F32 observations `[4]` on the fixture device.
+        fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
+            self.calls.set(self.calls.get() + 1);
+            self.inner.step(action)
+        }
+
+        /// Returns unbatched F32 observations `[4]` on the fixture device.
+        fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+            self.inner.reset()
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            self.inner.observation_space()
+        }
+
+        fn action_space(&self) -> Self::ActionSpace {
+            self.inner.action_space()
+        }
+    }
+
     pub(crate) struct FixedContinuousEnv {
         device: Device,
     }
@@ -195,7 +231,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{FixedContinuousEnv, FixedEnv};
+    use super::test_support::{BorrowingFixedEnv, FixedContinuousEnv, FixedEnv};
     use super::{Agent, ToEnvironmentActions};
     use crate::{
         gym::{Gym, MultiGym, MultiGymStepInfo, VectorizedGymError, VectorizedGymWrapper},
@@ -208,7 +244,14 @@ mod tests {
 
     impl Agent for FixedAgent {
         type Error = Box<dyn std::error::Error>;
-        type GymError = VectorizedGymError<Infallible>;
+        type Env<'e> = dyn MultiGym<
+                (),
+                2,
+                2,
+                Error = VectorizedGymError<Infallible>,
+                ObservationSpace = BoxSpace<2>,
+                ActionSpace = Discrete,
+            > + 'e;
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
         type TrainingActions = Tensor<2, Int>;
@@ -227,11 +270,7 @@ mod tests {
         /// Steps observation batches `[num_envs, 4]` with scalar action batches `[num_envs, 1]`.
         fn learn(
             &mut self,
-            env: &mut dyn MultiGym<
-                Error = Self::GymError,
-                ObservationSpace = Self::ObservationSpace,
-                ActionSpace = Self::ActionSpace,
-            >,
+            env: &mut Self::Env<'_>,
             num_timesteps: usize,
         ) -> Result<(), Self::Error> {
             let mut observations = env.reset()?;
@@ -253,16 +292,9 @@ mod tests {
     }
 
     #[test]
-    fn agent_trait_object_accepts_native_tensors_and_environment_batches() {
+    fn agent_accepts_native_tensors_and_environment_batches() {
         let device = Device::flex();
         let mut agent = FixedAgent;
-        let agent: &mut dyn Agent<
-            Error = Box<dyn std::error::Error>,
-            GymError = VectorizedGymError<Infallible>,
-            ObservationSpace = BoxSpace<2>,
-            ActionSpace = Discrete,
-            TrainingActions = Tensor<2, Int>,
-        > = &mut agent;
         let mut single = VectorizedGymWrapper::from(FixedEnv::new(device.clone()));
         let mut multiple = VectorizedGymWrapper::new(vec![
             FixedEnv::new(device.clone()),
@@ -285,6 +317,14 @@ mod tests {
         assert_eq!(actions.into_data().try_to_vec::<i32>().unwrap(), vec![0, 0]);
         agent.learn(&mut single, 1).unwrap();
         agent.learn(&mut multiple, 2).unwrap();
+    }
+
+    #[test]
+    fn learn_accepts_environments_borrowing_locals() {
+        let calls = std::cell::Cell::new(0usize);
+        let mut env = VectorizedGymWrapper::from(BorrowingFixedEnv::new(Device::flex(), &calls));
+        FixedAgent.learn(&mut env, 2).unwrap();
+        assert!(calls.get() > 0);
     }
 
     #[test]
