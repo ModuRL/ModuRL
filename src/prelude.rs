@@ -56,9 +56,9 @@ pub use crate::gym::{
 #[cfg(feature = "multithreading")]
 pub use crate::gym::{MultithreadedStackedMultiGym, MultithreadedVectorizedGymWrapper};
 pub use crate::models::{
-    DuelingMLP, Forward, MLP, ModelError, probabilistic_model::ExpectationPolicy,
-    probabilistic_model::PolicyTypes, probabilistic_model::ProbabilisticPolicy,
-    probabilistic_model::ProbabilisticPolicyModel,
+    DuelingMLP, Forward, MLP, MaskedLogits, MaskedLogitsError, ModelError,
+    probabilistic_model::ExpectationPolicy, probabilistic_model::PolicyTypes,
+    probabilistic_model::ProbabilisticPolicy, probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
 pub use crate::objectives::{bellman_targets, clipped_value_loss};
@@ -70,8 +70,8 @@ pub use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 pub use crate::wrappers::{
     ClipRewardGym, ClipRewardGymError, DeviceMultiGymWrapper, EpisodeStatistics,
     EpisodeStatisticsInfo, FrameStackGym, FrameStackGymError, InputMapMultiGymWrapper,
-    MaxAndSkipGym, MaxAndSkipGymError, NormalizeObservationGym, NormalizeObservationGymError,
-    NormalizeObservationGymState, NormalizeRewardGym, NormalizeRewardGymState,
-    OutputMapMultiGymWrapper, RawRewardInfo, RecordEpisodeStatisticsGym, RecordRawRewardGym,
-    TensorMapMultiGymError, TimeLimitGym,
+    LegalActionMaskGym, LegalActionMaskGymError, MaxAndSkipGym, MaxAndSkipGymError,
+    NormalizeObservationGym, NormalizeObservationGymError, NormalizeObservationGymState,
+    NormalizeRewardGym, NormalizeRewardGymState, OutputMapMultiGymWrapper, RawRewardInfo,
+    RecordEpisodeStatisticsGym, RecordRawRewardGym, TensorMapMultiGymError, TimeLimitGym,
 };

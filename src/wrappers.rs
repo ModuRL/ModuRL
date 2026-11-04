@@ -441,7 +441,11 @@ pub use normalize::{
     NormalizeObservationGym, NormalizeObservationGymError, NormalizeObservationGymState,
     NormalizeRewardGym, NormalizeRewardGymState,
 };
-pub use observation::{FrameStackGym, FrameStackGymError, MaxAndSkipGym, MaxAndSkipGymError};
+pub(crate) use observation::split_legal_action_mask;
+pub use observation::{
+    FrameStackGym, FrameStackGymError, LegalActionMaskGym, LegalActionMaskGymError, MaxAndSkipGym,
+    MaxAndSkipGymError,
+};
 pub use reward::{ClipRewardGym, ClipRewardGymError};
 pub use time_limit::TimeLimitGym;
 
