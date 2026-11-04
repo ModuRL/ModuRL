@@ -1,10 +1,10 @@
 //! Wrappers that transform rewards.
 
 use crate::tensor_rank::TensorBatchTypes;
-use burn::tensor::kind::Basic;
+use burn::tensor::{Int, kind::Basic};
 
 use crate::{
-    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
+    gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
 
@@ -86,6 +86,19 @@ where
     fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
         self.gym
             .set_state(state)
+            .map_err(ClipRewardGymError::GymError)
+    }
+}
+
+impl<G, I, const BO: usize, K: Basic> LegalActionsGym<I, BO> for ClipRewardGym<G>
+where
+    G: LegalActionsGym<I, BO>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<2, Kind = Int>,
+{
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions()
             .map_err(ClipRewardGymError::GymError)
     }
 }

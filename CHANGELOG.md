@@ -111,6 +111,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
 
 - Added `PerfectStateGym` with `save_state` and `set_state`; core wrappers implement it when their inner gym does.
 - Added `PerfectStateMultiGym` with per-slot `save_state` and `set_state`; `VectorizedGymWrapper`, `StackedMultiGym`, and the input, output, and device wrappers implement it when their inner gyms do.
+- Added `LegalActionsGym` and `LegalActionsMultiGym`, which report legal discrete action indices per gym or slot; vectorized, stacked, map, device, and single-gym wrappers forward them.
 - Classic-control environments implement `PerfectStateGym` with saveable runtime and RNG state.
 - Replaced `TensorMapMultiGymWrapper` with `InputMapMultiGymWrapper` and `OutputMapMultiGymWrapper`.
   Compose the two wrappers when both directions need mapping.

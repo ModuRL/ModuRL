@@ -1,10 +1,10 @@
 //! Running observation and reward normalization wrappers.
 
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
-use burn::tensor::{Tensor, TensorData, TensorReadError, kind::Basic};
+use burn::tensor::{Int, Tensor, TensorData, TensorReadError, kind::Basic};
 
 use crate::{
-    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
+    gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
 
@@ -194,6 +194,22 @@ where
     }
 }
 
+impl<G, I, const O: usize, const BO: usize, K: Basic> LegalActionsGym<I, BO>
+    for NormalizeObservationGym<G>
+where
+    G: LegalActionsGym<I, BO>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<2, Kind = Int>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+{
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions()
+            .map_err(NormalizeObservationGymError::GymError)
+    }
+}
+
 /// Scales immediate rewards by the running standard deviation of discounted rewards.
 pub struct NormalizeRewardGym<G> {
     gym: G,
@@ -301,6 +317,17 @@ where
         self.statistics.clone_from(&state.statistics);
         self.discounted_reward = state.discounted_reward;
         Ok(())
+    }
+}
+
+impl<G, I, const BO: usize, K: Basic> LegalActionsGym<I, BO> for NormalizeRewardGym<G>
+where
+    G: LegalActionsGym<I, BO>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<2, Kind = Int>,
+{
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        self.gym.legal_actions()
     }
 }
 

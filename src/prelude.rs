@@ -49,8 +49,9 @@ pub use crate::distributions::{
     TanhTransform, TransformedDistribution, TransformedDistributionError,
 };
 pub use crate::gym::{
-    Gym, MultiGym, MultiGymStepInfo, PerfectStateGym, PerfectStateMultiGym, ResetInfo,
-    StackedMultiGym, StackedMultiGymError, StepInfo, VectorizedGymError, VectorizedGymWrapper,
+    Gym, LegalActionsGym, LegalActionsMultiGym, MultiGym, MultiGymStepInfo, PerfectStateGym,
+    PerfectStateMultiGym, ResetInfo, StackedMultiGym, StackedMultiGymError, StepInfo,
+    VectorizedGymError, VectorizedGymWrapper,
 };
 #[cfg(feature = "multithreading")]
 pub use crate::gym::{MultithreadedStackedMultiGym, MultithreadedVectorizedGymWrapper};

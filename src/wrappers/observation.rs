@@ -1,10 +1,10 @@
 //! Wrappers that transform observations.
 
-use crate::gym::{Gym, PerfectStateGym, ResetInfo, StepInfo};
+use crate::gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo};
 use crate::spaces::{ActionSpace, BoxSpace, ObservationSpace};
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{
-    Tensor,
+    Int, Tensor,
     kind::{Basic, Ordered},
 };
 use std::collections::VecDeque;
@@ -154,6 +154,24 @@ where
     }
 }
 
+impl<G, I, const O: usize, const F: usize, const BF: usize, S, K: Basic> LegalActionsGym<I, BF>
+    for FrameStackGym<G, BF, S>
+where
+    G: LegalActionsGym<I, F>,
+    G::ObservationSpace: ObservationSpace<F, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<2, Kind = Int>,
+    S: ObservationSpace<BF, Kind = K, Item = Tensor<F, K>> + Clone,
+    Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
+    Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
+{
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions()
+            .map_err(FrameStackGymError::GymError)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MaxAndSkipGymError<E> {
     #[error("wrapped gym error: {0}")]
@@ -251,6 +269,22 @@ where
     fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
         self.gym
             .set_state(state)
+            .map_err(MaxAndSkipGymError::GymError)
+    }
+}
+
+impl<G, I, const O: usize, const BO: usize, K: Basic + Ordered> LegalActionsGym<I, BO>
+    for MaxAndSkipGym<G>
+where
+    G: LegalActionsGym<I, BO>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<2, Kind = Int>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+{
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions()
             .map_err(MaxAndSkipGymError::GymError)
     }
 }
