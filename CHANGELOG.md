@@ -108,6 +108,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
 ### Environment wrappers and device placement
 
 - Added `PerfectStateGym` with `save_state` and `set_state`; core wrappers implement it when their inner gym does.
+- Classic-control environments implement `PerfectStateGym` with saveable runtime and RNG state.
 - Replaced `TensorMapMultiGymWrapper` with `InputMapMultiGymWrapper` and `OutputMapMultiGymWrapper`.
   Compose the two wrappers when both directions need mapping.
 - Input mapping receives the complete action batch. Output mapping has separate reset and step callbacks;

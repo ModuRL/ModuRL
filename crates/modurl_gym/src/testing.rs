@@ -1,9 +1,77 @@
 #![cfg(test)]
 
-use burn::tensor::{Device, Tensor, TensorData, TensorReadError};
-use modurl::gym::Gym;
+use burn::tensor::{Device, Int, Tensor, TensorData, TensorReadError};
+use modurl::{
+    gym::{Gym, PerfectStateGym},
+    tensor_rank::TensorBatchTypes,
+};
 
 pub(crate) const PARITY_STEPS: usize = 64;
+
+pub(crate) fn discrete_actions(actions: &[u32]) -> Vec<Tensor<1, Int>> {
+    actions
+        .iter()
+        .map(|action| Tensor::from_data([*action], &Device::flex()))
+        .collect()
+}
+
+pub(crate) fn check_perfect_state_replay<G>(
+    mut environment: G,
+    prefix_actions: &[<G::ActionSpace as TensorBatchTypes>::Item],
+    replay_actions: &[<G::ActionSpace as TensorBatchTypes>::Item],
+) where
+    G: PerfectStateGym<(), 2, 2>,
+    G::ActionSpace: TensorBatchTypes,
+    G::ObservationSpace: TensorBatchTypes<Item = Tensor<1>>,
+    G::Error: std::fmt::Debug,
+{
+    environment.reset().expect("Failed to reset environment.");
+    for action in prefix_actions {
+        environment
+            .step(action.clone())
+            .expect("Failed to take prefix step.");
+    }
+
+    let state = environment
+        .save_state()
+        .expect("Failed to save environment state.");
+    let expected = record_replay(&mut environment, replay_actions);
+    environment
+        .set_state(&state)
+        .expect("Failed to restore environment state.");
+    let actual = record_replay(&mut environment, replay_actions);
+
+    assert_eq!(actual, expected);
+}
+
+fn record_replay<G>(
+    environment: &mut G,
+    actions: &[<G::ActionSpace as TensorBatchTypes>::Item],
+) -> Vec<(TensorData, u32, bool, bool)>
+where
+    G: PerfectStateGym<(), 2, 2>,
+    G::ActionSpace: TensorBatchTypes,
+    G::ObservationSpace: TensorBatchTypes<Item = Tensor<1>>,
+    G::Error: std::fmt::Debug,
+{
+    let mut transitions = Vec::with_capacity(actions.len());
+    for (index, action) in actions.iter().enumerate() {
+        let step = environment
+            .step(action.clone())
+            .expect("Failed to take replay step.");
+        transitions.push((
+            step.observation.to_data(),
+            step.reward.to_bits(),
+            step.done,
+            step.truncated,
+        ));
+
+        if step.done || step.truncated || index == actions.len() / 2 {
+            environment.reset().expect("Failed to reset during replay.");
+        }
+    }
+    transitions
+}
 
 #[derive(serde::Deserialize)]
 struct ExpectedOutput {

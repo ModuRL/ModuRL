@@ -3,11 +3,12 @@ use std::f64::consts::PI;
 use crate::EnvironmentError;
 use bon::bon;
 use burn::tensor::{Device, Int, Tensor, TensorData};
+use modurl::gym::PerfectStateGym;
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     spaces::{BoxSpace, Discrete},
 };
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::ChaCha12Rng};
 
 const MAX_VELOCITY_1: f64 = 4.0 * PI;
 const MAX_VELOCITY_2: f64 = 9.0 * PI;
@@ -25,11 +26,18 @@ pub struct AcrobotV1 {
     state: [f64; 4],
     use_nips_dynamics: bool,
     torque_noise_max: f64,
-    rng: StdRng,
+    rng: ChaCha12Rng,
     action_space: Discrete,
     observation_space: BoxSpace,
     #[cfg(feature = "rendering")]
     renderer: Option<crate::rendering::Renderer>,
+}
+
+/// Saved mutable state for [`AcrobotV1`].
+#[derive(Clone)]
+pub struct AcrobotV1State {
+    rng_state: [u8; 49],
+    state: [f64; 4],
 }
 
 #[bon]
@@ -78,7 +86,7 @@ impl AcrobotV1 {
             state: [0.0; 4],
             use_nips_dynamics,
             torque_noise_max,
-            rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
+            rng: seed.map_or_else(rand::make_rng, ChaCha12Rng::seed_from_u64),
             action_space: Discrete::new(3).expect("3 is a valid action count"),
             observation_space: BoxSpace::new(
                 Tensor::from_data(TensorData::new(low, [1, 6]), &Device::flex()),
@@ -282,6 +290,23 @@ impl Gym for AcrobotV1 {
     }
 }
 
+impl PerfectStateGym for AcrobotV1 {
+    type State = AcrobotV1State;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        Ok(AcrobotV1State {
+            rng_state: self.rng.serialize_state(),
+            state: self.state,
+        })
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.rng = ChaCha12Rng::deserialize_state(&state.rng_state);
+        self.state = state.state;
+        Ok(())
+    }
+}
+
 fn wrap(mut value: f64, minimum: f64, maximum: f64) -> f64 {
     let width = maximum - minimum;
     while value > maximum {
@@ -296,7 +321,7 @@ fn wrap(mut value: f64, minimum: f64, maximum: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::PARITY_STEPS;
+    use crate::testing::{PARITY_STEPS, check_perfect_state_replay, discrete_actions};
     use burn::tensor::TensorReadError;
 
     #[derive(serde::Deserialize)]
@@ -339,6 +364,17 @@ mod tests {
             assert_eq!(actual.done, transition.terminated);
             assert!(!actual.truncated);
         }
+    }
+
+    #[test]
+    fn perfect_state_replays_resets() {
+        let prefix = discrete_actions(&[0, 2]);
+        let actions = discrete_actions(&[2, 1, 0, 2, 0, 1, 2, 2, 1, 0, 1, 2]);
+        check_perfect_state_replay(
+            AcrobotV1::builder().seed(7).build().unwrap(),
+            &prefix,
+            &actions,
+        );
     }
 
     #[test]

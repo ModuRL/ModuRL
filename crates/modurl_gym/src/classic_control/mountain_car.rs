@@ -1,17 +1,17 @@
 use bon::bon;
 use burn::tensor::{DType, Device, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
-    gym::{Gym, ResetInfo, StepInfo},
+    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
     spaces,
 };
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::ChaCha12Rng};
 
 use crate::EnvironmentError;
 
 /// The classic Mountain Car environment.
 /// Converted from the OpenAI Gym Mountain Car environment.
 pub struct MountainCarV0 {
-    rng: StdRng,
+    rng: ChaCha12Rng,
     state: Tensor<1>,
     action_space: spaces::Discrete,
     observation_space: spaces::BoxSpace,
@@ -24,6 +24,13 @@ pub struct MountainCarV0 {
     gravity: f32,
     #[cfg(feature = "rendering")]
     renderer: Option<crate::rendering::Renderer>,
+}
+
+/// Saved mutable state for [`MountainCarV0`].
+#[derive(Clone)]
+pub struct MountainCarV0State {
+    rng_state: [u8; 49],
+    state: Tensor<1>,
 }
 
 #[bon]
@@ -53,7 +60,7 @@ impl MountainCarV0 {
         let observation_space = spaces::BoxSpace::new(low.unsqueeze::<2>(), high.unsqueeze::<2>());
 
         Ok(Self {
-            rng: seed.map_or_else(rand::make_rng, StdRng::seed_from_u64),
+            rng: seed.map_or_else(rand::make_rng, ChaCha12Rng::seed_from_u64),
             state: Tensor::zeros([2], (&Device::flex(), DType::F32)),
             action_space,
             observation_space,
@@ -373,10 +380,27 @@ impl Gym for MountainCarV0 {
     }
 }
 
+impl PerfectStateGym for MountainCarV0 {
+    type State = MountainCarV0State;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        Ok(MountainCarV0State {
+            rng_state: self.rng.serialize_state(),
+            state: self.state.clone(),
+        })
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.rng = ChaCha12Rng::deserialize_state(&state.rng_state);
+        self.state = state.state.clone();
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::check_discrete_parity;
+    use crate::testing::{check_discrete_parity, check_perfect_state_replay, discrete_actions};
     use Gym;
     #[cfg(feature = "rendering")]
     use modurl::spaces::ActionSpace;
@@ -401,6 +425,17 @@ mod tests {
         assert_eq!(next_state.dims()[0], 2);
         assert!(reward == -1.0);
         assert!(!done);
+    }
+
+    #[test]
+    fn perfect_state_replays_resets() {
+        let prefix = discrete_actions(&[0, 2]);
+        let actions = discrete_actions(&[0, 2, 1, 2, 0, 1, 2, 2, 1, 0, 2, 1]);
+        check_perfect_state_replay(
+            MountainCarV0::builder().seed(7).build().unwrap(),
+            &prefix,
+            &actions,
+        );
     }
 
     #[test]
