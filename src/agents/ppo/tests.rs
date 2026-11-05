@@ -336,7 +336,7 @@ mod schedule_tests {
 
         device.seed(153);
         let training_actions = agent
-            .act_for_training(&observations)
+            .act_for_training(&observations, &mut ())
             .unwrap()
             .neurons()
             .clone();
@@ -1660,7 +1660,7 @@ mod schedule_tests {
             .unwrap();
 
         let observations = env.reset().unwrap();
-        let actions = agent.act_for_training(&observations).unwrap();
+        let actions = agent.act_for_training(&observations, &mut ()).unwrap();
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         let next_observations = step.observations.clone();
         agent
@@ -1669,7 +1669,7 @@ mod schedule_tests {
 
         agent.reset_current_observations();
 
-        let actions = agent.act_for_training(&next_observations).unwrap();
+        let actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         agent
             .learn_from_timesteps(&next_observations, actions, step)
@@ -1845,7 +1845,9 @@ mod schedule_tests {
             build_agent(caller_env.observation_space(), caller_env.action_space());
         let mut observations = caller_env.reset().unwrap();
         for _ in 0..2 {
-            let training_actions = caller_agent.act_for_training(&observations).unwrap();
+            let training_actions = caller_agent
+                .act_for_training(&observations, &mut ())
+                .unwrap();
             let step = caller_env
                 .step(training_actions.to_environment_actions().unwrap())
                 .unwrap();
@@ -1932,7 +1934,7 @@ mod schedule_tests {
 
         let mut observations = env.reset().unwrap();
         for step_index in 0..4 {
-            let training_actions = agent.act_for_training(&observations).unwrap();
+            let training_actions = agent.act_for_training(&observations, &mut ()).unwrap();
             let step = env
                 .step(training_actions.to_environment_actions().unwrap())
                 .unwrap();
@@ -1990,7 +1992,7 @@ mod schedule_tests {
         assert!(agent.learn(&mut env, 6).is_err());
         let mut observations = env.reset().unwrap();
         for _ in 0..2 {
-            let training_actions = agent.act_for_training(&observations).unwrap();
+            let training_actions = agent.act_for_training(&observations, &mut ()).unwrap();
             let step = env
                 .step(training_actions.to_environment_actions().unwrap())
                 .unwrap();
@@ -2039,7 +2041,7 @@ mod schedule_tests {
             .unwrap();
 
         let observations = env.reset().unwrap();
-        let training_actions = agent.act_for_training(&observations).unwrap();
+        let training_actions = agent.act_for_training(&observations, &mut ()).unwrap();
         let step = env
             .step(training_actions.to_environment_actions().unwrap())
             .unwrap();
@@ -2050,7 +2052,9 @@ mod schedule_tests {
 
         let mut single_env = VectorizedGymWrapper::from(TwoStepTestGym::new(device.clone(), false));
         let single_observations = single_env.reset().unwrap();
-        let single_actions = agent.act_for_training(&single_observations).unwrap();
+        let single_actions = agent
+            .act_for_training(&single_observations, &mut ())
+            .unwrap();
         let single_step = single_env
             .step(single_actions.to_environment_actions().unwrap())
             .unwrap();
@@ -2063,7 +2067,7 @@ mod schedule_tests {
             })
         ));
 
-        let training_actions = agent.act_for_training(&next_observations).unwrap();
+        let training_actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
         let step = env
             .step(training_actions.to_environment_actions().unwrap())
             .unwrap();

@@ -334,6 +334,7 @@ where
     type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
     type ObservationSpace = OS;
     type ActionSpace = AS;
+    type ActContext<'c> = ();
     type TrainingActions = Tensor<A>;
 
     /// Maps native observations [batch_size, ...observation_shape] to Float exploration actions [batch_size, ...action_shape].
@@ -341,12 +342,17 @@ where
     fn act_for_training(
         &mut self,
         observations: &Tensor<O, OS::Kind>,
+        _context: &mut Self::ActContext<'_>,
     ) -> Result<Tensor<A>, Self::Error> {
         self.inner.training_actions(observations)
     }
 
     /// Maps observations [batch_size, ...observation_shape] to exploration-noised policy actions [batch_size, ...action_shape]; never uses warmup random actions.
-    fn act(&mut self, observations: &Tensor<O, OS::Kind>) -> Result<Tensor<A>, Self::Error> {
+    fn act(
+        &mut self,
+        observations: &Tensor<O, OS::Kind>,
+        _context: &mut Self::ActContext<'_>,
+    ) -> Result<Tensor<A>, Self::Error> {
         Ok(self.inner.act(observations)?.without_autodiff())
     }
 
@@ -625,7 +631,7 @@ mod tests {
         let observations = Tensor::zeros([2, 4], &device);
 
         device.seed(153);
-        let actions = agent.act_for_training(&observations).unwrap();
+        let actions = agent.act_for_training(&observations, &mut ()).unwrap();
         device.seed(153);
         let expected = agent.inner.random_actions(observations.dims()[0]).unwrap();
 
@@ -747,7 +753,7 @@ mod tests {
             assert_eq!(agent.inner.optimization_steps, 4);
 
             let observations = env.reset().unwrap();
-            let actions = agent.act_for_training(&observations).unwrap();
+            let actions = agent.act_for_training(&observations, &mut ()).unwrap();
             let step = env.step(actions.clone()).unwrap();
             agent
                 .learn_from_timesteps(&observations, actions, step)

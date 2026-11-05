@@ -132,7 +132,7 @@ fn ppo_training_is_device_deterministic() {
         let mut observations = env.reset().unwrap();
         let mut actions = Vec::new();
         for _ in 0..25 {
-            let action = agent.act(&observations).unwrap();
+            let action = agent.act(&observations, &mut ()).unwrap();
             actions.push(action.clone().into_data());
             observations = env.step(action).unwrap().observations;
         }
