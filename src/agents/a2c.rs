@@ -360,16 +360,18 @@ where
     type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
     type ObservationSpace = OS;
     type ActionSpace = AS;
+    type ActContext<'c> = ();
     type TrainingActions = PolicySamples<AS, A2CError<N::Error, GE, AS::Error>, L, A>;
 
     /// Selects policy samples `[batch_size, ...policy_shape]` from rank-O observations `[batch_size, ...observation_shape]`.
     fn act_for_training(
         &mut self,
         observations: &OS::Batch,
+        context: &mut Self::ActContext<'_>,
     ) -> Result<Self::TrainingActions, Self::Error> {
         Ok(self
             .inner
-            .act_for_training(observations)
+            .act_for_training(observations, context)
             .map_err(A2CError::from)?
             .with_error(A2CError::SpaceError))
     }
@@ -486,7 +488,7 @@ mod tests {
                 .unwrap();
         agent.learn(&mut env, 2).unwrap();
         let observations = Tensor::zeros([2, 4], (&device, DType::F32));
-        assert_eq!(agent.act(&observations).unwrap().dims(), [2, 1]);
+        assert_eq!(agent.act(&observations, &mut ()).unwrap().dims(), [2, 1]);
         assert_eq!(
             agent.act_deterministic(&observations).unwrap().dims(),
             [2, 1]
@@ -621,7 +623,7 @@ mod tests {
                 .unwrap();
 
         let observations = env.reset().unwrap();
-        let actions = agent.act_for_training(&observations).unwrap();
+        let actions = agent.act_for_training(&observations, &mut ()).unwrap();
         let bad_step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         let bad_actions = PolicySamples::new(
             Tensor::zeros([1, 1], &device),
@@ -638,7 +640,7 @@ mod tests {
         ));
 
         let observations = env.reset().unwrap();
-        let actions = agent.act_for_training(&observations).unwrap();
+        let actions = agent.act_for_training(&observations, &mut ()).unwrap();
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         let next_observations = step.observations.clone();
         agent
@@ -647,7 +649,9 @@ mod tests {
 
         let mut single_env = VectorizedGymWrapper::from(FixedEnv::new(device.clone()));
         let single_observations = single_env.reset().unwrap();
-        let single_actions = agent.act_for_training(&single_observations).unwrap();
+        let single_actions = agent
+            .act_for_training(&single_observations, &mut ())
+            .unwrap();
         let single_step = single_env
             .step(single_actions.to_environment_actions().unwrap())
             .unwrap();
@@ -660,7 +664,7 @@ mod tests {
             })
         ));
 
-        let actions = agent.act_for_training(&next_observations).unwrap();
+        let actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         agent
             .learn_from_timesteps(&next_observations, actions, step)
@@ -723,7 +727,9 @@ mod tests {
             build_agent(caller_env.observation_space(), caller_env.action_space());
         let mut observations = caller_env.reset().unwrap();
         for _ in 0..2 {
-            let actions = caller_agent.act_for_training(&observations).unwrap();
+            let actions = caller_agent
+                .act_for_training(&observations, &mut ())
+                .unwrap();
             let step = caller_env
                 .step(actions.to_environment_actions().unwrap())
                 .unwrap();

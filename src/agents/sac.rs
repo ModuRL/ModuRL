@@ -1476,6 +1476,7 @@ where
     type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
     type ObservationSpace = OS;
     type ActionSpace = AS;
+    type ActContext<'c> = ();
     type TrainingActions = Tensor<A, AS::Kind>;
 
     /// Selects detached rank-A collection actions `[batch_size, ...action_shape]` from native rank-O observations `[batch_size, ...observation_shape]`.
@@ -1483,6 +1484,7 @@ where
     fn act_for_training(
         &mut self,
         observations: &Tensor<O, OS::Kind>,
+        _context: &mut Self::ActContext<'_>,
     ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
         self.training_actions(observations)
     }
@@ -1491,6 +1493,7 @@ where
     fn act(
         &mut self,
         observations: &Tensor<O, OS::Kind>,
+        _context: &mut Self::ActContext<'_>,
     ) -> Result<Tensor<A, AS::Kind>, Self::Error> {
         self.stochastic_action(observations)
     }
