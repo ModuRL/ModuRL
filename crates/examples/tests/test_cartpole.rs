@@ -40,7 +40,9 @@ fn model(input: usize, output: usize, hidden: Vec<usize>, gain: f64, device: &De
 }
 
 /// Evaluates Float observations [1, 4] with Int actions [1, 1] over 100 completed CartPole episodes.
-fn get_average_steps<A: Agent<ObservationSpace = BoxSpace<2>, ActionSpace = Discrete>>(
+fn get_average_steps<
+    A: for<'c> Agent<ObservationSpace = BoxSpace<2>, ActionSpace = Discrete, ActContext<'c> = ()>,
+>(
     agent: &mut A,
     device: &Device,
 ) -> f32
@@ -53,7 +55,9 @@ where
     let mut total_steps = 0;
     let mut episodes = 0;
     while episodes < 100 {
-        let step = env.step(agent.act(&observations).unwrap()).unwrap();
+        let step = env
+            .step(agent.act(&observations, &mut ()).unwrap())
+            .unwrap();
         episodes += usize::from(step.dones[0] || step.truncateds[0]);
         total_steps += 1;
         observations = step.observations;
@@ -277,7 +281,7 @@ fn dqn_cartpole() {
     let mut episode_count = 0;
     let mut total_steps = 0;
     while episode_count < 100 {
-        let actions = agent.act(&observations).unwrap();
+        let actions = agent.act(&observations, &mut ()).unwrap();
         let step = env.step(actions).unwrap();
         total_steps += 1;
         episode_count += usize::from(step.dones[0] || step.truncateds[0]);
@@ -335,7 +339,7 @@ fn ddqn_cartpole() {
     let mut episode_count = 0;
     let mut total_steps = 0;
     while episode_count < 100 {
-        let actions = agent.act(&observations).unwrap();
+        let actions = agent.act(&observations, &mut ()).unwrap();
         let step = env.step(actions).unwrap();
         total_steps += 1;
         episode_count += usize::from(step.dones[0] || step.truncateds[0]);

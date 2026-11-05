@@ -733,7 +733,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
         .unwrap();
 
     let observations = env.reset().unwrap();
-    let actions = agent.act_for_training(&observations).unwrap();
+    let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     let mut bad_step = env.step(actions.clone()).unwrap();
     bad_step.dones.pop();
     assert!(
@@ -743,7 +743,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     );
 
     let observations = env.reset().unwrap();
-    let actions = agent.act_for_training(&observations).unwrap();
+    let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     let step = env.step(actions.clone()).unwrap();
     agent
         .learn_from_timesteps(&observations, actions, step)
@@ -788,7 +788,7 @@ fn act_for_training_uses_random_warmup_actions() {
     let observations = Tensor::zeros([2, 1], &device);
 
     device.seed(153);
-    let actions = agent.act_for_training(&observations).unwrap();
+    let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     device.seed(153);
     let sampled_actions = agent
         .action_space
@@ -839,7 +839,7 @@ fn act_uses_policy_during_warmup() {
     let observations = Tensor::zeros([2, 1], &device);
 
     device.seed(153);
-    let actions = agent.act(&observations).unwrap();
+    let actions = agent.act(&observations, &mut ()).unwrap();
     device.seed(153);
     let expected = agent.stochastic_action(&observations).unwrap();
 
@@ -884,7 +884,7 @@ fn caller_collection_entropy_weight_is_one_after_warmup() {
         .unwrap();
 
     let observations = environment.reset().unwrap();
-    let actions = agent.act_for_training(&observations).unwrap();
+    let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     let step = environment.step(actions.clone()).unwrap();
     agent
         .learn_from_timesteps(&observations, actions, step)
@@ -957,7 +957,9 @@ fn caller_collected_training_matches_learn() {
     let mut caller_agent = build_agent(caller_env.observation_space(), caller_env.action_space());
     let mut observations = caller_env.reset().unwrap();
     for _ in 0..2 {
-        let actions = caller_agent.act_for_training(&observations).unwrap();
+        let actions = caller_agent
+            .act_for_training(&observations, &mut ())
+            .unwrap();
         let step = caller_env.step(actions.clone()).unwrap();
         let next_observations = step.observations.clone();
         caller_agent
@@ -1006,7 +1008,7 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         .build()
         .unwrap();
     let observations = Tensor::<2, Int>::from_data([[1i64], [2]], (&device, DType::I64));
-    assert_eq!(agent.act(&observations).unwrap().dims(), [2, 1]);
+    assert_eq!(agent.act(&observations, &mut ()).unwrap().dims(), [2, 1]);
     let batch = SACOptimizationBatch {
         observations: observations.clone(),
         next_observations: observations,
@@ -1049,7 +1051,10 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         .unwrap();
     assert_eq!(
         agent
-            .act(&Tensor::<2, Bool>::from_data([[true], [false]], &device))
+            .act(
+                &Tensor::<2, Bool>::from_data([[true], [false]], &device),
+                &mut (),
+            )
             .unwrap()
             .dims(),
         [2, 1]

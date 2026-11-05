@@ -1115,7 +1115,7 @@ mod tests {
             .unwrap();
         agent.learn(&mut env, 2).unwrap();
         let observations = agent.current_observations.as_ref().unwrap().clone();
-        assert_eq!(agent.act(&observations).unwrap().dims(), [2, 1]);
+        assert_eq!(agent.act(&observations, &mut ()).unwrap().dims(), [2, 1]);
         assert_eq!(
             agent.act_deterministic(&observations).unwrap().dims(),
             [2, 1]
@@ -1180,7 +1180,7 @@ mod tests {
             assert_close(network.critic_learning_rate, rate);
         }
         let observations = Tensor::zeros([2, 4], (&device, DType::F32));
-        assert_eq!(agent.act(&observations).unwrap().dims(), [2, 1]);
+        assert_eq!(agent.act(&observations, &mut ()).unwrap().dims(), [2, 1]);
         assert_eq!(
             agent.act_deterministic(&observations).unwrap().dims(),
             [2, 1]

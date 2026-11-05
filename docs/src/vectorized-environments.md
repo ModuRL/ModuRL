@@ -52,7 +52,7 @@ Rewards retain shape `[num_envs, 1]`; terminal observations retain their unbatch
 let mut observations = env.reset()?;
 
 loop {
-    let actions = agent.act(&observations)?;
+    let actions = agent.act(&observations, &mut ())?;
     let step = env.step(actions)?;
     observations = step.observations;
 }
@@ -101,7 +101,7 @@ dimension:
 ```rust,ignore
 let mut env = CoupledGame::new()?;
 let observations = env.reset()?; // [players, ...observation_shape]
-let actions = agent.act(&observations)?; // [players, ...action_shape]
+let actions = agent.act(&observations, &mut ())?; // [players, ...action_shape]
 let step = env.step(actions)?; // advances the shared game once
 ```
 
@@ -126,7 +126,7 @@ let games = (0..4)
 let mut env = StackedMultiGym::new(games)?;
 
 let observations = env.reset()?; // [8, ...observation_shape]
-let actions = agent.act(&observations)?; // [8, ...action_shape]
+let actions = agent.act(&observations, &mut ())?; // [8, ...action_shape]
 let step = env.step(actions)?; // steps each shared game once
 ```
 

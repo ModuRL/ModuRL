@@ -174,6 +174,7 @@ where
         dyn MultiGym<I, R, 2, Error = GE, ObservationSpace = S, ActionSpace = Discrete> + 'e;
     type ObservationSpace = S;
     type ActionSpace = Discrete;
+    type ActContext<'c> = ();
     type TrainingActions = Tensor<2, Int>;
 
     /// Selects U32 Int actions [batch_size, 1] for native rank-R observations [batch_size, ...observation_shape].
@@ -181,6 +182,7 @@ where
     fn act_for_training(
         &mut self,
         observations: &Tensor<R, S::Kind>,
+        _context: &mut Self::ActContext<'_>,
     ) -> Result<Tensor<2, Int>, Self::Error> {
         self.inner.act(observations)
     }
@@ -277,7 +279,7 @@ mod tests {
                 .unwrap();
             assert_eq!(agent.get_action_space().get_possible_values(), 2);
             assert_eq!(agent.get_observation_space().shape(), [4]);
-            let actions = agent.act(&Tensor::zeros([2, 4], &device)).unwrap();
+            let actions = agent.act(&Tensor::zeros([2, 4], &device), &mut ()).unwrap();
             assert_eq!(actions.dims(), [2, 1]);
             assert_eq!(actions.into_data().try_to_vec::<u32>().unwrap(), [1, 1]);
             let initial_parameters = agent.inner.online_q_network.values.val().into_data();
@@ -288,7 +290,7 @@ mod tests {
             assert_eq!(agent.inner.dtype, dtype);
 
             let observations = env.reset().unwrap();
-            let actions = agent.act_for_training(&observations).unwrap();
+            let actions = agent.act_for_training(&observations, &mut ()).unwrap();
             let step = env.step(actions.clone()).unwrap();
             agent
                 .learn_from_timesteps(&observations, actions, step)
@@ -333,7 +335,7 @@ mod tests {
             .build()
             .unwrap();
         let observations = Tensor::<3, Bool>::from_data([[[true]], [[false]]], &device);
-        let actions = agent.act(&observations).unwrap();
+        let actions = agent.act(&observations, &mut ()).unwrap();
         assert_eq!(actions.dims(), [2, 1]);
         assert_eq!(actions.into_data().try_to_vec::<u32>().unwrap(), [1, 1]);
     }

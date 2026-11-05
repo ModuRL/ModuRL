@@ -64,6 +64,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `PPOError::BatchLengthMismatch` and `A2CError::BatchLengthMismatch` report inconsistent caller-collected batches.
 - `Agent::GymError` is replaced by `type Env<'e>`, the environment type `learn` accepts.
   Built-in agents use `dyn MultiGym + 'e` with their gym error type, so environments may borrow locals; `Agent` is no longer dyn compatible.
+- `Agent` gains `type ActContext<'c>`, passed as `&mut` to `act_for_training` and `act`; built-in agents use `()`.
 - Renamed `ResetInfo::state` and `StepInfo::state` to `observation`.
   Both structures gain an observation tensor type parameter: `ResetInfo<I, T>` and `StepInfo<I, T>`.
 - Renamed `MultiGymStepInfo::states` to `observations`, `terminal_states` to `terminal_observations`,

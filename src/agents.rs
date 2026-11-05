@@ -53,6 +53,9 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
 
+    /// Extra input `act_for_training` and `act` need beyond observations, such as an environment to search; `()` when observations suffice.
+    type ActContext<'c>: ?Sized;
+
     /// Training actions used by `learn_from_timesteps`.
     type TrainingActions: ToEnvironmentActions<
         Actions = <Self::ActionSpace as TensorBatchTypes>::Batch,
@@ -62,15 +65,17 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     fn act_for_training(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
+        context: &mut Self::ActContext<'_>,
     ) -> Result<Self::TrainingActions, Self::Error>;
 
     /// Selects environment actions from observations shaped `[batch_size, ...observation_shape]`.
     fn act(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
+        context: &mut Self::ActContext<'_>,
     ) -> Result<<Self::ActionSpace as TensorBatchTypes>::Batch, Self::Error> {
         Ok(self
-            .act_for_training(observations)?
+            .act_for_training(observations, context)?
             .to_environment_actions()?)
     }
 
@@ -254,12 +259,14 @@ mod tests {
             > + 'e;
         type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ActContext<'c> = ();
         type TrainingActions = Tensor<2, Int>;
 
         /// Returns zero Int actions `[batch_size, 1]` for Float observations `[batch_size, features]` on the observation device.
         fn act_for_training(
             &mut self,
             observations: &Tensor<2>,
+            _context: &mut Self::ActContext<'_>,
         ) -> Result<Tensor<2, Int>, Self::Error> {
             Ok(Tensor::zeros(
                 [observations.dims()[0], 1],
@@ -275,7 +282,7 @@ mod tests {
         ) -> Result<(), Self::Error> {
             let mut observations = env.reset()?;
             for _ in (0..num_timesteps).step_by(env.num_envs()) {
-                observations = env.step(self.act(&observations)?)?.observations;
+                observations = env.step(self.act(&observations, &mut ())?)?.observations;
             }
             Ok(())
         }
@@ -303,11 +310,11 @@ mod tests {
         .unwrap();
         let observations = multiple.reset().unwrap();
         let training_actions = (|| {
-            let training_actions = agent.act_for_training(&observations)?;
+            let training_actions = agent.act_for_training(&observations, &mut ())?;
             Ok::<_, Box<dyn std::error::Error>>(training_actions.to_environment_actions()?)
         })()
         .unwrap();
-        let actions = agent.act(&observations).unwrap();
+        let actions = agent.act(&observations, &mut ()).unwrap();
         assert_eq!(
             training_actions.into_data().try_to_vec::<i32>().unwrap(),
             vec![0, 0]
@@ -317,6 +324,67 @@ mod tests {
         assert_eq!(actions.into_data().try_to_vec::<i32>().unwrap(), vec![0, 0]);
         agent.learn(&mut single, 1).unwrap();
         agent.learn(&mut multiple, 2).unwrap();
+    }
+
+    struct ContextAgent;
+
+    impl Agent for ContextAgent {
+        type Error = Infallible;
+        type Env<'e> = dyn MultiGym<
+                (),
+                2,
+                2,
+                Error = Infallible,
+                ObservationSpace = BoxSpace<2>,
+                ActionSpace = Discrete,
+            > + 'e;
+        type ObservationSpace = BoxSpace<2>;
+        type ActionSpace = Discrete;
+        type ActContext<'c> = [i64];
+        type TrainingActions = Tensor<2, Int>;
+
+        /// Returns context-provided Int actions `[batch_size, 1]` for Float observations `[batch_size, features]`.
+        fn act_for_training(
+            &mut self,
+            observations: &Tensor<2>,
+            context: &mut [i64],
+        ) -> Result<Tensor<2, Int>, Self::Error> {
+            Ok(Tensor::from_data(
+                burn::tensor::TensorData::new(context.to_vec(), [observations.dims()[0], 1]),
+                (&observations.device(), DType::I64),
+            ))
+        }
+
+        /// Accepts any compatible batched environment without stepping it.
+        fn learn(
+            &mut self,
+            _env: &mut Self::Env<'_>,
+            _num_timesteps: usize,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        /// Accepts observations `[num_envs, 4]` and matching caller-collected step data.
+        fn learn_from_timesteps(
+            &mut self,
+            _observations: &Tensor<2>,
+            _training_actions: Tensor<2, Int>,
+            _step: MultiGymStepInfo<(), Tensor<1>>,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn act_uses_caller_context() {
+        let device = Device::flex();
+        let observations = Tensor::zeros([2, 4], (&device, DType::F32));
+        let mut agent = ContextAgent;
+
+        let actions = agent.act(&observations, &mut [1i64, 0][..]).unwrap();
+
+        assert_eq!(actions.dims(), [2, 1]);
+        assert_eq!(actions.into_data().try_to_vec::<i64>().unwrap(), vec![1, 0]);
     }
 
     #[test]
