@@ -172,11 +172,6 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
     }
 
     /// Returns storage `[capacity + environment_count, ...item_shape]` of rank `R` without copying tensor data.
-    #[cfg(test)]
-    pub(crate) fn observations(&self) -> &Tensor<R, K> {
-        &self.observations
-    }
-
     /// Allocates rank-`R >= 2` storage from logical shape `[capacity, ...item_shape]`.
     /// Adds `environment_count` rows for next observations. Capacity must exceed and be divisible by the environment count.
     /// The selected dtype must belong to kind `K`. Storage has no autodiff association.
@@ -501,6 +496,7 @@ fn sample_indices_without_replacement(population_size: usize, sample_size: usize
 mod tests {
     use super::*;
     use burn::tensor::Bool;
+    use proptest::{collection::vec, prelude::*};
     use std::convert::Infallible;
 
     struct IndexStorage {
@@ -558,31 +554,6 @@ mod tests {
                 .unwrap(),
             vec![28, 29, 30, 31]
         );
-    }
-
-    #[test]
-    fn column_wraps_without_changing_previously_gathered_values() {
-        let device = Device::flex();
-        for dtype in [DType::F32, DType::F64] {
-            let mut column = TensorReplayColumn::<2>::new([3, 1], (&device, dtype));
-            column
-                .write(0, Tensor::from_data([[1.0], [2.0]], (&device, dtype)))
-                .unwrap();
-            let gathered = column.gather(replay_index_tensor(&[0], &device).unwrap());
-            column
-                .write(2, Tensor::from_data([[3.0], [4.0]], (&device, dtype)))
-                .unwrap();
-            assert_eq!(
-                gathered.into_data().iter::<f64>().collect::<Vec<_>>(),
-                vec![1.0]
-            );
-            let all = column.gather(replay_index_tensor(&[0, 1, 2], &device).unwrap());
-            assert_eq!(all.dtype(), dtype);
-            assert_eq!(
-                all.into_data().iter::<f64>().collect::<Vec<_>>(),
-                vec![4.0, 2.0, 3.0]
-            );
-        }
     }
 
     #[test]
@@ -671,171 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn column_reports_insertions_larger_than_capacity() {
-        let device = Device::flex();
-        let mut column = TensorReplayColumn::<2>::new([3, 2], &device);
-        assert!(matches!(
-            column.write(0, Tensor::zeros([4, 2], &device)),
-            Err(ReplayStorageError::InsertionExceedsCapacity {
-                capacity: 3,
-                inserted: 4
-            })
-        ));
-    }
-
-    #[test]
-    fn aligned_observations_exclude_frontier_and_preserve_truncations() {
-        let device = Device::flex();
-        let mut replay = AlignedObservationReplay::<2>::new([4, 1], 2, &device).unwrap();
-        let batch = |values: [f32; 2]| Tensor::<1>::from_data(values, &device).reshape([2, 1]);
-        replay
-            .insert(0, batch([0.0, 10.0]), batch([1.0, 11.0]), &[false; 2])
-            .unwrap();
-        replay
-            .insert(2, batch([1.0, 11.0]), batch([99.0, 12.0]), &[true, false])
-            .unwrap();
-        assert_eq!(replay.sampleable_len(4), 4);
-        assert_eq!(
-            replay
-                .gather(&[2, 3])
-                .unwrap()
-                .1
-                .into_data()
-                .try_to_vec::<f32>()
-                .unwrap(),
-            vec![99.0, 12.0]
-        );
-        replay
-            .insert(0, batch([2.0, 12.0]), batch([3.0, 13.0]), &[false; 2])
-            .unwrap();
-        assert_eq!(replay.sampleable_len(4), 2);
-        assert_eq!(replay.sample_index(0, 4), 0);
-        assert_eq!(replay.sample_index(1, 4), 1);
-        assert_eq!(
-            replay
-                .gather(&[2])
-                .unwrap()
-                .1
-                .into_data()
-                .try_to_vec::<f32>()
-                .unwrap(),
-            vec![99.0]
-        );
-        replay
-            .insert(2, batch([3.0, 13.0]), batch([4.0, 14.0]), &[false; 2])
-            .unwrap();
-        assert_eq!(replay.sample_index(0, 4), 2);
-        assert_eq!(replay.sample_index(1, 4), 3);
-        assert_eq!(
-            replay
-                .gather(&[2])
-                .unwrap()
-                .1
-                .into_data()
-                .try_to_vec::<f32>()
-                .unwrap(),
-            vec![4.0]
-        );
-    }
-
-    #[test]
-    fn aligned_observation_insert_validates_shape_and_dtype_without_mutation() {
-        let device = Device::flex();
-        let mut replay =
-            AlignedObservationReplay::<2>::new([4, 2], 1, (&device, DType::F32)).unwrap();
-        let states = Tensor::from_data([[1.0f32, 2.0]], &device);
-        let next_states = Tensor::from_data([[3.0f32, 4.0]], &device);
-        replay
-            .insert(0, states.clone(), next_states, &[false])
-            .unwrap();
-
-        let before = replay
-            .observations()
-            .clone()
-            .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-        let error = replay.insert(
-            1,
-            states.clone(),
-            Tensor::from_data([[5.0f32, 6.0, 7.0]], &device),
-            &[false],
-        );
-        assert!(matches!(
-            error,
-            Err(ReplayStorageError::ShapeMismatch {
-                field: "next observations",
-                expected,
-                actual,
-            }) if expected == vec![1, 2] && actual == vec![1, 3]
-        ));
-        assert_eq!(
-            replay
-                .observations()
-                .clone()
-                .into_data()
-                .try_to_vec::<f32>()
-                .unwrap(),
-            before
-        );
-
-        let error = replay.insert(
-            1,
-            Tensor::from_data([[5.0f64, 6.0]], (&device, DType::F64)),
-            Tensor::from_data([[7.0f64, 8.0]], (&device, DType::F64)),
-            &[false],
-        );
-        assert!(matches!(
-            error,
-            Err(ReplayStorageError::DTypeMismatch {
-                field: "observations",
-                expected: DType::F32,
-                actual: DType::F64,
-            })
-        ));
-        assert_eq!(
-            replay
-                .observations()
-                .clone()
-                .into_data()
-                .try_to_vec::<f32>()
-                .unwrap(),
-            before
-        );
-    }
-
-    #[test]
-    fn environment_count_validation_does_not_mutate_storage() {
-        let device = Device::flex();
-        let replay = AlignedObservationReplay::<2>::new([8, 1], 2, &device).unwrap();
-        let before = replay
-            .observations()
-            .clone()
-            .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-
-        replay.validate_environment_count(2).unwrap();
-        assert!(matches!(
-            replay.validate_environment_count(4),
-            Err(ReplayStorageError::EnvironmentCountMismatch {
-                expected: 2,
-                actual: 4
-            })
-        ));
-        assert_eq!(
-            replay
-                .observations()
-                .clone()
-                .into_data()
-                .try_to_vec::<f32>()
-                .unwrap(),
-            before
-        );
-    }
-
-    #[test]
-    fn aligned_storage_reports_configuration_and_batch_errors() {
+    fn aligned_storage_rejects_invalid_configurations() {
         let device = Device::flex();
         for capacity in [0, 2, 3] {
             assert!(matches!(
@@ -843,139 +650,193 @@ mod tests {
                 Err(ReplayStorageError::InvalidReplayAlignment { .. })
             ));
         }
-        let mut replay = AlignedObservationReplay::<2>::new([4, 1], 2, &device).unwrap();
-        assert!(matches!(
-            replay.validate_environment_count(1),
-            Err(ReplayStorageError::EnvironmentCountMismatch {
-                expected: 2,
-                actual: 1
-            })
-        ));
         assert!(matches!(
             AlignedObservationReplay::<2>::new([usize::MAX - 1, 1], 2, &device),
             Err(ReplayStorageError::CapacityOverflow { .. })
         ));
-        let before = replay
-            .observations()
-            .clone()
-            .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-        assert!(matches!(
-            replay.insert(
-                0,
-                Tensor::zeros([2, 1], &device),
-                Tensor::zeros([1, 1], &device),
-                &[false; 2]
-            ),
-            Err(ReplayStorageError::ShapeMismatch {
-                field: "next observations",
-                ..
-            })
-        ));
-        let after = replay
-            .observations()
-            .clone()
-            .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-        assert_eq!(before, after);
     }
 
-    #[test]
-    fn aligned_observations_reject_dtype_mismatches_without_mutation() {
-        let device = Device::flex();
-        let options = (&device, DType::F32);
-        let mut replay = AlignedObservationReplay::<2>::new([4, 2], 1, options).unwrap();
-        let f64_states = Tensor::zeros([1, 2], (&device, DType::F64));
-        let before = replay
-            .observations()
-            .clone()
+    /// Flattens `tensor`, shaped `[rows, 1]`, into one value per row.
+    fn column_values(tensor: Tensor<2>) -> Vec<f64> {
+        tensor
             .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-        assert!(matches!(
-            replay.insert(0, f64_states.clone(), f64_states.clone(), &[false]),
-            Err(ReplayStorageError::DTypeMismatch {
-                field: "observations",
-                expected: DType::F32,
-                actual: DType::F64,
-            })
-        ));
-        let after = replay
-            .observations()
-            .clone()
-            .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-        assert_eq!(before, after);
+            .convert::<f64>()
+            .try_to_vec::<f64>()
+            .unwrap()
+    }
 
-        replay
-            .insert(
-                0,
-                Tensor::ones([1, 2], options),
-                Tensor::ones([1, 2], options),
-                &[false],
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum EpisodeEnd {
+        Continue,
+        Terminate,
+        Truncate,
+    }
+
+    /// One episode end per environment, and optionally an invalid insert tried before the valid one.
+    type ReplayStep = (Vec<EpisodeEnd>, Option<usize>);
+
+    /// `(environment_count, capacity, steps)`; invalid inserts index the cases tried in the property.
+    fn aligned_replay_run() -> impl Strategy<Value = (usize, usize, Vec<ReplayStep>)> {
+        (1usize..=3, 2usize..=5).prop_flat_map(|(environment_count, batches)| {
+            let end = prop_oneof![
+                3 => Just(EpisodeEnd::Continue),
+                1 => Just(EpisodeEnd::Terminate),
+                1 => Just(EpisodeEnd::Truncate),
+            ];
+            let step = (
+                vec(end, environment_count),
+                prop::option::weighted(0.25, 0usize..4),
+            );
+            (
+                Just(environment_count),
+                Just(environment_count * batches),
+                vec(step, 1..=16),
             )
-            .unwrap();
-        let before = replay
-            .observations()
-            .clone()
-            .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-        assert!(matches!(
-            replay.insert(1, f64_states.clone(), f64_states, &[false]),
-            Err(ReplayStorageError::DTypeMismatch {
-                field: "observations",
-                expected: DType::F32,
-                actual: DType::F64,
-            })
-        ));
-        let after = replay
-            .observations()
-            .clone()
-            .into_data()
-            .try_to_vec::<f32>()
-            .unwrap();
-        assert_eq!(before, after);
+        })
     }
 
-    #[test]
-    fn sampling_is_unique_and_uses_requested_batch_size() {
-        let mut replay = ExperienceReplay::with_storage(IndexStorage { capacity: 100 }, 32);
-        replay.add(100).unwrap();
-        let values = replay.sample().unwrap();
-        let unique = values
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(values.len(), 32);
-        assert_eq!(unique.len(), 32);
-    }
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
 
-    #[test]
-    fn undersized_replay_returns_every_available_item_once() {
-        let mut replay = ExperienceReplay::with_storage(IndexStorage { capacity: 100 }, 32);
-        replay.add(7).unwrap();
-        let values = replay.sample().unwrap();
-        let unique = values
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(values.len(), 7);
-        assert_eq!(unique.len(), 7);
-    }
+        #[test]
+        fn column_matches_a_ring_model(
+            capacity in 1usize..=6,
+            writes in vec(0usize..=7, 1..=8),
+            dtype in prop_oneof![Just(DType::F32), Just(DType::F64)],
+        ) {
+            let device = Device::flex();
+            let mut column = TensorReplayColumn::<2>::new([capacity, 1], (&device, dtype));
+            let all_rows = replay_index_tensor(&(0..capacity).collect::<Vec<_>>(), &device).unwrap();
+            let (mut model, mut position, mut written) = (vec![0.0; capacity], 0, 0);
+            let mut first: Option<(Tensor<2>, Vec<f64>)> = None;
+            for count in writes {
+                let values: Vec<f64> = (written..written + count).map(|value| value as f64 + 1.0).collect();
+                let source = Tensor::from_data(TensorData::new(values.clone(), [count, 1]), (&device, dtype));
+                match column.write(position, source) {
+                    Err(ReplayStorageError::InsertionExceedsCapacity { capacity: c, inserted }) => {
+                        prop_assert_eq!((c, inserted), (capacity, count));
+                        prop_assert!(count > capacity);
+                    }
+                    result => {
+                        result.unwrap();
+                        for (offset, value) in values.into_iter().enumerate() {
+                            model[(position + offset) % capacity] = value;
+                        }
+                        (position, written) = ((position + count) % capacity, written + count);
+                    }
+                }
+                let gathered = column.gather(all_rows.clone());
+                prop_assert_eq!(gathered.dtype(), dtype);
+                prop_assert_eq!(column_values(gathered.clone()), model.clone());
+                first.get_or_insert((gathered, model.clone()));
+            }
+            // Earlier gathers are copies, so later writes leave them unchanged.
+            let (gathered, values) = first.unwrap();
+            prop_assert_eq!(column_values(gathered), values);
+        }
 
-    #[test]
-    fn replay_reports_storage_insertions_larger_than_capacity() {
-        let mut replay = ExperienceReplay::with_storage(IndexStorage { capacity: 3 }, 2);
-        assert!(matches!(
-            replay.add(4),
-            Err(ExperienceReplayError::InsertionExceedsCapacity {
-                capacity: 3,
-                inserted: 4
-            })
-        ));
+        #[test]
+        fn aligned_observations_match_a_transition_model(
+            (environment_count, capacity, steps) in aligned_replay_run(),
+        ) {
+            let device = Device::flex();
+            let n = environment_count;
+            let mut replay = AlignedObservationReplay::<2>::new([capacity, 1], n, &device).unwrap();
+            let all_rows: Vec<_> = (0..capacity).collect();
+            let gather_all = |replay: &AlignedObservationReplay<2>| {
+                let (states, next) = replay.gather(&all_rows).unwrap();
+                (column_values(states), column_values(next))
+            };
+            let batch = |values: &[f32], dtype: DType| {
+                Tensor::<2>::from_data(TensorData::new(values.to_vec(), [values.len(), 1]), (&device, dtype))
+            };
+            let mut ids = (1..).map(|id| id as f32);
+            let mut observations: Vec<f32> = ids.by_ref().take(n).collect();
+            // Per replay row: the state and, unless the episode terminated, the next state.
+            let mut model: Vec<Option<(f32, Option<f32>)>> = vec![None; capacity];
+            let (mut position, mut inserted) = (0, 0);
+            for (ends, invalid) in steps {
+                let next_states: Vec<f32> = ids.by_ref().take(n).collect();
+                let truncateds: Vec<_> = ends.iter().map(|end| *end == EpisodeEnd::Truncate).collect();
+                if let Some(invalid) = invalid {
+                    let before = gather_all(&replay);
+                    let (states, next) = (batch(&observations, DType::F32), batch(&next_states, DType::F32));
+                    let error = match invalid {
+                        0 => replay.insert(position, states, Tensor::zeros([n, 2], &device), &truncateds),
+                        1 => replay.insert(
+                            position,
+                            batch(&observations, DType::F64),
+                            batch(&next_states, DType::F64),
+                            &truncateds,
+                        ),
+                        2 => replay.insert(position, states, next, &vec![false; n + 1]),
+                        _ => replay.insert(position, Tensor::zeros([n + 1, 1], &device), Tensor::zeros([n + 1, 1], &device), &vec![false; n + 1]),
+                    }
+                    .unwrap_err();
+                    let expected = ["ShapeMismatch", "DTypeMismatch", "BatchLengthMismatch", "EnvironmentCountMismatch"];
+                    prop_assert!(format!("{error:?}").starts_with(expected[invalid]), "{error:?}");
+                    prop_assert_eq!(gather_all(&replay), before);
+                }
+
+                replay
+                    .insert(position, batch(&observations, DType::F32), batch(&next_states, DType::F32), &truncateds)
+                    .unwrap();
+                for (env, end) in ends.into_iter().enumerate() {
+                    let next = (end != EpisodeEnd::Terminate).then_some(next_states[env]);
+                    model[position + env] = Some((observations[env], next));
+                    observations[env] = if end == EpisodeEnd::Continue { next_states[env] } else { ids.next().unwrap() };
+                }
+                (position, inserted) = ((position + n) % capacity, inserted + n);
+
+                let len = inserted.min(capacity);
+                let sampleable = replay.sampleable_len(len);
+                // Once the ring has wrapped, the oldest batch shares rows with the newest next states.
+                prop_assert_eq!(sampleable, if inserted > capacity { len - n } else { len });
+                let rows: Vec<_> = (0..sampleable).map(|index| replay.sample_index(index, len)).collect();
+                let mut newest: Vec<_> = (1..=sampleable).map(|age| (position + capacity - age) % capacity).collect();
+                let mut sorted_rows = rows.clone();
+                newest.sort_unstable();
+                sorted_rows.sort_unstable();
+                prop_assert_eq!(sorted_rows, newest);
+
+                // Repeating every row checks that duplicate indices gather the same transition.
+                let (states, next) = replay.gather(&rows.repeat(2)).unwrap();
+                let (states, next) = (column_values(states), column_values(next));
+                for (index, row) in rows.iter().cycle().enumerate().take(2 * rows.len()) {
+                    let (state, expected_next) = model[*row].unwrap();
+                    prop_assert_eq!(states[index], f64::from(state), "state at row {}", row);
+                    if let Some(expected_next) = expected_next {
+                        prop_assert_eq!(next[index], f64::from(expected_next), "next at row {}", row);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn experience_replay_tracks_length_and_samples_unique_indices(
+            capacity in 1usize..=64,
+            batch_size in 0usize..=80,
+            adds in vec(0usize..=70, 1..=8),
+        ) {
+            let mut replay = ExperienceReplay::with_storage(IndexStorage { capacity }, batch_size);
+            let mut len = 0;
+            for count in adds {
+                match replay.add(count) {
+                    Err(ExperienceReplayError::InsertionExceedsCapacity { capacity: c, inserted }) => {
+                        prop_assert_eq!((c, inserted), (capacity, count));
+                        prop_assert!(count > capacity);
+                    }
+                    result => {
+                        result.unwrap();
+                        len = (len + count).min(capacity);
+                    }
+                }
+                prop_assert_eq!((replay.len(), replay.is_empty()), (len, len == 0));
+                let sample = replay.sample().unwrap();
+                let unique: std::collections::HashSet<_> = sample.iter().collect();
+                prop_assert_eq!((sample.len(), unique.len()), (batch_size.min(len), sample.len()));
+                prop_assert!(sample.iter().all(|&index| index < len));
+            }
+        }
     }
 }
