@@ -326,7 +326,7 @@ mod tests {
             .build()
             .unwrap();
         let observations = Tensor::<2>::from_data([[0.0f32, 0.0, 1.0]], &device).expand([32, 3]);
-        let actions = agent.act(&observations).unwrap();
+        let actions = agent.act(&observations, &mut ()).unwrap();
         assert!(
             actions
                 .into_data()
