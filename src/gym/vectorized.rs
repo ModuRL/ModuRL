@@ -1,7 +1,10 @@
-use super::{Gym, MultiGym, MultiGymStepInfo, PerfectStateGym, PerfectStateMultiGym};
+use super::{
+    Gym, LegalActionsGym, LegalActionsMultiGym, MultiGym, MultiGymStepInfo, PerfectStateGym,
+    PerfectStateMultiGym,
+};
 use crate::spaces::{ActionSpace, ObservationSpace};
 use crate::tensor_rank::{NextRank, PrevRank};
-use burn::tensor::{DType, Slice, Tensor, TensorData, kind::Basic};
+use burn::tensor::{DType, Int, Slice, Tensor, TensorData, kind::Basic};
 use std::marker::PhantomData;
 
 #[derive(Debug, thiserror::Error)]
@@ -200,6 +203,28 @@ where
     }
 }
 
+/// A slot that ended an episode reports the auto-reset state's legal actions.
+impl<G, I, const O: usize, const A: usize, const BO: usize, K: Basic> LegalActionsMultiGym<I, BO>
+    for VectorizedGymWrapper<G, I, BO, 2>
+where
+    G: LegalActionsGym<I, BO>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<2, Kind = Int, Item = Tensor<A, Int>>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+    Tensor<2, Int>: PrevRank<Prev = Tensor<A, Int>>,
+    Tensor<A, Int>: NextRank<Next = Tensor<2, Int>>,
+{
+    fn legal_actions(&self, slot: usize) -> Result<Vec<usize>, Self::Error> {
+        let num_envs = self.envs.len();
+        let env = self
+            .envs
+            .get(slot)
+            .ok_or(VectorizedGymError::InvalidSlot { slot, num_envs })?;
+        env.legal_actions().map_err(VectorizedGymError::Single)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{ResetInfo, StepInfo, test_support::*};
@@ -267,6 +292,24 @@ mod tests {
         assert_eq!(actual.rewards.into_data(), expected.rewards.into_data());
         assert_eq!(actual.dones, expected.dones);
         assert_eq!(actual.truncateds, expected.truncateds);
+    }
+
+    #[test]
+    fn vectorized_legal_actions_report_each_slot_state() {
+        let mut env =
+            VectorizedGymWrapper::new(vec![StateTestGym::new(11), StateTestGym::new(22)]).unwrap();
+        env.step(Tensor::<2, Int>::zeros([2, 1], &Device::flex()))
+            .unwrap();
+
+        assert_eq!(env.legal_actions(0).unwrap(), vec![1]);
+        assert_eq!(env.legal_actions(1).unwrap(), vec![1]);
+        assert!(matches!(
+            env.legal_actions(2),
+            Err(VectorizedGymError::InvalidSlot {
+                slot: 2,
+                num_envs: 2
+            })
+        ));
     }
 
     #[test]

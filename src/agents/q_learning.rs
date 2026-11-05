@@ -3,8 +3,8 @@ use burn::{
     module::Module,
     optim::{GradientsParams, ModuleOptimizer},
     tensor::{
-        Bool, DType, Device, Float, IndexingUpdateOp, Int, IntDType, Tensor, TensorData,
-        TensorReadError,
+        Bool, Cast, DType, Device, Float, FloatDType, IndexingUpdateOp, Int, IntDType, Tensor,
+        TensorData, TensorReadError,
         kind::{Autodiff, Basic},
     },
 };
@@ -20,9 +20,10 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
-    spaces::{Discrete, ObservationSpace, SpaceError},
+    spaces::{ActionSpace, Discrete, ObservationSpace, SpaceError},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
+    wrappers::split_legal_action_mask,
 };
 
 pub mod ddqn;
@@ -54,6 +55,8 @@ pub enum QLearningConfigurationError {
     InvalidLearningRate,
     #[error("observation space has {actual} item axes, expected {expected}")]
     ObservationRank { expected: usize, actual: usize },
+    #[error("legal-action masking requires rank-2 observations, got rank {actual}")]
+    LegalActionMaskRequiresRank2 { actual: usize },
 }
 
 /// Q-learning replay storage failures.
@@ -81,6 +84,10 @@ where
     GymError(#[source] GE),
     #[error("space operation failed: {0}")]
     SpaceError(#[from] SpaceError),
+    #[error(
+        "legal-action mask observation has {actual} columns, fewer than {action_count} mask columns"
+    )]
+    LegalActionMaskShape { actual: usize, action_count: usize },
 }
 
 impl<GE, ME> From<std::convert::Infallible> for QAgentError<GE, ME>
@@ -415,6 +422,7 @@ where
     optimization_steps: usize,
     action_rng: StdRng,
     timestep_episodes: Option<QEpisodeTracker>,
+    legal_action_mask: bool,
     _phantom: PhantomData<(GE, T)>,
 }
 
@@ -450,6 +458,7 @@ where
         training_horizon: Option<usize>,
         replay_device: Option<Device>,
         #[builder(default = DType::F32)] dtype: DType,
+        #[builder(default)] legal_action_mask: bool,
     ) -> Result<Self, QAgentError<GE, ME>> {
         const {
             assert!(R >= 2, "observations require batch and item axes");
@@ -459,6 +468,12 @@ where
         }
         if !learning_rate.is_finite() || learning_rate <= 0.0 {
             return Err(QLearningConfigurationError::InvalidLearningRate.into());
+        }
+        let observation_shape = observation_space.shape();
+        if legal_action_mask && R != 2 {
+            return Err(
+                QLearningConfigurationError::LegalActionMaskRequiresRank2 { actual: R }.into(),
+            );
         }
         let initial_epsilon = epsilon_schedule.value(0.0);
         QLearningConfigurationValidator::validate_configuration()
@@ -473,7 +488,7 @@ where
             .call()?;
 
         let mut observation_storage_shape = vec![replay_capacity];
-        observation_storage_shape.extend(observation_space.shape());
+        observation_storage_shape.extend(observation_shape);
         let actual = observation_storage_shape.len() - 1;
         let observation_storage_shape: [usize; R] =
             observation_storage_shape.try_into().map_err(|_| {
@@ -520,6 +535,7 @@ where
             optimization_steps: 0,
             action_rng: StdRng::seed_from_u64(u64::from(action_seed)),
             timestep_episodes: None,
+            legal_action_mask,
             _phantom: PhantomData,
         })
     }
@@ -552,16 +568,37 @@ where
     pub(crate) fn act(
         &mut self,
         observations: &Tensor<R, S::Kind>,
-    ) -> Result<Tensor<2, Int>, QAgentError<GE, ME>> {
+    ) -> Result<Tensor<2, Int>, QAgentError<GE, ME>>
+    where
+        FloatDType: Cast<2, S::Kind, OutputKind = Float>,
+    {
         let observations = self.model_observations(observations.clone());
+        let legal_action_mask = if self.legal_action_mask {
+            let batch_size = observations.dims()[0];
+            let feature_count = observations.dims()[1..].iter().product();
+            let flat_observations = observations.clone().reshape([batch_size, feature_count]);
+            let (_, mask) =
+                split_legal_action_mask(flat_observations, self.action_space.get_possible_values())
+                    .map_err(|error| QAgentError::LegalActionMaskShape {
+                        actual: error.columns,
+                        action_count: error.action_count,
+                    })?;
+            Some(mask)
+        } else {
+            None
+        };
         epsilon_greedy_actions(
             &observations,
             self.current_epsilon,
             &self.action_space,
             &mut self.action_rng,
+            legal_action_mask.as_ref(),
             |observations| self.online_q_network.forward(observations.clone()),
         )
-        .map_err(QAgentError::ModelError)
+        .map_err(|error| match error {
+            EpsilonGreedyError::ModelError(error) => QAgentError::ModelError(error),
+            EpsilonGreedyError::SpaceError(error) => QAgentError::SpaceError(error),
+        })
     }
 
     /// Samples detached rank-R observations, Int actions [batch_size, 1], and statistics [batch_size, 1].
@@ -805,6 +842,7 @@ where
     where
         S: ObservationSpace<R, Item = Tensor<U, <S as TensorBatchTypes>::Kind>>,
         Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
+        FloatDType: Cast<2, S::Kind, OutputKind = Float>,
     {
         let mut elapsed_timesteps = 0;
         let environment_count = env.num_envs();
@@ -911,56 +949,89 @@ pub(crate) fn validate_epsilon(epsilon: f64) -> Result<f64, QLearningConfigurati
     Ok(epsilon)
 }
 
-/// Selects U32 Int actions [batch_size, 1] from rank-R observations [batch_size, ...observation_shape].
-/// The callback receives only greedy rows and returns Float Q values [selected_batch, action_count] on the input device.
-/// The caller validates epsilon and category count. Exploration uses the supplied RNG; native observation kind is preserved.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum EpsilonGreedyError<E> {
+    #[error("Q-network failed: {0}")]
+    ModelError(#[source] E),
+    #[error("action-space sampling failed: {0}")]
+    SpaceError(#[from] SpaceError),
+}
+
+/// Selects U32 Int actions `[batch_size, 1]` from rank-R observations `[batch_size, ...observation_shape]`.
+/// An optional legal-action mask has shape `[batch_size, action_count]`.
+/// The `rng` argument only decides which rows explore; random actions use the backend device RNG, seeded with `Device::seed`.
+/// The callback receives only greedy rows and returns Float Q values `[selected_batch, action_count]` on the input device.
+/// The caller validates epsilon and category count.
 pub(crate) fn epsilon_greedy_actions<const R: usize, K: Basic, E>(
     observations: &Tensor<R, K>,
     epsilon: f64,
     action_space: &Discrete,
     rng: &mut impl Rng,
+    legal_action_mask: Option<&Tensor<2, K>>,
     forward: impl FnOnce(&Tensor<R, K>) -> Result<Tensor<2>, E>,
-) -> Result<Tensor<2, Int>, E> {
+) -> Result<Tensor<2, Int>, EpsilonGreedyError<E>>
+where
+    FloatDType: Cast<2, K, OutputKind = Float>,
+{
     const {
         assert!(R >= 2, "observations require batch and item axes");
     }
     let batch_size = observations.dims()[0];
     let device = observations.device();
     if epsilon == 0.0 {
-        return Ok(forward(observations)?.argmax(1).cast(DType::U32));
+        return Ok(forward(observations)
+            .map_err(EpsilonGreedyError::ModelError)?
+            .argmax(1)
+            .cast(DType::U32));
     }
-    let action_count = action_space.get_possible_values() as u32;
-    let mut actions = Vec::with_capacity(batch_size);
-    let mut greedy_indices = Vec::with_capacity(batch_size);
+    let mut random_rows = Vec::new();
+    let mut greedy_rows = Vec::with_capacity(batch_size);
     for index in 0..batch_size {
         if rng.random_bool(epsilon) {
-            actions.push(rng.random_range(0..action_count));
+            random_rows.push(index as i64);
         } else {
-            actions.push(0);
-            greedy_indices.push(index as i64);
+            greedy_rows.push(index as i64);
         }
     }
-    if greedy_indices.is_empty() {
-        return Ok(Tensor::from_data(
-            TensorData::new(actions, [batch_size, 1]),
-            (&device, DType::U32),
-        ));
+    if greedy_rows.len() == batch_size {
+        return Ok(forward(observations)
+            .map_err(EpsilonGreedyError::ModelError)?
+            .argmax(1)
+            .cast(DType::U32));
     }
-    if greedy_indices.len() == batch_size {
-        return Ok(forward(observations)?.argmax(1).cast(DType::U32));
+    let mut actions = Tensor::<2, Int>::zeros([batch_size, 1], (&device, DType::U32));
+    if !random_rows.is_empty() {
+        let random_count = random_rows.len();
+        let rows = Tensor::<1, Int>::from_data(
+            TensorData::new(random_rows, [random_count]),
+            (&device, DType::I64),
+        );
+        let random_actions = match legal_action_mask {
+            Some(mask) => action_space.sample_batch_masked(&<FloatDType as Cast<2, K>>::cast(
+                mask.clone().select(0, rows.clone()),
+                FloatDType::F32,
+            )),
+            None => action_space
+                .sample_batch(random_count, &device)
+                .map(|actions| actions.cast(DType::U32)),
+        }
+        .map_err(EpsilonGreedyError::SpaceError)?;
+        actions = actions.select_assign(0, rows, random_actions, IndexingUpdateOp::Assign);
     }
-    let greedy_count = greedy_indices.len();
+    if greedy_rows.is_empty() {
+        return Ok(actions);
+    }
+    let greedy_count = greedy_rows.len();
     let rows = Tensor::<1, Int>::from_data(
-        TensorData::new(greedy_indices, [greedy_count]),
+        TensorData::new(greedy_rows, [greedy_count]),
         (&device, DType::I64),
     );
     let selected = observations.clone().select(0, rows.clone());
-    let greedy_actions = forward(&selected)?.argmax(1).cast(DType::U32);
-    Ok(Tensor::<2, Int>::from_data(
-        TensorData::new(actions, [batch_size, 1]),
-        (&device, DType::U32),
-    )
-    .select_assign(0, rows, greedy_actions, IndexingUpdateOp::Assign))
+    let greedy_actions = forward(&selected)
+        .map_err(EpsilonGreedyError::ModelError)?
+        .argmax(1)
+        .cast(DType::U32);
+    Ok(actions.select_assign(0, rows, greedy_actions, IndexingUpdateOp::Assign))
 }
 
 /// Gathers Float Q values [batch_size, action_count] using Int actions [batch_size, 1].

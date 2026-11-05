@@ -1,3 +1,4 @@
+use crate::wrappers::split_legal_action_mask;
 use bon::bon;
 use burn::{
     module::{Module, ModuleMapper, Param},
@@ -24,6 +25,86 @@ pub trait Forward<const I: usize, const O: usize> {
         &self,
         input: Tensor<I, Self::InputKind>,
     ) -> Result<Tensor<O, Self::OutputKind>, Self::Error>;
+}
+
+/// Applies a legal-action mask to model scores.
+/// Illegal actions receive the finite minimum of the logits dtype, so an all-illegal row becomes uniform after softmax.
+/// Discrete SAC's default target entropy still assumes all `action_count` actions are available.
+#[derive(Module, Debug)]
+pub struct MaskedLogits<M> {
+    inner: M,
+    #[module(skip)]
+    action_count: usize,
+}
+
+impl<M> MaskedLogits<M> {
+    /// Wraps a model that maps feature observations to exactly `action_count` logits.
+    pub fn new(inner: M, action_count: usize) -> Self {
+        Self {
+            inner,
+            action_count,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MaskedLogitsError<E> {
+    #[error("inner model failed: {0}")]
+    Inner(#[source] E),
+    #[error("input has {columns} columns, fewer than the {action_count} mask columns")]
+    InputTooNarrow { columns: usize, action_count: usize },
+    #[error("inner model returned {actual} logits, expected {expected}")]
+    OutputWidthMismatch { expected: usize, actual: usize },
+    #[error("inner model returned batch size {actual}, expected {expected}")]
+    OutputBatchMismatch { expected: usize, actual: usize },
+    #[error("unsupported logits dtype {0:?}")]
+    UnsupportedDType(DType),
+}
+
+impl<M> Forward<2, 2> for MaskedLogits<M>
+where
+    M: Forward<2, 2, InputKind = Float, OutputKind = Float>,
+{
+    type InputKind = Float;
+    type OutputKind = Float;
+    type Error = MaskedLogitsError<M::Error>;
+
+    /// Maps observations `[batch_size, feature_count + action_count]` to masked logits `[batch_size, action_count]`.
+    /// Illegal columns receive the finite minimum of the logits dtype; legal logits and their gradient paths are preserved.
+    fn forward(&self, input: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+        let batch_size = input.dims()[0];
+        let (features, mask) =
+            split_legal_action_mask(input, self.action_count).map_err(|error| {
+                MaskedLogitsError::InputTooNarrow {
+                    columns: error.columns,
+                    action_count: error.action_count,
+                }
+            })?;
+        let logits = self
+            .inner
+            .forward(features)
+            .map_err(MaskedLogitsError::Inner)?;
+        let [actual_batch_size, actual_width] = logits.dims();
+        if actual_batch_size != batch_size {
+            return Err(MaskedLogitsError::OutputBatchMismatch {
+                expected: batch_size,
+                actual: actual_batch_size,
+            });
+        }
+        if actual_width != self.action_count {
+            return Err(MaskedLogitsError::OutputWidthMismatch {
+                expected: self.action_count,
+                actual: actual_width,
+            });
+        }
+        let minimum = logits
+            .dtype()
+            .finfo()
+            .ok_or(MaskedLogitsError::UnsupportedDType(logits.dtype()))?
+            .min;
+        let illegal_actions = mask.lower_equal_scalar(0.5);
+        Ok(logits.mask_fill(illegal_actions, minimum))
+    }
 }
 
 impl<const D: usize> Forward<D, D> for Relu {
@@ -535,11 +616,167 @@ impl Forward<2, 2> for DuelingMLP {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::distributions::{CategoricalDistribution, Distribution};
+    use crate::models::probabilistic_model::ProbabilisticPolicyModel;
     use burn::{
+        module::Param,
         nn::{PReluConfig, SwiGluConfig, Tanh},
         optim::{GradientsParams, SgdConfig},
-        tensor::Device,
+        tensor::{Bool, Device},
     };
+    use std::convert::Infallible;
+
+    #[derive(Module, Debug)]
+    struct ConstantLogitsModel {
+        values: Param<Tensor<2>>,
+    }
+
+    impl Forward<2, 2> for ConstantLogitsModel {
+        type InputKind = Float;
+        type OutputKind = Float;
+        type Error = Infallible;
+
+        /// Returns constant logits `[batch_size, action_count]` for feature input `[batch_size, features]`.
+        fn forward(&self, input: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+            let batch_size = input.dims()[0];
+            let action_count = self.values.val().dims()[1];
+            Ok(self.values.val().expand([batch_size, action_count]))
+        }
+    }
+
+    #[test]
+    fn masked_logits_preserve_legal_values_and_keep_categorical_evaluation_finite() {
+        let device = Device::flex().autodiff();
+        let model = MaskedLogits::new(
+            ConstantLogitsModel {
+                values: Param::from_tensor(
+                    Tensor::from_data([[10.0f32, 20.0, 30.0]], &device).require_grad(),
+                ),
+            },
+            3,
+        );
+        let observations = Tensor::<2>::from_data(
+            [
+                [0.0f32, 1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            &device,
+        );
+        let logits = model.forward(observations).unwrap();
+        assert_eq!(logits.dims(), [3, 3]);
+        assert_eq!(
+            logits.clone().into_data().try_to_vec::<f32>().unwrap(),
+            [
+                10.0,
+                f32::MIN,
+                30.0,
+                f32::MIN,
+                20.0,
+                f32::MIN,
+                f32::MIN,
+                f32::MIN,
+                f32::MIN
+            ]
+        );
+        let probabilities = burn::tensor::activation::softmax(logits.clone(), 1)
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert_eq!(
+            [probabilities[1], probabilities[3], probabilities[5]],
+            [0.0; 3]
+        );
+
+        let evaluation = CategoricalDistribution
+            .dist_eval(logits.clone(), Tensor::zeros([3, 3], &device))
+            .unwrap();
+        let entropy = evaluation
+            .entropy()
+            .clone()
+            .into_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        assert!(entropy.iter().all(|value| value.is_finite()));
+        assert!((entropy[2] - 3.0f32.ln()).abs() < 1e-6);
+
+        let choices = logits
+            .clone()
+            .argmax(1)
+            .into_data()
+            .try_to_vec::<i32>()
+            .unwrap();
+        assert_eq!(choices[..2], [2, 1]);
+        let legal_logits = logits.mask_fill(
+            Tensor::<2, Bool>::from_data(
+                [
+                    [false, true, false],
+                    [true, false, true],
+                    [true, true, true],
+                ],
+                &device,
+            ),
+            0.0,
+        );
+        let gradients = legal_logits.sum().backward();
+        assert_eq!(
+            model
+                .inner
+                .values
+                .val()
+                .grad(&gradients)
+                .unwrap()
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            [1.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn masked_logits_reject_short_inputs_and_wrong_output_widths() {
+        let device = Device::flex();
+        let wrapper = MaskedLogits::new(
+            ConstantLogitsModel {
+                values: Param::from_tensor(Tensor::from_data([[1.0f32, 2.0, 3.0]], &device)),
+            },
+            3,
+        );
+        assert!(matches!(
+            wrapper.forward(Tensor::zeros([1, 2], &device)),
+            Err(MaskedLogitsError::InputTooNarrow {
+                columns: 2,
+                action_count: 3
+            })
+        ));
+
+        let wrong_width = MaskedLogits::new(
+            ConstantLogitsModel {
+                values: Param::from_tensor(Tensor::from_data([[1.0f32, 2.0]], &device)),
+            },
+            3,
+        );
+        assert!(matches!(
+            wrong_width.forward(Tensor::from_data([[0.0f32, 1.0, 0.0, 1.0]], &device)),
+            Err(MaskedLogitsError::OutputWidthMismatch {
+                expected: 3,
+                actual: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn masked_logits_can_be_used_as_a_probabilistic_policy_model() {
+        let device = Device::flex();
+        let mlp = MLP::builder()
+            .input_size(1)
+            .output_size(2)
+            .options(&device)
+            .build()
+            .unwrap();
+        let _policy =
+            ProbabilisticPolicyModel::new(MaskedLogits::new(mlp, 2), CategoricalDistribution);
+    }
 
     #[test]
     fn forward_uses_model_defined_native_kinds_without_precision_loss() {

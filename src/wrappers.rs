@@ -3,11 +3,11 @@
 //! The modules group observation transformations, reward transformations, and episode controls.
 
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
-use burn::tensor::{Device, Slice, Tensor, kind::Basic};
+use burn::tensor::{Device, Int, Slice, Tensor, kind::Basic};
 use std::convert::Infallible;
 
 use crate::{
-    gym::{MultiGym, MultiGymStepInfo, PerfectStateMultiGym},
+    gym::{LegalActionsMultiGym, MultiGym, MultiGymStepInfo, PerfectStateMultiGym},
     spaces::{ActionSpace, ObservationSpace},
 };
 
@@ -111,6 +111,20 @@ where
     fn set_state(&mut self, slot: usize, state: &Self::State) -> Result<(), Self::Error> {
         self.gym
             .set_state(slot, state)
+            .map_err(TensorMapMultiGymError::Gym)
+    }
+}
+
+impl<G, F, I, E, const O: usize> LegalActionsMultiGym<I, O> for InputMapMultiGymWrapper<G, F>
+where
+    G: LegalActionsMultiGym<I, O>,
+    F: FnMut(
+        <G::ActionSpace as TensorBatchTypes>::Batch,
+    ) -> Result<<G::ActionSpace as TensorBatchTypes>::Batch, E>,
+{
+    fn legal_actions(&self, slot: usize) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions(slot)
             .map_err(TensorMapMultiGymError::Gym)
     }
 }
@@ -233,6 +247,25 @@ where
     fn set_state(&mut self, slot: usize, state: &Self::State) -> Result<(), Self::Error> {
         self.gym
             .set_state(slot, state)
+            .map_err(TensorMapMultiGymError::Gym)
+    }
+}
+
+impl<G, FReset, FStep, I, E, const O: usize> LegalActionsMultiGym<I, O>
+    for OutputMapMultiGymWrapper<G, FReset, FStep>
+where
+    G: LegalActionsMultiGym<I, O>,
+    FReset: FnMut(
+        <G::ObservationSpace as TensorBatchTypes>::Batch,
+    ) -> Result<<G::ObservationSpace as TensorBatchTypes>::Batch, E>,
+    FStep: FnMut(
+        MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>,
+    )
+        -> Result<MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, E>,
+{
+    fn legal_actions(&self, slot: usize) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions(slot)
             .map_err(TensorMapMultiGymError::Gym)
     }
 }
@@ -375,6 +408,22 @@ where
     }
 }
 
+impl<G, I, const O: usize, const U: usize, K: Basic> LegalActionsMultiGym<I, O>
+    for DeviceMultiGymWrapper<G>
+where
+    G: LegalActionsMultiGym<I, O>,
+    G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
+    G::ActionSpace: ActionSpace<2, Kind = Int>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+{
+    fn legal_actions(&self, slot: usize) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions(slot)
+            .map_err(TensorMapMultiGymError::Gym)
+    }
+}
+
 pub mod info;
 pub mod normalize;
 pub mod observation;
@@ -392,7 +441,11 @@ pub use normalize::{
     NormalizeObservationGym, NormalizeObservationGymError, NormalizeObservationGymState,
     NormalizeRewardGym, NormalizeRewardGymState,
 };
-pub use observation::{FrameStackGym, FrameStackGymError, MaxAndSkipGym, MaxAndSkipGymError};
+pub(crate) use observation::split_legal_action_mask;
+pub use observation::{
+    FrameStackGym, FrameStackGymError, LegalActionMaskGym, LegalActionMaskGymError, MaxAndSkipGym,
+    MaxAndSkipGymError,
+};
 pub use reward::{ClipRewardGym, ClipRewardGymError};
 pub use time_limit::TimeLimitGym;
 

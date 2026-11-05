@@ -1,10 +1,10 @@
 //! Episode time-limit wrapper.
 
 use crate::tensor_rank::TensorBatchTypes;
-use burn::tensor::kind::Basic;
+use burn::tensor::{Int, kind::Basic};
 
 use crate::{
-    gym::{Gym, PerfectStateGym, ResetInfo, StepInfo},
+    gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
 
@@ -92,10 +92,21 @@ where
     }
 }
 
+impl<G, I, const BO: usize, K: Basic> LegalActionsGym<I, BO> for TimeLimitGym<G>
+where
+    G: LegalActionsGym<I, BO>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K>,
+    G::ActionSpace: ActionSpace<2, Kind = Int>,
+{
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        self.gym.legal_actions()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
-        gym::{Gym, ResetInfo, StepInfo},
+        gym::{Gym, LegalActionsGym, ResetInfo, StepInfo},
         spaces::{BoxSpace, Discrete},
     };
     use burn::tensor::{DType, Device, Int, Tensor};
@@ -214,5 +225,14 @@ mod tests {
             |observation| observation.into_data(),
             |_: &()| (),
         );
+    }
+
+    #[test]
+    fn forwards_legal_actions_from_inner_gym() {
+        let mut wrapper = TimeLimitGym::new(StateTestGym::new(13), 4);
+
+        assert_eq!(wrapper.legal_actions().unwrap(), vec![0, 1]);
+        wrapper.step(state_action()).unwrap();
+        assert_eq!(wrapper.legal_actions().unwrap(), vec![1]);
     }
 }

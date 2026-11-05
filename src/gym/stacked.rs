@@ -1,5 +1,6 @@
 use super::{
-    MultiGym, MultiGymStepInfo, PerfectStateMultiGym, batch_metadata, batch_offsets, combine_steps,
+    LegalActionsMultiGym, MultiGym, MultiGymStepInfo, PerfectStateMultiGym, batch_metadata,
+    batch_offsets, combine_steps,
 };
 use crate::spaces::{ActionSpace, ObservationSpace};
 use crate::tensor_rank::TensorBatchTypes;
@@ -238,6 +239,18 @@ where
     }
 }
 
+impl<G, I, const O: usize> LegalActionsMultiGym<I, O> for StackedMultiGym<G, I, O, 2>
+where
+    G: LegalActionsMultiGym<I, O>,
+{
+    fn legal_actions(&self, slot: usize) -> Result<Vec<usize>, Self::Error> {
+        let (gym_index, local_slot) = self.locate_slot(slot)?;
+        self.gyms[gym_index]
+            .legal_actions(local_slot)
+            .map_err(|error| StackedMultiGymError::Inner { gym_index, error })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::VectorizedGymWrapper;
@@ -276,6 +289,28 @@ mod tests {
 
         assert!(matches!(
             env.save_state(3),
+            Err(StackedMultiGymError::InvalidSlot {
+                slot: 3,
+                num_envs: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn stacked_legal_actions_route_global_slots_to_inner_groups() {
+        let mut stepped_group = VectorizedGymWrapper::new(vec![StateTestGym::new(11)]).unwrap();
+        stepped_group
+            .step(Tensor::<2, Int>::zeros([1, 1], &Device::flex()))
+            .unwrap();
+        let unstepped_group =
+            VectorizedGymWrapper::new(vec![StateTestGym::new(22), StateTestGym::new(33)]).unwrap();
+        let env = StackedMultiGym::new(vec![stepped_group, unstepped_group]).unwrap();
+
+        assert_eq!(env.legal_actions(0).unwrap(), vec![1]);
+        assert_eq!(env.legal_actions(1).unwrap(), vec![0, 1]);
+        assert_eq!(env.legal_actions(2).unwrap(), vec![0, 1]);
+        assert!(matches!(
+            env.legal_actions(3),
             Err(StackedMultiGymError::InvalidSlot {
                 slot: 3,
                 num_envs: 3

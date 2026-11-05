@@ -1,13 +1,189 @@
 //! Wrappers that transform observations.
 
-use crate::gym::{Gym, PerfectStateGym, ResetInfo, StepInfo};
+use crate::gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo};
 use crate::spaces::{ActionSpace, BoxSpace, ObservationSpace};
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{
-    Tensor,
+    DType, Int, Tensor, TensorData,
     kind::{Basic, Ordered},
 };
 use std::collections::VecDeque;
+
+#[derive(Debug, thiserror::Error)]
+pub enum LegalActionMaskGymError<E> {
+    #[error("wrapped gym error: {0}")]
+    GymError(#[source] E),
+    #[error("legal action {action} is outside 0..{action_count}")]
+    InvalidLegalAction { action: usize, action_count: usize },
+}
+
+/// Splits observations `[batch_size, feature_count + action_count]` into features and the trailing mask.
+/// Returns a recoverable error when fewer than `action_count` columns are present.
+pub(crate) fn split_legal_action_mask<K: Basic>(
+    observations: Tensor<2, K>,
+    action_count: usize,
+) -> Result<(Tensor<2, K>, Tensor<2, K>), LegalActionMaskLayoutError> {
+    let [batch_size, columns] = observations.dims();
+    if columns < action_count {
+        return Err(LegalActionMaskLayoutError {
+            columns,
+            action_count,
+        });
+    }
+
+    let feature_count = columns - action_count;
+    Ok((
+        observations
+            .clone()
+            .slice([0..batch_size, 0..feature_count]),
+        observations.slice([0..batch_size, feature_count..columns]),
+    ))
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "observation has {columns} columns, fewer than the {action_count} legal-action mask columns"
+)]
+pub(crate) struct LegalActionMaskLayoutError {
+    pub(crate) columns: usize,
+    pub(crate) action_count: usize,
+}
+
+/// Appends the current discrete legal-action mask to flat observations.
+pub struct LegalActionMaskGym<G> {
+    gym: G,
+}
+
+impl<G> LegalActionMaskGym<G> {
+    /// Wraps a flat-observation gym with a legal-action mask appended to each observation.
+    pub fn new(gym: G) -> Self {
+        Self { gym }
+    }
+}
+
+/// Appends a mask to observation shape `[feature_count]`, preserving dtype and device.
+fn append_legal_action_mask<E>(
+    observation: Tensor<1>,
+    legal_actions: Vec<usize>,
+    action_count: usize,
+) -> Result<Tensor<1>, LegalActionMaskGymError<E>> {
+    let mut mask = vec![0.0f32; action_count];
+    for action in legal_actions {
+        if action >= action_count {
+            return Err(LegalActionMaskGymError::InvalidLegalAction {
+                action,
+                action_count,
+            });
+        }
+        mask[action] = 1.0;
+    }
+    let mask = Tensor::<1>::from_data(
+        TensorData::new(mask, [action_count]),
+        (&observation.device(), DType::F32),
+    )
+    .cast(observation.dtype());
+    Ok(Tensor::cat(vec![observation, mask], 0))
+}
+
+impl<G, I> Gym<I, 2, 2> for LegalActionMaskGym<G>
+where
+    G: LegalActionsGym<I, 2, ObservationSpace = BoxSpace<2>>,
+{
+    type Error = LegalActionMaskGymError<G::Error>;
+    type ObservationSpace = BoxSpace<2>;
+    type ActionSpace = G::ActionSpace;
+
+    fn reset(&mut self) -> Result<ResetInfo<I, Tensor<1>>, Self::Error> {
+        let reset = self
+            .gym
+            .reset()
+            .map_err(LegalActionMaskGymError::GymError)?;
+        let legal_actions = self
+            .gym
+            .legal_actions()
+            .map_err(LegalActionMaskGymError::GymError)?;
+        Ok(ResetInfo {
+            observation: append_legal_action_mask(
+                reset.observation,
+                legal_actions,
+                self.gym.action_space().get_possible_values(),
+            )?,
+            info: reset.info,
+        })
+    }
+
+    /// Steps the inner gym with an action shaped `[1]` and appends the post-step legal-action mask.
+    fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo<I, Tensor<1>>, Self::Error> {
+        let step = self
+            .gym
+            .step(action)
+            .map_err(LegalActionMaskGymError::GymError)?;
+        let legal_actions = self
+            .gym
+            .legal_actions()
+            .map_err(LegalActionMaskGymError::GymError)?;
+        Ok(StepInfo {
+            observation: append_legal_action_mask(
+                step.observation,
+                legal_actions,
+                self.gym.action_space().get_possible_values(),
+            )?,
+            reward: step.reward,
+            done: step.done,
+            truncated: step.truncated,
+            info: step.info,
+        })
+    }
+
+    fn action_space(&self) -> Self::ActionSpace {
+        self.gym.action_space()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        let inner_space = self.gym.observation_space();
+        let action_count = self.gym.action_space().get_possible_values();
+        let low = inner_space.low();
+        let high = inner_space.high();
+        let device = low.device();
+        let dtype = low.dtype();
+        let mask_low = Tensor::<2>::zeros([1, action_count], (&device, dtype));
+        let mask_high = Tensor::<2>::ones([1, action_count], (&device, dtype));
+        BoxSpace::new(
+            Tensor::cat(vec![low.clone(), mask_low], 1),
+            Tensor::cat(vec![high.clone(), mask_high], 1),
+        )
+    }
+}
+
+impl<G, I> LegalActionsGym<I, 2> for LegalActionMaskGym<G>
+where
+    G: LegalActionsGym<I, 2, ObservationSpace = BoxSpace<2>>,
+{
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions()
+            .map_err(LegalActionMaskGymError::GymError)
+    }
+}
+
+impl<G, I> PerfectStateGym<I, 2, 2> for LegalActionMaskGym<G>
+where
+    G: LegalActionsGym<I, 2, ObservationSpace = BoxSpace<2>> + PerfectStateGym<I, 2, 2>,
+{
+    type State = G::State;
+
+    fn save_state(&self) -> Result<Self::State, Self::Error> {
+        self.gym
+            .save_state()
+            .map_err(LegalActionMaskGymError::GymError)
+    }
+
+    fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
+        self.gym
+            .set_state(state)
+            .map_err(LegalActionMaskGymError::GymError)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrameStackGymError<E> {
@@ -154,6 +330,24 @@ where
     }
 }
 
+impl<G, I, const O: usize, const F: usize, const BF: usize, S, K: Basic> LegalActionsGym<I, BF>
+    for FrameStackGym<G, BF, S>
+where
+    G: LegalActionsGym<I, F>,
+    G::ObservationSpace: ObservationSpace<F, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<2, Kind = Int>,
+    S: ObservationSpace<BF, Kind = K, Item = Tensor<F, K>> + Clone,
+    Tensor<BF, K>: PrevRank<Prev = Tensor<F, K>>,
+    Tensor<F, K>: PrevRank<Prev = Tensor<O, K>> + NextRank<Next = Tensor<BF, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
+{
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions()
+            .map_err(FrameStackGymError::GymError)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MaxAndSkipGymError<E> {
     #[error("wrapped gym error: {0}")]
@@ -255,12 +449,28 @@ where
     }
 }
 
+impl<G, I, const O: usize, const BO: usize, K: Basic + Ordered> LegalActionsGym<I, BO>
+    for MaxAndSkipGym<G>
+where
+    G: LegalActionsGym<I, BO>,
+    G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
+    G::ActionSpace: ActionSpace<2, Kind = Int>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
+{
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        self.gym
+            .legal_actions()
+            .map_err(MaxAndSkipGymError::GymError)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tensor_rank::TensorBatchTypes;
     use crate::{
-        gym::Gym,
-        spaces::{BoxSpace, ObservationSpace},
+        gym::{Gym, LegalActionsGym, ResetInfo, StepInfo},
+        spaces::{BoxSpace, Discrete, ObservationSpace},
         tensor_rank::PrevRank,
         wrappers::{
             state_test_support::{StateTestGym, action as state_action, assert_state_round_trip},
@@ -270,7 +480,95 @@ mod tests {
     use burn::tensor::{Bool, DType, Device, Int, Tensor, kind::Basic};
     use std::marker::PhantomData;
 
-    use super::{FrameStackGym, MaxAndSkipGym};
+    use super::{FrameStackGym, LegalActionMaskGym, LegalActionMaskGymError, MaxAndSkipGym};
+
+    struct InvalidLegalActionsGym(StateTestGym);
+
+    impl Gym for InvalidLegalActionsGym {
+        type Error = std::convert::Infallible;
+        type ObservationSpace = BoxSpace<2>;
+        type ActionSpace = Discrete;
+
+        /// Accepts an action with shape `[1]` and returns the inner observation.
+        fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
+            self.0.step(action)
+        }
+
+        fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+            self.0.reset()
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            self.0.observation_space()
+        }
+
+        fn action_space(&self) -> Self::ActionSpace {
+            self.0.action_space()
+        }
+    }
+
+    impl LegalActionsGym for InvalidLegalActionsGym {
+        fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+            Ok(vec![2])
+        }
+    }
+
+    #[test]
+    fn legal_action_mask_is_appended_on_reset_and_step() {
+        let device = Device::flex();
+        let mut wrapper = LegalActionMaskGym::new(StateTestGym::new(41));
+        let reset = wrapper.reset().unwrap();
+        assert_eq!(reset.observation.dims(), [3]);
+        assert_eq!(
+            reset
+                .observation
+                .clone()
+                .narrow(0, 1, 2)
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            [1.0, 1.0]
+        );
+        let step = wrapper.step(state_action()).unwrap();
+        let step_values = step.observation.into_data().try_to_vec::<f32>().unwrap();
+        assert_eq!(&step_values[1..], &[0.0, 1.0]);
+
+        let space = wrapper.observation_space();
+        assert_eq!(space.shape(), [3]);
+        assert_eq!(
+            space
+                .low()
+                .clone()
+                .slice([0..1, 1..3])
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            [0.0, 0.0]
+        );
+        assert_eq!(
+            space
+                .high()
+                .clone()
+                .slice([0..1, 1..3])
+                .into_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            [1.0, 1.0]
+        );
+        assert_eq!(reset.observation.device(), device);
+    }
+
+    #[test]
+    fn legal_action_mask_rejects_actions_outside_the_action_space() {
+        let mut wrapper = LegalActionMaskGym::new(InvalidLegalActionsGym(StateTestGym::new(43)));
+        assert!(matches!(
+            wrapper.reset(),
+            Err(LegalActionMaskGymError::InvalidLegalAction {
+                action: 2,
+                action_count: 2
+            })
+        ));
+    }
 
     #[derive(Clone)]
     struct TypedSpace<const D: usize, K> {

@@ -1,4 +1,4 @@
-use crate::spaces::{ActionSpace, ObservationSpace};
+use crate::spaces::{ActionSpace, Discrete, ObservationSpace};
 use crate::tensor_rank::{NextRank, TensorBatchTypes};
 use burn::tensor::{
     DType, IndexingUpdateOp, Int, Slice, Tensor, TensorData,
@@ -102,6 +102,22 @@ pub trait PerfectStateMultiGym<I = (), const O: usize = 2, const A: usize = 2>:
 
     /// Restores one slot's state saved earlier; other slots keep their current state.
     fn set_state(&mut self, slot: usize, state: &Self::State) -> Result<(), Self::Error>;
+}
+
+/// A discrete-action gym that reports which actions are legal in its current state.
+pub trait LegalActionsGym<I = (), const O: usize = 2>:
+    Gym<I, O, 2, ActionSpace = Discrete>
+{
+    /// Returns legal action indices in ascending order, each below the action count.
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error>;
+}
+
+/// A discrete-action batch whose slots each report the legal actions of their current state.
+pub trait LegalActionsMultiGym<I = (), const O: usize = 2>:
+    MultiGym<I, O, 2, ActionSpace = Discrete>
+{
+    /// Returns one slot's legal action indices in ascending order, each below the action count.
+    fn legal_actions(&self, slot: usize) -> Result<Vec<usize>, Self::Error>;
 }
 
 /// An unbatched observation tensor `T` and environment metadata; scalar observations use native `Tensor<1>` with shape `[1]`.

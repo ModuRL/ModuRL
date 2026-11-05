@@ -3,7 +3,7 @@ use bon::bon;
 use burn::{
     module::Module,
     optim::ModuleOptimizer,
-    tensor::{Bool, DType, Device, Float, Int, Tensor, kind::Autodiff},
+    tensor::{Bool, Cast, DType, Device, Float, FloatDType, Int, Tensor, kind::Autodiff},
 };
 
 use super::{
@@ -100,6 +100,8 @@ where
     /// Model parameters and Q outputs must use the optimization device and compute dtype.
     /// Replay stores detached observations in their native kind and first-batch dtype.
     /// Construction returns an error for invalid sizes, schedules, learning rate, dtype, or observation rank.
+    /// `legal_action_mask(true)` requires flat rank-2 observations whose last `action_count` columns are the mask.
+    /// Random actions use the backend device RNG (seeded with `Device::seed`); `action_rng` only decides which rows explore.
     #[builder]
     pub fn new(
         action_space: Discrete,
@@ -119,6 +121,7 @@ where
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         training_horizon: Option<usize>,
+        #[builder(default)] legal_action_mask: bool,
         logger: Option<&'a mut dyn DDQNLogger<I>>,
         replay_device: Option<Device>,
         #[builder(default = DType::F32)] dtype: DType,
@@ -137,6 +140,7 @@ where
             .update_frequency(update_frequency)
             .training_start(training_start)
             .maybe_training_horizon(training_horizon)
+            .legal_action_mask(legal_action_mask)
             .maybe_replay_device(replay_device)
             .dtype(dtype)
             .build()?;
@@ -159,6 +163,7 @@ impl<M, S, GE, I, const R: usize, const U: usize> Agent<I, R, 2> for DDQNAgent<'
 where
     S: ObservationSpace<R, Item = Tensor<U, <S as TensorBatchTypes>::Kind>>,
     S::Kind: Autodiff,
+    FloatDType: Cast<2, S::Kind, OutputKind = Float>,
     M: Module + Forward<R, 2, InputKind = S::Kind, OutputKind = Float>,
     M::Error: std::fmt::Debug,
     GE: std::fmt::Debug,
@@ -218,7 +223,9 @@ mod tests {
         agents::q_learning::tests::{ObservationFixture, network},
         agents::test_support::FixedEnv,
         gym::{VectorizedGymError, VectorizedGymWrapper},
+        models::MaskedLogits,
         parameter_schedule::ConstantSchedule,
+        spaces::BoxSpace,
     };
     use burn::{optim::SgdConfig, tensor::Device};
     use std::{convert::Infallible, marker::PhantomData};
@@ -293,6 +300,21 @@ mod tests {
             assert_eq!(logger.collection_timesteps, [2, 4]);
             assert_eq!(logger.update_timesteps, [1, 2, 3, 4]);
         }
+    }
+
+    #[test]
+    fn masked_logits_can_back_a_ddqn_q_network() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let _agent = DDQNAgent::<_, _, std::convert::Infallible, (), 2>::builder()
+            .action_space(Discrete::new(2).unwrap())
+            .observation_space(BoxSpace::new_unbounded([1, 3], &device))
+            .online_q_network(MaskedLogits::new(network(&device, DType::F32), 2))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .legal_action_mask(true)
+            .build()
+            .unwrap();
     }
 
     #[test]

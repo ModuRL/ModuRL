@@ -107,6 +107,16 @@ impl PerfectStateGym for CounterEnv {
 }
 ```
 
+Implement `LegalActionsGym` to expose the currently legal action indices:
+
+```rust,ignore
+impl LegalActionsGym for CounterEnv {
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        Ok(if self.state.abs() >= 4 { vec![] } else { vec![0, 1] })
+    }
+}
+```
+
 Include the random-number generator state too when an environment uses randomness.
 Wrapping `PerfectStateGym` environments in `VectorizedGymWrapper` provides
 `PerfectStateMultiGym`, which saves and restores individual slots by index.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::sampling::tests::RNG_LOCK;
 use crate::tensor_rank::{PrevRank, TensorBatchTypes};
 use crate::{
     gym::{Gym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
@@ -228,7 +229,8 @@ fn float_agent(
 }
 
 #[test]
-fn epsilon_greedy_preserves_layout_kind_and_seeded_host_randomness() {
+fn epsilon_greedy_preserves_layout_kind_and_seeded_randomness() {
+    let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex();
     let observations = Tensor::<2>::from_data(
         [[0.0f32, 2.0, 1.0], [3.0, 1.0, 2.0], [0.0, 1.0, 4.0]],
@@ -239,6 +241,7 @@ fn epsilon_greedy_preserves_layout_kind_and_seeded_host_randomness() {
         0.0,
         &Discrete::new(3).unwrap(),
         &mut StdRng::seed_from_u64(1),
+        None,
         |input| Ok::<_, Infallible>(input.clone()),
     )
     .unwrap();
@@ -248,11 +251,13 @@ fn epsilon_greedy_preserves_layout_kind_and_seeded_host_randomness() {
     let input =
         Tensor::<3, Bool>::from_data(TensorData::new(vec![true; 128], [128, 1, 1]), &device);
     let sample = || {
+        device.seed(2);
         epsilon_greedy_actions(
             &input,
             1.0,
             &Discrete::new(3).unwrap(),
             &mut StdRng::seed_from_u64(2),
+            None,
             |_| -> Result<Tensor<2>, Infallible> {
                 panic!("full exploration must not evaluate the model")
             },
@@ -278,6 +283,7 @@ fn mixed_exploration_forwards_only_greedy_native_observations() {
         0.5,
         &Discrete::new(2).unwrap(),
         &mut StdRng::seed_from_u64(3),
+        None,
         |input| {
             assert_eq!(input.dtype(), DType::I64);
             forwarded = input.dims()[0];

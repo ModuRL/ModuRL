@@ -92,6 +92,8 @@ pub enum SpaceError {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
+    #[error("discrete action mask has {actual} columns, expected {expected}")]
+    MaskWidthMismatch { expected: usize, actual: usize },
 }
 
 /// Integer actions in `0..possible_values` with rank-2 category logits.
@@ -115,6 +117,20 @@ impl Discrete {
     /// Returns the scalar item shape `[1]`, excluding the batch axis.
     pub fn shape(&self) -> Vec<usize> {
         vec![1]
+    }
+
+    /// Samples U32 actions `[batch_size, 1]` uniformly among columns equal to 1.0 in a Float mask `[batch_size, n]`.
+    /// Mask entries must be 0.0 or 1.0; rows with no legal column sample uniformly over all actions.
+    pub fn sample_batch_masked(&self, mask: &Tensor<2>) -> Result<Tensor<2, Int>, SpaceError> {
+        let [_, width] = mask.dims();
+        if width != self.possible_values {
+            return Err(SpaceError::MaskWidthMismatch {
+                expected: self.possible_values,
+                actual: width,
+            });
+        }
+        let noise = mask.random_like(Distribution::Uniform(0.0, 1.0));
+        Ok(noise.add(mask.clone()).argmax(1).cast(DType::U32))
     }
 }
 
@@ -229,6 +245,14 @@ impl<const R: usize> BoxSpace<R> {
     /// Returns the action/observation shape, excluding the leading batch axis.
     pub fn shape(&self) -> Vec<usize> {
         self.low.dims()[1..].to_vec()
+    }
+
+    pub(crate) fn low(&self) -> &Tensor<R> {
+        &self.low
+    }
+
+    pub(crate) fn high(&self) -> &Tensor<R> {
+        &self.high
     }
 }
 
@@ -381,6 +405,7 @@ fn finite_limit(dtype: DType) -> f64 {
 mod tests {
     use super::*;
     use crate::sampling::tests::RNG_LOCK;
+    use burn::tensor::TensorData;
 
     #[test]
     fn discrete_samples_indices_and_decodes_logits() {
@@ -440,6 +465,57 @@ mod tests {
                 .unwrap(),
             vec![0, 0]
         );
+    }
+
+    #[test]
+    fn discrete_masked_batch_sampling_respects_legal_actions_and_falls_back() {
+        let _guard = RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        device.seed(7);
+        let space = Discrete::new(4).unwrap();
+        let mut mask_values = Vec::with_capacity(200 * 8);
+        for _ in 0..200 {
+            mask_values.extend([0.0f32, 1.0, 0.0, 1.0]);
+            mask_values.extend([1.0f32, 0.0, 0.0, 0.0]);
+        }
+        let mask = Tensor::<2>::from_data(TensorData::new(mask_values, [400, 4]), &device);
+        let actions = space
+            .sample_batch_masked(&mask)
+            .unwrap()
+            .into_data()
+            .try_to_vec::<u32>()
+            .unwrap();
+        for rows in actions.as_chunks::<2>().0 {
+            assert!([1, 3].contains(&rows[0]));
+            assert_eq!(rows[1], 0);
+        }
+
+        device.seed(11);
+        let all_illegal = Tensor::zeros([200, 4], &device);
+        let actions = space
+            .sample_batch_masked(&all_illegal)
+            .unwrap()
+            .into_data()
+            .try_to_vec::<u32>()
+            .unwrap();
+        assert!(actions.iter().all(|&action| action < 4));
+        let mut distinct_actions = actions;
+        distinct_actions.sort_unstable();
+        distinct_actions.dedup();
+        assert!(distinct_actions.len() >= 2);
+    }
+
+    #[test]
+    fn discrete_masked_batch_sampling_rejects_wrong_mask_width() {
+        let device = Device::flex();
+        let space = Discrete::new(4).unwrap();
+        assert!(matches!(
+            space.sample_batch_masked(&Tensor::zeros([2, 3], &device)),
+            Err(SpaceError::MaskWidthMismatch {
+                expected: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use burn::tensor::{Device, Int, Tensor, TensorData};
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 
 use crate::{
-    gym::{Gym, PerfectStateGym, PerfectStateMultiGym, ResetInfo, StepInfo},
+    gym::{Gym, LegalActionsGym, PerfectStateGym, PerfectStateMultiGym, ResetInfo, StepInfo},
     spaces::{BoxSpace, Discrete},
     tensor_rank::TensorBatchTypes,
 };
@@ -70,6 +70,16 @@ impl PerfectStateGym for StateTestGym {
         self.rng.clone_from(&state.0);
         self.step_count = state.1;
         Ok(())
+    }
+}
+
+impl LegalActionsGym for StateTestGym {
+    fn legal_actions(&self) -> Result<Vec<usize>, Self::Error> {
+        Ok(if self.step_count.is_multiple_of(2) {
+            vec![0, 1]
+        } else {
+            vec![1]
+        })
     }
 }
 
