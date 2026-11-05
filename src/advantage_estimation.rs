@@ -355,301 +355,251 @@ impl<V: AdvantageEstimator> AdvantageEstimator for UPGO<V> {
 mod tests {
     use super::{AdvantageEstimator, GAE, GAEError, NStep, NStepError, UPGO};
     use burn::tensor::{Bool, DType, Device, Tensor, TensorData};
+    use proptest::{collection::vec, prelude::*};
 
-    const REWARDS: [[f32; 3]; 3] = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
-    const VALUES: [[f32; 3]; 3] = [[0.2, 0.3, 0.4], [0.5, 0.6, 0.7], [0.8, 0.9, 1.0]];
-    const DONES: [[bool; 3]; 3] = [
-        [false, false, false],
-        [true, false, false],
-        [false, true, false],
-    ];
-    const TRUNCATEDS: [[bool; 3]; 3] = [
-        [false, false, false],
-        [false, true, false],
-        [false, false, true],
-    ];
-    const BOOTSTRAP: [f32; 3] = [1.1, 1.2, 1.3];
-
-    fn rollout_tensors(
-        device: &Device,
-    ) -> (
-        Tensor<3>,
-        Tensor<3>,
-        Tensor<3, Bool>,
-        Tensor<3, Bool>,
-        Tensor<2>,
-    ) {
-        let reward_tensor = Tensor::<3>::from_data(
-            TensorData::new(REWARDS.into_iter().flatten().collect::<Vec<_>>(), [3, 3, 1]),
-            device,
-        );
-        let value_tensor = Tensor::<3>::from_data(
-            TensorData::new(VALUES.into_iter().flatten().collect::<Vec<_>>(), [3, 3, 1]),
-            device,
-        );
-        let done_tensor = Tensor::from_data(
-            TensorData::new(DONES.into_iter().flatten().collect::<Vec<_>>(), [3, 3, 1]),
-            device,
-        );
-        let truncated_tensor = Tensor::from_data(
-            TensorData::new(
-                TRUNCATEDS.into_iter().flatten().collect::<Vec<_>>(),
-                [3, 3, 1],
-            ),
-            device,
-        );
-        let bootstrap_tensor =
-            Tensor::<2>::from_data(TensorData::new(BOOTSTRAP.to_vec(), [3, 1]), device);
-        (
-            reward_tensor,
-            value_tensor,
-            done_tensor,
-            truncated_tensor,
-            bootstrap_tensor,
-        )
+    /// Per-step columns flattened from `[time, env]`, so the next step of row `i` is `i + envs`.
+    #[derive(Debug, Clone)]
+    struct Rollout {
+        envs: usize,
+        rewards: Vec<f32>,
+        values: Vec<f32>,
+        dones: Vec<bool>,
+        truncateds: Vec<bool>,
+        bootstrap: Vec<f32>,
     }
 
-    #[test]
-    fn gae_matches_scalar_reference_across_environments_and_episode_boundaries() {
-        let device = Device::flex().autodiff();
-        let (reward_tensor, value_tensor, done_tensor, truncated_tensor, bootstrap_tensor) =
-            rollout_tensors(&device);
-        for dtype in [DType::F32, DType::F64] {
-            let estimate = GAE::new(0.8).unwrap().estimate(
-                &reward_tensor.clone().cast(dtype),
-                &value_tensor.clone().cast(dtype),
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrap_tensor.clone().cast(dtype),
-                0.9,
-            );
-            assert_eq!(estimate.advantages.dtype(), dtype);
-            assert_eq!(estimate.value_targets.dtype(), dtype);
-            let actual_advantages = estimate
-                .advantages
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            let actual_value_targets = estimate
-                .value_targets
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            for env_idx in 0..3 {
-                let mut next_value = BOOTSTRAP[env_idx];
-                let mut gae = 0.0_f32;
-                for time in (0..3).rev() {
-                    let mask = if DONES[time][env_idx] || TRUNCATEDS[time][env_idx] {
-                        0.0
-                    } else {
-                        1.0
-                    };
-                    let value = VALUES[time][env_idx];
-                    let delta = REWARDS[time][env_idx] + 0.9 * next_value * mask - value;
-                    gae = delta + 0.9 * 0.8 * gae * mask;
-                    let sample_index = time * 3 + env_idx;
-                    assert!((actual_advantages[sample_index] - f64::from(gae)).abs() < 1e-5);
-                    assert!(
-                        (actual_value_targets[sample_index] - f64::from(value + gae)).abs() < 1e-5
-                    );
-                    next_value = value;
-                }
-            }
+    impl Rollout {
+        fn reward(&self, i: usize) -> f64 {
+            f64::from(self.rewards[i])
         }
-    }
 
-    #[test]
-    fn gae_handles_single_step_rollout() {
-        let device = Device::flex().autodiff();
-        let reward_values = [1.0_f32, 0.5];
-        let critic_values = [0.2_f32, 0.8];
-        let dones = [false, true];
-        let truncateds = [false, false];
-        let bootstrap_values = [0.4_f32, 1.2];
-        let rewards =
-            Tensor::<3>::from_data(TensorData::new(reward_values.to_vec(), [1, 2, 1]), &device);
-        let values =
-            Tensor::<3>::from_data(TensorData::new(critic_values.to_vec(), [1, 2, 1]), &device);
-        let next_dones = Tensor::from_data(TensorData::new(dones.to_vec(), [1, 2, 1]), &device);
-        let next_truncateds =
-            Tensor::from_data(TensorData::new(truncateds.to_vec(), [1, 2, 1]), &device);
-        let bootstrapped_values =
-            Tensor::<2>::from_data(TensorData::new(bootstrap_values.to_vec(), [2, 1]), &device);
-        let estimate = GAE::new(0.8).unwrap().estimate(
-            &rewards,
-            &values,
-            &next_dones,
-            &next_truncateds,
-            &bootstrapped_values,
-            0.9,
-        );
-        assert_eq!(estimate.advantages.dims(), [1, 2, 1]);
-        assert_eq!(estimate.value_targets.dims(), [1, 2, 1]);
-        let actual_advantages = estimate
-            .advantages
-            .into_data()
-            .convert::<f64>()
-            .try_to_vec::<f64>()
-            .unwrap();
-        let actual_value_targets = estimate
-            .value_targets
-            .into_data()
-            .convert::<f64>()
-            .try_to_vec::<f64>()
-            .unwrap();
+        fn value(&self, i: usize) -> f64 {
+            f64::from(self.values[i])
+        }
 
-        for env in 0..2 {
-            let mask = if dones[env] || truncateds[env] {
-                0.0
-            } else {
-                1.0
+        fn mask(&self, i: usize) -> f64 {
+            f64::from(u8::from(!(self.dones[i] || self.truncateds[i])))
+        }
+
+        fn next_value(&self, i: usize) -> f64 {
+            f64::from(
+                *self
+                    .values
+                    .get(i + self.envs)
+                    .unwrap_or(&self.bootstrap[i % self.envs]),
+            )
+        }
+
+        fn estimate(
+            &self,
+            estimator: &impl AdvantageEstimator,
+            gamma: f32,
+            dtype: DType,
+        ) -> Estimate {
+            let device = Device::flex().autodiff();
+            let shape = [self.rewards.len() / self.envs, self.envs, 1];
+            let float = |data: &[f32]| {
+                Tensor::<3>::from_data(TensorData::new(data.to_vec(), shape), (&device, dtype))
             };
-            let delta =
-                reward_values[env] + 0.9 * bootstrap_values[env] * mask - critic_values[env];
-            let value_target = critic_values[env] + delta;
-            assert!((actual_advantages[env] - f64::from(delta)).abs() < 1e-5);
-            assert!((actual_value_targets[env] - f64::from(value_target)).abs() < 1e-5);
+            let flags = |data: &[bool]| {
+                Tensor::<3, Bool>::from_data(TensorData::new(data.to_vec(), shape), &device)
+            };
+            let bootstrap = TensorData::new(self.bootstrap.clone(), [self.envs, 1]);
+            let estimate = estimator.estimate(
+                &float(&self.rewards),
+                &float(&self.values),
+                &flags(&self.dones),
+                &flags(&self.truncateds),
+                &Tensor::from_data(bootstrap, (&device, dtype)),
+                gamma,
+            );
+            let values = |tensor: Tensor<3>| {
+                assert_eq!((tensor.dims(), tensor.dtype()), (shape, dtype));
+                tensor
+                    .into_data()
+                    .convert::<f64>()
+                    .try_to_vec::<f64>()
+                    .unwrap()
+            };
+            (values(estimate.advantages), values(estimate.value_targets))
+        }
+
+        /// Backward recurrence `acc_i = delta_i + discount * mask_i * acc_{i + envs}`.
+        fn discounted_deltas(&self, gamma: f64, discount: f64) -> Vec<f64> {
+            let mut sums = vec![0.0; self.rewards.len()];
+            for i in (0..sums.len()).rev() {
+                let later = sums.get(i + self.envs).copied().unwrap_or(0.0);
+                sums[i] = self.reward(i)
+                    + self.mask(i) * (gamma * self.next_value(i) + discount * later)
+                    - self.value(i);
+            }
+            sums
+        }
+
+        fn gae(&self, gamma: f32, lambda: f32, value_lambda: f32) -> Estimate {
+            let gamma = f64::from(gamma);
+            let targets = self.discounted_deltas(gamma, gamma * f64::from(value_lambda));
+            (
+                self.discounted_deltas(gamma, gamma * f64::from(lambda)),
+                targets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, target)| target + self.value(i))
+                    .collect(),
+            )
+        }
+
+        fn n_step(&self, gamma: f32, n: usize) -> Estimate {
+            let targets: Vec<f64> = (0..self.rewards.len())
+                .map(|i| {
+                    let steps: Vec<_> =
+                        (i..self.rewards.len()).step_by(self.envs).take(n).collect();
+                    let (target, discount) =
+                        steps.iter().fold((0.0, 1.0), |(target, discount), &j| {
+                            (
+                                target + discount * self.reward(j),
+                                discount * self.mask(j) * f64::from(gamma),
+                            )
+                        });
+                    target + discount * self.next_value(*steps.last().unwrap())
+                })
+                .collect();
+            (self.minus_values(&targets), targets)
+        }
+
+        /// Returns UPGO advantages; value targets come from the wrapped estimator.
+        fn upgo_advantages(&self, gamma: f32) -> Vec<f64> {
+            let mut returns = vec![0.0; self.rewards.len()];
+            let mut q_values = returns.clone();
+            for i in (0..returns.len()).rev() {
+                let bootstrap = f64::from(self.bootstrap[i % self.envs]);
+                let next = |column: &[f64]| column.get(i + self.envs).copied().unwrap_or(bootstrap);
+                let (next_return, next_q, next_value) =
+                    (next(&returns), next(&q_values), self.next_value(i));
+                let continuation = if next_q >= next_value {
+                    next_return
+                } else {
+                    next_value
+                };
+                let discount = self.mask(i) * f64::from(gamma);
+                returns[i] = self.reward(i) + discount * continuation;
+                q_values[i] = self.reward(i) + discount * next_value;
+            }
+            self.minus_values(&returns)
+        }
+
+        fn minus_values(&self, column: &[f64]) -> Vec<f64> {
+            column
+                .iter()
+                .enumerate()
+                .map(|(i, item)| item - self.value(i))
+                .collect()
         }
     }
 
-    #[test]
-    fn n_step_matches_scalar_reference_across_environments_and_episode_boundaries() {
-        let device = Device::flex().autodiff();
-        let (reward_tensor, value_tensor, done_tensor, truncated_tensor, bootstrap_tensor) =
-            rollout_tensors(&device);
-        for dtype in [DType::F32, DType::F64] {
-            let estimate = NStep::new(2).unwrap().estimate(
-                &reward_tensor.clone().cast(dtype),
-                &value_tensor.clone().cast(dtype),
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrap_tensor.clone().cast(dtype),
-                0.9,
+    /// Flattened `(advantages, value_targets)`.
+    type Estimate = (Vec<f64>, Vec<f64>);
+
+    fn assert_close(actual: &[f64], expected: &[f64], dtype: DType) {
+        let tolerance = if dtype == DType::F64 { 1e-9 } else { 1e-4 };
+        assert_eq!(actual.len(), expected.len());
+        for (i, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() <= tolerance * (1.0 + expected.abs()),
+                "[{i}]: {actual} != {expected}"
             );
-            assert_eq!(estimate.advantages.dtype(), dtype);
-            assert_eq!(estimate.value_targets.dtype(), dtype);
-            let actual_advantages = estimate
-                .advantages
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            let actual_value_targets = estimate
-                .value_targets
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            for env_idx in 0..3 {
-                for time in 0..3 {
-                    let step_count = 2.min(3 - time);
-                    let mut target = 0.0_f32;
-                    let mut discount = 1.0_f32;
-                    for offset in 0..step_count {
-                        let step = time + offset;
-                        target += discount * REWARDS[step][env_idx];
-                        let mask = if DONES[step][env_idx] || TRUNCATEDS[step][env_idx] {
-                            0.0
-                        } else {
-                            1.0
-                        };
-                        discount *= mask * 0.9;
+        }
+    }
+
+    fn assert_estimates_close(actual: Estimate, expected: Estimate, dtype: DType) {
+        assert_close(&actual.0, &expected.0, dtype);
+        assert_close(&actual.1, &expected.1, dtype);
+    }
+
+    fn unit_interval() -> impl Strategy<Value = f32> {
+        prop_oneof![Just(0.0f32), Just(0.5), Just(1.0), 0.0f32..=1.0]
+    }
+
+    /// Rollouts of 1..=12 steps over 1..=4 environments; episode ends are sparse so multi-step
+    /// recurrences run across several steps before a mask cuts them.
+    fn rollout() -> impl Strategy<Value = Rollout> {
+        (1usize..=12, 1usize..=4).prop_flat_map(|(time_steps, envs)| {
+            let len = time_steps * envs;
+            let flags = || vec(prop::bool::weighted(0.2), len);
+            (
+                vec(-10.0f32..10.0, len),
+                vec(-10.0f32..10.0, len),
+                flags(),
+                flags(),
+                vec(-10.0f32..10.0, envs),
+            )
+                .prop_map(move |(rewards, values, dones, truncateds, bootstrap)| {
+                    Rollout {
+                        envs,
+                        rewards,
+                        values,
+                        dones,
+                        truncateds,
+                        bootstrap,
                     }
-                    let next_value = if time + step_count < 3 {
-                        VALUES[time + step_count][env_idx]
-                    } else {
-                        BOOTSTRAP[env_idx]
-                    };
-                    target += discount * next_value;
-                    let sample_index = time * 3 + env_idx;
-                    assert!(
-                        (actual_advantages[sample_index]
-                            - f64::from(target - VALUES[time][env_idx]))
-                        .abs()
-                            < 1e-5
-                    );
-                    assert!((actual_value_targets[sample_index] - f64::from(target)).abs() < 1e-5);
-                }
-            }
-        }
+                })
+        })
     }
 
-    #[test]
-    fn n_step_matches_gae_at_extremes() {
-        let device = Device::flex().autodiff();
-        let (reward_tensor, value_tensor, done_tensor, truncated_tensor, bootstrap_tensor) =
-            rollout_tensors(&device);
-        for dtype in [DType::F32, DType::F64] {
-            let rewards = reward_tensor.clone().cast(dtype);
-            let values = value_tensor.clone().cast(dtype);
-            let bootstrapped_values = bootstrap_tensor.clone().cast(dtype);
-            let n_step_one = NStep::new(1).unwrap().estimate(
-                &rewards,
-                &values,
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrapped_values,
-                0.9,
-            );
-            let gae_zero = GAE::new(0.0).unwrap().estimate(
-                &rewards,
-                &values,
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrapped_values,
-                0.9,
-            );
-            let n_step_three = NStep::new(3).unwrap().estimate(
-                &rewards,
-                &values,
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrapped_values,
-                0.9,
-            );
-            let gae_one = GAE::new(1.0).unwrap().estimate(
-                &rewards,
-                &values,
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrapped_values,
-                0.9,
-            );
-            for (n_step, gae) in [(n_step_one, gae_zero), (n_step_three, gae_one)] {
-                let advantages = n_step
-                    .advantages
-                    .into_data()
-                    .convert::<f64>()
-                    .try_to_vec::<f64>()
-                    .unwrap();
-                let gae_advantages = gae
-                    .advantages
-                    .into_data()
-                    .convert::<f64>()
-                    .try_to_vec::<f64>()
-                    .unwrap();
-                let value_targets = n_step
-                    .value_targets
-                    .into_data()
-                    .convert::<f64>()
-                    .try_to_vec::<f64>()
-                    .unwrap();
-                let gae_value_targets = gae
-                    .value_targets
-                    .into_data()
-                    .convert::<f64>()
-                    .try_to_vec::<f64>()
-                    .unwrap();
-                for sample_index in 0..9 {
-                    assert!((advantages[sample_index] - gae_advantages[sample_index]).abs() < 1e-5);
-                    assert!(
-                        (value_targets[sample_index] - gae_value_targets[sample_index]).abs()
-                            < 1e-5
-                    );
-                }
+    fn float_dtype() -> impl Strategy<Value = DType> {
+        prop_oneof![Just(DType::F32), Just(DType::F64)]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn gae_matches_scalar_reference(
+            rollout in rollout(),
+            gamma in unit_interval(),
+            lambda in unit_interval(),
+            value_lambda in unit_interval(),
+            dtype in float_dtype(),
+        ) {
+            let estimator = GAE::new(lambda).unwrap().with_value_lambda(value_lambda).unwrap();
+            let actual = rollout.estimate(&estimator, gamma, dtype);
+            assert_estimates_close(actual, rollout.gae(gamma, lambda, value_lambda), dtype);
+        }
+
+        #[test]
+        fn n_step_matches_scalar_reference(
+            rollout in rollout(),
+            gamma in unit_interval(),
+            n in 1usize..=16,
+            dtype in float_dtype(),
+        ) {
+            let actual = rollout.estimate(&NStep::new(n).unwrap(), gamma, dtype);
+            assert_estimates_close(actual, rollout.n_step(gamma, n), dtype);
+        }
+
+        #[test]
+        fn n_step_matches_gae_at_extremes(
+            rollout in rollout(),
+            gamma in unit_interval(),
+            dtype in float_dtype(),
+        ) {
+            for (n, lambda) in [(1, 0.0), (rollout.rewards.len() / rollout.envs, 1.0)] {
+                let n_step = rollout.estimate(&NStep::new(n).unwrap(), gamma, dtype);
+                let gae = rollout.estimate(&GAE::new(lambda).unwrap(), gamma, dtype);
+                assert_estimates_close(n_step, gae, dtype);
             }
+        }
+
+        // F64 only: UPGO branches on `q >= V`, and F32 rounding can flip near-ties.
+        #[test]
+        fn upgo_matches_scalar_reference(
+            rollout in rollout(),
+            gamma in unit_interval(),
+            lambda in unit_interval(),
+        ) {
+            let actual = rollout.estimate(&UPGO::new(GAE::new(lambda).unwrap()), gamma, DType::F64);
+            let expected = (rollout.upgo_advantages(gamma), rollout.gae(gamma, lambda, lambda).1);
+            assert_estimates_close(actual, expected, DType::F64);
         }
     }
 
@@ -657,81 +607,6 @@ mod tests {
     fn n_step_rejects_zero_steps() {
         assert_eq!(NStep::new(0), Err(NStepError::ZeroSteps));
         assert_eq!(NStep::new(1).unwrap().n(), 1);
-    }
-
-    #[test]
-    fn gae_with_value_lambda_uses_it_only_for_value_targets() {
-        let device = Device::flex().autodiff();
-        let (reward_tensor, value_tensor, done_tensor, truncated_tensor, bootstrap_tensor) =
-            rollout_tensors(&device);
-        for dtype in [DType::F32, DType::F64] {
-            let rewards = reward_tensor.clone().cast(dtype);
-            let values = value_tensor.clone().cast(dtype);
-            let bootstrapped_values = bootstrap_tensor.clone().cast(dtype);
-            let separate = GAE::new(0.8)
-                .unwrap()
-                .with_value_lambda(1.0)
-                .unwrap()
-                .estimate(
-                    &rewards,
-                    &values,
-                    &done_tensor,
-                    &truncated_tensor,
-                    &bootstrapped_values,
-                    0.9,
-                );
-            let advantage_reference = GAE::new(0.8).unwrap().estimate(
-                &rewards,
-                &values,
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrapped_values,
-                0.9,
-            );
-            let value_target_reference = GAE::new(1.0).unwrap().estimate(
-                &rewards,
-                &values,
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrapped_values,
-                0.9,
-            );
-            let separate_advantages = separate
-                .advantages
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            let advantage_reference = advantage_reference
-                .advantages
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            let separate_value_targets = separate
-                .value_targets
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            let value_target_reference = value_target_reference
-                .value_targets
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            for sample_index in 0..9 {
-                assert!(
-                    (separate_advantages[sample_index] - advantage_reference[sample_index]).abs()
-                        < 1e-5
-                );
-                assert!(
-                    (separate_value_targets[sample_index] - value_target_reference[sample_index])
-                        .abs()
-                        < 1e-5
-                );
-            }
-        }
     }
 
     #[test]
@@ -754,117 +629,5 @@ mod tests {
                 .value_lambda(),
             1.0
         );
-    }
-
-    #[test]
-    fn upgo_matches_scalar_reference_across_environments_and_episode_boundaries() {
-        let device = Device::flex().autodiff();
-        let (reward_tensor, value_tensor, done_tensor, truncated_tensor, bootstrap_tensor) =
-            rollout_tensors(&device);
-
-        for dtype in [DType::F32, DType::F64] {
-            let rewards = reward_tensor.clone().cast(dtype);
-            let values = value_tensor.clone().cast(dtype);
-            let bootstrapped_values = bootstrap_tensor.clone().cast(dtype);
-            let estimate = UPGO::new(GAE::new(0.8).unwrap()).estimate(
-                &rewards,
-                &values,
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrapped_values,
-                0.9,
-            );
-            let value_target_reference = GAE::new(0.8).unwrap().estimate(
-                &rewards,
-                &values,
-                &done_tensor,
-                &truncated_tensor,
-                &bootstrapped_values,
-                0.9,
-            );
-            assert_eq!(estimate.advantages.dtype(), dtype);
-            assert_eq!(estimate.value_targets.dtype(), dtype);
-            let actual_advantages = estimate
-                .advantages
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            let actual_value_targets = estimate
-                .value_targets
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-            let expected_value_targets = value_target_reference
-                .value_targets
-                .into_data()
-                .convert::<f64>()
-                .try_to_vec::<f64>()
-                .unwrap();
-
-            for env_idx in 0..3 {
-                let mut next_return = BOOTSTRAP[env_idx];
-                let mut next_q = BOOTSTRAP[env_idx];
-                let mut next_value = BOOTSTRAP[env_idx];
-                for time in (0..3).rev() {
-                    let continues = next_q >= next_value;
-                    let continuation = if continues { next_return } else { next_value };
-                    let mask = if DONES[time][env_idx] || TRUNCATEDS[time][env_idx] {
-                        0.0
-                    } else {
-                        1.0
-                    };
-                    let current_return = REWARDS[time][env_idx] + 0.9 * mask * continuation;
-                    next_q = REWARDS[time][env_idx] + 0.9 * mask * next_value;
-                    next_return = current_return;
-                    next_value = VALUES[time][env_idx];
-
-                    let sample_index = time * 3 + env_idx;
-                    assert!(
-                        (actual_advantages[sample_index]
-                            - f64::from(current_return - VALUES[time][env_idx]))
-                        .abs()
-                            < 1e-5
-                    );
-                    assert!(
-                        (actual_value_targets[sample_index] - expected_value_targets[sample_index])
-                            .abs()
-                            < 1e-5
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn upgo_cuts_return_when_next_step_is_below_the_critic() {
-        let device = Device::flex().autodiff();
-        let rewards =
-            Tensor::<3>::from_data(TensorData::new(vec![1.0_f32, 0.1], [2, 1, 1]), &device);
-        let values =
-            Tensor::<3>::from_data(TensorData::new(vec![0.2_f32, 10.0], [2, 1, 1]), &device);
-        let dones = Tensor::from_data(TensorData::new(vec![false, false], [2, 1, 1]), &device);
-        let truncateds = Tensor::from_data(TensorData::new(vec![false, false], [2, 1, 1]), &device);
-        let bootstrapped_values =
-            Tensor::<2>::from_data(TensorData::new(vec![0.0_f32], [1, 1]), &device);
-
-        // Step 1's one-step estimate 0.1 < V=10, so step 0 bootstraps from V instead of following the return.
-        let estimate = UPGO::new(GAE::new(0.8).unwrap()).estimate(
-            &rewards,
-            &values,
-            &dones,
-            &truncateds,
-            &bootstrapped_values,
-            0.9,
-        );
-        let advantages = estimate
-            .advantages
-            .into_data()
-            .convert::<f64>()
-            .try_to_vec::<f64>()
-            .unwrap();
-        assert!((advantages[0] - 9.8).abs() < 1e-5);
-        assert!((advantages[1] + 9.9).abs() < 1e-5);
     }
 }
