@@ -2032,6 +2032,95 @@ mod schedule_tests {
     }
 
     #[test]
+    fn sparse_rollout_waits_for_batch_size_active_rows() {
+        let progress = sparse_rollout_progress(false);
+        assert_eq!(&progress[..4], &[(1, 0), (2, 0), (3, 0), (4, 0)]);
+    }
+
+    #[test]
+    fn sparse_rollout_schedule_counts_only_active_rows() {
+        let progress = sparse_rollout_progress(false);
+        assert_eq!(progress[4], (0, 4));
+        assert_eq!(progress[5], (1, 4));
+    }
+
+    #[test]
+    fn sparse_rollout_counts_active_rows_past_batch_size() {
+        let progress = sparse_rollout_progress(true);
+        assert_eq!(progress[4], (0, 5));
+        assert_eq!(progress[5], (1, 5));
+    }
+
+    fn sparse_rollout_progress(final_row_active: bool) -> Vec<(usize, usize)> {
+        #[derive(Default)]
+        struct Logger {
+            collections: Vec<usize>,
+            updates: Vec<usize>,
+        }
+        impl PPOLogger for Logger {
+            fn log(&mut self, entry: &PPOLogEntry) {
+                self.updates.push(entry.timestep);
+            }
+            fn log_collection(&mut self, entry: &PPOCollectionLogEntry) {
+                self.collections.push(entry.collection_timestep);
+            }
+        }
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut logger = Logger::default();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(4)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .training_horizon(10)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([2, 4], &device);
+        let mut progress = Vec::new();
+        for time in 0..6 {
+            let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+            let step = MultiGymStepInfo {
+                observations: observations.clone(),
+                rewards: Tensor::ones([2, 1], &device),
+                infos: vec![(); 2],
+                dones: vec![false; 2],
+                truncateds: vec![false; 2],
+                terminal_observations: vec![None; 2],
+            };
+            let active = [time > 0 && time < 5, final_row_active && time == 4];
+            agent
+                .learn_from_timesteps(&observations, actions, step, &active)
+                .unwrap();
+            progress.push((
+                agent.rollout_buffer.len(),
+                agent.schedule_progress.elapsed_steps(),
+            ));
+        }
+        drop(agent);
+        let collected = if final_row_active { 5 } else { 4 };
+        assert_eq!(logger.collections, vec![1, 2, 3, collected]);
+        assert!(!logger.updates.is_empty());
+        assert!(logger.updates.iter().all(|&timestep| timestep == collected));
+        progress
+    }
+
+    #[test]
     fn padding_does_not_change_updates_or_episode_statistics() {
         struct Parameters(Vec<f32>);
         impl ModuleVisitor for Parameters {
@@ -2084,7 +2173,7 @@ mod schedule_tests {
                 .observation_space(BoxSpace::new_unbounded([1, 4], &device))
                 .action_space(Discrete::new(2).unwrap())
                 .network_info(networks)
-                .batch_size(4)
+                .batch_size(2)
                 .mini_batch_size(1)
                 .num_epochs(1)
                 .training_horizon(8)
@@ -2111,8 +2200,9 @@ mod schedule_tests {
                     .learn_from_timesteps(&observations, actions, step, &active)
                     .unwrap();
             }
-            assert_eq!(agent.schedule_progress.elapsed_steps(), 8);
-            assert!(agent.rollout_buffer.is_empty());
+            assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+            assert_eq!(agent.rollout_buffer.len(), 2);
+            assert_eq!(agent.rollout_active_rows, 0);
             let mut parameters = Parameters(Vec::new());
             agent.network().visit(&mut parameters);
             drop(agent);

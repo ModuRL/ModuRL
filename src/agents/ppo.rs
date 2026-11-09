@@ -496,6 +496,7 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     action_space: AS,
     network_info: G::Network,
     rollout_buffer: Vec<PPOExperience<G::Observation, G::Action>>,
+    rollout_active_rows: usize,
     mini_batch_size: usize,
     num_epochs: usize,
     batch_size: usize,
@@ -620,6 +621,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
             observation_space,
             action_space,
             rollout_buffer: Vec::new(),
+            rollout_active_rows: 0,
             num_epochs,
             batch_size,
             schedule_progress: ScheduleProgress::new(training_horizon),
@@ -756,6 +758,7 @@ where
         }
 
         self.rollout_buffer.clear();
+        self.rollout_active_rows = 0;
         Ok(())
     }
 
@@ -1262,7 +1265,8 @@ where
         logging_info.logger.log_collection(&PPOCollectionLogEntry {
             collection_rewards,
             infos,
-            collection_timestep: first_collection_timestep.saturating_add(rewards_vec.len()),
+            collection_timestep: first_collection_timestep
+                .saturating_add(active.iter().filter(|&&active| active).count()),
             completed_episodes,
         });
         Ok(())
@@ -1316,6 +1320,7 @@ where
         let environment_count = env.num_envs();
         self.validate_environment_count(environment_count)?;
         self.rollout_buffer.clear();
+        self.rollout_active_rows = 0;
         self.prepare_episode_tracker(environment_count);
         Ok(observations)
     }
@@ -1364,7 +1369,7 @@ where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         let environment_count = env.num_envs();
-        while self.rollout_buffer.len() * environment_count < self.batch_size {
+        while self.rollout_active_rows < self.batch_size {
             let observations = next_observations.clone();
             let collection_action = self.sample_collection_action(validation, &observations)?;
             let step_info = env
@@ -1384,18 +1389,17 @@ where
             )?;
         }
 
-        Ok(self.rollout_buffer.len() * environment_count)
+        Ok(self.rollout_active_rows)
     }
 
     fn train_if_rollout_full<const BO: usize, const BL: usize>(
         &mut self,
-        environment_count: usize,
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>>
     where
         Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
         Tensor<L>: NextRank<Next = Tensor<BL>>,
     {
-        let collected = self.rollout_buffer.len() * environment_count;
+        let collected = self.rollout_active_rows;
         if collected < self.batch_size {
             return Ok(());
         }
@@ -1408,6 +1412,7 @@ where
         })();
         if result.is_err() {
             self.rollout_buffer.clear();
+            self.rollout_active_rows = 0;
         }
         result
     }
@@ -1460,11 +1465,10 @@ where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         Self::check_critic_dtype(&collection_action.values, step.rewards.dtype())?;
-        let environment_count = observations.dims()[0];
         let first_collection_timestep = self
             .schedule_progress
             .elapsed_steps()
-            .saturating_add(self.rollout_buffer.len() * environment_count);
+            .saturating_add(self.rollout_active_rows);
         let training_next_observations = zero_inactive(step.transition_next_observations(), active);
         let MultiGymStepInfo {
             observations: next_observations,
@@ -1510,6 +1514,9 @@ where
                 .values(zero_inactive(collection_action.values, active))
                 .build(),
         );
+        self.rollout_active_rows = self
+            .rollout_active_rows
+            .saturating_add(active.iter().filter(|&&active| active).count());
         Ok(next_observations)
     }
 
@@ -1615,7 +1622,6 @@ where
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_rollout_collection(env)?;
         self.schedule_progress.default_horizon(num_timesteps);
-        let environment_count = env.num_envs();
 
         let result: Result<(), PPOError<N::Error, GE, AS::Error>> = (|| {
             while elapsed_timesteps < num_timesteps {
@@ -1623,12 +1629,13 @@ where
                 elapsed_timesteps +=
                     self.collect_rollout(&validation, env, &mut next_observations)?;
                 drop(validation);
-                self.train_if_rollout_full(environment_count)?;
+                self.train_if_rollout_full()?;
             }
             Ok(())
         })();
         if result.is_err() {
             self.rollout_buffer.clear();
+            self.rollout_active_rows = 0;
         }
         result?;
         self.current_observations = Some(next_observations);
@@ -1682,7 +1689,7 @@ where
             )?;
             self.store_timestep(&validation, &observations, collection_action, step, active)?;
         }
-        self.train_if_rollout_full(environment_count)?;
+        self.train_if_rollout_full()?;
         Ok(())
     }
 }
