@@ -738,7 +738,12 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     bad_step.dones.pop();
     assert!(
         agent
-            .learn_from_timesteps(&observations, actions, bad_step)
+            .learn_from_timesteps(
+                &observations,
+                actions,
+                bad_step,
+                &vec![true; observations.dims()[0]]
+            )
             .is_err()
     );
 
@@ -746,9 +751,32 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     let step = env.step(actions.clone()).unwrap();
     agent
-        .learn_from_timesteps(&observations, actions, step)
+        .learn_from_timesteps(&observations, actions.clone(), step.clone(), &[true, false])
         .unwrap();
-    assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    agent
+        .learn_from_timesteps(
+            &observations,
+            actions.clone(),
+            step.clone(),
+            &[false, false],
+        )
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    assert!(
+        agent
+            .learn_from_timesteps(&observations, actions.clone(), step.clone(), &[])
+            .is_err()
+    );
+    agent
+        .learn_from_timesteps(
+            &observations,
+            actions,
+            step,
+            &vec![true; observations.dims()[0]],
+        )
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 3);
 }
 
 #[test]
@@ -887,7 +915,12 @@ fn caller_collection_entropy_weight_is_one_after_warmup() {
     let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     let step = environment.step(actions.clone()).unwrap();
     agent
-        .learn_from_timesteps(&observations, actions, step)
+        .learn_from_timesteps(
+            &observations,
+            actions,
+            step,
+            &vec![true; observations.dims()[0]],
+        )
         .unwrap();
 
     let stored = agent.replay.as_ref().unwrap().sample().unwrap();
@@ -963,7 +996,12 @@ fn caller_collected_training_matches_learn() {
         let step = caller_env.step(actions.clone()).unwrap();
         let next_observations = step.observations.clone();
         caller_agent
-            .learn_from_timesteps(&observations, actions, step)
+            .learn_from_timesteps(
+                &observations,
+                actions,
+                step,
+                &vec![true; observations.dims()[0]],
+            )
             .unwrap();
         observations = next_observations;
     }

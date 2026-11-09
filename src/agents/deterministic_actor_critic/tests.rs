@@ -287,7 +287,7 @@ impl DeterministicActorCriticLogger for Logger {
     fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry) {
         self.rewards.push(numbers(entry.collection_rewards.clone()));
         self.replay_lengths.push(entry.replay_len);
-        assert_eq!(entry.infos.len(), 2);
+        assert_eq!(entry.infos.len(), entry.collection_rewards.dims()[0]);
         for episode in &entry.completed_episodes {
             self.episodes.push((
                 episode.episode_return,
@@ -499,7 +499,13 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     bad_step.dones.pop();
     assert!(
         agent
-            .learn_from_timesteps(&observations, actions.clone(), bad_step, &mut logger,)
+            .learn_from_timesteps(
+                &observations,
+                actions.clone(),
+                bad_step,
+                &vec![true; observations.dims()[0]],
+                &mut logger
+            )
             .is_err()
     );
 
@@ -507,9 +513,49 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     let actions = agent.act(&observations).unwrap().without_autodiff();
     let step = env.step(actions.clone()).unwrap();
     agent
-        .learn_from_timesteps(&observations, actions, step, &mut logger)
+        .learn_from_timesteps(
+            &observations,
+            actions.clone(),
+            step.clone(),
+            &[true, false],
+            &mut logger,
+        )
         .unwrap();
-    assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    assert_eq!(logger.rewards.len(), 1);
+    assert_eq!(logger.rewards[0].len(), 1);
+    agent
+        .learn_from_timesteps(
+            &observations,
+            actions.clone(),
+            step.clone(),
+            &[false, false],
+            &mut logger,
+        )
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    assert_eq!(logger.rewards.len(), 1);
+    assert!(
+        agent
+            .learn_from_timesteps(
+                &observations,
+                actions.clone(),
+                step.clone(),
+                &[],
+                &mut logger
+            )
+            .is_err()
+    );
+    agent
+        .learn_from_timesteps(
+            &observations,
+            actions,
+            step,
+            &vec![true; observations.dims()[0]],
+            &mut logger,
+        )
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 3);
 }
 
 #[test]

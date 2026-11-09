@@ -334,6 +334,7 @@ fn selected_action_q_values_retains_shape_precision_and_gradient_flow() {
 fn replay_insert(values: &[f64], device: &Device) -> QLearningInsert<2, Float> {
     let count = values.len();
     QLearningInsert {
+        active: None,
         observations: Tensor::from_data(
             TensorData::new(values.to_vec(), [count, 1]),
             (device, DType::F64),
@@ -349,6 +350,31 @@ fn replay_insert(values: &[f64], device: &Device) -> QLearningInsert<2, Float> {
         rewards: Tensor::ones([count, 1], device),
         next_dones: Tensor::from_data(TensorData::new(vec![false; count], [count, 1]), device),
         truncateds: vec![false; count],
+    }
+}
+
+#[test]
+fn inactive_rows_are_never_sampled_across_ring_overwrites() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex();
+    let storage = QLearningReplayStorage::<2, Float>::new([4, 1], device.clone());
+    let mut replay = ExperienceReplay::with_storage(storage, 1);
+    for _ in 0..8 {
+        let mut transitions = replay_insert(&[1.0, 999.0], &device);
+        transitions.active = Some(vec![true, false]);
+        transitions.rewards = Tensor::from_data([[1.0], [999.0]], &device);
+        replay.add(transitions).unwrap();
+        for _ in 0..20 {
+            let batch = replay.sample().unwrap();
+            assert_eq!(
+                batch.observations.to_data().try_to_vec::<f64>().unwrap(),
+                vec![1.0]
+            );
+            assert_eq!(
+                batch.rewards.to_data().try_to_vec::<f32>().unwrap(),
+                vec![1.0]
+            );
+        }
     }
 }
 
@@ -389,6 +415,7 @@ fn replay_preserves_native_integer_and_boolean_observations() {
         .insert(
             0,
             QLearningInsert {
+                active: None,
                 observations: Tensor::from_data(
                     TensorData::new(values.to_vec(), [2, 1]),
                     (&device, DType::U64),
@@ -415,6 +442,7 @@ fn replay_preserves_native_integer_and_boolean_observations() {
         .insert(
             0,
             QLearningInsert {
+                active: None,
                 observations: Tensor::from_data([[false], [true]], &device),
                 next_observations: Tensor::from_data([[true], [false]], &device),
                 actions: Tensor::zeros([2, 1], (&device, DType::U32)),
@@ -497,6 +525,7 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
     agent
         .experience_replay
         .add(QLearningInsert {
+            active: None,
             observations: observations.clone(),
             next_observations: observations,
             actions: Tensor::ones([2, 1], (&device, DType::U32)),
@@ -577,7 +606,8 @@ fn caller_collected_steps_reject_length_mismatches_and_advance_epsilon() {
                 &observations,
                 actions.clone(),
                 bad_step,
-                &mut Logger::default(),
+                &vec![true; observations.dims()[0]],
+                &mut Logger::default()
             )
             .is_err()
     );
@@ -586,7 +616,44 @@ fn caller_collected_steps_reject_length_mismatches_and_advance_epsilon() {
     let actions = agent.act(&observations).unwrap();
     let step = env.step(actions.clone()).unwrap();
     agent
-        .learn_from_timesteps(&observations, actions, step, &mut Logger::default())
+        .learn_from_timesteps(
+            &observations,
+            actions.clone(),
+            step.clone(),
+            &[true, false],
+            &mut Logger::default(),
+        )
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    agent
+        .learn_from_timesteps(
+            &observations,
+            actions.clone(),
+            step.clone(),
+            &[false, false],
+            &mut Logger::default(),
+        )
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    assert!(
+        agent
+            .learn_from_timesteps(
+                &observations,
+                actions.clone(),
+                step.clone(),
+                &[],
+                &mut Logger::default()
+            )
+            .is_err()
+    );
+    agent
+        .learn_from_timesteps(
+            &observations,
+            actions,
+            step,
+            &vec![true; observations.dims()[0]],
+            &mut Logger::default(),
+        )
         .unwrap();
     assert!(agent.current_epsilon < epsilon_before);
 }

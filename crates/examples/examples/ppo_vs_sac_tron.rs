@@ -120,7 +120,7 @@ impl MultiAgentGym for Tron {
     }
 
     /// Moves both heads simultaneously with absolute directions `[num_envs, 1]`: up, down, left, right.
-    fn step(&mut self, actions: Vec<Tensor<2, Int>>) -> Result<Vec<MultiGymStepInfo>, TronError> {
+    fn step(&mut self, actions: Vec<Tensor<2, Int>>) -> Result<Vec<MultiAgentStepInfo>, TronError> {
         if actions.len() != 2 || actions.iter().any(|a| a.dims() != [self.num_envs(), 1]) {
             return Err(TronError::InvalidActions);
         }
@@ -183,16 +183,19 @@ impl MultiAgentGym for Tron {
             .zip(terminals)
             .enumerate()
             .map(
-                |(agent, (rewards, terminal_observations))| MultiGymStepInfo {
-                    observations: self.observations(agent),
-                    rewards: Tensor::from_data(
-                        TensorData::new(rewards, [self.num_envs(), 1]),
-                        &self.device,
-                    ),
-                    infos: vec![(); self.num_envs()],
-                    dones: dones.clone(),
-                    truncateds: vec![false; self.num_envs()],
-                    terminal_observations,
+                |(agent, (rewards, terminal_observations))| MultiAgentStepInfo {
+                    active: vec![true; self.num_envs()],
+                    step: MultiGymStepInfo {
+                        observations: self.observations(agent),
+                        rewards: Tensor::from_data(
+                            TensorData::new(rewards, [self.num_envs(), 1]),
+                            &self.device,
+                        ),
+                        infos: vec![(); self.num_envs()],
+                        dones: dones.clone(),
+                        truncateds: vec![false; self.num_envs()],
+                        terminal_observations,
+                    },
                 },
             )
             .collect())
@@ -295,10 +298,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into_iter();
         let ppo_step = steps.next().unwrap();
         let sac_step = steps.next().unwrap();
-        let rewards = ppo_step.rewards.to_data().try_to_vec::<f32>()?;
+        let rewards = ppo_step.step.rewards.to_data().try_to_vec::<f32>()?;
         for (slot, length) in lengths.iter_mut().enumerate() {
             *length += 1;
-            if ppo_step.dones[slot] || ppo_step.truncateds[slot] {
+            if ppo_step.step.dones[slot] || ppo_step.step.truncateds[slot] {
                 episodes += 1;
                 ppo_wins += usize::from(rewards[slot] > 0.0);
                 sac_wins += usize::from(rewards[slot] < 0.0);
@@ -318,9 +321,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        let next = vec![ppo_step.observations.clone(), sac_step.observations.clone()];
-        ppo.learn_from_timesteps(&obs[0], ppo_t, ppo_step)?;
-        sac.learn_from_timesteps(&obs[1], sac_t, sac_step)?;
+        let next = vec![
+            ppo_step.step.observations.clone(),
+            sac_step.step.observations.clone(),
+        ];
+        ppo.learn_from_timesteps(&obs[0], ppo_t, ppo_step.step, &ppo_step.active)?;
+        sac.learn_from_timesteps(&obs[1], sac_t, sac_step.step, &sac_step.active)?;
         obs = next;
     }
     println!("Training elapsed: {:.2?}", started.elapsed());
@@ -342,7 +348,14 @@ mod tests {
 
     fn step(env: &mut Tron, actions: [i64; 2]) -> Vec<MultiGymStepInfo> {
         let actions = actions.map(|a| Tensor::from_data([[a]], &env.device));
-        env.step(actions.into()).unwrap()
+        env.step(actions.into())
+            .unwrap()
+            .into_iter()
+            .map(|info| {
+                assert_eq!(info.active, vec![true; env.num_envs()]);
+                info.step
+            })
+            .collect()
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub(super) struct DeterministicBatch<const O: usize, const A: usize, K: Autodiff
 /// Native observations [num_envs, ...observation_shape] and Float actions [num_envs, ...action_shape].
 /// Rewards and Bool termination flags have shape [num_envs, 1]; truncations have one flag per environment.
 pub(super) struct DeterministicReplayInsert<const O: usize, const A: usize, K: Autodiff> {
+    pub active: Option<Vec<bool>>,
     pub(super) observations: Tensor<O, K>,
     pub(super) next_observations: Tensor<O, K>,
     pub(super) actions: Tensor<A>,
@@ -278,6 +279,7 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
             transitions.observations,
             transitions.next_observations,
             &transitions.truncateds,
+            transitions.active.as_deref(),
         )?;
         self.actions
             .write(start, transitions.actions.to_device(&device).cast(dtype))?;
@@ -320,6 +322,7 @@ mod tests {
     /// Creates U64 observations [2, 1] and Float actions, rewards, and Bool flags [2, 1].
     fn integer_transitions(device: &Device) -> DeterministicReplayInsert<2, 2, Int> {
         DeterministicReplayInsert {
+            active: None,
             observations: Tensor::from_data([[u64::MAX - 1], [u64::MAX - 2]], (device, DType::U64)),
             next_observations: Tensor::from_data([[7u64], [8]], (device, DType::U64)),
             actions: Tensor::from_data([[0.25f32], [-0.5]], device),
@@ -339,6 +342,35 @@ mod tests {
             .device(device.clone())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn inactive_rows_are_never_sampled_across_ring_overwrites() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let mut replay = DeterministicReplay::new(integer_storage(&device), 1);
+        for _ in 0..8 {
+            let mut transitions = integer_transitions(&device);
+            transitions.active = Some(vec![true, false]);
+            replay.insert(transitions).unwrap();
+            for _ in 0..20 {
+                let batch = replay.sample().unwrap();
+                assert_eq!(
+                    batch.observations.to_data().try_to_vec::<u64>().unwrap(),
+                    vec![u64::MAX - 1]
+                );
+                assert_eq!(
+                    batch.rewards.to_data().try_to_vec::<f64>().unwrap(),
+                    vec![1.0]
+                );
+            }
+        }
+        for _ in 0..2 {
+            let mut transitions = integer_transitions(&device);
+            transitions.active = Some(vec![false, false]);
+            replay.insert(transitions).unwrap();
+        }
+        assert!(!replay.can_sample());
     }
 
     #[test]
@@ -422,6 +454,7 @@ mod tests {
                 .insert(
                     start,
                     DeterministicReplayInsert {
+                        active: None,
                         observations: Tensor::from_data(
                             [[[true, true]], [[false, false]]],
                             &device,
@@ -474,6 +507,7 @@ mod tests {
             .insert(
                 0,
                 DeterministicReplayInsert {
+                    active: None,
                     observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     actions: Tensor::ones([2, 1], &device).require_grad(),

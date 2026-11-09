@@ -1210,7 +1210,7 @@ where
 
         let step = env.step(actions.clone()).map_err(SACError::GymError)?;
         self.validate_timestep(observations, &actions, &step)?;
-        let stored = self.store_timestep(observations, actions, step, episodes)?;
+        let stored = self.store_timestep(observations, actions, step, None, episodes)?;
         *observations = stored.next_observations;
         Ok(stored.log_entry)
     }
@@ -1298,6 +1298,7 @@ where
         observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A, AS::Kind>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        active: Option<&[bool]>,
         episodes: &mut SACEpisodeTracker,
     ) -> Result<SACStoredTimestep<I, O, OS::Kind>, SACError<PE, GE, SE, CE>>
     where
@@ -1365,6 +1366,7 @@ where
             .ok_or(ReplayStorageError::EnvironmentCountNotSet)
             .map_err(SACReplayError::from)?
             .insert(SACReplayInsert {
+                active: active.map(<[bool]>::to_vec),
                 observations: observations.clone(),
                 next_observations: transition_next_observations,
                 actions,
@@ -1384,25 +1386,32 @@ where
 
         let mut completed_episodes = Vec::new();
         if let Some(reward_values) = reward_values {
+            let mut active_offset = 0;
             for (index, reward) in reward_values.into_iter().enumerate() {
+                if active.is_some_and(|active| !active[index]) {
+                    continue;
+                }
+                active_offset += 1;
                 if let Some(entry) = episodes.record(
                     index,
                     reward,
                     dones[index],
                     truncateds[index],
-                    first_timestep + index + 1,
+                    first_timestep + active_offset,
                 ) {
                     completed_episodes.push(entry);
                 }
             }
         }
 
-        self.schedule_progress.advance_steps(count);
+        let active_count = active.map_or(count, |active| active.iter().filter(|&&a| a).count());
+        self.schedule_progress.advance_steps(active_count);
+        let (collection_rewards, infos) = super::active_collection(rewards.detach(), infos, active);
 
         Ok(SACStoredTimestep {
             next_observations,
             log_entry: SACCollectionLogEntry {
-                collection_rewards: rewards.detach(),
+                collection_rewards,
                 infos,
                 collection_timestep: self.schedule_progress.elapsed_steps(),
                 completed_episodes,
@@ -1535,7 +1544,19 @@ where
         observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A, AS::Kind>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        active: &[bool],
     ) -> Result<(), Self::Error> {
+        if active.len() != observations.dims()[0] {
+            return Err(
+                SACReplayError::Storage(ReplayStorageError::BatchLengthMismatch {
+                    field: "active flags",
+                    expected: observations.dims()[0],
+                    actual: active.len(),
+                })
+                .into(),
+            );
+        }
+        let active = active.contains(&false).then_some(active);
         self.validate_replay_environment_count(observations.dims()[0])?;
         let count = self.validate_timestep(observations, &actions, &step)?;
         let mut episodes = match self.timestep_episodes.take() {
@@ -1543,10 +1564,14 @@ where
             _ => SACEpisodeTracker::new(count),
         };
         let result = (|| {
-            let collection = self.store_timestep(observations, actions, step, &mut episodes)?;
-            let collected_timesteps = collection.log_entry.collection_rewards.dims()[0];
+            let collection =
+                self.store_timestep(observations, actions, step, active, &mut episodes)?;
+            let collected_timesteps =
+                active.map_or(count, |active| active.iter().filter(|&&a| a).count());
             self.train_on_collected_transitions(collected_timesteps)?;
-            if let Some(logger) = &mut self.logger {
+            if let Some(logger) = &mut self.logger
+                && collected_timesteps > 0
+            {
                 logger.log_collection(&collection.log_entry);
             }
             Ok(())

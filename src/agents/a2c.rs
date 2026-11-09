@@ -397,12 +397,14 @@ where
         observations: &OS::Batch,
         training_actions: Self::TrainingActions,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        active: &[bool],
     ) -> Result<(), Self::Error> {
         self.inner
             .learn_from_timesteps(
                 observations,
                 training_actions.with_error(PPOError::SpaceError),
                 step,
+                active,
             )
             .map_err(A2CError::from)
     }
@@ -631,7 +633,12 @@ mod tests {
             A2CError::SpaceError,
         );
         assert!(matches!(
-            agent.learn_from_timesteps(&observations, bad_actions, bad_step),
+            agent.learn_from_timesteps(
+                &observations,
+                bad_actions,
+                bad_step,
+                &vec![true; observations.dims()[0]]
+            ),
             Err(A2CError::BatchLengthMismatch {
                 field: "training actions",
                 expected: 2,
@@ -644,7 +651,12 @@ mod tests {
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         let next_observations = step.observations.clone();
         agent
-            .learn_from_timesteps(&observations, actions, step)
+            .learn_from_timesteps(
+                &observations,
+                actions,
+                step,
+                &vec![true; observations.dims()[0]],
+            )
             .unwrap();
 
         let mut single_env = VectorizedGymWrapper::from(FixedEnv::new(device.clone()));
@@ -656,7 +668,12 @@ mod tests {
             .step(single_actions.to_environment_actions().unwrap())
             .unwrap();
         assert!(matches!(
-            agent.learn_from_timesteps(&single_observations, single_actions, single_step),
+            agent.learn_from_timesteps(
+                &single_observations,
+                single_actions,
+                single_step,
+                &vec![true; single_observations.dims()[0]]
+            ),
             Err(A2CError::BatchLengthMismatch {
                 field: "environment count",
                 expected: 2,
@@ -667,7 +684,12 @@ mod tests {
         let actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         agent
-            .learn_from_timesteps(&next_observations, actions, step)
+            .learn_from_timesteps(
+                &next_observations,
+                actions,
+                step,
+                &vec![true; next_observations.dims()[0]],
+            )
             .unwrap();
     }
 
@@ -735,7 +757,12 @@ mod tests {
                 .unwrap();
             let next_observations = step.observations.clone();
             caller_agent
-                .learn_from_timesteps(&observations, actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    actions,
+                    step,
+                    &vec![true; observations.dims()[0]],
+                )
                 .unwrap();
             observations = next_observations;
         }

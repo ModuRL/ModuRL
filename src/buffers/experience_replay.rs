@@ -161,6 +161,8 @@ pub(crate) struct AlignedObservationReplay<const R: usize, K: Autodiff = Float> 
     frontier: usize,
     frontier_is_invalid: bool,
     inserted: usize,
+    valid_indices: Vec<usize>,
+    valid_positions: Vec<Option<usize>>,
 }
 
 impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
@@ -184,6 +186,7 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
             assert!(R >= 2, "replay observations require capacity and item axes");
         }
         shape[0] = validate_replay_alignment(shape[0], environment_count)?;
+        let capacity = shape[0] - environment_count;
         let mut options = options.into();
         options.device = options.device.without_autodiff();
         Ok(Self {
@@ -193,6 +196,8 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
             frontier: 0,
             frontier_is_invalid: false,
             inserted: 0,
+            valid_indices: Vec::new(),
+            valid_positions: vec![None; capacity],
         })
     }
 
@@ -212,6 +217,7 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
     /// Validates and stores `states` and `next_states` shaped `[environment_count, ...item_shape]` of rank `R`.
     /// Both tensors must match storage shape, kind, and dtype; they are transferred to the storage device.
     /// Start must be a multiple of `environment_count` below capacity; `truncateds` has one flag per environment.
+    /// Optional active flags exclude padding from sampling while keeping whole observation batches aligned.
     /// Removes autodiff associations. Later state batches overwrite shared next-state rows.
     pub(crate) fn insert(
         &mut self,
@@ -219,6 +225,7 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         states: Tensor<R, K>,
         next_states: Tensor<R, K>,
         truncateds: &[bool],
+        active: Option<&[bool]>,
     ) -> Result<usize, ReplayStorageError> {
         let capacity = self.shape()[0];
         let count = states.dims()[0];
@@ -248,6 +255,15 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
             });
         }
         self.validate_environment_count(count)?;
+        if let Some(active) = active
+            && active.len() != count
+        {
+            return Err(ReplayStorageError::BatchLengthMismatch {
+                field: "active flags",
+                expected: count,
+                actual: active.len(),
+            });
+        }
         let device = self.observations.device();
         let states = states.to_device(&device).without_autodiff();
         let next_states = next_states.to_device(&device).without_autodiff();
@@ -288,20 +304,48 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         self.frontier_is_invalid |= self.inserted >= capacity;
         self.inserted = self.inserted.saturating_add(count);
         self.frontier = (start + count) % capacity;
+        for offset in 0..count {
+            self.set_valid(start + offset, active.is_none_or(|active| active[offset]));
+        }
+        if self.frontier_is_invalid {
+            for offset in 0..count {
+                self.set_valid(self.frontier + offset, false);
+            }
+        }
         Ok(count)
     }
 
-    pub(crate) fn sampleable_len(&self, len: usize) -> usize {
-        let capacity = self.shape()[0];
-        if len == capacity && self.frontier_is_invalid {
-            len - self.environment_count
-        } else {
-            len
+    fn set_valid(&mut self, row: usize, valid: bool) {
+        match (self.valid_positions[row], valid) {
+            (None, true) => {
+                self.valid_positions[row] = Some(self.valid_indices.len());
+                self.valid_indices.push(row);
+            }
+            (Some(position), false) => {
+                self.valid_indices.swap_remove(position);
+                if let Some(&moved) = self.valid_indices.get(position) {
+                    self.valid_positions[moved] = Some(position);
+                }
+                self.valid_positions[row] = None;
+            }
+            _ => {}
         }
+    }
+
+    pub(crate) fn sampleable_len(&self, _len: usize) -> usize {
+        self.valid_indices.len()
     }
 
     pub(crate) fn sample_index(&self, index: usize, len: usize) -> usize {
         let capacity = self.shape()[0];
+        let sampleable = if len == capacity && self.frontier_is_invalid {
+            len - self.environment_count
+        } else {
+            len
+        };
+        if self.valid_indices.len() != sampleable {
+            return self.valid_indices[index];
+        }
         if len == capacity && self.frontier_is_invalid {
             (self.frontier + self.environment_count + index) % capacity
         } else {
@@ -532,16 +576,20 @@ mod tests {
             (&device, DType::U8),
         );
         replay
-            .insert(0, batch(1), terminals, &[true, false, true])
+            .insert(0, batch(1), terminals, &[true, false, true], None)
             .unwrap();
-        replay.insert(3, batch(2), batch(3), &[false; 3]).unwrap();
+        replay
+            .insert(3, batch(2), batch(3), &[false; 3], None)
+            .unwrap();
         let (_, next) = replay.gather(&[2, 0, 2, 1]).unwrap();
         assert_eq!(next.dtype(), DType::U8);
         assert_eq!(
             next.clone().into_data().try_to_vec::<u8>().unwrap(),
             vec![28, 29, 30, 31, 20, 21, 22, 23, 28, 29, 30, 31, 2, 2, 2, 2]
         );
-        replay.insert(0, batch(4), batch(5), &[false; 3]).unwrap();
+        replay
+            .insert(0, batch(4), batch(5), &[false; 3], None)
+            .unwrap();
         let (_, overwritten) = replay.gather(&[0, 2]).unwrap();
         assert_eq!(
             overwritten.into_data().try_to_vec::<u8>().unwrap(),
@@ -576,6 +624,72 @@ mod tests {
     }
 
     #[test]
+    fn sparse_valid_rows_follow_frontier_and_recover_after_overwrites() {
+        let device = Device::flex();
+        let mut replay = AlignedObservationReplay::<2>::new([8, 1], 2, &device).unwrap();
+        let mut valid = [false; 8];
+        let states = Tensor::zeros([2, 1], &device);
+        assert!(matches!(
+            replay.insert(0, states.clone(), states, &[false; 2], Some(&[true])),
+            Err(ReplayStorageError::BatchLengthMismatch { .. })
+        ));
+        assert_eq!(replay.sampleable_len(0), 0);
+        for batch in 0..12 {
+            let start = (batch * 2) % 8;
+            let active = match batch % 3 {
+                0 => [true, false],
+                1 => [false, false],
+                _ => [true, true],
+            };
+            let states = Tensor::full([2, 1], batch as f32, &device);
+            replay
+                .insert(
+                    start,
+                    states.clone(),
+                    states + 1.0,
+                    &[false; 2],
+                    Some(&active),
+                )
+                .unwrap();
+            let len = ((batch + 1) * 2).min(8);
+            let frontier = (start + 2) % 8;
+            valid[start..start + 2].copy_from_slice(&active);
+            if batch >= 4 {
+                valid[frontier..frontier + 2].fill(false);
+            }
+            assert_eq!(
+                replay.sampleable_len(len),
+                valid.iter().filter(|&&v| v).count()
+            );
+            for index in 0..replay.sampleable_len(len) {
+                let row = replay.sample_index(index, len);
+                assert!(valid[row]);
+                if batch >= 4 {
+                    assert!(!(frontier..frontier + 2).contains(&row));
+                }
+            }
+        }
+        for start in [0, 2, 4, 6] {
+            let states = Tensor::zeros([2, 1], &device);
+            replay
+                .insert(
+                    start,
+                    states.clone(),
+                    states,
+                    &[false; 2],
+                    Some(&[false; 2]),
+                )
+                .unwrap();
+        }
+        assert_eq!(replay.sampleable_len(8), 0);
+        let states = Tensor::zeros([2, 1], &device);
+        replay
+            .insert(0, states.clone(), states, &[false; 2], None)
+            .unwrap();
+        assert_eq!(replay.sampleable_len(8), 2);
+    }
+
+    #[test]
     fn boolean_observations_preserve_terminal_overrides() {
         let device = Device::flex();
         let mut replay = AlignedObservationReplay::<2, Bool>::new([2, 2], 1, &device).unwrap();
@@ -585,6 +699,7 @@ mod tests {
                 Tensor::from_data([[false, false]], &device),
                 Tensor::from_data([[false, false]], &device),
                 &[true],
+                None,
             )
             .unwrap();
         replay
@@ -593,6 +708,7 @@ mod tests {
                 Tensor::from_data([[true, true]], &device),
                 Tensor::from_data([[true, true]], &device),
                 &[false],
+                None,
             )
             .unwrap();
         let (states, next) = replay.gather(&[0, 0, 1]).unwrap();
@@ -620,7 +736,7 @@ mod tests {
         );
         let mut replay = AlignedObservationReplay::<2>::new([2, 2], 1, &device).unwrap();
         replay
-            .insert(0, input.clone(), input.clone() * 2.0, &[true])
+            .insert(0, input.clone(), input.clone() * 2.0, &[true], None)
             .unwrap();
         let (states, next) = replay.gather(&[0]).unwrap();
         assert!(!states.is_autodiff());
@@ -762,15 +878,15 @@ mod tests {
                     let before = gather_all(&replay);
                     let (states, next) = (batch(&observations, DType::F32), batch(&next_states, DType::F32));
                     let error = match invalid {
-                        0 => replay.insert(position, states, Tensor::zeros([n, 2], &device), &truncateds),
+                        0 => replay.insert(position, states, Tensor::zeros([n, 2], &device), &truncateds, None),
                         1 => replay.insert(
                             position,
                             batch(&observations, DType::F64),
                             batch(&next_states, DType::F64),
                             &truncateds,
-                        ),
-                        2 => replay.insert(position, states, next, &vec![false; n + 1]),
-                        _ => replay.insert(position, Tensor::zeros([n + 1, 1], &device), Tensor::zeros([n + 1, 1], &device), &vec![false; n + 1]),
+                         None,),
+                        2 => replay.insert(position, states, next, &vec![false; n + 1], None),
+                        _ => replay.insert(position, Tensor::zeros([n + 1, 1], &device), Tensor::zeros([n + 1, 1], &device), &vec![false; n + 1], None),
                     }
                     .unwrap_err();
                     let expected = ["ShapeMismatch", "DTypeMismatch", "BatchLengthMismatch", "EnvironmentCountMismatch"];
@@ -779,7 +895,7 @@ mod tests {
                 }
 
                 replay
-                    .insert(position, batch(&observations, DType::F32), batch(&next_states, DType::F32), &truncateds)
+                    .insert(position, batch(&observations, DType::F32), batch(&next_states, DType::F32), &truncateds, None)
                     .unwrap();
                 for (env, end) in ends.into_iter().enumerate() {
                     let next = (end != EpisodeEnd::Terminate).then_some(next_states[env]);

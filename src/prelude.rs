@@ -61,7 +61,7 @@ pub use crate::models::{
     probabilistic_model::ProbabilisticPolicy, probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
-pub use crate::multi_agent::MultiAgentGym;
+pub use crate::multi_agent::{MultiAgentGym, MultiAgentStepInfo};
 pub use crate::objectives::{bellman_targets, clipped_value_loss};
 pub use crate::parameter_schedule::{
     ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,

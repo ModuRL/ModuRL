@@ -210,9 +210,10 @@ where
         observations: &Tensor<R, S::Kind>,
         actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
+        active: &[bool],
     ) -> Result<(), Self::Error> {
         self.inner
-            .learn_from_timesteps(observations, actions, step, &mut self.logging_info)
+            .learn_from_timesteps(observations, actions, step, active, &mut self.logging_info)
     }
 }
 
@@ -293,7 +294,12 @@ mod tests {
             let actions = agent.act_for_training(&observations, &mut ()).unwrap();
             let step = env.step(actions.clone()).unwrap();
             agent
-                .learn_from_timesteps(&observations, actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    actions,
+                    step,
+                    &vec![true; observations.dims()[0]],
+                )
                 .unwrap();
             assert_eq!(agent.inner.schedule_progress.elapsed_steps(), 4);
             drop(agent);

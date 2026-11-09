@@ -76,6 +76,7 @@ fn replay_error(error: ExperienceReplayError<SACReplayError>) -> SACReplayError 
 }
 
 pub(super) struct SACReplayInsert<const O: usize, const A: usize, K: Autodiff, L: Autodiff> {
+    pub active: Option<Vec<bool>>,
     pub observations: Tensor<O, K>,
     pub next_observations: Tensor<O, K>,
     pub actions: Tensor<A, L>,
@@ -234,6 +235,7 @@ where
             transitions.observations,
             transitions.next_observations,
             &transitions.truncateds,
+            transitions.active.as_deref(),
         )?;
         self.actions.write(
             start,
@@ -302,6 +304,7 @@ mod tests {
     /// Creates I64 observations/actions `[2, 1]` and scalar statistics `[2, 1]` with one truncated transition.
     fn integer_transitions(device: &Device, dtype: DType) -> SACReplayInsert<2, 2, Int, Int> {
         SACReplayInsert {
+            active: None,
             observations: Tensor::from_data([[1i64], [2]], (device, dtype)),
             next_observations: Tensor::from_data([[10i64], [20]], (device, dtype)),
             actions: Tensor::from_data([[0i64], [1]], device),
@@ -311,6 +314,51 @@ mod tests {
             entropy_change_weights: Tensor::zeros([2, 1], device),
             truncateds: vec![true, false],
         }
+    }
+
+    #[test]
+    fn inactive_rows_are_never_sampled_across_ring_overwrites() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex();
+        let storage = SACReplayStorage::<2, 2, Int, Int>::builder()
+            .observation_shape([4, 1])
+            .action_shape([4, 1])
+            .observation_dtype(DType::I64)
+            .action_dtype(DType::I32)
+            .environment_count(2)
+            .dtype(DType::F32)
+            .device(device.clone())
+            .build()
+            .unwrap();
+        let mut replay = SACReplay::new(storage, 1);
+        for _ in 0..8 {
+            let mut transitions = integer_transitions(&device, DType::I64);
+            transitions.active = Some(vec![true, false]);
+            transitions.rewards = Tensor::from_data([[1.0], [999.0]], &device);
+            replay.insert(transitions).unwrap();
+            for _ in 0..20 {
+                let batch = replay.sample().unwrap();
+                assert_eq!(
+                    batch
+                        .observations
+                        .to_data()
+                        .iter::<i64>()
+                        .collect::<Vec<_>>(),
+                    vec![1]
+                );
+                assert_eq!(
+                    batch.rewards.to_data().try_to_vec::<f32>().unwrap(),
+                    vec![1.0]
+                );
+            }
+        }
+        let mut transitions = integer_transitions(&device, DType::I64);
+        transitions.active = Some(vec![false, false]);
+        replay.insert(transitions).unwrap();
+        let mut transitions = integer_transitions(&device, DType::I64);
+        transitions.active = Some(vec![false, false]);
+        replay.insert(transitions).unwrap();
+        assert!(!replay.can_sample());
     }
 
     #[test]
@@ -446,6 +494,7 @@ mod tests {
                 .insert(
                     start,
                     SACReplayInsert {
+                        active: None,
                         observations: Tensor::from_data([[true], [false]], &device),
                         next_observations: Tensor::from_data([[false], [true]], &device),
                         actions: Tensor::zeros([2, 1], &device),
@@ -492,6 +541,7 @@ mod tests {
             .build()
             .unwrap();
         let mut transitions = SACReplayInsert {
+            active: None,
             observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
             next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
             actions: Tensor::zeros([2, 1], &device),
@@ -523,6 +573,7 @@ mod tests {
             .insert(
                 0,
                 SACReplayInsert {
+                    active: None,
                     observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     actions: Tensor::zeros([2, 1], &device),

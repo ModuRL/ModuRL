@@ -1664,7 +1664,12 @@ mod schedule_tests {
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         let next_observations = step.observations.clone();
         agent
-            .learn_from_timesteps(&observations, actions, step)
+            .learn_from_timesteps(
+                &observations,
+                actions,
+                step,
+                &vec![true; observations.dims()[0]],
+            )
             .unwrap();
 
         agent.reset_current_observations();
@@ -1672,7 +1677,12 @@ mod schedule_tests {
         let actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         agent
-            .learn_from_timesteps(&next_observations, actions, step)
+            .learn_from_timesteps(
+                &next_observations,
+                actions,
+                step,
+                &vec![true; next_observations.dims()[0]],
+            )
             .unwrap();
 
         assert_eq!(logger.0, [(1.0, 1)]);
@@ -1853,7 +1863,12 @@ mod schedule_tests {
                 .unwrap();
             let next_observations = step.observations.clone();
             caller_agent
-                .learn_from_timesteps(&observations, training_actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    training_actions,
+                    step,
+                    &vec![true; observations.dims()[0]],
+                )
                 .unwrap();
             observations = next_observations;
         }
@@ -1939,7 +1954,12 @@ mod schedule_tests {
                 .step(training_actions.to_environment_actions().unwrap())
                 .unwrap();
             let next_observations = step.observations.clone();
-            let result = agent.learn_from_timesteps(&observations, training_actions, step);
+            let result = agent.learn_from_timesteps(
+                &observations,
+                training_actions,
+                step,
+                &vec![true; observations.dims()[0]],
+            );
             if step_index == 1 {
                 assert!(result.is_err());
             } else {
@@ -1998,12 +2018,111 @@ mod schedule_tests {
                 .unwrap();
             let next_observations = step.observations.clone();
             agent
-                .learn_from_timesteps(&observations, training_actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    training_actions,
+                    step,
+                    &vec![true; observations.dims()[0]],
+                )
                 .unwrap();
             observations = next_observations;
         }
 
         assert_eq!(*time_steps.lock().unwrap(), vec![2, 2]);
+    }
+
+    #[test]
+    fn padding_does_not_change_updates_or_episode_statistics() {
+        struct Parameters(Vec<f32>);
+        impl ModuleVisitor for Parameters {
+            /// Visits parameters with their native tensor shape.
+            fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
+                self.0
+                    .extend(param.val().to_data().try_to_vec::<f32>().unwrap());
+            }
+        }
+        #[derive(Default)]
+        struct Logger {
+            rewards: Vec<f32>,
+            episodes: Vec<(f32, usize)>,
+        }
+        impl PPOLogger for Logger {
+            fn log(&mut self, entry: &PPOLogEntry) {
+                assert!(entry.actor_loss.to_data().try_to_vec::<f32>().unwrap()[0].is_finite());
+                self.rewards
+                    .extend(entry.rewards.to_data().try_to_vec::<f32>().unwrap());
+            }
+            fn log_collection(&mut self, entry: &PPOCollectionLogEntry) {
+                assert_eq!(entry.collection_rewards.dims()[0], 1);
+                self.episodes.extend(
+                    entry
+                        .completed_episodes
+                        .iter()
+                        .map(|e| (e.episode_return, e.episode_length)),
+                );
+            }
+        }
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut results = Vec::new();
+        for padding in [0.0, 1e6] {
+            device.seed(153);
+            let mut logger = Logger::default();
+            let networks = SeparatePPONetwork::builder()
+                .actor_network(ProbabilisticPolicyModel::new(
+                    mlp(4, 2, &device),
+                    CategoricalDistribution,
+                ))
+                .critic_network(mlp(4, 1, &device))
+                .actor_optimizer(SgdConfig::new().init())
+                .critic_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(1e-3)
+                .critic_learning_rate(1e-3)
+                .build()
+                .unwrap();
+            let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+                .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+                .action_space(Discrete::new(2).unwrap())
+                .network_info(networks)
+                .batch_size(4)
+                .mini_batch_size(1)
+                .num_epochs(1)
+                .training_horizon(8)
+                .logging_info(&mut logger)
+                .build()
+                .unwrap();
+            for time in 0..4 {
+                let observations = Tensor::from_data([[0.1, 0.2, 0.3, 0.4], [padding; 4]], &device);
+                let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+                let active = if time < 2 {
+                    [true, false]
+                } else {
+                    [false, false]
+                };
+                let step = MultiGymStepInfo {
+                    observations: observations.clone(),
+                    rewards: Tensor::from_data([[1.0], [padding]], &device),
+                    infos: vec![(); 2],
+                    dones: vec![time == 1, false],
+                    truncateds: vec![false; 2],
+                    terminal_observations: vec![None; 2],
+                };
+                agent
+                    .learn_from_timesteps(&observations, actions, step, &active)
+                    .unwrap();
+            }
+            assert_eq!(agent.schedule_progress.elapsed_steps(), 8);
+            assert!(agent.rollout_buffer.is_empty());
+            let mut parameters = Parameters(Vec::new());
+            agent.network().visit(&mut parameters);
+            drop(agent);
+            results.push((parameters.0, logger.rewards, logger.episodes));
+        }
+        assert_eq!(results[0].0, results[1].0);
+        for (_, rewards, episodes) in results {
+            assert_eq!(rewards, vec![1.0, 1.0]);
+            assert_eq!(episodes, vec![(2.0, 2)]);
+        }
     }
 
     #[test]
@@ -2046,8 +2165,29 @@ mod schedule_tests {
             .step(training_actions.to_environment_actions().unwrap())
             .unwrap();
         let next_observations = step.observations.clone();
+        assert!(matches!(
+            agent.learn_from_timesteps(
+                &observations,
+                training_actions.clone(),
+                step.clone(),
+                &[true]
+            ),
+            Err(PPOError::BatchLengthMismatch {
+                field: "active flags",
+                expected: 2,
+                actual: 1
+            })
+        ));
+        assert!(agent.rollout_buffer.is_empty());
+        assert_eq!(agent.schedule_progress.elapsed_steps(), 0);
+        assert_eq!(agent.episode_tracker.environment_count(), 0);
         agent
-            .learn_from_timesteps(&observations, training_actions, step)
+            .learn_from_timesteps(
+                &observations,
+                training_actions,
+                step,
+                &vec![true; observations.dims()[0]],
+            )
             .unwrap();
 
         let mut single_env = VectorizedGymWrapper::from(TwoStepTestGym::new(device.clone(), false));
@@ -2059,7 +2199,12 @@ mod schedule_tests {
             .step(single_actions.to_environment_actions().unwrap())
             .unwrap();
         assert!(matches!(
-            agent.learn_from_timesteps(&single_observations, single_actions, single_step),
+            agent.learn_from_timesteps(
+                &single_observations,
+                single_actions,
+                single_step,
+                &vec![true; single_observations.dims()[0]]
+            ),
             Err(PPOError::BatchLengthMismatch {
                 field: "environment count",
                 expected: 2,
@@ -2072,7 +2217,12 @@ mod schedule_tests {
             .step(training_actions.to_environment_actions().unwrap())
             .unwrap();
         agent
-            .learn_from_timesteps(&next_observations, training_actions, step)
+            .learn_from_timesteps(
+                &next_observations,
+                training_actions,
+                step,
+                &vec![true; next_observations.dims()[0]],
+            )
             .unwrap();
     }
 

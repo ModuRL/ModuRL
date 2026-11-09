@@ -237,6 +237,7 @@ struct QLearningBatch<const R: usize, K: Autodiff> {
 }
 
 struct QLearningInsert<const R: usize, K: Autodiff> {
+    active: Option<Vec<bool>>,
     observations: Tensor<R, K>,
     next_observations: Tensor<R, K>,
     actions: Tensor<2, Int>,
@@ -337,6 +338,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             transitions.observations,
             transitions.next_observations,
             &transitions.truncateds,
+            transitions.active.as_deref(),
         )?;
         if let Some(observations) = new_observations {
             self.observations = Some(observations);
@@ -388,6 +390,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
 }
 
 struct QCollectedTransitions<'a, const R: usize, K: Autodiff> {
+    active: Option<&'a [bool]>,
     observations: &'a Tensor<R, K>,
     next_observations: &'a Tensor<R, K>,
     actions: &'a Tensor<2, Int>,
@@ -694,6 +697,7 @@ where
             &self.replay_storage_config.storage_device(),
         );
         self.experience_replay.add(QLearningInsert {
+            active: transitions.active.map(<[bool]>::to_vec),
             observations: transitions.observations.clone(),
             next_observations: transitions.next_observations.clone(),
             actions: transitions.actions.clone(),
@@ -702,10 +706,16 @@ where
             truncateds: transitions.truncateds.to_vec(),
         })?;
         let mut completed_episodes = Vec::new();
+        let mut active_offset = 0;
         for (environment_index, reward) in reward_values.into_iter().enumerate() {
-            let collection_timestep = transitions
-                .first_timestep
-                .saturating_add(environment_index + 1);
+            if transitions
+                .active
+                .is_some_and(|active| !active[environment_index])
+            {
+                continue;
+            }
+            active_offset += 1;
+            let collection_timestep = transitions.first_timestep.saturating_add(active_offset);
             if let Some(entry) = episodes.record(
                 environment_index,
                 reward,
@@ -757,18 +767,22 @@ where
         observations: &Tensor<R, S::Kind>,
         actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
+        active: Option<&[bool]>,
         episodes: &mut QEpisodeTracker,
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>
     where
         Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
-        let count = step.dones.len();
+        let count = active.map_or(step.dones.len(), |active| {
+            active.iter().filter(|&&a| a).count()
+        });
         let first_timestep = self.schedule_progress.elapsed_steps();
         let transition_next_observations = step.transition_next_observations();
         let collection_rewards = step.rewards.clone();
         let completed_episodes = self.store_vectorized_transitions(
             QCollectedTransitions {
+                active,
                 observations,
                 next_observations: &transition_next_observations,
                 actions: &actions,
@@ -779,15 +793,17 @@ where
             },
             episodes,
         )?;
+        let (collection_rewards, infos) =
+            super::active_collection(collection_rewards, step.infos, active);
         let entry = QCollectionLogEntry {
             collection_rewards,
-            infos: step.infos,
+            infos,
             epsilon: self.current_epsilon,
             collection_timestep: first_timestep.saturating_add(count),
             completed_episodes,
         };
         let update_result = self.run_scheduled_updates(first_timestep, count, logger);
-        if update_result.is_ok() {
+        if update_result.is_ok() && count > 0 {
             logger.log_collection(&entry);
         }
         self.schedule_progress.advance_steps(count);
@@ -869,6 +885,7 @@ where
                 &observations_before,
                 actions,
                 step_info,
+                None,
                 &mut episodes,
                 logger,
             )?;
@@ -882,11 +899,21 @@ where
         observations: &Tensor<R, S::Kind>,
         actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
+        active: &[bool],
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>
     where
         Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
+        if active.len() != observations.dims()[0] {
+            return Err(ReplayStorageError::BatchLengthMismatch {
+                field: "active flags",
+                expected: observations.dims()[0],
+                actual: active.len(),
+            }
+            .into());
+        }
+        let active = active.contains(&false).then_some(active);
         let count = self.validate_timestep(observations, &actions, &step)?;
         self.experience_replay
             .storage_mut()
@@ -895,7 +922,8 @@ where
             Some(episodes) if episodes.returns.len() == count => episodes,
             _ => QEpisodeTracker::new(count),
         };
-        let result = self.collect_timestep(observations, actions, step, &mut episodes, logger);
+        let result =
+            self.collect_timestep(observations, actions, step, active, &mut episodes, logger);
         self.timestep_episodes = Some(episodes);
         result
     }

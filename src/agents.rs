@@ -3,7 +3,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     spaces::{ActionSpace, ObservationSpace},
 };
-use burn::tensor::{Tensor, kind::Basic};
+use burn::tensor::{DType, Int, Tensor, TensorData, kind::Basic};
 
 pub mod a2c;
 pub mod action_value_critic;
@@ -15,6 +15,38 @@ mod replay_device_strategy;
 pub mod sac;
 
 pub(crate) use replay_device_strategy::ReplayStorageConfig;
+
+/// Selects rewards `[active_count, 1]` and metadata for collections with active rows.
+fn active_collection<I>(
+    rewards: Tensor<2>,
+    infos: Vec<I>,
+    active: Option<&[bool]>,
+) -> (Tensor<2>, Vec<I>) {
+    let Some(active) = active else {
+        return (rewards, infos);
+    };
+    if !active.contains(&true) {
+        return (rewards, infos);
+    }
+    let rows: Vec<i64> = active
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &a)| a.then_some(i as i64))
+        .collect();
+    let count = rows.len();
+    let rows = Tensor::<1, Int>::from_data(
+        TensorData::new(rows, [count]),
+        (&rewards.device(), DType::I64),
+    );
+    (
+        rewards.select(0, rows),
+        infos
+            .into_iter()
+            .zip(active)
+            .filter_map(|(info, &a)| a.then_some(info))
+            .collect(),
+    )
+}
 
 /// Training actions selected by [`Agent::act_for_training`] and converted for the environment on demand.
 pub trait ToEnvironmentActions {
@@ -87,11 +119,15 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     /// Stores one caller-collected step from observations shaped `[num_envs, ...observation_shape]`.
     /// `actions` must come from `act_for_training` on those observations; steps must be consecutive for the same environments.
     /// Schedules need the builder's `training_horizon` because this method has no total timestep count.
+    /// `active` must contain one flag per batch row; a different length returns an error.
+    /// A death transition is active with `done = true`; later rows are inactive until reset.
+    /// Inactive observations, actions, and rewards are padding and do not affect learning or episode statistics.
     fn learn_from_timesteps(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
         training_actions: Self::TrainingActions,
         step: MultiGymStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>,
+        active: &[bool],
     ) -> Result<(), Self::Error>;
 }
 
@@ -293,6 +329,7 @@ mod tests {
             _observations: &Tensor<2>,
             _training_actions: Tensor<2, Int>,
             _step: MultiGymStepInfo<(), Tensor<1>>,
+            _active: &[bool],
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -370,6 +407,7 @@ mod tests {
             _observations: &Tensor<2>,
             _training_actions: Tensor<2, Int>,
             _step: MultiGymStepInfo<(), Tensor<1>>,
+            _active: &[bool],
         ) -> Result<(), Self::Error> {
             Ok(())
         }
