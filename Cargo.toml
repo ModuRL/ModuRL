@@ -50,6 +50,7 @@ burn = { version = "=0.22.0", default-features = false, features = [
     "ndarray",
     "optim",
 ] }
+proptest = "1.11.0"
 
 [features]
 default = []
