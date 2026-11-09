@@ -2032,6 +2032,62 @@ mod schedule_tests {
     }
 
     #[test]
+    fn sparse_rollout_forms_full_active_minibatches() {
+        #[derive(Default)]
+        struct Logger(Vec<usize>);
+        impl PPOLogger for Logger {
+            fn log(&mut self, entry: &PPOLogEntry) {
+                self.0.push(entry.rewards.dims()[0]);
+            }
+        }
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        device.seed(153);
+        let mut logger = Logger::default();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(8)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .normalize_advantage(true)
+            .ent_coef(0.0)
+            .training_horizon(8)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([2, 4], &device);
+        for _ in 0..8 {
+            let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+            let step = MultiGymStepInfo {
+                observations: observations.clone(),
+                rewards: Tensor::ones([2, 1], &device),
+                infos: vec![(); 2],
+                dones: vec![false; 2],
+                truncateds: vec![false; 2],
+                terminal_observations: vec![None; 2],
+            };
+            agent
+                .learn_from_timesteps(&observations, actions, step, &[true, false])
+                .unwrap();
+        }
+        assert_eq!(logger.0, vec![2; 4]);
+    }
+
+    #[test]
     fn sparse_rollout_waits_for_batch_size_active_rows() {
         let progress = sparse_rollout_progress(false);
         assert_eq!(&progress[..4], &[(1, 0), (2, 0), (3, 0), (4, 0)]);

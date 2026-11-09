@@ -695,39 +695,25 @@ where
                 logging_info.epoch = epoch;
             }
 
-            let mut indices: Vec<i64> = (0..total_samples as i64).collect();
-            shuffle_with_device_rng(&mut indices, &device)?;
-            let indices_tensor = if all_active {
-                Some(Tensor::<1, Int>::from_data(
-                    TensorData::new(indices.clone(), [total_samples]),
-                    (&device, DType::I64),
-                ))
+            let mut indices: Vec<i64> = if all_active {
+                (0..total_samples as i64).collect()
             } else {
-                None
+                self.rollout_buffer
+                    .iter()
+                    .flat_map(|experience| &experience.active)
+                    .enumerate()
+                    .filter_map(|(index, &active)| active.then_some(index as i64))
+                    .collect()
             };
-            for start in (0..total_samples).step_by(self.mini_batch_size) {
-                let end = (start + self.mini_batch_size).min(total_samples);
-                let batch_indices = if let Some(indices_tensor) = &indices_tensor {
-                    indices_tensor.clone().slice_dim(0, start..end)
-                } else {
-                    let active_indices: Vec<_> = indices[start..end]
-                        .iter()
-                        .copied()
-                        .filter(|&index| {
-                            let index = index as usize;
-                            let count = self.rollout_buffer[0].active.len();
-                            self.rollout_buffer[index / count].active[index % count]
-                        })
-                        .collect();
-                    if active_indices.is_empty() {
-                        continue;
-                    }
-                    let count = active_indices.len();
-                    Tensor::<1, Int>::from_data(
-                        TensorData::new(active_indices, [count]),
-                        (&device, DType::I64),
-                    )
-                };
+            shuffle_with_device_rng(&mut indices, &device)?;
+            let sample_count = indices.len();
+            let indices_tensor = Tensor::<1, Int>::from_data(
+                TensorData::new(indices.clone(), [sample_count]),
+                (&device, DType::I64),
+            );
+            for start in (0..sample_count).step_by(self.mini_batch_size) {
+                let end = (start + self.mini_batch_size).min(sample_count);
+                let batch_indices = indices_tensor.clone().slice_dim(0, start..end);
 
                 let batch_observations = all_observations.clone().select(0, batch_indices.clone());
                 let batch_actions = all_actions.clone().select(0, batch_indices.clone());
