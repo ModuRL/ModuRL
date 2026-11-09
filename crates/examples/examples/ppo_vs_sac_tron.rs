@@ -22,7 +22,6 @@ enum TronError {
 struct Slot {
     occupied: [bool; CELLS],
     heads: [[i32; 2]; 2],
-    length: usize,
 }
 
 impl Default for Slot {
@@ -30,7 +29,6 @@ impl Default for Slot {
         Self {
             occupied: [false; CELLS],
             heads: [[0; 2]; 2],
-            length: 0,
         }
     }
 }
@@ -142,7 +140,6 @@ impl MultiAgentGym for Tron {
         let mut rewards = [Vec::new(), Vec::new()];
         let mut terminals = [Vec::new(), Vec::new()];
         let mut dones = Vec::new();
-        let mut truncateds = Vec::new();
         for index in 0..self.num_envs() {
             let slot = &mut self.slots[index];
             let next = std::array::from_fn::<_, 2, _>(|agent| {
@@ -152,9 +149,7 @@ impl MultiAgentGym for Tron {
             let crash = next.map(|head| {
                 Self::cell(head).is_none_or(|cell| slot.occupied[cell]) || next[0] == next[1]
             });
-            slot.length += 1;
             let done = crash[0] || crash[1];
-            let truncated = !done && slot.length >= 64;
             let reward = if crash[0] == crash[1] {
                 0.0
             } else if crash[0] {
@@ -171,16 +166,15 @@ impl MultiAgentGym for Tron {
                 }
             }
             dones.push(done);
-            truncateds.push(truncated);
             for (agent, terminal) in terminals.iter_mut().enumerate() {
-                terminal.push((done || truncated).then(|| {
+                terminal.push(done.then(|| {
                     Tensor::from_data(
                         TensorData::new(self.observation(index, agent), [192]),
                         &self.device,
                     )
                 }));
             }
-            if done || truncated {
+            if done {
                 self.reset_slot(index);
             }
         }
@@ -197,7 +191,7 @@ impl MultiAgentGym for Tron {
                     ),
                     infos: vec![(); self.num_envs()],
                     dones: dones.clone(),
-                    truncateds: truncateds.clone(),
+                    truncateds: vec![false; self.num_envs()],
                     terminal_observations,
                 },
             )
@@ -389,7 +383,6 @@ mod tests {
                 vec![1.0]
             );
             assert!(steps.iter().all(|s| s.terminal_observations[0].is_some()));
-            assert_eq!(env.slots[0].length, 0);
         }
     }
 
@@ -404,23 +397,6 @@ mod tests {
                     vec![0.0]
                 );
             }
-        }
-    }
-
-    #[test]
-    fn truncation_at_64() {
-        let mut env = env([[1, 1], [6, 6]]);
-        env.slots[0].length = 62;
-        let steps = step(&mut env, [3, 2]);
-        assert_eq!(steps[0].truncateds, vec![false]);
-        for step in step(&mut env, [3, 2]) {
-            assert_eq!(step.dones, vec![false]);
-            assert_eq!(step.truncateds, vec![true]);
-            assert!(step.terminal_observations[0].is_some());
-            assert_eq!(
-                step.rewards.to_data().try_to_vec::<f32>().unwrap(),
-                vec![0.0]
-            );
         }
     }
 
@@ -445,7 +421,6 @@ mod tests {
             );
         }
         assert_eq!(env.observation(0, 0), before);
-        assert_eq!(env.slots[0].length, 0);
     }
 
     #[test]
