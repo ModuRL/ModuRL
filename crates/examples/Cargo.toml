@@ -6,6 +6,10 @@ publish = false
 autoexamples = false
 
 [[example]]
+name = "ppo_vs_sac_tron"
+path = "examples/ppo_vs_sac_tron.rs"
+
+[[example]]
 name = "dqn_cartpole"
 path = "examples/dqn_cartpole.rs"
 
@@ -67,6 +71,7 @@ path = "examples/ppo_atari_play.rs"
 required-features = ["atari-environment", "rendering"]
 
 [dependencies]
+rand = "0.10.3"
 burn = { version = "=0.22.0", default-features = false, features = ["std", "optim", "flex", "autodiff"] }
 modurl = { version = "0.1.0", path = "../.." }
 modurl_ale = { version = "0.1.0", path = "../modurl_ale", optional = true }
