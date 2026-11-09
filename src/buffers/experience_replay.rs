@@ -186,7 +186,6 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
             assert!(R >= 2, "replay observations require capacity and item axes");
         }
         shape[0] = validate_replay_alignment(shape[0], environment_count)?;
-        let capacity = shape[0] - environment_count;
         let mut options = options.into();
         options.device = options.device.without_autodiff();
         Ok(Self {
@@ -197,7 +196,7 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
             frontier_is_invalid: false,
             inserted: 0,
             valid_indices: Vec::new(),
-            valid_positions: vec![None; capacity],
+            valid_positions: Vec::new(),
         })
     }
 
@@ -304,12 +303,24 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         self.frontier_is_invalid |= self.inserted >= capacity;
         self.inserted = self.inserted.saturating_add(count);
         self.frontier = (start + count) % capacity;
-        for offset in 0..count {
-            self.set_valid(start + offset, active.is_none_or(|active| active[offset]));
+        if self.valid_positions.is_empty() && active.is_some_and(|active| active.contains(&false)) {
+            self.valid_positions = vec![None; capacity];
+            for row in 0..self.inserted.min(capacity) {
+                if !self.frontier_is_invalid
+                    || !(self.frontier..self.frontier + count).contains(&row)
+                {
+                    self.set_valid(row, true);
+                }
+            }
         }
-        if self.frontier_is_invalid {
+        if !self.valid_positions.is_empty() {
             for offset in 0..count {
-                self.set_valid(self.frontier + offset, false);
+                self.set_valid(start + offset, active.is_none_or(|active| active[offset]));
+            }
+            if self.frontier_is_invalid {
+                for offset in 0..count {
+                    self.set_valid(self.frontier + offset, false);
+                }
             }
         }
         Ok(count)
@@ -332,8 +343,14 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         }
     }
 
-    pub(crate) fn sampleable_len(&self, _len: usize) -> usize {
-        self.valid_indices.len()
+    pub(crate) fn sampleable_len(&self, len: usize) -> usize {
+        if !self.valid_positions.is_empty() {
+            self.valid_indices.len()
+        } else if len == self.shape()[0] && self.frontier_is_invalid {
+            len - self.environment_count
+        } else {
+            len
+        }
     }
 
     pub(crate) fn sample_index(&self, index: usize, len: usize) -> usize {
@@ -343,7 +360,7 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         } else {
             len
         };
-        if self.valid_indices.len() != sampleable {
+        if !self.valid_positions.is_empty() && self.valid_indices.len() != sampleable {
             return self.valid_indices[index];
         }
         if len == capacity && self.frontier_is_invalid {
@@ -621,6 +638,76 @@ mod tests {
             gathered.into_data().try_to_vec::<u64>().unwrap(),
             vec![values[1], values[0]]
         );
+    }
+
+    #[test]
+    fn validity_tracking_stays_unallocated_for_all_active_rows() {
+        let device = Device::flex();
+        let mut replay = AlignedObservationReplay::<2>::new([8, 1], 2, &device).unwrap();
+        for batch in 0usize..16 {
+            let start = (batch * 2) % 8;
+            let states = Tensor::full([2, 1], batch as f32, &device);
+            let active = batch.is_multiple_of(2).then_some(&[true; 2][..]);
+            replay
+                .insert(start, states.clone(), states + 1.0, &[false; 2], active)
+                .unwrap();
+            let len = ((batch + 1) * 2).min(8);
+            let expected_count = if batch >= 4 { 6 } else { len };
+            assert_eq!(replay.sampleable_len(len), expected_count);
+            for index in 0..expected_count {
+                let expected_row = if batch >= 4 {
+                    (start + 4 + index) % 8
+                } else {
+                    index
+                };
+                assert_eq!(replay.sample_index(index, len), expected_row);
+            }
+        }
+        assert!(replay.valid_positions.is_empty());
+        assert_eq!(replay.valid_positions.capacity(), 0);
+        assert!(replay.valid_indices.is_empty());
+        assert_eq!(replay.valid_indices.capacity(), 0);
+    }
+
+    #[test]
+    fn validity_tracking_switches_to_sparse_after_wraparound() {
+        let device = Device::flex();
+        let mut replay = AlignedObservationReplay::<2>::new([8, 1], 2, &device).unwrap();
+        let mut valid = [false; 8];
+        for batch in 0..20 {
+            let start = (batch * 2) % 8;
+            let active = if batch < 9 {
+                [true; 2]
+            } else {
+                match batch % 3 {
+                    0 => [false, true],
+                    1 => [false; 2],
+                    _ => [true, false],
+                }
+            };
+            let states = Tensor::full([2, 1], batch as f32, &device);
+            replay
+                .insert(
+                    start,
+                    states.clone(),
+                    states + 1.0,
+                    &[false; 2],
+                    Some(&active),
+                )
+                .unwrap();
+            valid[start..start + 2].copy_from_slice(&active);
+            if batch >= 4 {
+                let frontier = (start + 2) % 8;
+                valid[frontier..frontier + 2].fill(false);
+            }
+            let len = ((batch + 1) * 2).min(8);
+            let mut rows = (0..replay.sampleable_len(len))
+                .map(|index| replay.sample_index(index, len))
+                .collect::<Vec<_>>();
+            rows.sort_unstable();
+            let expected = (0..8).filter(|&row| valid[row]).collect::<Vec<_>>();
+            assert_eq!(rows, expected);
+        }
     }
 
     #[test]
