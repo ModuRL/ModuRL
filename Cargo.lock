@@ -2755,6 +2755,7 @@ dependencies = [
  "modurl_gym",
  "modurl_logger",
  "modurl_mujoco",
+ "rand 0.10.3",
  "thiserror 2.0.21",
 ]
 

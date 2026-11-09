@@ -4,6 +4,7 @@ pub mod buffers;
 pub mod distributions;
 pub mod gym;
 pub mod models;
+pub mod multi_agent;
 pub mod objectives;
 pub mod parameter_schedule;
 pub mod prelude;
