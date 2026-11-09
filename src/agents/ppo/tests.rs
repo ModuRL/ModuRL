@@ -2112,7 +2112,6 @@ mod schedule_tests {
                 agent.schedule_progress.elapsed_steps(),
             ));
         }
-        drop(agent);
         let collected = if final_row_active { 5 } else { 4 };
         assert_eq!(logger.collections, vec![1, 2, 3, collected]);
         assert!(!logger.updates.is_empty());
@@ -2205,7 +2204,6 @@ mod schedule_tests {
             assert_eq!(agent.rollout_active_rows, 0);
             let mut parameters = Parameters(Vec::new());
             agent.network().visit(&mut parameters);
-            drop(agent);
             results.push((parameters.0, logger.rewards, logger.episodes));
         }
         assert_eq!(results[0].0, results[1].0);
