@@ -2032,6 +2032,64 @@ mod schedule_tests {
     }
 
     #[test]
+    fn sparse_episode_timestamp_counts_only_active_rows() {
+        #[derive(Default)]
+        struct Logger(Vec<(usize, usize)>);
+        impl PPOLogger for Logger {
+            fn log(&mut self, _entry: &PPOLogEntry) {}
+
+            fn log_collection(&mut self, entry: &PPOCollectionLogEntry) {
+                self.0.extend(
+                    entry
+                        .completed_episodes
+                        .iter()
+                        .map(|episode| (episode.environment_index, episode.collection_timestep)),
+                );
+            }
+        }
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut logger = Logger::default();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(4)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .training_horizon(8)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([2, 4], &device);
+        let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+        let step = MultiGymStepInfo {
+            observations: observations.clone(),
+            rewards: Tensor::ones([2, 1], &device),
+            infos: vec![(); 2],
+            dones: vec![false, true],
+            truncateds: vec![false; 2],
+            terminal_observations: vec![None; 2],
+        };
+        agent
+            .learn_from_timesteps(&observations, actions, step, &[false, true])
+            .unwrap();
+        assert_eq!(logger.0, vec![(1, 1)]);
+    }
+
+    #[test]
     fn sparse_rollout_forms_full_active_minibatches() {
         #[derive(Default)]
         struct Logger(Vec<usize>);

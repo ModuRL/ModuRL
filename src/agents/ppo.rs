@@ -1206,12 +1206,13 @@ where
             .try_to_vec::<f32>()
             .map_err(TensorReadError::from)?;
         let mut completed_episodes = Vec::new();
+        let mut active_offset = 0;
         for (environment_index, reward) in rewards_vec.iter().copied().enumerate() {
             if !active[environment_index] {
                 continue;
             }
-            let collection_timestep =
-                first_collection_timestep.saturating_add(environment_index + 1);
+            active_offset += 1;
+            let collection_timestep = first_collection_timestep.saturating_add(active_offset);
             if let Some(entry) = self.episode_tracker.record(
                 environment_index,
                 reward,
