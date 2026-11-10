@@ -39,6 +39,8 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
+    #[error("invalid slots: {0}")]
+    Slots(#[from] crate::buffers::experience_replay::ReplayStorageError),
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
     CriticRewardDTypeMismatch { critic: DType, reward: DType },
     #[error(
@@ -78,6 +80,7 @@ impl<AE: std::fmt::Debug, GE: std::fmt::Debug, SE: std::fmt::Debug> From<PPOErro
 {
     fn from(error: PPOError<AE, GE, SE>) -> Self {
         match error {
+            PPOError::Slots(error) => Self::Slots(error),
             PPOError::CriticRewardDTypeMismatch { critic, reward } => {
                 Self::CriticRewardDTypeMismatch { critic, reward }
             }
@@ -397,14 +400,14 @@ where
         observations: &OS::Batch,
         training_actions: Self::TrainingActions,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
-        active: &[bool],
+        slots: &[usize],
     ) -> Result<(), Self::Error> {
         self.inner
             .learn_from_timesteps(
                 observations,
                 training_actions.with_error(PPOError::SpaceError),
                 step,
-                active,
+                slots,
             )
             .map_err(A2CError::from)
     }
@@ -594,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn caller_collected_rollout_rejects_environment_count_changes() {
+    fn caller_collected_rollout_accepts_varying_slot_subsets() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let mut env = VectorizedGymWrapper::new(vec![
@@ -626,37 +629,48 @@ mod tests {
 
         let observations = env.reset().unwrap();
         let actions = agent.act_for_training(&observations, &mut ()).unwrap();
-        let bad_step = env.step(actions.to_environment_actions().unwrap()).unwrap();
+        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
+        assert!(matches!(
+            agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[0]),
+            Err(A2CError::Slots(
+                crate::buffers::experience_replay::ReplayStorageError::BatchLengthMismatch {
+                    field: "slots",
+                    expected: 2,
+                    actual: 1
+                }
+            ))
+        ));
+        assert!(matches!(
+            agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[7, 7]),
+            Err(A2CError::Slots(
+                crate::buffers::experience_replay::ReplayStorageError::DuplicateSlot(7)
+            ))
+        ));
         let bad_actions = PolicySamples::new(
             Tensor::zeros([1, 1], &device),
             env.action_space(),
             A2CError::SpaceError,
         );
         assert!(matches!(
-            agent.learn_from_timesteps(
-                &observations,
-                bad_actions,
-                bad_step,
-                &vec![true; observations.dims()[0]]
-            ),
+            agent.learn_from_timesteps(&observations, bad_actions, step.clone(), &[0, 1]),
             Err(A2CError::BatchLengthMismatch {
                 field: "training actions",
                 expected: 2,
-                actual: 1,
+                actual: 1
             })
         ));
+        crate::agents::test_support::learn_selected_rows(
+            &mut agent,
+            &observations,
+            actions.clone(),
+            step.clone(),
+            &[],
+        )
+        .unwrap();
 
-        let observations = env.reset().unwrap();
-        let actions = agent.act_for_training(&observations, &mut ()).unwrap();
-        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         let next_observations = step.observations.clone();
         agent
-            .learn_from_timesteps(
-                &observations,
-                actions,
-                step,
-                &vec![true; observations.dims()[0]],
-            )
+            .learn_from_timesteps(&observations, actions, step, &[usize::MAX, 7])
             .unwrap();
 
         let mut single_env = VectorizedGymWrapper::from(FixedEnv::new(device.clone()));
@@ -667,29 +681,14 @@ mod tests {
         let single_step = single_env
             .step(single_actions.to_environment_actions().unwrap())
             .unwrap();
-        assert!(matches!(
-            agent.learn_from_timesteps(
-                &single_observations,
-                single_actions,
-                single_step,
-                &vec![true; single_observations.dims()[0]]
-            ),
-            Err(A2CError::BatchLengthMismatch {
-                field: "environment count",
-                expected: 2,
-                actual: 1,
-            })
-        ));
+        agent
+            .learn_from_timesteps(&single_observations, single_actions, single_step, &[7])
+            .unwrap();
 
         let actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         agent
-            .learn_from_timesteps(
-                &next_observations,
-                actions,
-                step,
-                &vec![true; next_observations.dims()[0]],
-            )
+            .learn_from_timesteps(&next_observations, actions, step, &[7, usize::MAX])
             .unwrap();
     }
 
@@ -761,7 +760,7 @@ mod tests {
                     &observations,
                     actions,
                     step,
-                    &vec![true; observations.dims()[0]],
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 )
                 .unwrap();
             observations = next_observations;

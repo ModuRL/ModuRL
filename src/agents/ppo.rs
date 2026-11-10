@@ -8,7 +8,7 @@ mod tests;
 
 use bon::bon;
 use burn::tensor::{
-    DType, Device, IndexingUpdateOp, Int, Tensor, TensorData, TensorReadError,
+    DType, IndexingUpdateOp, Int, Tensor, TensorData, TensorReadError,
     kind::{Autodiff, Basic},
 };
 use std::{marker::PhantomData, sync::Arc};
@@ -24,31 +24,6 @@ use crate::{
     tensor_operations::{clamp_with_boundary_gradients, normalize_tensor},
     tensor_rank::{NextRank, PrevRank},
 };
-
-fn compact_indices(slots: &[usize], row_count: usize, device: &Device) -> Option<Tensor<1, Int>> {
-    if slots.len() == row_count {
-        return None;
-    }
-    Some(Tensor::from_data(
-        TensorData::new(
-            slots.iter().map(|&slot| slot as i64).collect::<Vec<_>>(),
-            [slots.len()],
-        ),
-        (device, DType::I64),
-    ))
-}
-
-/// Selects compact rows from `[batch, ...]` using optional Int indices `[active_rows]`.
-/// Without indices, preserves the input tensor without a selection.
-fn compact_rows<const D: usize, K: Basic>(
-    tensor: Tensor<D, K>,
-    indices: Option<&Tensor<1, Int>>,
-) -> Tensor<D, K> {
-    match indices {
-        Some(indices) => tensor.select(0, indices.clone()),
-        None => tensor,
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PPOConfigurationError {
@@ -83,6 +58,8 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
+    #[error("invalid slots: {0}")]
+    Slots(#[from] crate::buffers::experience_replay::ReplayStorageError),
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
     CriticRewardDTypeMismatch { critic: DType, reward: DType },
     #[error(
@@ -393,6 +370,7 @@ pub struct PPOCollectionLogEntry<I = ()> {
 }
 
 pub struct PPOEpisodeLogEntry {
+    /// Stable slot ID, not the row position within a compact batch.
     pub environment_index: usize,
     pub episode_return: f32,
     pub episode_length: usize,
@@ -403,15 +381,15 @@ pub struct PPOEpisodeLogEntry {
 
 #[derive(Clone)]
 struct PPOEpisodeTracker {
-    returns: Vec<f32>,
-    lengths: Vec<usize>,
+    returns: super::SlotValues<f32>,
+    lengths: super::SlotValues<usize>,
 }
 
 impl PPOEpisodeTracker {
     fn new(environment_count: usize) -> Self {
         Self {
-            returns: vec![0.0; environment_count],
-            lengths: vec![0; environment_count],
+            returns: super::SlotValues::new(environment_count),
+            lengths: super::SlotValues::new(environment_count),
         }
     }
 
@@ -501,8 +479,7 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     action_space: AS,
     network_info: G::Network,
     rollout_buffer: Vec<PPOExperience<G::Observation, G::Action>>,
-    rollout_active_rows: usize,
-    rollout_environment_count: usize,
+    rollout_rows: usize,
     mini_batch_size: usize,
     num_epochs: usize,
     batch_size: usize,
@@ -627,8 +604,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
             observation_space,
             action_space,
             rollout_buffer: Vec::new(),
-            rollout_active_rows: 0,
-            rollout_environment_count: 0,
+            rollout_rows: 0,
             num_epochs,
             batch_size,
             schedule_progress: ScheduleProgress::new(training_horizon),
@@ -736,8 +712,7 @@ where
         }
 
         self.rollout_buffer.clear();
-        self.rollout_active_rows = 0;
-        self.rollout_environment_count = 0;
+        self.rollout_rows = 0;
         Ok(())
     }
 
@@ -758,12 +733,24 @@ where
     ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>> {
         let experiences = &self.rollout_buffer;
         let final_experience = experiences.last().ok_or(ExperienceBatchError::EmptyBatch)?;
-        let environment_count = self.rollout_environment_count;
+        let dense_width = final_experience.slots.len();
+        let all_dense = experiences
+            .iter()
+            .all(|experience| experience.slots.iter().copied().eq(0..dense_width));
+        let mut slots = Vec::new();
+        if !all_dense {
+            slots.extend(
+                experiences
+                    .iter()
+                    .flat_map(|experience| experience.slots.iter().copied()),
+            );
+            slots.sort_unstable();
+            slots.dedup();
+        }
+        let environment_count = if all_dense { dense_width } else { slots.len() };
+        let slot_index = |slot: usize| slots.partition_point(|&known| known < slot);
         let device = final_experience.values.device();
         let dtype = final_experience.values.dtype();
-        let all_active = experiences
-            .iter()
-            .all(|experience| experience.slots.len() == environment_count);
         let (
             values_tensor,
             training_rewards,
@@ -771,7 +758,7 @@ where
             truncateds,
             bootstrapped_observations,
             row_indices,
-        ) = if all_active {
+        ) = if all_dense {
             (
                 experience::stack_tensor_field(experiences, |experience| {
                     experience.values.clone()
@@ -796,7 +783,7 @@ where
             let mut counts = vec![0; environment_count];
             for experience in experiences {
                 for &slot in &experience.slots {
-                    counts[slot] += 1;
+                    counts[slot_index(slot)] += 1;
                 }
             }
             let time = counts
@@ -806,11 +793,12 @@ where
                 .ok_or(ExperienceBatchError::EmptyBatch)?;
             let mut offsets: Vec<_> = counts.iter().map(|&count| time - count).collect();
             let mut latest = vec![None; environment_count];
-            let mut positions = Vec::with_capacity(self.rollout_active_rows);
+            let mut positions = Vec::with_capacity(self.rollout_rows);
             let mut dones = vec![true; time * environment_count];
             let mut truncations = vec![false; time * environment_count];
             for (index, experience) in experiences.iter().enumerate() {
                 for (row, &slot) in experience.slots.iter().enumerate() {
+                    let slot = slot_index(slot);
                     let position = offsets[slot] * environment_count + slot;
                     positions.push(position as i64);
                     dones[position] = experience.next_dones[row];
@@ -820,7 +808,7 @@ where
                 }
             }
             let row_indices = Tensor::<1, Int>::from_data(
-                TensorData::new(positions, [self.rollout_active_rows]),
+                TensorData::new(positions, [self.rollout_rows]),
                 (&device, DType::I64),
             );
             let values =
@@ -1268,7 +1256,7 @@ where
         dones: &[bool],
         truncateds: &[bool],
         first_collection_timestep: usize,
-        active: &[bool],
+        slots: &[usize],
     ) -> Result<(), TensorReadError> {
         let Some(logging_info) = &mut self.logging_info else {
             return Ok(());
@@ -1280,54 +1268,23 @@ where
             .try_to_vec::<f32>()
             .map_err(TensorReadError::from)?;
         let mut completed_episodes = Vec::new();
-        let mut active_offset = 0;
-        for (environment_index, reward) in rewards_vec.iter().copied().enumerate() {
-            if !active[environment_index] {
-                continue;
-            }
-            active_offset += 1;
-            let collection_timestep = first_collection_timestep.saturating_add(active_offset);
+        for (row, reward) in rewards_vec.iter().copied().enumerate() {
+            let collection_timestep = first_collection_timestep.saturating_add(row + 1);
             if let Some(entry) = self.episode_tracker.record(
-                environment_index,
+                slots[row],
                 reward,
-                dones[environment_index],
-                truncateds[environment_index],
+                dones[row],
+                truncateds[row],
                 collection_timestep,
             ) {
                 completed_episodes.push(entry);
             }
         }
-
-        let (collection_rewards, infos) = if active.iter().all(|&active| active) {
-            (rewards.clone(), infos)
-        } else {
-            let indices: Vec<i64> = active
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &a)| a.then_some(i as i64))
-                .collect();
-            if indices.is_empty() {
-                return Ok(());
-            }
-            let count = indices.len();
-            let indices = Tensor::<1, Int>::from_data(
-                TensorData::new(indices, [count]),
-                (&rewards.device(), DType::I64),
-            );
-            (
-                rewards.clone().select(0, indices),
-                infos
-                    .into_iter()
-                    .zip(active)
-                    .filter_map(|(info, &a)| a.then_some(info))
-                    .collect(),
-            )
-        };
+        let collection_rewards = rewards.clone();
         logging_info.logger.log_collection(&PPOCollectionLogEntry {
             collection_rewards,
             infos,
-            collection_timestep: first_collection_timestep
-                .saturating_add(active.iter().filter(|&&active| active).count()),
+            collection_timestep: first_collection_timestep.saturating_add(slots.len()),
             completed_episodes,
         });
         Ok(())
@@ -1381,9 +1338,8 @@ where
         let environment_count = env.num_envs();
         self.validate_environment_count(environment_count)?;
         self.rollout_buffer.clear();
-        self.rollout_active_rows = 0;
+        self.rollout_rows = 0;
         self.prepare_episode_tracker(environment_count);
-        self.rollout_environment_count = 0;
         Ok(observations)
     }
 
@@ -1431,7 +1387,8 @@ where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         let environment_count = env.num_envs();
-        while self.rollout_active_rows < self.batch_size {
+        let slots: Vec<_> = (0..environment_count).collect();
+        while self.rollout_rows < self.batch_size {
             let observations = next_observations.clone();
             let collection_action = self.sample_collection_action(validation, &observations)?;
             let step_info = env
@@ -1447,11 +1404,11 @@ where
                 &observations,
                 collection_action,
                 step_info,
-                &vec![true; environment_count],
+                &slots,
             )?;
         }
 
-        Ok(self.rollout_active_rows)
+        Ok(self.rollout_rows)
     }
 
     fn train_if_rollout_full<const BO: usize, const BL: usize>(
@@ -1461,7 +1418,7 @@ where
         Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
         Tensor<L>: NextRank<Next = Tensor<BL>>,
     {
-        let collected = self.rollout_active_rows;
+        let collected = self.rollout_rows;
         if collected < self.batch_size {
             return Ok(());
         }
@@ -1474,8 +1431,7 @@ where
         })();
         if result.is_err() {
             self.rollout_buffer.clear();
-            self.rollout_active_rows = 0;
-            self.rollout_environment_count = 0;
+            self.rollout_rows = 0;
         }
         result
     }
@@ -1521,7 +1477,7 @@ where
         observations: &Tensor<O, OS::Kind>,
         collection_action: PPOCollectionAction<AS, L>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
-        active: &[bool],
+        slots: &[usize],
     ) -> Result<OS::Batch, PPOError<N::Error, GE, AS::Error>>
     where
         OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
@@ -1531,15 +1487,8 @@ where
         let first_collection_timestep = self
             .schedule_progress
             .elapsed_steps()
-            .saturating_add(self.rollout_active_rows);
-        let slots: Vec<_> = active
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, &active)| active.then_some(slot))
-            .collect();
-        let indices = compact_indices(&slots, active.len(), &observations.device());
-        let training_next_observations =
-            compact_rows(step.transition_next_observations(), indices.as_ref());
+            .saturating_add(self.rollout_rows);
+        let training_next_observations = step.transition_next_observations();
         let MultiGymStepInfo {
             observations: next_observations,
             rewards,
@@ -1554,17 +1503,8 @@ where
             &dones,
             &truncateds,
             first_collection_timestep,
-            active,
+            slots,
         )?;
-        let (dones, truncateds) = if slots.len() == active.len() {
-            (dones, truncateds)
-        } else {
-            (
-                slots.iter().map(|&slot| dones[slot]).collect(),
-                slots.iter().map(|&slot| truncateds[slot]).collect(),
-            )
-        };
-        let rewards = compact_rows(rewards, indices.as_ref());
         let training_rewards = self.bootstrap_truncated_rewards(
             validation,
             rewards.clone().detach(),
@@ -1574,11 +1514,8 @@ where
         )?;
         self.rollout_buffer.push(
             PPOExperience::builder()
-                .slots(slots)
-                .observations(compact_rows(
-                    observations.clone().without_autodiff(),
-                    indices.as_ref(),
-                ))
+                .slots(slots.to_vec())
+                .observations(observations.clone().without_autodiff())
                 .next_observations(training_next_observations.without_autodiff())
                 .actions(collection_action.policy_actions.detach())
                 .rewards(rewards.detach())
@@ -1589,10 +1526,7 @@ where
                 .values(collection_action.values)
                 .build(),
         );
-        self.rollout_active_rows = self
-            .rollout_active_rows
-            .saturating_add(active.iter().filter(|&&active| active).count());
-        self.rollout_environment_count = active.len();
+        self.rollout_rows = self.rollout_rows.saturating_add(slots.len());
         Ok(next_observations)
     }
 
@@ -1711,8 +1645,7 @@ where
         })();
         if result.is_err() {
             self.rollout_buffer.clear();
-            self.rollout_active_rows = 0;
-            self.rollout_environment_count = 0;
+            self.rollout_rows = 0;
         }
         result?;
         self.current_observations = Some(next_observations);
@@ -1726,48 +1659,18 @@ where
         observations: &OS::Batch,
         training_actions: Self::TrainingActions,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
-        active: &[bool],
+        slots: &[usize],
     ) -> Result<(), Self::Error> {
         let environment_count =
             Self::validate_timestep_batch(observations, &training_actions.neurons, &step)?;
-        if active.len() != environment_count {
-            return Err(PPOError::BatchLengthMismatch {
-                field: "active flags",
-                expected: environment_count,
-                actual: active.len(),
-            });
-        }
-        self.validate_environment_count(environment_count)?;
-        if self.rollout_environment_count != 0 {
-            let expected = self.rollout_environment_count;
-            if expected != environment_count {
-                return Err(PPOError::BatchLengthMismatch {
-                    field: "environment count",
-                    expected,
-                    actual: environment_count,
-                });
-            }
-        }
-        self.prepare_episode_tracker(environment_count);
-        let slots: Vec<_> = active
-            .iter()
-            .enumerate()
-            .filter_map(|(slot, &active)| active.then_some(slot))
-            .collect();
+        crate::buffers::experience_replay::validate_slots(environment_count, slots)?;
         if slots.is_empty() {
-            self.rollout_environment_count = environment_count;
             return Ok(());
         }
-        let indices = compact_indices(&slots, environment_count, &observations.device());
         let validation = self.network_info.valid();
         let latent_observations = validation
-            .forward_observations(compact_rows(
-                observations.clone().without_autodiff(),
-                indices.as_ref(),
-            ))
+            .forward_observations(observations.clone().without_autodiff())
             .map_err(PPOError::NetworkError)?;
-        let mut training_actions = training_actions;
-        training_actions.neurons = compact_rows(training_actions.neurons, indices.as_ref());
         let environment_actions = training_actions.to_environment_actions()?;
         let collection_action = self.collection_action(
             &validation,
@@ -1775,7 +1678,7 @@ where
             training_actions.neurons,
             environment_actions,
         )?;
-        self.store_timestep(&validation, observations, collection_action, step, active)?;
+        self.store_timestep(&validation, observations, collection_action, step, slots)?;
         self.train_if_rollout_full()?;
         Ok(())
     }

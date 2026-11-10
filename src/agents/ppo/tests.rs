@@ -1,4 +1,5 @@
 use super::*;
+
 use crate::tensor_rank::TensorBatchTypes;
 use crate::{
     gym::{Gym, ResetInfo, StepInfo},
@@ -16,6 +17,29 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+
+impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> crate::agents::test_support::SelectRows
+    for PolicySamples<AS, E, L, A>
+{
+    fn select_rows(mut self, rows: &[usize]) -> Self {
+        self.neurons = crate::agents::test_support::SelectRows::select_rows(self.neurons, rows);
+        self
+    }
+}
+
+#[test]
+fn episode_tracker_handles_slots_that_disappear_and_reset() {
+    let mut tracker = PPOEpisodeTracker::new(0);
+    assert!(tracker.record(usize::MAX, 2.0, false, false, 1).is_none());
+    assert!(tracker.record(7, 9.0, false, false, 2).is_none());
+    let completed = tracker.record(usize::MAX, 3.0, true, false, 3).unwrap();
+    assert_eq!(completed.environment_index, usize::MAX);
+    assert_eq!(completed.episode_return, 5.0);
+    assert_eq!(completed.episode_length, 2);
+    let reset = tracker.record(usize::MAX, 4.0, false, true, 4).unwrap();
+    assert_eq!(reset.episode_return, 4.0);
+    assert_eq!(reset.episode_length, 1);
+}
 
 pub(super) fn assert_close(actual: f64, expected: f64) {
     assert!(
@@ -1706,7 +1730,7 @@ mod schedule_tests {
                 &observations,
                 actions,
                 step,
-                &vec![true; observations.dims()[0]],
+                &(0..observations.dims()[0]).collect::<Vec<_>>(),
             )
             .unwrap();
 
@@ -1719,7 +1743,7 @@ mod schedule_tests {
                 &next_observations,
                 actions,
                 step,
-                &vec![true; next_observations.dims()[0]],
+                &(0..next_observations.dims()[0]).collect::<Vec<_>>(),
             )
             .unwrap();
 
@@ -1905,7 +1929,7 @@ mod schedule_tests {
                     &observations,
                     training_actions,
                     step,
-                    &vec![true; observations.dims()[0]],
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 )
                 .unwrap();
             observations = next_observations;
@@ -1996,7 +2020,7 @@ mod schedule_tests {
                 &observations,
                 training_actions,
                 step,
-                &vec![true; observations.dims()[0]],
+                &(0..observations.dims()[0]).collect::<Vec<_>>(),
             );
             if step_index == 1 {
                 assert!(result.is_err());
@@ -2060,7 +2084,7 @@ mod schedule_tests {
                     &observations,
                     training_actions,
                     step,
-                    &vec![true; observations.dims()[0]],
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 )
                 .unwrap();
             observations = next_observations;
@@ -2097,8 +2121,7 @@ mod schedule_tests {
         let observations = Tensor::zeros([256, 4], &device);
         for time in 0..4 {
             let actions = agent.act_for_training(&observations, &mut ()).unwrap();
-            let mut active = vec![false; 256];
-            active[255] = time != 2;
+            let slots = if time != 2 { vec![255] } else { vec![] };
             let step = MultiGymStepInfo {
                 observations: observations.clone(),
                 rewards: Tensor::ones([256, 1], &device),
@@ -2107,9 +2130,14 @@ mod schedule_tests {
                 truncateds: vec![false; 256],
                 terminal_observations: vec![None; 256],
             };
-            agent
-                .learn_from_timesteps(&observations, actions, step, &active)
-                .unwrap();
+            crate::agents::test_support::learn_selected_rows(
+                &mut agent,
+                &observations,
+                actions,
+                step,
+                &slots,
+            )
+            .unwrap();
         }
         let stored_rows: usize = agent
             .rollout_buffer
@@ -2117,7 +2145,7 @@ mod schedule_tests {
             .map(|step| step.observations.dims()[0])
             .sum();
         assert_eq!(stored_rows, 3);
-        assert_eq!(agent.rollout_active_rows, 3);
+        assert_eq!(agent.rollout_rows, 3);
         assert_eq!(agent.rollout_buffer.len(), 3);
         for step in &agent.rollout_buffer {
             assert_eq!(step.slots, [255]);
@@ -2197,8 +2225,20 @@ mod schedule_tests {
                     truncateds: vec![false; 3],
                     terminal_observations: vec![None; 3],
                 };
+                let rows = if time == 0 {
+                    vec![1, 0]
+                } else if time < 2 {
+                    vec![0, 1]
+                } else {
+                    vec![1]
+                };
+                let slots: Vec<_> = rows.iter().map(|&row| [42, usize::MAX][row]).collect();
+                let observations =
+                    crate::agents::test_support::SelectRows::select_rows(observations, &rows);
+                let actions = crate::agents::test_support::SelectRows::select_rows(actions, &rows);
+                let step = crate::agents::test_support::select_step(step, &rows);
                 agent
-                    .learn_from_timesteps(&observations, actions, step, &[time < 2, true, false])
+                    .learn_from_timesteps(&observations, actions, step, &slots)
                     .unwrap();
             }
             agent
@@ -2224,7 +2264,13 @@ mod schedule_tests {
                 .collect();
             for (time, step) in agent.rollout_buffer.iter().enumerate() {
                 let prepared = step.prepared.as_ref().unwrap();
-                let slots: Vec<_> = if time < 2 { vec![0, 1] } else { vec![1] };
+                let slots: Vec<_> = if time == 0 {
+                    vec![1, 0]
+                } else if time < 2 {
+                    vec![0, 1]
+                } else {
+                    vec![1]
+                };
                 let expected_advantages: Vec<_> = slots
                     .iter()
                     .map(|&slot| {
@@ -2322,9 +2368,14 @@ mod schedule_tests {
             truncateds: vec![false; 2],
             terminal_observations: vec![None; 2],
         };
-        agent
-            .learn_from_timesteps(&observations, actions, step, &[false, true])
-            .unwrap();
+        crate::agents::test_support::learn_selected_rows(
+            &mut agent,
+            &observations,
+            actions,
+            step,
+            &[1],
+        )
+        .unwrap();
         assert_eq!(logger.0, vec![(1, 1)]);
     }
 
@@ -2377,9 +2428,14 @@ mod schedule_tests {
                 truncateds: vec![false; 2],
                 terminal_observations: vec![None; 2],
             };
-            agent
-                .learn_from_timesteps(&observations, actions, step, &[true, false])
-                .unwrap();
+            crate::agents::test_support::learn_selected_rows(
+                &mut agent,
+                &observations,
+                actions,
+                step,
+                &[0],
+            )
+            .unwrap();
         }
         assert_eq!(logger.0, vec![2; 4]);
     }
@@ -2456,10 +2512,21 @@ mod schedule_tests {
                 truncateds: vec![false; 2],
                 terminal_observations: vec![None; 2],
             };
-            let active = [time > 0 && time < 5, final_row_active && time == 4];
-            agent
-                .learn_from_timesteps(&observations, actions, step, &active)
-                .unwrap();
+            let mut slots = Vec::new();
+            if time > 0 && time < 5 {
+                slots.push(0);
+            }
+            if final_row_active && time == 4 {
+                slots.push(1);
+            }
+            crate::agents::test_support::learn_selected_rows(
+                &mut agent,
+                &observations,
+                actions,
+                step,
+                &slots,
+            )
+            .unwrap();
             progress.push((
                 agent.rollout_buffer.len(),
                 agent.schedule_progress.elapsed_steps(),
@@ -2535,11 +2602,7 @@ mod schedule_tests {
             for time in 0..4 {
                 let observations = Tensor::from_data([[0.1, 0.2, 0.3, 0.4], [padding; 4]], &device);
                 let actions = agent.act_for_training(&observations, &mut ()).unwrap();
-                let active = if time < 2 {
-                    [true, false]
-                } else {
-                    [false, false]
-                };
+                let slots = if time < 2 { vec![0] } else { vec![] };
                 let step = MultiGymStepInfo {
                     observations: observations.clone(),
                     rewards: Tensor::from_data([[1.0], [padding]], &device),
@@ -2548,13 +2611,18 @@ mod schedule_tests {
                     truncateds: vec![false; 2],
                     terminal_observations: vec![None; 2],
                 };
-                agent
-                    .learn_from_timesteps(&observations, actions, step, &active)
-                    .unwrap();
+                crate::agents::test_support::learn_selected_rows(
+                    &mut agent,
+                    &observations,
+                    actions,
+                    step,
+                    &slots,
+                )
+                .unwrap();
             }
             assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
             assert_eq!(agent.rollout_buffer.len(), 0);
-            assert_eq!(agent.rollout_active_rows, 0);
+            assert_eq!(agent.rollout_rows, 0);
             let mut parameters = Parameters(Vec::new());
             agent.network().visit(&mut parameters);
             results.push((parameters.0, logger.rewards, logger.episodes));
@@ -2567,7 +2635,7 @@ mod schedule_tests {
     }
 
     #[test]
-    fn caller_collected_rollout_rejects_environment_count_changes() {
+    fn caller_collected_rollout_accepts_varying_slot_subsets() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = vec![
@@ -2601,34 +2669,39 @@ mod schedule_tests {
             .unwrap();
 
         let observations = env.reset().unwrap();
-        let training_actions = agent.act_for_training(&observations, &mut ()).unwrap();
-        let step = env
-            .step(training_actions.to_environment_actions().unwrap())
-            .unwrap();
-        let next_observations = step.observations.clone();
+        let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         assert!(matches!(
-            agent.learn_from_timesteps(
-                &observations,
-                training_actions.clone(),
-                step.clone(),
-                &[true]
-            ),
-            Err(PPOError::BatchLengthMismatch {
-                field: "active flags",
-                expected: 2,
-                actual: 1
-            })
+            agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[0]),
+            Err(PPOError::Slots(
+                crate::buffers::experience_replay::ReplayStorageError::BatchLengthMismatch {
+                    field: "slots",
+                    expected: 2,
+                    actual: 1
+                }
+            ))
         ));
+        assert!(matches!(
+            agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[7, 7]),
+            Err(PPOError::Slots(
+                crate::buffers::experience_replay::ReplayStorageError::DuplicateSlot(7)
+            ))
+        ));
+
+        crate::agents::test_support::learn_selected_rows(
+            &mut agent,
+            &observations,
+            actions.clone(),
+            step.clone(),
+            &[],
+        )
+        .unwrap();
         assert!(agent.rollout_buffer.is_empty());
         assert_eq!(agent.schedule_progress.elapsed_steps(), 0);
         assert_eq!(agent.episode_tracker.environment_count(), 0);
+        let next_observations = step.observations.clone();
         agent
-            .learn_from_timesteps(
-                &observations,
-                training_actions,
-                step,
-                &vec![true; observations.dims()[0]],
-            )
+            .learn_from_timesteps(&observations, actions, step, &[usize::MAX, 7])
             .unwrap();
 
         let mut single_env = VectorizedGymWrapper::from(TwoStepTestGym::new(device.clone(), false));
@@ -2639,32 +2712,16 @@ mod schedule_tests {
         let single_step = single_env
             .step(single_actions.to_environment_actions().unwrap())
             .unwrap();
-        assert!(matches!(
-            agent.learn_from_timesteps(
-                &single_observations,
-                single_actions,
-                single_step,
-                &vec![true; single_observations.dims()[0]]
-            ),
-            Err(PPOError::BatchLengthMismatch {
-                field: "environment count",
-                expected: 2,
-                actual: 1,
-            })
-        ));
-
-        let training_actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
-        let step = env
-            .step(training_actions.to_environment_actions().unwrap())
-            .unwrap();
         agent
-            .learn_from_timesteps(
-                &next_observations,
-                training_actions,
-                step,
-                &vec![true; next_observations.dims()[0]],
-            )
+            .learn_from_timesteps(&single_observations, single_actions, single_step, &[7])
             .unwrap();
+
+        let actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
+        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
+        agent
+            .learn_from_timesteps(&next_observations, actions, step, &[7, usize::MAX])
+            .unwrap();
+        assert_eq!(agent.schedule_progress.elapsed_steps(), 5);
     }
 
     #[test]

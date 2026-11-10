@@ -226,7 +226,7 @@ pub struct DeterministicActorCriticCollectionLogEntry<I = ()> {
 
 /// Summary of an episode completed during collection.
 pub struct DeterministicActorCriticEpisodeLogEntry {
-    /// Index of the inner vectorized environment that completed the episode.
+    /// Stable slot ID, not the row position within a compact batch.
     pub environment_index: usize,
     /// Sum of rewards over the completed episode.
     pub episode_return: f32,
@@ -241,15 +241,15 @@ pub struct DeterministicActorCriticEpisodeLogEntry {
 }
 
 struct EpisodeTracker {
-    returns: Vec<f32>,
-    lengths: Vec<usize>,
+    returns: super::SlotValues<f32>,
+    lengths: super::SlotValues<usize>,
 }
 
 impl EpisodeTracker {
     fn new(environment_count: usize) -> Self {
         Self {
-            returns: vec![0.0; environment_count],
-            lengths: vec![0; environment_count],
+            returns: super::SlotValues::new(environment_count),
+            lengths: super::SlotValues::new(environment_count),
         }
     }
 
@@ -386,7 +386,7 @@ impl DeterministicActorCriticConfigurationValidator {
 }
 
 struct CollectedTransitions<'a, const O: usize, const A: usize, K: Autodiff> {
-    active: Option<&'a [bool]>,
+    slots: &'a [usize],
     observations: &'a Tensor<O, K>,
     next_observations: &'a Tensor<O, K>,
     actions: &'a Tensor<A>,
@@ -659,9 +659,10 @@ where
     fn validate_observations(
         &self,
         observations: &Tensor<O, OS::Kind>,
+        allow_empty: bool,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
         let count = observations.dims()[0];
-        if count == 0 {
+        if !allow_empty && count == 0 {
             return Err(DeterministicActorCriticError::EmptyBatch);
         }
         let expected =
@@ -737,7 +738,7 @@ where
         &self,
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
-        self.validate_observations(observations)?;
+        self.validate_observations(observations, false)?;
         let latent = self
             .online_actor
             .forward(
@@ -755,7 +756,7 @@ where
         &self,
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
-        self.validate_observations(observations)?;
+        self.validate_observations(observations, false)?;
         let latent = self
             .online_actor
             .forward(
@@ -776,7 +777,7 @@ where
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
         let actions = if self.schedule_progress.elapsed_steps() < self.training_start {
-            self.validate_observations(observations)?;
+            self.validate_observations(observations, false)?;
             self.random_actions(observations.dims()[0])?
         } else {
             self.act(observations)?
@@ -1061,7 +1062,7 @@ where
             .ok_or(ReplayStorageError::EnvironmentCountNotSet)?;
         replay.insert(DeterministicReplayInsert {
             dones: transitions.dones.to_vec(),
-            active: transitions.active.map(<[bool]>::to_vec),
+            slots: transitions.slots.to_vec(),
             observations: transitions.observations.clone(),
             next_observations: transitions.next_observations.clone(),
             actions: transitions.actions.clone(),
@@ -1074,18 +1075,13 @@ where
         })?;
         self.observation_dtype = Some(transitions.observations.dtype());
         let mut completed = Vec::new();
-        let mut active_offset = 0;
         for (index, reward) in reward_values.into_iter().enumerate() {
-            if transitions.active.is_some_and(|active| !active[index]) {
-                continue;
-            }
-            active_offset += 1;
             if let Some(entry) = episodes.record(
-                index,
+                transitions.slots[index],
                 reward,
                 transitions.dones[index],
                 transitions.truncateds[index],
-                transitions.first_timestep + active_offset,
+                transitions.first_timestep + index + 1,
             ) {
                 completed.push(entry);
             }
@@ -1122,8 +1118,8 @@ where
                 .into());
             }
         }
-        self.validate_observations(observations)?;
-        self.validate_observations(&step.observations)?;
+        self.validate_observations(observations, true)?;
+        self.validate_observations(&step.observations, true)?;
         let expected_rewards = [count, 1];
         if step.rewards.dims() != expected_rewards {
             return Err(DeterministicActorCriticError::Shape {
@@ -1170,15 +1166,6 @@ where
         count: usize,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
         validate_replay_alignment(self.replay_capacity, count)?;
-        if let Some(expected) = self.environment_count
-            && expected != count
-        {
-            return Err(ReplayStorageError::EnvironmentCountMismatch {
-                expected,
-                actual: count,
-            }
-            .into());
-        }
         if let Some(replay) = &mut self.replay {
             replay.validate_environment_count(count)?;
         }
@@ -1191,21 +1178,19 @@ where
         observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
-        active: Option<&[bool]>,
+        slots: &[usize],
         episodes: &mut EpisodeTracker,
         logger: &mut dyn DeterministicActorCriticLogger<I, A>,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
     where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
-        let count = active.map_or(step.dones.len(), |active| {
-            active.iter().filter(|&&a| a).count()
-        });
+        let count = slots.len();
         let first_timestep = self.schedule_progress.elapsed_steps();
         let next_observations = step.transition_next_observations();
         let completed_episodes = self.store_transitions(
             CollectedTransitions {
-                active,
+                slots,
                 observations,
                 next_observations: &next_observations,
                 actions: &actions.without_autodiff(),
@@ -1226,8 +1211,8 @@ where
         if count == 0 {
             return Ok(());
         }
-        let (collection_rewards, infos) =
-            super::active_collection(step.rewards.without_autodiff(), step.infos, active);
+        let collection_rewards = step.rewards.without_autodiff();
+        let infos = step.infos;
         logger.log_collection(&DeterministicActorCriticCollectionLogEntry {
             collection_rewards,
             infos,
@@ -1272,7 +1257,7 @@ where
         let mut observations = env
             .reset()
             .map_err(DeterministicActorCriticError::GymError)?;
-        self.validate_observations(&observations)?;
+        self.validate_observations(&observations, false)?;
         if observations.dims()[0] != count {
             return Err(DeterministicActorCriticError::Shape {
                 field: "environment observations",
@@ -1286,6 +1271,7 @@ where
         }
         self.environment_count = Some(count);
         let mut episodes = EpisodeTracker::new(count);
+        let slots: Vec<_> = (0..count).collect();
         let mut elapsed = 0;
         while elapsed < num_timesteps {
             let actions = self.training_actions(&observations)?;
@@ -1300,7 +1286,7 @@ where
                 &observations_before,
                 actions,
                 step,
-                None,
+                &slots,
                 &mut episodes,
                 logger,
             )?;
@@ -1314,31 +1300,25 @@ where
         observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
-        active: &[bool],
+        slots: &[usize],
         logger: &mut dyn DeterministicActorCriticLogger<I, A>,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>
     where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
-        if active.len() != observations.dims()[0] {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "active flags",
-                expected: observations.dims()[0],
-                actual: active.len(),
-            }
-            .into());
-        }
-        let active = active.contains(&false).then_some(active);
+        crate::buffers::experience_replay::validate_slots(observations.dims()[0], slots)?;
         let count = step.dones.len();
-        self.validate_environment_count(count)?;
         let validated_count = self.validate_timestep(observations, &actions, &step)?;
+        if slots.is_empty() {
+            return Ok(());
+        }
         self.environment_count = Some(validated_count);
         let mut episodes = match self.timestep_episodes.take() {
-            Some(episodes) if episodes.returns.len() == count => episodes,
+            Some(episodes) => episodes,
             _ => EpisodeTracker::new(count),
         };
         let result =
-            self.collect_timestep(observations, actions, step, active, &mut episodes, logger);
+            self.collect_timestep(observations, actions, step, slots, &mut episodes, logger);
         self.timestep_episodes = Some(episodes);
         result
     }

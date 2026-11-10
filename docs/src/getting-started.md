@@ -308,3 +308,39 @@ stochastic categorical policy, and a value model. Read [Understand a PPO
 Training Run](./understand-ppo-training.md) to learn what the example's metrics
 show, or [Use Vectorized Environments](./vectorized-environments.md) to work
 directly with batched environments.
+
+## Caller-Owned Multi-Agent Collection
+
+Use `Agent::learn_from_timesteps` when the caller owns collection. Its observation,
+training-action, reward, and termination batches contain only real rows. Pass a
+unique `slots: &[usize]` identifying those rows in the same order; mismatched
+lengths and duplicate IDs return errors. An ordinary `MultiGym` batch uses
+`0..num_envs`.
+
+`MultiAgentGym::reset` returns one `MultiAgentObservations { observations, slots }`
+per agent. Act on those compact observations and pass each agent's actions to
+`step` in its current slot order. Each result contains transition rows in action
+order, plus `next_observations` and `next_slots` for the next action selection:
+
+```rust,ignore
+agent.learn_from_timesteps(
+    &current.observations,
+    training_actions,
+    result.step,
+    &current.slots,
+)?;
+current = MultiAgentObservations {
+    observations: result.next_observations,
+    slots: result.next_slots,
+};
+```
+
+A slot ID identifies a continuous stream, not a batch position. Pass each slot's
+transitions in time order; it may disappear between calls. Its new episode
+starts after a done or truncated row. A death step is the last real row: dead
+agents produce no padding rows. The environment resets a slot when all its
+agents have finished, then includes its reset agents in the next acting rows.
+Set each agent's `training_horizon` for caller-owned scheduling.
+
+The `ppo_vs_sac_tron` example demonstrates independent PPO and SAC learners using
+this API.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents::test_support::SelectRows;
 use crate::sampling::tests::RNG_LOCK;
 use crate::tensor_rank::{PrevRank, TensorBatchTypes};
 use crate::{
@@ -229,6 +230,26 @@ fn float_agent(
 }
 
 #[test]
+fn episode_tracker_handles_arbitrary_slots_and_reset_after_absence() {
+    let mut tracker = QEpisodeTracker::new(0);
+    assert!(tracker.record(usize::MAX, 2.0, false, false, 1).is_none());
+    assert!(tracker.record(7, 9.0, false, false, 2).is_none());
+    let completed = tracker.record(usize::MAX, 3.0, true, false, 3).unwrap();
+    assert_eq!(completed.environment_index, usize::MAX);
+    assert_eq!(completed.episode_return, 5.0);
+    assert_eq!(completed.episode_length, 2);
+    let reset = tracker.record(usize::MAX, 4.0, false, true, 4).unwrap();
+    assert_eq!(reset.episode_return, 4.0);
+    assert_eq!(reset.episode_length, 1);
+    for slot in 0..7 {
+        tracker.record(slot, 1.0, false, false, 5);
+    }
+    let promoted = tracker.record(7, 1.0, true, false, 6).unwrap();
+    assert_eq!(promoted.episode_return, 10.0);
+    assert_eq!(promoted.episode_length, 2);
+}
+
+#[test]
 fn epsilon_greedy_preserves_layout_kind_and_seeded_randomness() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex();
@@ -330,11 +351,29 @@ fn selected_action_q_values_retains_shape_precision_and_gradient_flow() {
     );
 }
 
+fn select_transitions(
+    mut transitions: QLearningInsert<2, Float>,
+    rows: &[usize],
+) -> QLearningInsert<2, Float> {
+    transitions.observations = transitions.observations.select_rows(rows);
+    transitions.next_observations = transitions.next_observations.select_rows(rows);
+    transitions.actions = transitions.actions.select_rows(rows);
+    transitions.rewards = transitions.rewards.select_rows(rows);
+    transitions.next_dones = transitions.next_dones.select_rows(rows);
+    transitions.dones = rows.iter().map(|&row| transitions.dones[row]).collect();
+    transitions.truncateds = rows
+        .iter()
+        .map(|&row| transitions.truncateds[row])
+        .collect();
+    transitions.slots = rows.to_vec();
+    transitions
+}
+
 /// Creates Float replay rows [batch_size, 1] with scalar rewards and Bool flags [batch_size, 1].
 fn replay_insert(values: &[f64], device: &Device) -> QLearningInsert<2, Float> {
     let count = values.len();
     QLearningInsert {
-        active: None,
+        slots: (0..count).collect(),
         observations: Tensor::from_data(
             TensorData::new(values.to_vec(), [count, 1]),
             (device, DType::F64),
@@ -362,8 +401,8 @@ fn inactive_rows_are_never_sampled_across_ring_overwrites() {
     let mut replay = ExperienceReplay::with_storage(storage, 1);
     for _ in 0..8 {
         let mut transitions = replay_insert(&[1.0, 999.0], &device);
-        transitions.active = Some(vec![true, false]);
-        transitions.rewards = Tensor::from_data([[1.0], [999.0]], &device);
+        transitions = select_transitions(transitions, &[0]);
+        transitions.rewards = Tensor::ones([1, 1], &device);
         replay.add(transitions).unwrap();
         for _ in 0..20 {
             let batch = replay.sample().unwrap();
@@ -416,7 +455,7 @@ fn replay_preserves_native_integer_and_boolean_observations() {
         .insert(
             0,
             QLearningInsert {
-                active: None,
+                slots: vec![0, 1],
                 observations: Tensor::from_data(
                     TensorData::new(values.to_vec(), [2, 1]),
                     (&device, DType::U64),
@@ -444,7 +483,7 @@ fn replay_preserves_native_integer_and_boolean_observations() {
         .insert(
             0,
             QLearningInsert {
-                active: None,
+                slots: vec![0, 1],
                 observations: Tensor::from_data([[false], [true]], &device),
                 next_observations: Tensor::from_data([[true], [false]], &device),
                 actions: Tensor::zeros([2, 1], (&device, DType::U32)),
@@ -528,7 +567,7 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
     agent
         .experience_replay
         .add(QLearningInsert {
-            active: None,
+            slots: vec![0, 1],
             observations: observations.clone(),
             next_observations: observations,
             actions: Tensor::ones([2, 1], (&device, DType::U32)),
@@ -610,7 +649,7 @@ fn caller_collected_steps_reject_length_mismatches_and_advance_epsilon() {
                 &observations,
                 actions.clone(),
                 bad_step,
-                &vec![true; observations.dims()[0]],
+                &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 &mut Logger::default()
             )
             .is_err()
@@ -619,22 +658,37 @@ fn caller_collected_steps_reject_length_mismatches_and_advance_epsilon() {
     let observations = env.reset().unwrap();
     let actions = agent.act(&observations).unwrap();
     let step = env.step(actions.clone()).unwrap();
+    for slots in [vec![0], vec![7, 7]] {
+        assert!(
+            agent
+                .learn_from_timesteps(
+                    &observations,
+                    actions.clone(),
+                    step.clone(),
+                    &slots,
+                    &mut Logger::default()
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 0);
+
     agent
         .learn_from_timesteps(
-            &observations,
-            actions.clone(),
-            step.clone(),
-            &[true, false],
+            &crate::agents::test_support::SelectRows::select_rows(observations.clone(), &[0]),
+            crate::agents::test_support::SelectRows::select_rows(actions.clone(), &[0]),
+            crate::agents::test_support::select_step(step.clone(), &[0]),
+            &[usize::MAX],
             &mut Logger::default(),
         )
         .unwrap();
     assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
     agent
         .learn_from_timesteps(
-            &observations,
-            actions.clone(),
-            step.clone(),
-            &[false, false],
+            &crate::agents::test_support::SelectRows::select_rows(observations.clone(), &[]),
+            crate::agents::test_support::SelectRows::select_rows(actions.clone(), &[]),
+            crate::agents::test_support::select_step(step.clone(), &[]),
+            &[],
             &mut Logger::default(),
         )
         .unwrap();
@@ -655,7 +709,7 @@ fn caller_collected_steps_reject_length_mismatches_and_advance_epsilon() {
             &observations,
             actions,
             step,
-            &vec![true; observations.dims()[0]],
+            &(0..observations.dims()[0]).collect::<Vec<_>>(),
             &mut Logger::default(),
         )
         .unwrap();
@@ -745,15 +799,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
         steps: 0,
         truncate: false,
     });
-    assert!(matches!(
-        agent.learn(&mut incompatible, 1, &mut logger),
-        Err(QAgentError::ReplayStorageError(
-            QLearningReplayError::Storage(ReplayStorageError::EnvironmentCountMismatch {
-                expected: 2,
-                actual: 1
-            })
-        ))
-    ));
+    agent.learn(&mut incompatible, 0, &mut logger).unwrap();
     assert_eq!(agent.experience_replay.len(), len);
 }
 
@@ -771,7 +817,7 @@ fn learn_accepts_capacity_not_divisible_by_environment_count() {
 }
 
 #[test]
-fn learn_reuses_matching_count_and_rejects_a_new_count_before_reset() {
+fn learn_reuses_replay_when_the_number_of_slots_grows() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex();
     let calls = Arc::new(GymCallCounts::default());
@@ -786,17 +832,9 @@ fn learn_reuses_matching_count_and_rejects_a_new_count_before_reset() {
 
     let changed_calls = Arc::new(GymCallCounts::default());
     let mut changed_env = counting_envs(4, &device, changed_calls.clone());
-    assert!(matches!(
-        agent.learn(&mut changed_env, 1, &mut logger),
-        Err(QAgentError::ReplayStorageError(
-            QLearningReplayError::Storage(ReplayStorageError::EnvironmentCountMismatch {
-                expected: 2,
-                actual: 4
-            })
-        ))
-    ));
-    assert_eq!(changed_calls.resets.load(Ordering::Relaxed), 0);
-    assert_eq!(changed_calls.steps.load(Ordering::Relaxed), 0);
+    agent.learn(&mut changed_env, 1, &mut logger).unwrap();
+    assert_eq!(changed_calls.resets.load(Ordering::Relaxed), 4);
+    assert_eq!(changed_calls.steps.load(Ordering::Relaxed), 4);
 }
 
 #[test]

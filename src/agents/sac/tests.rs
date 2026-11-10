@@ -203,6 +203,26 @@ impl SACLogger for RecordingLogger {
 }
 
 #[test]
+fn episode_tracker_handles_arbitrary_slots_and_reset_after_absence() {
+    let mut tracker = SACEpisodeTracker::new(0);
+    assert!(tracker.record(usize::MAX, 2.0, false, false, 1).is_none());
+    assert!(tracker.record(7, 9.0, false, false, 2).is_none());
+    let completed = tracker.record(usize::MAX, 3.0, true, false, 3).unwrap();
+    assert_eq!(completed.environment_index, usize::MAX);
+    assert_eq!(completed.episode_return, 5.0);
+    assert_eq!(completed.episode_length, 2);
+    let reset = tracker.record(usize::MAX, 4.0, false, true, 4).unwrap();
+    assert_eq!(reset.episode_return, 4.0);
+    assert_eq!(reset.episode_length, 1);
+    for slot in 0..7 {
+        tracker.record(slot, 1.0, false, false, 5);
+    }
+    let promoted = tracker.record(7, 1.0, true, false, 6).unwrap();
+    assert_eq!(promoted.episode_return, 10.0);
+    assert_eq!(promoted.episode_length, 2);
+}
+
+#[test]
 fn alpha_and_entropy_drift_losses_preserve_reference_gradients() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
@@ -564,15 +584,7 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
         terminated: false,
         terminal_width: 1,
     });
-    assert!(matches!(
-        agent.learn(&mut different_environment, 1),
-        Err(SACError::ReplayStorageError(SACReplayError::Storage(
-            ReplayStorageError::EnvironmentCountMismatch {
-                expected: 2,
-                actual: 1,
-            }
-        )))
-    ));
+    agent.learn(&mut different_environment, 0).unwrap();
     assert_eq!(agent.optimization_steps, 3);
     assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
     assert_eq!(logger.updates, [2, 3, 4]);
@@ -742,7 +754,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
                 &observations,
                 actions,
                 bad_step,
-                &vec![true; observations.dims()[0]]
+                &(0..observations.dims()[0]).collect::<Vec<_>>()
             )
             .is_err()
     );
@@ -750,18 +762,32 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     let observations = env.reset().unwrap();
     let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     let step = env.step(actions.clone()).unwrap();
-    agent
-        .learn_from_timesteps(&observations, actions.clone(), step.clone(), &[true, false])
-        .unwrap();
-    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    for slots in [vec![0], vec![7, 7]] {
+        assert!(
+            agent
+                .learn_from_timesteps(&observations, actions.clone(), step.clone(), &slots)
+                .is_err()
+        );
+    }
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 0);
+
     agent
         .learn_from_timesteps(
-            &observations,
-            actions.clone(),
-            step.clone(),
-            &[false, false],
+            &crate::agents::test_support::SelectRows::select_rows(observations.clone(), &[0]),
+            crate::agents::test_support::SelectRows::select_rows(actions.clone(), &[0]),
+            crate::agents::test_support::select_step(step.clone(), &[0]),
+            &[usize::MAX],
         )
         .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    crate::agents::test_support::learn_selected_rows(
+        &mut agent,
+        &observations,
+        actions.clone(),
+        step.clone(),
+        &[],
+    )
+    .unwrap();
     assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
     assert!(
         agent
@@ -773,7 +799,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
             &observations,
             actions,
             step,
-            &vec![true; observations.dims()[0]],
+            &(0..observations.dims()[0]).collect::<Vec<_>>(),
         )
         .unwrap();
     assert_eq!(agent.schedule_progress.elapsed_steps(), 3);
@@ -919,7 +945,7 @@ fn caller_collection_entropy_weight_is_one_after_warmup() {
             &observations,
             actions,
             step,
-            &vec![true; observations.dims()[0]],
+            &(0..observations.dims()[0]).collect::<Vec<_>>(),
         )
         .unwrap();
 
@@ -976,22 +1002,22 @@ fn collection_entropy_evaluates_only_real_rows() {
         .entropy_change_penalty(0.5)
         .build()
         .unwrap();
-    for active in [[false, true], [false; 2]] {
-        agent
-            .learn_from_timesteps(
-                &Tensor::zeros([2, 1], &device),
-                Tensor::zeros([2, 1], &device),
-                MultiGymStepInfo {
-                    observations: Tensor::ones([2, 1], &device),
-                    rewards: Tensor::ones([2, 1], &device),
-                    dones: vec![false; 2],
-                    truncateds: vec![false; 2],
-                    infos: vec![(); 2],
-                    terminal_observations: vec![None; 2],
-                },
-                &active,
-            )
-            .unwrap();
+    for slots in [vec![1], vec![]] {
+        crate::agents::test_support::learn_selected_rows(
+            &mut agent,
+            &Tensor::zeros([2, 1], &device),
+            Tensor::zeros([2, 1], &device),
+            MultiGymStepInfo {
+                observations: Tensor::ones([2, 1], &device),
+                rewards: Tensor::ones([2, 1], &device),
+                dones: vec![false; 2],
+                truncateds: vec![false; 2],
+                infos: vec![(); 2],
+                terminal_observations: vec![None; 2],
+            },
+            &slots,
+        )
+        .unwrap();
     }
     assert_eq!(agent.replay.as_ref().unwrap().len(), 1);
     assert!(
@@ -1082,7 +1108,7 @@ fn caller_collected_training_matches_learn() {
                 &observations,
                 actions,
                 step,
-                &vec![true; observations.dims()[0]],
+                &(0..observations.dims()[0]).collect::<Vec<_>>(),
             )
             .unwrap();
         observations = next_observations;

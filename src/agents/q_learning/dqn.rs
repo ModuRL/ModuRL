@@ -205,10 +205,10 @@ where
         observations: &Tensor<R, S::Kind>,
         actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
-        active: &[bool],
+        slots: &[usize],
     ) -> Result<(), Self::Error> {
         self.inner
-            .learn_from_timesteps(observations, actions, step, active, &mut self.logging_info)
+            .learn_from_timesteps(observations, actions, step, slots, &mut self.logging_info)
     }
 }
 
@@ -307,7 +307,7 @@ mod tests {
                     &observations,
                     actions,
                     step,
-                    &vec![true; observations.dims()[0]],
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 )
                 .unwrap();
             assert_eq!(agent.inner.schedule_progress.elapsed_steps(), 4);
@@ -414,7 +414,7 @@ mod tests {
                     &observations,
                     actions,
                     step,
-                    &vec![true; observations.dims()[0]],
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 )
                 .unwrap();
             observations = next_observations;
@@ -483,7 +483,7 @@ mod tests {
                     &observations,
                     actions,
                     step,
-                    &vec![true; observations.dims()[0]]
+                    &(0..observations.dims()[0]).collect::<Vec<_>>()
                 )
                 .is_err()
         );
@@ -552,7 +552,7 @@ mod tests {
                     &observations,
                     actions,
                     step,
-                    &vec![true; observations.dims()[0]]
+                    &(0..observations.dims()[0]).collect::<Vec<_>>()
                 )
                 .is_err()
         );
@@ -601,7 +601,7 @@ mod tests {
                     &observations,
                     actions,
                     step,
-                    &vec![true; observations.dims()[0]],
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 )
                 .unwrap();
             assert_eq!(agent.inner.current_epsilon, expected_epsilon);

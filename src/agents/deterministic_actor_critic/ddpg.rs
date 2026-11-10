@@ -345,10 +345,10 @@ where
         observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
-        active: &[bool],
+        slots: &[usize],
     ) -> Result<(), Self::Error> {
         self.inner
-            .learn_from_timesteps(observations, actions, step, active, &mut self.logging_info)
+            .learn_from_timesteps(observations, actions, step, slots, &mut self.logging_info)
     }
 }
 
@@ -522,7 +522,7 @@ mod tests {
                     &observations,
                     actions,
                     step,
-                    &vec![true; observations.dims()[0]],
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 )
                 .unwrap();
             drop(agent);
@@ -799,7 +799,7 @@ mod tests {
                     &observations,
                     actions,
                     step,
-                    &vec![true; observations.dims()[0]],
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 )
                 .unwrap();
             observations = next_observations;

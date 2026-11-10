@@ -1,8 +1,8 @@
 use burn::tensor::{Bool, Cast, DType, Device, Tensor, kind::Autodiff};
 
 use crate::buffers::experience_replay::{
-    ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayRows, ReplayStorage,
-    ReplayStorageError, TensorReplayColumn, replay_index_tensor,
+    ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayStorage,
+    ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_slots,
 };
 use crate::tensor_operations::transfer_bool_tensor;
 
@@ -80,7 +80,7 @@ fn replay_error(error: ExperienceReplayError<SACReplayError>) -> SACReplayError 
 }
 
 pub(super) struct SACReplayInsert<const O: usize, const A: usize, K: Autodiff, L: Autodiff> {
-    pub active: Option<Vec<bool>>,
+    pub slots: Vec<usize>,
     pub observations: Tensor<O, K>,
     pub next_observations: Tensor<O, K>,
     pub actions: Tensor<A, L>,
@@ -155,19 +155,15 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
     }
 
     /// Validates actions `[num_envs, ...action_shape]` and statistics `[num_envs, 1]`.
-    /// Entropy metadata is compact `[real_rows, 1]`; other fields retain the caller's batch axis.
+    /// Every field has one compact row per slot.
     /// Observation shape and dtype validation is handled by pointer storage.
     fn validate_insert(
         &self,
         transitions: &SACReplayInsert<O, A, K, L>,
-    ) -> Result<ReplayRows, SACReplayError> {
+    ) -> Result<usize, SACReplayError> {
         let count = transitions.observations.dims()[0];
-        let rows = ReplayRows::new(
-            count,
-            transitions.active.as_deref(),
-            &transitions.observations.device(),
-        )?;
-        let real_count = rows.slots.len();
+        validate_slots(count, &transitions.slots)?;
+        let real_count = count;
         let mut action_shape = self.actions.tensor().dims();
         action_shape[0] = count;
 
@@ -194,7 +190,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
             .into());
         }
 
-        Ok(rows)
+        Ok(count)
     }
 
     pub(super) fn validate_environment_count(&self, count: usize) -> Result<(), SACReplayError> {
@@ -237,8 +233,7 @@ where
     /// Preserves observation kind and first-batch dtype. Explicitly casts actions to their storage dtype and statistics to compute dtype.
     /// Validates non-observation fields before writing; pointer storage validates and transfers observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
-        let rows = self.validate_insert(&transitions)?;
-        let count = transitions.observations.dims()[0];
+        let count = self.validate_insert(&transitions)?;
         for (field, actual) in [
             ("dones", transitions.dones.len()),
             ("truncations", transitions.truncateds.len()),
@@ -252,40 +247,41 @@ where
                 .into());
             }
         }
-        let ends = rows.ends(&transitions.dones, &transitions.truncateds);
-        if rows.slots.is_empty() {
+        let ends: Vec<_> = transitions
+            .dones
+            .iter()
+            .zip(&transitions.truncateds)
+            .map(|(&done, &truncated)| done || truncated)
+            .collect();
+        if transitions.slots.is_empty() {
             return Ok(0);
         }
-        let inserted = rows.slots.len();
+        let inserted = count;
         let device = self.rewards.tensor().device();
         let statistics_dtype = self.rewards.tensor().dtype();
         let action_dtype = self.actions.tensor().dtype();
 
         self.observations.insert(
             start,
-            rows.select(transitions.observations),
-            rows.select(transitions.next_observations),
+            transitions.observations,
+            transitions.next_observations,
             &ends,
-            &rows.slots,
+            &transitions.slots,
         )?;
         self.actions.write(
             start,
-            <DType as Cast<A, L>>::cast(
-                rows.select(transitions.actions).to_device(&device),
-                action_dtype,
-            ),
+            <DType as Cast<A, L>>::cast(transitions.actions.to_device(&device), action_dtype),
         )?;
 
         self.rewards.write(
             start,
-            rows.select(transitions.rewards)
+            transitions
+                .rewards
                 .to_device(&device)
                 .cast(statistics_dtype),
         )?;
-        self.terminated.write(
-            start,
-            transfer_bool_tensor(rows.select(transitions.terminated), &device),
-        )?;
+        self.terminated
+            .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
 
         self.collection_policy_entropies.write(
             start,
@@ -334,12 +330,34 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::test_support::SelectRows;
     use burn::tensor::{Float, Int};
+
+    fn select_transitions(
+        mut transitions: SACReplayInsert<2, 2, Int, Int>,
+        rows: &[usize],
+    ) -> SACReplayInsert<2, 2, Int, Int> {
+        transitions.observations = transitions.observations.select_rows(rows);
+        transitions.next_observations = transitions.next_observations.select_rows(rows);
+        transitions.actions = transitions.actions.select_rows(rows);
+        transitions.rewards = transitions.rewards.select_rows(rows);
+        transitions.terminated = transitions.terminated.select_rows(rows);
+        transitions.collection_policy_entropies =
+            transitions.collection_policy_entropies.select_rows(rows);
+        transitions.entropy_change_weights = transitions.entropy_change_weights.select_rows(rows);
+        transitions.dones = rows.iter().map(|&row| transitions.dones[row]).collect();
+        transitions.truncateds = rows
+            .iter()
+            .map(|&row| transitions.truncateds[row])
+            .collect();
+        transitions.slots = rows.to_vec();
+        transitions
+    }
 
     /// Creates I64 observations/actions `[2, 1]` and scalar statistics `[2, 1]` with one truncated transition.
     fn integer_transitions(device: &Device, dtype: DType) -> SACReplayInsert<2, 2, Int, Int> {
         SACReplayInsert {
-            active: None,
+            slots: vec![0, 1],
             observations: Tensor::from_data([[1i64], [2]], (device, dtype)),
             next_observations: Tensor::from_data([[10i64], [20]], (device, dtype)),
             actions: Tensor::from_data([[0i64], [1]], device),
@@ -367,14 +385,14 @@ mod tests {
             .unwrap();
         let mut replay = SACReplay::new(storage, 1);
         let mut transitions = integer_transitions(&device, DType::I64);
-        transitions.active = Some(vec![false, true]);
+        transitions = select_transitions(transitions, &[1]);
         transitions.collection_policy_entropies = Tensor::zeros([1, 1], &device);
         transitions.entropy_change_weights = Tensor::zeros([1, 1], &device);
         replay.insert(transitions).unwrap();
         assert_eq!(replay.buffer.len(), 1);
         for _ in 0..4 {
             let mut transitions = integer_transitions(&device, DType::I64);
-            transitions.active = Some(vec![false; 2]);
+            transitions = select_transitions(transitions, &[]);
             transitions.collection_policy_entropies = Tensor::zeros([0, 1], &device);
             transitions.entropy_change_weights = Tensor::zeros([0, 1], &device);
             replay.insert(transitions).unwrap();
@@ -400,10 +418,10 @@ mod tests {
         let mut replay = SACReplay::new(storage, 1);
         for _ in 0..8 {
             let mut transitions = integer_transitions(&device, DType::I64);
-            transitions.active = Some(vec![true, false]);
+            transitions = select_transitions(transitions, &[0]);
             transitions.collection_policy_entropies = Tensor::zeros([1, 1], &device);
             transitions.entropy_change_weights = Tensor::zeros([1, 1], &device);
-            transitions.rewards = Tensor::from_data([[1.0], [999.0]], &device);
+            transitions.rewards = Tensor::ones([1, 1], &device);
             replay.insert(transitions).unwrap();
             for _ in 0..20 {
                 let batch = replay.sample().unwrap();
@@ -422,12 +440,12 @@ mod tests {
             }
         }
         let mut transitions = integer_transitions(&device, DType::I64);
-        transitions.active = Some(vec![false, false]);
+        transitions = select_transitions(transitions, &[]);
         transitions.collection_policy_entropies = Tensor::zeros([0, 1], &device);
         transitions.entropy_change_weights = Tensor::zeros([0, 1], &device);
         replay.insert(transitions).unwrap();
         let mut transitions = integer_transitions(&device, DType::I64);
-        transitions.active = Some(vec![false, false]);
+        transitions = select_transitions(transitions, &[]);
         transitions.collection_policy_entropies = Tensor::zeros([0, 1], &device);
         transitions.entropy_change_weights = Tensor::zeros([0, 1], &device);
         replay.insert(transitions).unwrap();
@@ -435,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn environment_count_is_enforced_before_and_after_first_insertion() {
+    fn initial_slot_reservation_does_not_restrict_batch_width() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex();
         let mut storage = SACReplayStorage::<2, 2, Int, Int>::builder()
@@ -456,15 +474,7 @@ mod tests {
                     .unwrap();
             }
             storage.validate_environment_count(2).unwrap();
-            assert!(matches!(
-                storage.validate_environment_count(1),
-                Err(SACReplayError::Storage(
-                    ReplayStorageError::EnvironmentCountMismatch {
-                        expected: 2,
-                        actual: 1,
-                    }
-                ))
-            ));
+            storage.validate_environment_count(1).unwrap();
         }
         assert_eq!(storage.capacity(), 4);
         assert_eq!(
@@ -567,7 +577,7 @@ mod tests {
                 .insert(
                     start,
                     SACReplayInsert {
-                        active: None,
+                        slots: vec![0, 1],
                         observations: Tensor::from_data([[true], [false]], &device),
                         next_observations: Tensor::from_data([[false], [true]], &device),
                         actions: Tensor::zeros([2, 1], &device),
@@ -615,7 +625,7 @@ mod tests {
             .build()
             .unwrap();
         let mut transitions = SACReplayInsert {
-            active: None,
+            slots: vec![0, 1],
             observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
             next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
             actions: Tensor::zeros([2, 1], &device),
@@ -648,7 +658,7 @@ mod tests {
             .insert(
                 0,
                 SACReplayInsert {
-                    active: None,
+                    slots: vec![0, 1],
                     observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     actions: Tensor::zeros([2, 1], &device),

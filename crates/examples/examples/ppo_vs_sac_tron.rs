@@ -112,11 +112,16 @@ impl MultiAgentGym for Tron {
     fn action_space(&self, _agent: usize) -> Discrete {
         Discrete::new(4).unwrap()
     }
-    fn reset(&mut self) -> Result<Vec<Tensor<2>>, TronError> {
+    fn reset(&mut self) -> Result<Vec<MultiAgentObservations>, TronError> {
         for slot in 0..self.num_envs() {
             self.reset_slot(slot);
         }
-        Ok((0..2).map(|agent| self.observations(agent)).collect())
+        Ok((0..2)
+            .map(|agent| MultiAgentObservations {
+                observations: self.observations(agent),
+                slots: (0..self.num_envs()).collect(),
+            })
+            .collect())
     }
 
     /// Moves both heads simultaneously with absolute directions `[num_envs, 1]`: up, down, left, right.
@@ -182,11 +187,13 @@ impl MultiAgentGym for Tron {
             .into_iter()
             .zip(terminals)
             .enumerate()
-            .map(
-                |(agent, (rewards, terminal_observations))| MultiAgentStepInfo {
-                    active: vec![true; self.num_envs()],
+            .map(|(agent, (rewards, terminal_observations))| {
+                let observations = self.observations(agent);
+                MultiAgentStepInfo {
+                    next_observations: observations.clone(),
+                    next_slots: (0..self.num_envs()).collect(),
                     step: MultiGymStepInfo {
-                        observations: self.observations(agent),
+                        observations,
                         rewards: Tensor::from_data(
                             TensorData::new(rewards, [self.num_envs(), 1]),
                             &self.device,
@@ -196,8 +203,8 @@ impl MultiAgentGym for Tron {
                         truncateds: vec![false; self.num_envs()],
                         terminal_observations,
                     },
-                },
-            )
+                }
+            })
             .collect())
     }
 }
@@ -287,9 +294,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut lengths = vec![0; env.num_envs()];
     let (mut episodes, mut ppo_wins, mut sac_wins, mut draws, mut total_length) = (0, 0, 0, 0, 0);
     let started = std::time::Instant::now();
-    for timestep in (0..total_timesteps).step_by(env.num_envs()) {
-        let ppo_t = ppo.act_for_training(&obs[0], &mut ())?;
-        let sac_t = sac.act_for_training(&obs[1], &mut ())?;
+    let mut timestep = 0;
+    while timestep < total_timesteps {
+        let ppo_t = ppo.act_for_training(&obs[0].observations, &mut ())?;
+        let sac_t = sac.act_for_training(&obs[1].observations, &mut ())?;
         let mut steps = env
             .step(vec![
                 ppo_t.to_environment_actions()?,
@@ -299,19 +307,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ppo_step = steps.next().unwrap();
         let sac_step = steps.next().unwrap();
         let rewards = ppo_step.step.rewards.to_data().try_to_vec::<f32>()?;
-        for (slot, length) in lengths.iter_mut().enumerate() {
+        for (row, &slot) in obs[0].slots.iter().enumerate() {
+            let length = &mut lengths[slot];
             *length += 1;
-            if ppo_step.step.dones[slot] || ppo_step.step.truncateds[slot] {
+            if ppo_step.step.dones[row] || ppo_step.step.truncateds[row] {
                 episodes += 1;
-                ppo_wins += usize::from(rewards[slot] > 0.0);
-                sac_wins += usize::from(rewards[slot] < 0.0);
-                draws += usize::from(rewards[slot] == 0.0);
+                ppo_wins += usize::from(rewards[row] > 0.0);
+                sac_wins += usize::from(rewards[row] < 0.0);
+                draws += usize::from(rewards[row] == 0.0);
                 total_length += *length;
                 *length = 0;
                 if episodes % 100 == 0 {
                     println!(
                         "steps={} episodes={episodes} ppo_wins={:.3} sac_wins={:.3} draws={:.3} mean_episode_length={:.2}",
-                        timestep + env.num_envs(),
+                        timestep + obs[0].slots.len(),
                         ppo_wins as f64 / 100.0,
                         sac_wins as f64 / 100.0,
                         draws as f64 / 100.0,
@@ -322,11 +331,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         let next = vec![
-            ppo_step.step.observations.clone(),
-            sac_step.step.observations.clone(),
+            MultiAgentObservations {
+                observations: ppo_step.next_observations,
+                slots: ppo_step.next_slots,
+            },
+            MultiAgentObservations {
+                observations: sac_step.next_observations,
+                slots: sac_step.next_slots,
+            },
         ];
-        ppo.learn_from_timesteps(&obs[0], ppo_t, ppo_step.step, &ppo_step.active)?;
-        sac.learn_from_timesteps(&obs[1], sac_t, sac_step.step, &sac_step.active)?;
+        ppo.learn_from_timesteps(&obs[0].observations, ppo_t, ppo_step.step, &obs[0].slots)?;
+        sac.learn_from_timesteps(&obs[1].observations, sac_t, sac_step.step, &obs[1].slots)?;
+        timestep += obs[0].slots.len();
         obs = next;
     }
     println!("Training elapsed: {:.2?}", started.elapsed());
@@ -352,7 +368,8 @@ mod tests {
             .unwrap()
             .into_iter()
             .map(|info| {
-                assert_eq!(info.active, vec![true; env.num_envs()]);
+                assert_eq!(info.next_slots, (0..env.num_envs()).collect::<Vec<_>>());
+                assert_eq!(info.next_observations.dims()[0], info.next_slots.len());
                 info.step
             })
             .collect()
@@ -441,8 +458,8 @@ mod tests {
         let mut a = Tron::new(8, 42, Device::flex());
         let mut b = Tron::new(8, 42, Device::flex());
         assert_eq!(
-            a.reset().unwrap()[0].to_data(),
-            b.reset().unwrap()[0].to_data()
+            a.reset().unwrap()[0].observations.to_data(),
+            b.reset().unwrap()[0].observations.to_data()
         );
         for slot in &a.slots {
             assert_ne!(slot.heads[0], slot.heads[1]);

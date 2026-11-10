@@ -15,6 +15,26 @@ use burn::{
 use std::convert::Infallible;
 
 #[test]
+fn episode_tracker_handles_arbitrary_slots_and_reset_after_absence() {
+    let mut tracker = EpisodeTracker::new(0);
+    assert!(tracker.record(usize::MAX, 2.0, false, false, 1).is_none());
+    assert!(tracker.record(7, 9.0, false, false, 2).is_none());
+    let completed = tracker.record(usize::MAX, 3.0, true, false, 3).unwrap();
+    assert_eq!(completed.environment_index, usize::MAX);
+    assert_eq!(completed.episode_return, 5.0);
+    assert_eq!(completed.episode_length, 2);
+    let reset = tracker.record(usize::MAX, 4.0, false, true, 4).unwrap();
+    assert_eq!(reset.episode_return, 4.0);
+    assert_eq!(reset.episode_length, 1);
+    for slot in 0..7 {
+        tracker.record(slot, 1.0, false, false, 5);
+    }
+    let promoted = tracker.record(7, 1.0, true, false, 6).unwrap();
+    assert_eq!(promoted.episode_return, 10.0);
+    assert_eq!(promoted.episode_length, 2);
+}
+
+#[test]
 fn validates_shared_and_strategy_configuration() {
     assert_eq!(
         DeterministicActorCriticConfigurationValidator::validate_configuration()
@@ -460,15 +480,7 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
         truncate: false,
         steps: 0,
     });
-    assert!(matches!(
-        agent.learn(&mut single, 1, &mut logger),
-        Err(DeterministicActorCriticError::ReplayStorageError(
-            DeterministicReplayError::Storage(ReplayStorageError::EnvironmentCountMismatch {
-                expected: 2,
-                actual: 1
-            })
-        ))
-    ));
+    agent.learn(&mut single, 0, &mut logger).unwrap();
     assert_eq!(agent.replay.as_ref().unwrap().len(), len);
 }
 
@@ -503,7 +515,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
                 &observations,
                 actions.clone(),
                 bad_step,
-                &vec![true; observations.dims()[0]],
+                &(0..observations.dims()[0]).collect::<Vec<_>>(),
                 &mut logger
             )
             .is_err()
@@ -512,12 +524,27 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     let observations = env.reset().unwrap();
     let actions = agent.act(&observations).unwrap().without_autodiff();
     let step = env.step(actions.clone()).unwrap();
+    for slots in [vec![0], vec![7, 7]] {
+        assert!(
+            agent
+                .learn_from_timesteps(
+                    &observations,
+                    actions.clone(),
+                    step.clone(),
+                    &slots,
+                    &mut logger
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 0);
+
     agent
         .learn_from_timesteps(
-            &observations,
-            actions.clone(),
-            step.clone(),
-            &[true, false],
+            &crate::agents::test_support::SelectRows::select_rows(observations.clone(), &[0]),
+            crate::agents::test_support::SelectRows::select_rows(actions.clone(), &[0]),
+            crate::agents::test_support::select_step(step.clone(), &[0]),
+            &[usize::MAX],
             &mut logger,
         )
         .unwrap();
@@ -526,10 +553,10 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     assert_eq!(logger.rewards[0].len(), 1);
     agent
         .learn_from_timesteps(
-            &observations,
-            actions.clone(),
-            step.clone(),
-            &[false, false],
+            &crate::agents::test_support::SelectRows::select_rows(observations.clone(), &[]),
+            crate::agents::test_support::SelectRows::select_rows(actions.clone(), &[]),
+            crate::agents::test_support::select_step(step.clone(), &[]),
+            &[],
             &mut logger,
         )
         .unwrap();
@@ -551,7 +578,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
             &observations,
             actions,
             step,
-            &vec![true; observations.dims()[0]],
+            &(0..observations.dims()[0]).collect::<Vec<_>>(),
             &mut logger,
         )
         .unwrap();

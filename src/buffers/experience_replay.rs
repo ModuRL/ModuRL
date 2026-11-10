@@ -179,7 +179,6 @@ pub(crate) struct PointerObservationReplay<const R: usize, K: Autodiff = Float> 
     len: usize,
     free_rows: usize,
     cursor: usize,
-    environment_count: usize,
 }
 
 impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
@@ -191,7 +190,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
     }
 
     /// Allocates native observations `[capacity + environment_count, ...item_shape]` and Int pointers `[capacity]`.
-    /// Storage is detached. Environment count validates callers using the current mask API.
+    /// Storage is detached. Environment count reserves the initial per-slot observation heads.
     pub(crate) fn new(
         mut shape: [usize; R],
         environment_count: usize,
@@ -217,7 +216,6 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
             len: 0,
             free_rows: shape[0],
             cursor: 0,
-            environment_count,
         })
     }
 
@@ -225,13 +223,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
         &self,
         environment_count: usize,
     ) -> Result<(), ReplayStorageError> {
-        if self.environment_count != environment_count {
-            return Err(ReplayStorageError::EnvironmentCountMismatch {
-                expected: self.environment_count,
-                actual: environment_count,
-            });
-        }
-        Ok(())
+        validate_replay_alignment(self.transitions.len(), environment_count).map(|_| ())
     }
 
     pub(crate) fn clear_streams(&mut self) {
@@ -289,13 +281,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
                 });
             }
         }
-        if !slots.iter().copied().eq(0..count) {
-            let mut sorted = slots.to_vec();
-            sorted.sort_unstable();
-            if let Some(pair) = sorted.windows(2).find(|pair| pair[0] == pair[1]) {
-                return Err(ReplayStorageError::DuplicateSlot(pair[0]));
-            }
-        }
+        validate_slots(count, slots)?;
         if count == 0 {
             return Ok(0);
         }
@@ -493,55 +479,23 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
     }
 }
 
-/// Selects real rows from masked batches, with no tensor selection for all-active batches.
-pub(crate) struct ReplayRows {
-    pub(crate) slots: Vec<usize>,
-    indices: Option<Tensor<1, Int>>,
-}
-
-impl ReplayRows {
-    pub(crate) fn new(
-        count: usize,
-        active: Option<&[bool]>,
-        device: &Device,
-    ) -> Result<Self, ReplayStorageError> {
-        if let Some(active) = active
-            && active.len() != count
-        {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "active flags",
-                expected: count,
-                actual: active.len(),
-            });
-        }
-        let slots: Vec<_> = (0..count)
-            .filter(|&slot| active.is_none_or(|flags| flags[slot]))
-            .collect();
-        let indices = if slots.len() == count {
-            None
-        } else {
-            Some(replay_index_tensor(&slots, device)?)
-        };
-        Ok(Self { slots, indices })
+/// Validates one unique slot per compact row; identity slots need no allocation.
+pub(crate) fn validate_slots(count: usize, slots: &[usize]) -> Result<(), ReplayStorageError> {
+    if slots.len() != count {
+        return Err(ReplayStorageError::BatchLengthMismatch {
+            field: "slots",
+            expected: count,
+            actual: slots.len(),
+        });
     }
-
-    /// Selects compact values `[slots.len(), ...]` from a tensor `[batch_size, ...]`.
-    pub(crate) fn select<const R: usize, K: Autodiff>(&self, values: Tensor<R, K>) -> Tensor<R, K> {
-        match &self.indices {
-            Some(indices) => {
-                let device = values.device();
-                values.select(0, indices.clone().to_device(&device))
-            }
-            None => values,
+    if !slots.iter().copied().eq(0..count) {
+        let mut sorted = slots.to_vec();
+        sorted.sort_unstable();
+        if let Some(pair) = sorted.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(ReplayStorageError::DuplicateSlot(pair[0]));
         }
     }
-
-    pub(crate) fn ends(&self, dones: &[bool], truncateds: &[bool]) -> Vec<bool> {
-        self.slots
-            .iter()
-            .map(|&slot| dones[slot] || truncateds[slot])
-            .collect()
-    }
+    Ok(())
 }
 
 /// Checks native observations `[batch_size, ...item_shape]` against the storage axes.
@@ -897,8 +851,7 @@ mod tests {
             previous
         );
         assert_eq!(replay.transitions.iter().flatten().count(), 4);
-        let rows = ReplayRows::new(2, Some(&[true; 2]), &device).unwrap();
-        assert!(rows.indices.is_none());
+        validate_slots(2, &[0, 1]).unwrap();
     }
 
     #[test]
