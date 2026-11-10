@@ -4,7 +4,7 @@ use burn::tensor::{
 };
 
 use crate::buffers::experience_replay::{
-    AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
+    ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayRows, ReplayStorage,
     ReplayStorageError, TensorReplayColumn, replay_index_tensor,
 };
 use crate::tensor_operations::transfer_bool_tensor;
@@ -29,7 +29,7 @@ pub enum DeterministicReplayError {
     #[error("replay {field} item dimensions must be nonzero")]
     ZeroItemDimension { field: &'static str },
     #[error(
-        "replay start {start} must be below capacity {capacity} and divisible by environment count {environment_count}"
+        "replay start {start} must be below capacity {capacity} (environment count {environment_count})"
     )]
     InvalidStart {
         start: usize,
@@ -57,10 +57,11 @@ pub(super) struct DeterministicReplayInsert<const O: usize, const A: usize, K: A
     pub(super) actions: Tensor<A>,
     pub(super) rewards: Tensor<2>,
     pub(super) terminated: Tensor<2, Bool>,
+    pub(super) dones: Vec<bool>,
     pub(super) truncateds: Vec<bool>,
 }
 
-/// Owns aligned replay for native rank-O observations, Float rank-A actions, and scalar rewards and Bool flags.
+/// Owns pointer replay for native rank-O observations, Float rank-A actions, and scalar rewards and Bool flags.
 pub struct DeterministicReplay<const O: usize, const A: usize, K: Autodiff> {
     buffer:
         ExperienceReplay<DeterministicReplayInsert<O, A, K>, DeterministicReplayStorage<O, A, K>>,
@@ -75,6 +76,10 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplay<O, A, K> {
 
     pub(super) fn len(&self) -> usize {
         self.buffer.len()
+    }
+
+    pub(super) fn clear_streams(&mut self) {
+        self.buffer.storage_mut().observations.clear_streams();
     }
 
     pub(super) fn can_sample(&self) -> bool {
@@ -121,7 +126,7 @@ fn replay_error(
 }
 
 pub(super) struct DeterministicReplayStorage<const O: usize, const A: usize, K: Autodiff> {
-    observations: AlignedObservationReplay<O, K>,
+    observations: PointerObservationReplay<O, K>,
     actions: TensorReplayColumn<A>,
     rewards: TensorReplayColumn<2>,
     terminated: TensorReplayColumn<2, Bool>,
@@ -164,7 +169,7 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
                 actual: vec![action_shape[0]],
             });
         }
-        let observations = AlignedObservationReplay::new(
+        let observations = PointerObservationReplay::new(
             observation_shape,
             environment_count,
             (&device, observation_dtype),
@@ -188,14 +193,14 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
     }
 
     /// Checks Float actions [num_envs, ...action_shape] and scalars [num_envs, 1].
-    /// Aligned storage validates observation shape and dtype; this validates environment count without changing storage.
+    /// Pointer storage validates observation shape and dtype; this validates environment count without changing storage.
     fn validate_insert(
         &self,
         start: usize,
         transitions: &DeterministicReplayInsert<O, A, K>,
     ) -> Result<usize, DeterministicReplayError> {
         let count = transitions.observations.dims()[0];
-        if start >= self.capacity() || !start.is_multiple_of(self.environment_count) {
+        if start >= self.capacity() {
             return Err(DeterministicReplayError::InvalidStart {
                 start,
                 capacity: self.capacity(),
@@ -269,25 +274,58 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
 
     /// Stores native observations [num_envs, ...observation_shape], Float actions [num_envs, ...action_shape], and scalars [num_envs, 1].
     /// Validates non-observation fields before writing. Preserves observation dtype and casts actions and rewards to the configured floating dtype.
-    /// Aligned storage validates and transfers observations; truncations preserve terminal next observations.
+    /// Pointer storage validates and transfers observations; truncations preserve terminal next observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = self.validate_insert(start, &transitions)?;
+        let rows = ReplayRows::new(
+            count,
+            transitions.active.as_deref(),
+            &transitions.observations.device(),
+        )?;
+        for (field, actual) in [
+            ("dones", transitions.dones.len()),
+            ("truncations", transitions.truncateds.len()),
+        ] {
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field,
+                    expected: count,
+                    actual,
+                }
+                .into());
+            }
+        }
+        let ends = rows.ends(&transitions.dones, &transitions.truncateds);
+        if rows.slots.is_empty() {
+            return Ok(0);
+        }
+        let inserted = rows.slots.len();
         let device = self.rewards.tensor().device();
         let dtype = self.rewards.tensor().dtype();
         self.observations.insert(
             start,
-            transitions.observations,
-            transitions.next_observations,
-            &transitions.truncateds,
-            transitions.active.as_deref(),
+            rows.select(transitions.observations),
+            rows.select(transitions.next_observations),
+            &ends,
+            &rows.slots,
         )?;
-        self.actions
-            .write(start, transitions.actions.to_device(&device).cast(dtype))?;
-        self.rewards
-            .write(start, transitions.rewards.to_device(&device).cast(dtype))?;
-        self.terminated
-            .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
-        Ok(count)
+        self.actions.write(
+            start,
+            rows.select(transitions.actions)
+                .to_device(&device)
+                .cast(dtype),
+        )?;
+        self.rewards.write(
+            start,
+            rows.select(transitions.rewards)
+                .to_device(&device)
+                .cast(dtype),
+        )?;
+        self.terminated.write(
+            start,
+            transfer_bool_tensor(rows.select(transitions.terminated), &device),
+        )?;
+        Ok(inserted)
     }
 
     /// Gathers host indices [sample_count] into native observations, Float actions, and scalars with a leading sample axis.
@@ -327,6 +365,7 @@ mod tests {
             next_observations: Tensor::from_data([[7u64], [8]], (device, DType::U64)),
             actions: Tensor::from_data([[0.25f32], [-0.5]], device),
             rewards: Tensor::from_data([[1.0f32], [2.0]], device),
+            dones: vec![false, true],
             terminated: Tensor::from_data([[false], [true]], device),
             truncateds: vec![true, false],
         }
@@ -370,7 +409,7 @@ mod tests {
             transitions.active = Some(vec![false, false]);
             replay.insert(transitions).unwrap();
         }
-        assert!(!replay.can_sample());
+        assert!(replay.can_sample());
     }
 
     #[test]
@@ -420,14 +459,14 @@ mod tests {
                 .into_data()
                 .try_to_vec::<u64>()
                 .unwrap(),
-            [7, 4]
+            [7, 8]
         );
         assert_eq!(storage.sampleable_len(4), 4);
         let mut wrapped = integer_transitions(&device);
         wrapped.observations = Tensor::from_data([[5u64], [6]], (&device, DType::U64));
         wrapped.truncateds = vec![false, false];
         storage.insert(0, wrapped).unwrap();
-        assert_eq!(storage.sampleable_len(4), 2);
+        assert_eq!(storage.sampleable_len(4), 4);
         assert_eq!(storage.sample_index(0, 4), 0);
         assert_eq!(storage.sample_index(1, 4), 1);
         assert_eq!(
@@ -465,6 +504,7 @@ mod tests {
                         ),
                         actions: Tensor::ones([2, 1, 1], &device),
                         rewards: Tensor::ones([2, 1], &device),
+                        dones: vec![false, true],
                         terminated: Tensor::from_data([[false], [true]], &device),
                         truncateds: vec![true, false],
                     },
@@ -512,6 +552,7 @@ mod tests {
                     next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     actions: Tensor::ones([2, 1], &device).require_grad(),
                     rewards: Tensor::ones([2, 1], &device).require_grad(),
+                    dones: vec![false, true],
                     terminated: Tensor::from_data([[false], [true]], &device),
                     truncateds: vec![true, false],
                 },
@@ -622,12 +663,10 @@ mod tests {
                 }
             ))
         ));
-        for start in [1, 4] {
-            assert!(matches!(
-                storage.insert(start, integer_transitions(&device)),
-                Err(DeterministicReplayError::InvalidStart { .. })
-            ));
-        }
+        assert!(matches!(
+            storage.insert(4, integer_transitions(&device)),
+            Err(DeterministicReplayError::InvalidStart { .. })
+        ));
         assert_eq!(
             storage
                 .gather(&[0, 1])
@@ -692,7 +731,7 @@ mod tests {
                 ..
             })
         ));
-        for (capacity, count) in [(0, 2), (2, 2), (3, 2), (4, 0)] {
+        for (capacity, count) in [(0, 2), (4, 0)] {
             assert!(matches!(
                 build([capacity, 1], [capacity, 1], DType::U64, DType::F32, count),
                 Err(DeterministicReplayError::Storage(

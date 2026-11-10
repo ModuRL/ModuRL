@@ -1060,6 +1060,7 @@ where
             .as_mut()
             .ok_or(ReplayStorageError::EnvironmentCountNotSet)?;
         replay.insert(DeterministicReplayInsert {
+            dones: transitions.dones.to_vec(),
             active: transitions.active.map(<[bool]>::to_vec),
             observations: transitions.observations.clone(),
             next_observations: transitions.next_observations.clone(),
@@ -1280,6 +1281,9 @@ where
             });
         }
         self.schedule_progress.default_horizon(num_timesteps);
+        if let Some(replay) = self.replay.as_mut() {
+            replay.clear_streams();
+        }
         self.environment_count = Some(count);
         let mut episodes = EpisodeTracker::new(count);
         let mut elapsed = 0;

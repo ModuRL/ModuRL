@@ -349,7 +349,8 @@ fn replay_insert(values: &[f64], device: &Device) -> QLearningInsert<2, Float> {
         actions: Tensor::zeros([count, 1], (device, DType::U32)),
         rewards: Tensor::ones([count, 1], device),
         next_dones: Tensor::from_data(TensorData::new(vec![false; count], [count, 1]), device),
-        truncateds: vec![false; count],
+        dones: vec![false; count],
+        truncateds: vec![true; count],
     }
 }
 
@@ -399,7 +400,7 @@ fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
     let batch = storage.gather(&[0, 1, 2, 3]).unwrap();
     assert_eq!(
         batch.observations.into_data().try_to_vec::<f64>().unwrap(),
-        [5.0, 6.0, 15.0, 16.0]
+        [5.0, 6.0, 3.0, 4.0]
     );
     assert_eq!(batch.actions.dims(), [4, 1]);
     assert_eq!(batch.next_dones.dims(), [4, 1]);
@@ -426,6 +427,7 @@ fn replay_preserves_native_integer_and_boolean_observations() {
                 ),
                 actions: Tensor::zeros([2, 1], (&device, DType::U32)),
                 rewards: Tensor::zeros([2, 1], &device),
+                dones: vec![false, true],
                 next_dones: Tensor::from_data([[false], [true]], &device),
                 truncateds: vec![false; 2],
             },
@@ -447,6 +449,7 @@ fn replay_preserves_native_integer_and_boolean_observations() {
                 next_observations: Tensor::from_data([[true], [false]], &device),
                 actions: Tensor::zeros([2, 1], (&device, DType::U32)),
                 rewards: Tensor::zeros([2, 1], &device),
+                dones: vec![false, false],
                 next_dones: Tensor::from_data([[false], [false]], &device),
                 truncateds: vec![true, false],
             },
@@ -530,6 +533,7 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
             next_observations: observations,
             actions: Tensor::ones([2, 1], (&device, DType::U32)),
             rewards: Tensor::full([2, 1], 2.0, (&device, DType::F64)),
+            dones: vec![false, false],
             next_dones: Tensor::from_data([[false], [false]], &device),
             truncateds: vec![false; 2],
         })
@@ -754,24 +758,16 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
 }
 
 #[test]
-fn learn_rejects_invalid_replay_alignment_before_reset_or_step() {
+fn learn_accepts_capacity_not_divisible_by_environment_count() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex();
     let calls = Arc::new(GymCallCounts::default());
     let mut env = counting_envs(3, &device, calls.clone());
     let mut agent = float_agent(&device);
-
-    assert!(matches!(
-        agent.learn(&mut env, 1, &mut Logger::default()),
-        Err(QAgentError::ReplayStorageError(
-            QLearningReplayError::Storage(ReplayStorageError::InvalidReplayAlignment {
-                capacity: 8,
-                environment_count: 3
-            })
-        ))
-    ));
-    assert_eq!(calls.resets.load(Ordering::Relaxed), 0);
-    assert_eq!(calls.steps.load(Ordering::Relaxed), 0);
+    agent.learn(&mut env, 1, &mut Logger::default()).unwrap();
+    assert_eq!(calls.resets.load(Ordering::Relaxed), 3);
+    assert_eq!(calls.steps.load(Ordering::Relaxed), 3);
+    assert_eq!(agent.experience_replay.len(), 3);
 }
 
 #[test]

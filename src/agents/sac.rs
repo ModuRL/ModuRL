@@ -23,7 +23,7 @@ use super::{
 };
 use crate::{
     buffers::experience_replay::{
-        ExperienceReplayError, ReplayStorageError, validate_replay_alignment,
+        ExperienceReplayError, ReplayRows, ReplayStorageError, validate_replay_alignment,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ExpectationPolicy,
@@ -1114,7 +1114,7 @@ where
         environment_count: usize,
         random_actions: bool,
     ) -> Result<SACCollectionEntropy, SACError<PE, GE, SE, CE>> {
-        if self.entropy_change_penalty.is_none() || random_actions {
+        if environment_count == 0 || self.entropy_change_penalty.is_none() || random_actions {
             return Ok(SACCollectionEntropy {
                 values: Tensor::zeros(
                     [environment_count, 1],
@@ -1154,6 +1154,9 @@ where
         let count = env.num_envs();
         self.validate_replay_environment_count(count)?;
         let observations = env.reset().map_err(SACError::GymError)?;
+        if let Some(replay) = self.replay.as_mut() {
+            replay.clear_streams();
+        }
         self.validate_observations(&observations)?;
         if observations.dims()[0] != count {
             return Err(SACError::Shape {
@@ -1313,9 +1316,12 @@ where
 
         let count = observations.dims()[0];
         let first_timestep = self.schedule_progress.elapsed_steps();
+        let rows =
+            ReplayRows::new(count, active, &observations.device()).map_err(SACReplayError::from)?;
+        let entropy_observations = rows.select(observations.clone());
         let entropy = self.collection_entropy_metadata(
-            observations,
-            count,
+            &entropy_observations,
+            rows.slots.len(),
             first_timestep < self.training_start,
         )?;
         let transition_next_observations = step.transition_next_observations();
@@ -1366,6 +1372,7 @@ where
             .ok_or(ReplayStorageError::EnvironmentCountNotSet)
             .map_err(SACReplayError::from)?
             .insert(SACReplayInsert {
+                dones: dones.clone(),
                 active: active.map(<[bool]>::to_vec),
                 observations: observations.clone(),
                 next_observations: transition_next_observations,
@@ -1377,7 +1384,7 @@ where
                 ),
                 collection_policy_entropies: entropy.values,
                 entropy_change_weights: Tensor::full(
-                    [count, 1],
+                    [rows.slots.len(), 1],
                     entropy.change_weight,
                     (&storage_device, self.dtype),
                 ),

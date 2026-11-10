@@ -14,8 +14,9 @@ use std::marker::PhantomData;
 use crate::{
     agents::ReplayStorageConfig,
     buffers::experience_replay::{
-        AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
-        ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_replay_alignment,
+        ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayRows,
+        ReplayStorage, ReplayStorageError, TensorReplayColumn, replay_index_tensor,
+        validate_replay_alignment,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
@@ -243,11 +244,12 @@ struct QLearningInsert<const R: usize, K: Autodiff> {
     actions: Tensor<2, Int>,
     rewards: Tensor<2>,
     next_dones: Tensor<2, Bool>,
+    dones: Vec<bool>,
     truncateds: Vec<bool>,
 }
 
 struct QLearningReplayStorage<const R: usize, K: Autodiff> {
-    observations: Option<AlignedObservationReplay<R, K>>,
+    observations: Option<PointerObservationReplay<R, K>>,
     actions: TensorReplayColumn<2, Int>,
     rewards: TensorReplayColumn<2>,
     next_dones: TensorReplayColumn<2, Bool>,
@@ -318,9 +320,32 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 .into());
             }
         }
+        let rows = ReplayRows::new(
+            count,
+            transitions.active.as_deref(),
+            &transitions.observations.device(),
+        )?;
+        for (field, actual) in [
+            ("dones", transitions.dones.len()),
+            ("truncations", transitions.truncateds.len()),
+        ] {
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field,
+                    expected: count,
+                    actual,
+                }
+                .into());
+            }
+        }
+        let ends = rows.ends(&transitions.dones, &transitions.truncateds);
+        if rows.slots.is_empty() {
+            return Ok(0);
+        }
+        let inserted = rows.slots.len();
         let dtype = transitions.observations.dtype();
         let mut new_observations = if self.observations.is_none() {
-            Some(AlignedObservationReplay::new(
+            Some(PointerObservationReplay::new(
                 self.observation_storage_shape,
                 count,
                 (&self.device, dtype),
@@ -335,27 +360,31 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
         };
         observations.insert(
             start,
-            transitions.observations,
-            transitions.next_observations,
-            &transitions.truncateds,
-            transitions.active.as_deref(),
+            rows.select(transitions.observations),
+            rows.select(transitions.next_observations),
+            &ends,
+            &rows.slots,
         )?;
         if let Some(observations) = new_observations {
             self.observations = Some(observations);
         }
         self.actions.write(
             start,
-            transitions.actions.to_device(&self.device).cast(DType::U32),
+            rows.select(transitions.actions)
+                .to_device(&self.device)
+                .cast(DType::U32),
         )?;
         self.rewards.write(
             start,
-            transitions.rewards.to_device(&self.device).cast(DType::F32),
+            rows.select(transitions.rewards)
+                .to_device(&self.device)
+                .cast(DType::F32),
         )?;
         self.next_dones.write(
             start,
-            transfer_bool_tensor(transitions.next_dones, &self.device),
+            transfer_bool_tensor(rows.select(transitions.next_dones), &self.device),
         )?;
-        Ok(count)
+        Ok(inserted)
     }
 
     /// Samples detached native rank-R observations [sample_count, ...observation_shape], actions [sample_count, 1], and statistics [sample_count, 1].
@@ -697,6 +726,7 @@ where
             &self.replay_storage_config.storage_device(),
         );
         self.experience_replay.add(QLearningInsert {
+            dones: transitions.dones.to_vec(),
             active: transitions.active.map(<[bool]>::to_vec),
             observations: transitions.observations.clone(),
             next_observations: transitions.next_observations.clone(),
@@ -867,6 +897,9 @@ where
             .storage_mut()
             .validate_environment_count(environment_count)?;
         let mut observations = env.reset().map_err(QAgentError::GymError)?;
+        if let Some(observations) = self.experience_replay.storage_mut().observations.as_mut() {
+            observations.clear_streams();
+        }
         self.schedule_progress.default_horizon(num_timesteps);
         let mut episodes = QEpisodeTracker::new(environment_count);
         while elapsed_timesteps < num_timesteps {

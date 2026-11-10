@@ -927,6 +927,88 @@ fn caller_collection_entropy_weight_is_one_after_warmup() {
     assert_eq!(numbers(stored.entropy_change_weights), [1.0; 2]);
 }
 
+#[derive(Module, Debug)]
+struct SingleRowModel {
+    weight: Param<Tensor<2>>,
+}
+
+impl Forward<2, 2> for SingleRowModel {
+    type InputKind = Float;
+    type OutputKind = Float;
+    type Error = std::io::Error;
+
+    /// Maps real observations `[1, 1]` to logits `[1, 2]`, rejecting padding batches.
+    fn forward(&self, input: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+        if input.dims()[0] != 1 {
+            return Err(std::io::Error::other(format!(
+                "policy received {} rows, expected one real row",
+                input.dims()[0]
+            )));
+        }
+        Ok(input.matmul(self.weight.val()))
+    }
+}
+
+#[test]
+fn collection_entropy_evaluates_only_real_rows() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex().autodiff();
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
+        .policy(ProbabilisticPolicyModel::new(
+            SingleRowModel {
+                weight: Param::from_tensor(Tensor::zeros([1, 2], &device)),
+            },
+            CategoricalDistribution,
+        ))
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![discrete_critic(&device, DType::F32)])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(Discrete::new(2).unwrap())
+        .observation_space(BoxSpace::new(
+            Tensor::full([1, 1], -1.0, &device),
+            Tensor::ones([1, 1], &device),
+        ))
+        .replay_capacity(8)
+        .batch_size(4)
+        .training_start(0)
+        .training_horizon(4)
+        .entropy_change_penalty(0.5)
+        .build()
+        .unwrap();
+    for active in [[false, true], [false; 2]] {
+        agent
+            .learn_from_timesteps(
+                &Tensor::zeros([2, 1], &device),
+                Tensor::zeros([2, 1], &device),
+                MultiGymStepInfo {
+                    observations: Tensor::ones([2, 1], &device),
+                    rewards: Tensor::ones([2, 1], &device),
+                    dones: vec![false; 2],
+                    truncateds: vec![false; 2],
+                    infos: vec![(); 2],
+                    terminal_observations: vec![None; 2],
+                },
+                &active,
+            )
+            .unwrap();
+    }
+    assert_eq!(agent.replay.as_ref().unwrap().len(), 1);
+    assert!(
+        (numbers(
+            agent
+                .replay
+                .as_ref()
+                .unwrap()
+                .sample()
+                .unwrap()
+                .collection_policy_entropies
+        )[0] - std::f64::consts::LN_2)
+            .abs()
+            < 1e-6
+    );
+}
+
 #[test]
 fn caller_collected_training_matches_learn() {
     struct Parameters(Vec<f32>);

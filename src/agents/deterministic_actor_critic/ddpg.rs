@@ -761,7 +761,7 @@ mod tests {
                 .observation_space(observation_space)
                 .dtype(DType::F32)
                 .exploration_noise(0.0)
-                .replay_capacity(4)
+                .replay_capacity(2)
                 .batch_size(2)
                 .update_frequency(6)
                 .training_start(0)

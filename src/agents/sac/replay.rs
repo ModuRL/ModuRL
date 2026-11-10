@@ -1,7 +1,7 @@
 use burn::tensor::{Bool, Cast, DType, Device, Tensor, kind::Autodiff};
 
 use crate::buffers::experience_replay::{
-    AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
+    ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayRows, ReplayStorage,
     ReplayStorageError, TensorReplayColumn, replay_index_tensor,
 };
 use crate::tensor_operations::transfer_bool_tensor;
@@ -18,7 +18,7 @@ pub enum SACReplayError {
     },
 }
 
-/// Owns SAC's replay ring and aligned observation storage with native observation and action kinds.
+/// Owns SAC's replay ring and pointer observation storage with native observation and action kinds.
 pub struct SACReplay<const O: usize, const A: usize, K: Autodiff, L: Autodiff>
 where
     DType: Cast<A, L, OutputKind = L>,
@@ -45,6 +45,10 @@ where
 
     pub(super) fn len(&self) -> usize {
         self.buffer.len()
+    }
+
+    pub(super) fn clear_streams(&mut self) {
+        self.buffer.storage_mut().observations.clear_streams();
     }
 
     pub(super) fn can_sample(&self) -> bool {
@@ -84,6 +88,7 @@ pub(super) struct SACReplayInsert<const O: usize, const A: usize, K: Autodiff, L
     pub terminated: Tensor<2, Bool>,
     pub collection_policy_entropies: Tensor<2>,
     pub entropy_change_weights: Tensor<2>,
+    pub dones: Vec<bool>,
     pub truncateds: Vec<bool>,
 }
 
@@ -98,7 +103,7 @@ pub(super) struct SACOptimizationBatch<const O: usize, const A: usize, K: Autodi
 }
 
 pub(super) struct SACReplayStorage<const O: usize, const A: usize, K: Autodiff, L: Autodiff> {
-    observations: AlignedObservationReplay<O, K>,
+    observations: PointerObservationReplay<O, K>,
     actions: TensorReplayColumn<A, L>,
     rewards: TensorReplayColumn<2>,
     terminated: TensorReplayColumn<2, Bool>,
@@ -133,7 +138,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
             });
         }
 
-        let observations = AlignedObservationReplay::new(
+        let observations = PointerObservationReplay::new(
             observation_shape,
             environment_count,
             (&device, observation_dtype),
@@ -150,12 +155,19 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
     }
 
     /// Validates actions `[num_envs, ...action_shape]` and statistics `[num_envs, 1]`.
-    /// Observation shape and dtype validation is handled by aligned storage. Returns the number of transitions.
+    /// Entropy metadata is compact `[real_rows, 1]`; other fields retain the caller's batch axis.
+    /// Observation shape and dtype validation is handled by pointer storage.
     fn validate_insert(
         &self,
         transitions: &SACReplayInsert<O, A, K, L>,
-    ) -> Result<usize, SACReplayError> {
+    ) -> Result<ReplayRows, SACReplayError> {
         let count = transitions.observations.dims()[0];
+        let rows = ReplayRows::new(
+            count,
+            transitions.active.as_deref(),
+            &transitions.observations.device(),
+        )?;
+        let real_count = rows.slots.len();
         let mut action_shape = self.actions.tensor().dims();
         action_shape[0] = count;
 
@@ -165,12 +177,12 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
         validate_shape(
             "collection entropy",
             &transitions.collection_policy_entropies,
-            [count, 1],
+            [real_count, 1],
         )?;
         validate_shape(
             "entropy change weights",
             &transitions.entropy_change_weights,
-            [count, 1],
+            [real_count, 1],
         )?;
 
         if transitions.truncateds.len() != count {
@@ -182,7 +194,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
             .into());
         }
 
-        Ok(count)
+        Ok(rows)
     }
 
     pub(super) fn validate_environment_count(&self, count: usize) -> Result<(), SACReplayError> {
@@ -223,34 +235,57 @@ where
 
     /// Inserts observations `[num_envs, ...observation_shape]`, actions `[num_envs, ...action_shape]`, and statistics `[num_envs, 1]`.
     /// Preserves observation kind and first-batch dtype. Explicitly casts actions to their storage dtype and statistics to compute dtype.
-    /// Validates non-observation fields before writing; aligned storage validates and transfers observations.
+    /// Validates non-observation fields before writing; pointer storage validates and transfers observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
-        let count = self.validate_insert(&transitions)?;
+        let rows = self.validate_insert(&transitions)?;
+        let count = transitions.observations.dims()[0];
+        for (field, actual) in [
+            ("dones", transitions.dones.len()),
+            ("truncations", transitions.truncateds.len()),
+        ] {
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field,
+                    expected: count,
+                    actual,
+                }
+                .into());
+            }
+        }
+        let ends = rows.ends(&transitions.dones, &transitions.truncateds);
+        if rows.slots.is_empty() {
+            return Ok(0);
+        }
+        let inserted = rows.slots.len();
         let device = self.rewards.tensor().device();
         let statistics_dtype = self.rewards.tensor().dtype();
         let action_dtype = self.actions.tensor().dtype();
 
         self.observations.insert(
             start,
-            transitions.observations,
-            transitions.next_observations,
-            &transitions.truncateds,
-            transitions.active.as_deref(),
+            rows.select(transitions.observations),
+            rows.select(transitions.next_observations),
+            &ends,
+            &rows.slots,
         )?;
         self.actions.write(
             start,
-            <DType as Cast<A, L>>::cast(transitions.actions.to_device(&device), action_dtype),
+            <DType as Cast<A, L>>::cast(
+                rows.select(transitions.actions).to_device(&device),
+                action_dtype,
+            ),
         )?;
 
         self.rewards.write(
             start,
-            transitions
-                .rewards
+            rows.select(transitions.rewards)
                 .to_device(&device)
                 .cast(statistics_dtype),
         )?;
-        self.terminated
-            .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
+        self.terminated.write(
+            start,
+            transfer_bool_tensor(rows.select(transitions.terminated), &device),
+        )?;
 
         self.collection_policy_entropies.write(
             start,
@@ -267,7 +302,7 @@ where
                 .cast(statistics_dtype),
         )?;
 
-        Ok(count)
+        Ok(inserted)
     }
 
     /// Gathers host indices `[sample_count]` into detached observations, actions, and statistics with one leading sample axis.
@@ -309,11 +344,43 @@ mod tests {
             next_observations: Tensor::from_data([[10i64], [20]], (device, dtype)),
             actions: Tensor::from_data([[0i64], [1]], device),
             rewards: Tensor::ones([2, 1], device),
+            dones: vec![false, true],
             terminated: Tensor::from_data([[false], [true]], device),
             collection_policy_entropies: Tensor::zeros([2, 1], device),
             entropy_change_weights: Tensor::zeros([2, 1], device),
             truncateds: vec![true, false],
         }
+    }
+
+    #[test]
+    fn compact_storage_counts_only_real_transitions() {
+        let device = Device::flex();
+        let storage = SACReplayStorage::<2, 2, Int, Int>::builder()
+            .observation_shape([4, 1])
+            .action_shape([4, 1])
+            .observation_dtype(DType::I64)
+            .action_dtype(DType::I32)
+            .environment_count(2)
+            .dtype(DType::F32)
+            .device(device.clone())
+            .build()
+            .unwrap();
+        let mut replay = SACReplay::new(storage, 1);
+        let mut transitions = integer_transitions(&device, DType::I64);
+        transitions.active = Some(vec![false, true]);
+        transitions.collection_policy_entropies = Tensor::zeros([1, 1], &device);
+        transitions.entropy_change_weights = Tensor::zeros([1, 1], &device);
+        replay.insert(transitions).unwrap();
+        assert_eq!(replay.buffer.len(), 1);
+        for _ in 0..4 {
+            let mut transitions = integer_transitions(&device, DType::I64);
+            transitions.active = Some(vec![false; 2]);
+            transitions.collection_policy_entropies = Tensor::zeros([0, 1], &device);
+            transitions.entropy_change_weights = Tensor::zeros([0, 1], &device);
+            replay.insert(transitions).unwrap();
+        }
+        assert_eq!(replay.buffer.len(), 1);
+        assert!(!replay.buffer.is_empty());
     }
 
     #[test]
@@ -334,6 +401,8 @@ mod tests {
         for _ in 0..8 {
             let mut transitions = integer_transitions(&device, DType::I64);
             transitions.active = Some(vec![true, false]);
+            transitions.collection_policy_entropies = Tensor::zeros([1, 1], &device);
+            transitions.entropy_change_weights = Tensor::zeros([1, 1], &device);
             transitions.rewards = Tensor::from_data([[1.0], [999.0]], &device);
             replay.insert(transitions).unwrap();
             for _ in 0..20 {
@@ -354,11 +423,15 @@ mod tests {
         }
         let mut transitions = integer_transitions(&device, DType::I64);
         transitions.active = Some(vec![false, false]);
+        transitions.collection_policy_entropies = Tensor::zeros([0, 1], &device);
+        transitions.entropy_change_weights = Tensor::zeros([0, 1], &device);
         replay.insert(transitions).unwrap();
         let mut transitions = integer_transitions(&device, DType::I64);
         transitions.active = Some(vec![false, false]);
+        transitions.collection_policy_entropies = Tensor::zeros([0, 1], &device);
+        transitions.entropy_change_weights = Tensor::zeros([0, 1], &device);
         replay.insert(transitions).unwrap();
-        assert!(!replay.can_sample());
+        assert!(replay.can_sample());
     }
 
     #[test]
@@ -472,7 +545,7 @@ mod tests {
         storage
             .insert(0, integer_transitions(&device, DType::I64))
             .unwrap();
-        assert_eq!(storage.sampleable_len(4), 2);
+        assert_eq!(storage.sampleable_len(4), 4);
     }
 
     #[test]
@@ -499,6 +572,7 @@ mod tests {
                         next_observations: Tensor::from_data([[false], [true]], &device),
                         actions: Tensor::zeros([2, 1], &device),
                         rewards: Tensor::ones([2, 1], &device),
+                        dones: vec![false, false],
                         terminated: Tensor::from_data([[false], [false]], &device),
                         collection_policy_entropies: Tensor::zeros([2, 1], &device),
                         entropy_change_weights: Tensor::zeros([2, 1], &device),
@@ -546,6 +620,7 @@ mod tests {
             next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
             actions: Tensor::zeros([2, 1], &device),
             rewards: Tensor::ones([2, 1], &device).require_grad(),
+            dones: vec![false, false],
             terminated: Tensor::from_data([[false], [false]], &device),
             collection_policy_entropies: Tensor::zeros([2, 1], &device),
             entropy_change_weights: Tensor::zeros([2, 1], &device),
@@ -578,6 +653,7 @@ mod tests {
                     next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     actions: Tensor::zeros([2, 1], &device),
                     rewards: Tensor::ones([2, 1], &device).require_grad(),
+                    dones: vec![false, false],
                     terminated: Tensor::from_data([[false], [false]], &device),
                     collection_policy_entropies: Tensor::zeros([2, 1], &device),
                     entropy_change_weights: Tensor::zeros([2, 1], &device),
