@@ -8,13 +8,13 @@ mod tests;
 
 use bon::bon;
 use burn::tensor::{
-    DType, IndexingUpdateOp, Int, Tensor, TensorData, TensorReadError,
+    DType, Int, Tensor, TensorData, TensorReadError,
     kind::{Autodiff, Basic},
 };
 use std::{marker::PhantomData, sync::Arc};
 
 use crate::{
-    advantage_estimation::{AdvantageEstimator, GAE},
+    advantage_estimation::{AdvantageEstimator, AdvantageInput, GAE, RaggedRollout, RolloutLayout},
     buffers::experience::{self, Experience, ExperienceBatchError},
     gym::{MultiGym, MultiGymStepInfo},
     objectives::clipped_value_loss,
@@ -58,6 +58,8 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
+    #[error("invalid rollout layout: {0}")]
+    Layout(#[from] crate::advantage_estimation::RolloutLayoutError),
     #[error("invalid slots: {0}")]
     Slots(#[from] crate::buffers::experience_replay::ReplayStorageError),
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
@@ -65,7 +67,7 @@ where
     #[error(
         "advantage estimates must match rollout values: shape {expected:?}, dtype {dtype:?}, and device"
     )]
-    AdvantageEstimateMismatch { expected: [usize; 3], dtype: DType },
+    AdvantageEstimateMismatch { expected: [usize; 2], dtype: DType },
     #[error("network failed: {0}")]
     NetworkError(#[source] AE),
     #[error("gym failed: {0}")]
@@ -266,7 +268,7 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
     /// `observations` and `next_observations` are `[active_rows, ...observation_shape]`.
     /// `actions` is `[active_rows, ...action_shape]`; `rewards`, `log_probs`, and detached collection `values` are `[active_rows, 1]`.
     /// `rewards` preserves the environment values for logging.
-    /// Training rewards [active_rows, 1] include terminal-value corrections for nonterminal truncations and retain the reward dtype.
+    /// Training rewards [active_rows, 1] receive terminal-value corrections during rollout preparation and retain the reward dtype.
     /// Observations preserve their native kind and dtype. Other fields preserve their Float dtype and device; collection detaches stored experience.
     /// PPO training data is added internally after rollout collection.
     #[builder]
@@ -725,151 +727,212 @@ where
             skip_all
         )
     )]
-    /// Right-aligns each slot's sequence for advantage estimation, then prepares compact statistics.
-    /// Bootstraps each slot from its latest stored next observation without autodiff.
+    /// Prepares flat rollout statistics, evaluating only truncations and live tails.
     fn add_advantages_and_returns(
         &mut self,
         validation: &N,
     ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>> {
         let experiences = &self.rollout_buffer;
         let final_experience = experiences.last().ok_or(ExperienceBatchError::EmptyBatch)?;
-        let dense_width = final_experience.slots.len();
+        let width = final_experience.slots.len();
         let all_dense = experiences
             .iter()
-            .all(|experience| experience.slots.iter().copied().eq(0..dense_width));
-        let mut slots = Vec::new();
-        if !all_dense {
-            slots.extend(
-                experiences
-                    .iter()
-                    .flat_map(|experience| experience.slots.iter().copied()),
-            );
-            slots.sort_unstable();
-            slots.dedup();
-        }
-        let environment_count = if all_dense { dense_width } else { slots.len() };
-        let slot_index = |slot: usize| slots.partition_point(|&known| known < slot);
-        let device = final_experience.values.device();
-        let dtype = final_experience.values.dtype();
-        let (
-            values_tensor,
-            training_rewards,
-            next_dones,
-            truncateds,
-            bootstrapped_observations,
-            row_indices,
-        ) = if all_dense {
-            (
-                experience::stack_tensor_field(experiences, |experience| {
-                    experience.values.clone()
-                })?,
-                experience::stack_tensor_field(experiences, |experience| {
-                    experience.training_rewards.clone()
-                })?,
-                experience::stack_bool_field(
-                    experiences,
-                    |experience| &experience.next_dones,
-                    &device,
-                )?,
-                experience::stack_bool_field(
-                    experiences,
-                    |experience| &experience.truncateds,
-                    &device,
-                )?,
-                final_experience.next_observations.clone(),
-                None,
-            )
+            .all(|experience| experience.slots.iter().copied().eq(0..width));
+        let layout = if all_dense {
+            None
         } else {
-            let mut counts = vec![0; environment_count];
-            for experience in experiences {
-                for &slot in &experience.slots {
-                    counts[slot_index(slot)] += 1;
-                }
-            }
-            let time = counts
-                .iter()
-                .copied()
-                .max()
-                .ok_or(ExperienceBatchError::EmptyBatch)?;
-            let mut offsets: Vec<_> = counts.iter().map(|&count| time - count).collect();
-            let mut latest = vec![None; environment_count];
-            let mut positions = Vec::with_capacity(self.rollout_rows);
-            let mut dones = vec![true; time * environment_count];
-            let mut truncations = vec![false; time * environment_count];
-            for (index, experience) in experiences.iter().enumerate() {
-                for (row, &slot) in experience.slots.iter().enumerate() {
-                    let slot = slot_index(slot);
-                    let position = offsets[slot] * environment_count + slot;
-                    positions.push(position as i64);
-                    dones[position] = experience.next_dones[row];
-                    truncations[position] = experience.truncateds[row];
-                    offsets[slot] += 1;
-                    latest[slot] = Some((index, row));
-                }
-            }
-            let row_indices = Tensor::<1, Int>::from_data(
-                TensorData::new(positions, [self.rollout_rows]),
-                (&device, DType::I64),
-            );
-            let values =
-                experience::cat_tensor_field(experiences, |experience| experience.values.clone())?;
-            let rewards = experience::cat_tensor_field(experiences, |experience| {
-                experience.training_rewards.clone()
-            })?;
-            let shape = [time, environment_count, 1];
-            let values = Tensor::zeros([time * environment_count, 1], (&device, dtype))
-                .select_assign(0, row_indices.clone(), values, IndexingUpdateOp::Assign)
-                .reshape(shape);
-            let rewards = Tensor::zeros([time * environment_count, 1], (&device, dtype))
-                .select_assign(0, row_indices.clone(), rewards, IndexingUpdateOp::Assign)
-                .reshape(shape);
-            let mut observation_shape = final_experience.next_observations.dims();
-            observation_shape[0] = 1;
-            let next_observations = latest
-                .into_iter()
-                .map(|latest| match latest {
-                    Some((index, row)) => experiences[index]
-                        .next_observations
-                        .clone()
-                        .slice_dim(0, row..row + 1),
-                    None => Tensor::<O, OS::Kind>::zeros(
-                        observation_shape,
-                        (&device, final_experience.next_observations.dtype()),
-                    ),
-                })
-                .collect();
-            (
-                values,
-                rewards,
-                Tensor::from_data(TensorData::new(dones, shape), &device),
-                Tensor::from_data(TensorData::new(truncations, shape), &device),
-                Tensor::cat(next_observations, 0),
-                Some(row_indices),
-            )
+            Some(RolloutLayout::from_steps(
+                &experiences
+                    .iter()
+                    .map(|e| e.slots.as_slice())
+                    .collect::<Vec<_>>(),
+            )?)
         };
-        let latent_bootstrapped_observations = validation
-            .forward_observations(bootstrapped_observations.without_autodiff())
-            .map_err(PPOError::NetworkError)?;
-
-        let bootstrapped_values = self
-            .critic_network_forward(
-                validation,
-                &latent_bootstrapped_observations,
-                final_experience.rewards.dtype(),
-            )?
-            .detach(); // shape [env_count, 1]
-
-        let estimate = self.advantage_estimator.estimate(
-            &training_rewards,
-            &values_tensor,
-            &next_dones,
-            &truncateds,
-            &bootstrapped_values,
-            self.gamma,
-        );
-        let expected_shape = values_tensor.dims();
-        let expected_dtype = values_tensor.dtype();
-        let expected_device = values_tensor.device();
+        let values = if all_dense {
+            experience::stack_tensor_field::<_, 2, 3, _>(experiences, |e| e.values.clone())?
+                .flatten::<2>(0, 1)
+        } else {
+            experience::cat_tensor_field(experiences, |e| e.values.clone())?
+        };
+        let rewards = if all_dense {
+            experience::stack_tensor_field::<_, 2, 3, _>(experiences, |e| e.rewards.clone())?
+                .flatten::<2>(0, 1)
+        } else {
+            experience::cat_tensor_field(experiences, |e| e.rewards.clone())?
+        };
+        let n = values.dims()[0];
+        let mut dones = Vec::with_capacity(if all_dense { 0 } else { n });
+        let mut truncateds = Vec::with_capacity(if all_dense { 0 } else { n });
+        let mut bootstrap_positions = Vec::new();
+        let mut final_bootstrap = if all_dense {
+            vec![None; width]
+        } else {
+            Vec::new()
+        };
+        let mut offset = 0;
+        for (time, experience) in experiences.iter().enumerate() {
+            for (row, (&done, &truncated)) in experience
+                .next_dones
+                .iter()
+                .zip(&experience.truncateds)
+                .enumerate()
+            {
+                let flat = offset + row;
+                let tail = match &layout {
+                    Some(layout) => layout.successor()[flat].is_none(),
+                    None => time + 1 == experiences.len(),
+                };
+                if !all_dense {
+                    dones.push(done);
+                    truncateds.push(truncated);
+                }
+                if !done && (truncated || tail) {
+                    if all_dense && time + 1 == experiences.len() {
+                        final_bootstrap[row] = Some(bootstrap_positions.len());
+                    }
+                    bootstrap_positions.push((time, row, flat));
+                }
+            }
+            offset += experience.slots.len();
+        }
+        let bootstrap_values = if bootstrap_positions.is_empty() {
+            Tensor::zeros([0, 1], (&values.device(), values.dtype()))
+        } else {
+            let mut chunks = Vec::new();
+            let mut index = 0;
+            while index < bootstrap_positions.len() {
+                let (time, start, _) = bootstrap_positions[index];
+                let mut end = start + 1;
+                index += 1;
+                while index < bootstrap_positions.len()
+                    && bootstrap_positions[index].0 == time
+                    && bootstrap_positions[index].1 == end
+                {
+                    end += 1;
+                    index += 1;
+                }
+                let observations = experiences[time].next_observations.clone();
+                chunks.push(if start == 0 && end == observations.dims()[0] {
+                    observations
+                } else {
+                    observations.slice_dim(0, start..end)
+                });
+            }
+            let observations = if chunks.len() == 1 {
+                chunks.pop().ok_or(ExperienceBatchError::EmptyBatch)?
+            } else {
+                Tensor::cat(chunks, 0)
+            };
+            let latent = validation
+                .forward_observations(observations.without_autodiff())
+                .map_err(PPOError::NetworkError)?;
+            self.critic_network_forward(validation, &latent, rewards.dtype())?
+                .detach()
+        };
+        let mut reward_chunks = Vec::new();
+        let mut cursor = 0;
+        for (index, &(time, row, flat)) in bootstrap_positions.iter().enumerate() {
+            if experiences[time].truncateds[row] {
+                if cursor < flat {
+                    reward_chunks.push(rewards.clone().slice_dim(0, cursor..flat));
+                }
+                reward_chunks.push(
+                    rewards.clone().slice_dim(0, flat..flat + 1)
+                        + bootstrap_values.clone().slice_dim(0, index..index + 1)
+                            * f64::from(self.gamma),
+                );
+                cursor = flat + 1;
+            }
+        }
+        let training_rewards = if reward_chunks.is_empty() {
+            rewards
+        } else {
+            if cursor < n {
+                reward_chunks.push(rewards.slice_dim(0, cursor..n));
+            }
+            Tensor::cat(reward_chunks, 0)
+        };
+        let estimate = match &layout {
+            None => {
+                let final_offset = n - width;
+                let bootstrap = if bootstrap_positions.len() == width
+                    && final_bootstrap.iter().copied().eq((0..width).map(Some))
+                    && !final_experience.truncateds.contains(&true)
+                {
+                    bootstrap_values.clone()
+                } else {
+                    Tensor::cat(
+                        (final_offset..n)
+                            .map(|row| {
+                                match final_bootstrap[row - final_offset]
+                                    .filter(|_| !final_experience.truncateds[row - final_offset])
+                                {
+                                    Some(index) => {
+                                        bootstrap_values.clone().slice_dim(0, index..index + 1)
+                                    }
+                                    None => {
+                                        Tensor::zeros([1, 1], (&values.device(), values.dtype()))
+                                    }
+                                }
+                            })
+                            .collect(),
+                        0,
+                    )
+                };
+                let shape = [experiences.len(), width, 1];
+                self.advantage_estimator.estimate(
+                    AdvantageInput::Dense {
+                        rewards: &training_rewards.clone().reshape(shape),
+                        values: &values.clone().reshape(shape),
+                        next_dones: &experience::stack_bool_field(
+                            experiences,
+                            |e| &e.next_dones,
+                            &values.device(),
+                        )?,
+                        next_truncateds: &experience::stack_bool_field(
+                            experiences,
+                            |e| &e.truncateds,
+                            &values.device(),
+                        )?,
+                        bootstrapped_values: &bootstrap,
+                    },
+                    self.gamma,
+                )
+            }
+            Some(layout) => {
+                let tails: Vec<_> = bootstrap_positions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, &(_, _, row))| (!truncateds[row]).then_some(index as i64))
+                    .collect();
+                let tail_values = if tails.len() == bootstrap_positions.len() {
+                    bootstrap_values
+                } else if tails.is_empty() {
+                    Tensor::zeros([0, 1], (&values.device(), values.dtype()))
+                } else {
+                    let count = tails.len();
+                    let indices = Tensor::<1, Int>::from_data(
+                        TensorData::new(tails, [count]),
+                        (&values.device(), DType::I64),
+                    );
+                    bootstrap_values.select(0, indices)
+                };
+                self.advantage_estimator.estimate(
+                    AdvantageInput::Ragged(RaggedRollout::new(
+                        &training_rewards,
+                        &values,
+                        &dones,
+                        &truncateds,
+                        layout,
+                        &tail_values,
+                    )?),
+                    self.gamma,
+                )
+            }
+        };
+        let expected_shape = values.dims();
+        let expected_dtype = values.dtype();
+        let expected_device = values.device();
         if estimate.advantages.dims() != expected_shape
             || estimate.advantages.dtype() != expected_dtype
             || estimate.advantages.device() != expected_device
@@ -882,56 +945,17 @@ where
                 dtype: expected_dtype,
             });
         }
-
         let advantages = estimate.advantages.detach();
         let returns = estimate.value_targets.detach();
-        let compact_estimates = row_indices.as_ref().map(|indices| {
-            (
-                advantages
-                    .clone()
-                    .flatten::<2>(0, 1)
-                    .select(0, indices.clone()),
-                returns
-                    .clone()
-                    .flatten::<2>(0, 1)
-                    .select(0, indices.clone()),
-            )
-        });
-        let rollout_explained_variance = match &compact_estimates {
-            Some((_, compact_returns)) => compute_explained_variance(
-                compact_returns,
-                &experience::cat_tensor_field(experiences, |experience| experience.values.clone())?,
-            ),
-            None => compute_explained_variance(&returns, &values_tensor),
-        };
-
-        let experiences = &mut self.rollout_buffer;
-
+        let explained_variance = compute_explained_variance(&returns, &values);
         let mut offset = 0;
-        for (i, experience) in experiences.iter_mut().enumerate() {
+        for experience in &mut self.rollout_buffer {
             let end = offset + experience.slots.len();
-            let (advantages, returns) = match &compact_estimates {
-                Some((advantages, returns)) => (
-                    advantages.clone().slice_dim(0, offset..end).detach(),
-                    returns.clone().slice_dim(0, offset..end).detach(),
-                ),
-                None => (
-                    advantages
-                        .clone()
-                        .slice_dim(0, i..i + 1)
-                        .squeeze_dim(0)
-                        .detach(),
-                    returns
-                        .clone()
-                        .slice_dim(0, i..i + 1)
-                        .squeeze_dim(0)
-                        .detach(),
-                ),
-            };
+            experience.training_rewards =
+                training_rewards.clone().slice_dim(0, offset..end).detach();
             experience.prepared = Some(PPOPreparedExperience {
-                advantages,
-                returns,
-                // Value-loss clipping compares current values with fixed collection values.
+                advantages: advantages.clone().slice_dim(0, offset..end),
+                returns: returns.clone().slice_dim(0, offset..end),
                 old_values: if self.clip_value_loss {
                     Some(experience.values.clone())
                 } else {
@@ -940,8 +964,7 @@ where
             });
             offset = end;
         }
-
-        Ok(rollout_explained_variance)
+        Ok(explained_variance)
     }
 
     /// Maps rank-O observations `[batch, ...observation_shape]` to rank-H model inputs, preserving the batch axis.
@@ -981,56 +1004,6 @@ where
             });
         }
         Ok(())
-    }
-
-    /// Adds discounted terminal values to rewards [environment_count, 1] for nonterminal truncated rows.
-    /// Rank-O terminal observations are [environment_count, ...observation_shape]; both flag slices have environment_count entries.
-    /// Preserves reward dtype and device, rejecting critic dtype mismatches. Terminal values are detached from the model.
-    /// True termination suppresses bootstrapping, including transitions that also truncate.
-    fn bootstrap_truncated_rewards(
-        &mut self,
-        validation: &N,
-        rewards: Tensor<2>,
-        transition_next_observations: &OS::Batch,
-        dones: &[bool],
-        truncateds: &[bool],
-    ) -> Result<Tensor<2>, PPOError<N::Error, GE, AS::Error>> {
-        if dones.len() != truncateds.len() {
-            return Err(PPOError::MismatchedTerminationBatch {
-                dones: dones.len(),
-                truncateds: truncateds.len(),
-            });
-        }
-        let truncated_indices = truncateds
-            .iter()
-            .zip(dones)
-            .enumerate()
-            .filter_map(|(index, (truncated, done))| (*truncated && !*done).then_some(index as i64))
-            .collect::<Vec<_>>();
-        if truncated_indices.is_empty() {
-            return Ok(rewards);
-        }
-
-        let truncation_count = truncated_indices.len();
-        let truncated_indices = Tensor::<1, Int>::from_data(
-            TensorData::new(truncated_indices, [truncation_count]),
-            (&transition_next_observations.device(), DType::I64),
-        );
-        let truncated_next_observations = transition_next_observations
-            .clone()
-            .select(0, truncated_indices.clone());
-        let latent_observations = validation
-            .forward_observations(truncated_next_observations.without_autodiff())
-            .map_err(PPOError::NetworkError)?;
-        let terminal_values = self
-            .critic_network_forward(validation, &latent_observations, rewards.dtype())?
-            .detach();
-        Ok(rewards.select_assign(
-            0,
-            truncated_indices,
-            terminal_values * f64::from(self.gamma),
-            burn::tensor::IndexingUpdateOp::Add,
-        ))
     }
 
     /// Evaluates rank-L `actions` `[batch, ...action_shape]` for latent or raw
@@ -1473,7 +1446,7 @@ where
     /// Stores one already-validated caller or environment transition with batch shape `[num_envs, ...]`.
     fn store_timestep<const U: usize>(
         &mut self,
-        validation: &N,
+        _validation: &N,
         observations: &Tensor<O, OS::Kind>,
         collection_action: PPOCollectionAction<AS, L>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
@@ -1505,13 +1478,7 @@ where
             first_collection_timestep,
             slots,
         )?;
-        let training_rewards = self.bootstrap_truncated_rewards(
-            validation,
-            rewards.clone().detach(),
-            &training_next_observations,
-            &dones,
-            &truncateds,
-        )?;
+        let training_rewards = rewards.clone().detach();
         self.rollout_buffer.push(
             PPOExperience::builder()
                 .slots(slots.to_vec())

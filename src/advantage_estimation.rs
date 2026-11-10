@@ -1,16 +1,16 @@
 use burn::tensor::{Bool, Tensor};
 
-/// Advantages and critic value targets for one rollout, each shaped `[time, env_count, 1]`.
+/// Advantages and critic targets [rows, 1]; dense kernels use rank 3 internally.
 #[derive(Debug, Clone)]
-pub struct AdvantageEstimate {
-    /// Per-step advantages shaped `[time, env_count, 1]`.
-    pub advantages: Tensor<3>,
-    /// Critic value targets shaped `[time, env_count, 1]`.
-    pub value_targets: Tensor<3>,
+pub struct AdvantageEstimate<const D: usize = 2> {
+    /// Per-row advantages, with the same leading dimensions as the input values.
+    pub advantages: Tensor<D>,
+    /// Critic targets, with the same leading dimensions as the input values.
+    pub value_targets: Tensor<D>,
 }
 
 /// Computes advantages and critic value targets for an on-policy rollout.
-pub trait AdvantageEstimator {
+trait DenseAdvantageEstimator {
     /// Returns advantages and value targets shaped `[time, env_count, 1]` from `rewards`,
     /// `values`, `next_dones`, and `next_truncateds` shaped `[time, env_count, 1]`, and
     /// `bootstrapped_values` shaped `[env_count, 1]` (critic values of the final next observations).
@@ -19,7 +19,7 @@ pub trait AdvantageEstimator {
     /// `[time, env_count, 1]` and the reward dtype and device of `values`. Rewards already include
     /// `gamma * V(terminal)` for truncated transitions. Values are detached. The critic is trained
     /// toward `value_targets`.
-    fn estimate(
+    fn estimate_dense(
         &self,
         rewards: &Tensor<3>,
         values: &Tensor<3>,
@@ -27,31 +27,394 @@ pub trait AdvantageEstimator {
         next_truncateds: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f32,
-    ) -> AdvantageEstimate;
+    ) -> AdvantageEstimate<3>;
 }
 
-impl AdvantageEstimator for Box<dyn AdvantageEstimator> {
-    /// Delegates estimation for rollout tensors with their documented shapes.
-    fn estimate(
-        &self,
-        rewards: &Tensor<3>,
-        values: &Tensor<3>,
-        next_dones: &Tensor<3, Bool>,
-        next_truncateds: &Tensor<3, Bool>,
-        bootstrapped_values: &Tensor<2>,
-        gamma: f32,
-    ) -> AdvantageEstimate {
-        (**self).estimate(
-            rewards,
-            values,
-            next_dones,
-            next_truncateds,
-            bootstrapped_values,
-            gamma,
-        )
+/// Host temporal links for compact steps, preserving collection row order.
+#[derive(Debug, Clone)]
+pub struct RolloutLayout {
+    step_offsets: Vec<usize>,
+    successor: Vec<Option<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RolloutLayoutError {
+    #[error("duplicate slot {slot} in step {step}")]
+    DuplicateSlot { step: usize, slot: usize },
+    #[error("rollout row count overflow")]
+    TooManyRows,
+    #[error("invalid compact rollout field: {0}")]
+    InvalidBatch(&'static str),
+}
+
+impl RolloutLayout {
+    /// Builds links from slots in each step's compact row order.
+    pub fn from_steps(steps: &[&[usize]]) -> Result<Self, RolloutLayoutError> {
+        let mut step_offsets = vec![0usize];
+        for (step, slots) in steps.iter().enumerate() {
+            let mut seen = std::collections::BTreeSet::new();
+            for &slot in *slots {
+                if !seen.insert(slot) {
+                    return Err(RolloutLayoutError::DuplicateSlot { step, slot });
+                }
+            }
+            step_offsets.push(
+                step_offsets
+                    .last()
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(slots.len())
+                    .ok_or(RolloutLayoutError::TooManyRows)?,
+            );
+        }
+        let mut successor = vec![None; *step_offsets.last().unwrap_or(&0)];
+        let mut latest = std::collections::BTreeMap::new();
+        for (step, slots) in steps.iter().enumerate().rev() {
+            for (row, &slot) in slots.iter().enumerate() {
+                let index = step_offsets[step] + row;
+                successor[index] = latest.insert(slot, index);
+            }
+        }
+        Ok(Self {
+            step_offsets,
+            successor,
+        })
+    }
+
+    pub fn step_offsets(&self) -> &[usize] {
+        &self.step_offsets
+    }
+    pub fn successor(&self) -> &[Option<usize>] {
+        &self.successor
     }
 }
 
+/// Validated flat rewards and values [rows, 1], with bootstrap values [tails, 1].
+/// Rewards include gamma times terminal values for non-done truncations.
+/// Bootstrap values follow flat row order for non-ended rows without a successor.
+#[derive(Clone, Copy)]
+pub struct RaggedRollout<'a> {
+    rewards: &'a Tensor<2>,
+    values: &'a Tensor<2>,
+    dones: &'a [bool],
+    truncateds: &'a [bool],
+    layout: &'a RolloutLayout,
+    bootstrap: &'a Tensor<2>,
+}
+
+impl<'a> RaggedRollout<'a> {
+    pub fn rewards(&self) -> &Tensor<2> {
+        self.rewards
+    }
+    pub fn values(&self) -> &Tensor<2> {
+        self.values
+    }
+    pub fn dones(&self) -> &[bool] {
+        self.dones
+    }
+    pub fn truncateds(&self) -> &[bool] {
+        self.truncateds
+    }
+    pub fn layout(&self) -> &RolloutLayout {
+        self.layout
+    }
+    pub fn bootstrap(&self) -> &Tensor<2> {
+        self.bootstrap
+    }
+
+    /// Validates tensors [rows, 1], flags, layout and bootstrap values [tails, 1].
+    pub fn new(
+        rewards: &'a Tensor<2>,
+        values: &'a Tensor<2>,
+        dones: &'a [bool],
+        truncateds: &'a [bool],
+        layout: &'a RolloutLayout,
+        bootstrap: &'a Tensor<2>,
+    ) -> Result<Self, RolloutLayoutError> {
+        let n = layout.successor.len();
+        for (field, valid) in [
+            ("rewards", rewards.dims() == [n, 1]),
+            ("values", values.dims() == [n, 1]),
+            ("dones", dones.len() == n),
+            ("truncateds", truncateds.len() == n),
+            (
+                "dtype",
+                rewards.dtype() == values.dtype() && bootstrap.dtype() == values.dtype(),
+            ),
+            (
+                "device",
+                rewards.device() == values.device() && bootstrap.device() == values.device(),
+            ),
+        ] {
+            if !valid {
+                return Err(RolloutLayoutError::InvalidBatch(field));
+            }
+        }
+        let tails = (0..n)
+            .filter(|&i| !dones[i] && !truncateds[i] && layout.successor[i].is_none())
+            .count();
+        if bootstrap.dims() != [tails, 1] {
+            return Err(RolloutLayoutError::InvalidBatch("bootstrap"));
+        }
+        Ok(Self {
+            rewards,
+            values,
+            dones,
+            truncateds,
+            layout,
+            bootstrap,
+        })
+    }
+}
+
+/// Dense inputs use [time, env_count, 1] and final bootstrap values [env_count, 1],
+/// without a slot layout. Both variants include truncation bootstraps in rewards.
+#[derive(Clone, Copy)]
+pub enum AdvantageInput<'a> {
+    Dense {
+        rewards: &'a Tensor<3>,
+        values: &'a Tensor<3>,
+        next_dones: &'a Tensor<3, Bool>,
+        next_truncateds: &'a Tensor<3, Bool>,
+        bootstrapped_values: &'a Tensor<2>,
+    },
+    Ragged(RaggedRollout<'a>),
+}
+
+impl AdvantageInput<'_> {
+    /// Returns rewards and values [rows, 1] without padding.
+    pub fn rewards_and_values(&self) -> (Tensor<2>, Tensor<2>) {
+        match self {
+            Self::Dense {
+                rewards, values, ..
+            } => (
+                (*rewards).clone().flatten(0, 1),
+                (*values).clone().flatten(0, 1),
+            ),
+            Self::Ragged(r) => (r.rewards.clone(), r.values.clone()),
+        }
+    }
+    pub fn step_count(&self) -> usize {
+        match self {
+            Self::Dense { rewards, .. } => rewards.dims()[0],
+            Self::Ragged(r) => r.layout.step_offsets.len() - 1,
+        }
+    }
+}
+
+/// Computes advantages and critic targets [rows, 1] in collection order.
+/// Outputs must preserve the input dtype and device.
+pub trait AdvantageEstimator {
+    fn estimate(&self, rollout: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate;
+}
+
+impl AdvantageEstimator for Box<dyn AdvantageEstimator> {
+    fn estimate(&self, rollout: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate {
+        (**self).estimate(rollout, gamma)
+    }
+}
+
+fn indices(rows: &[usize], device: &burn::tensor::Device) -> Tensor<1, burn::tensor::Int> {
+    Tensor::from_data(
+        burn::tensor::TensorData::new(
+            rows.iter().map(|&i| i as i64).collect::<Vec<_>>(),
+            [rows.len()],
+        ),
+        (device, burn::tensor::DType::I64),
+    )
+}
+
+/// Builds a Float continuation column [rows, 1] matching the reference tensor.
+fn flags(values: Vec<bool>, like: &Tensor<2>) -> Tensor<2> {
+    let n = values.len();
+    Tensor::<2, Bool>::from_data(
+        burn::tensor::TensorData::new(values, [n, 1]),
+        &like.device(),
+    )
+    .float()
+    .cast(like.dtype())
+}
+
+impl RaggedRollout<'_> {
+    fn masks(&self) -> Tensor<2> {
+        flags(
+            self.dones
+                .iter()
+                .zip(self.truncateds)
+                .map(|(&done, &truncated)| !(done || truncated))
+                .collect(),
+            self.values,
+        )
+    }
+    fn next_values(&self) -> Tensor<2> {
+        let n = self.layout.successor.len();
+        let mut tail = n;
+        let rows: Vec<_> = (0..n)
+            .map(|i| {
+                if !self.dones[i] && !self.truncateds[i] && self.layout.successor[i].is_none() {
+                    let index = tail;
+                    tail += 1;
+                    index
+                } else {
+                    self.layout.successor[i].unwrap_or(i)
+                }
+            })
+            .collect();
+        let source = if tail == n {
+            self.values.clone().detach()
+        } else {
+            Tensor::cat(
+                vec![
+                    self.values.clone().detach(),
+                    self.bootstrap.clone().detach(),
+                ],
+                0,
+            )
+        };
+        let device = source.device();
+        source.select(0, indices(&rows, &device))
+    }
+    fn empty(&self) -> AdvantageEstimate {
+        AdvantageEstimate {
+            advantages: self.values.clone().detach(),
+            value_targets: self.values.clone().detach(),
+        }
+    }
+    fn gae(&self, gamma: f32, lambda: f32, value_lambda: f32) -> AdvantageEstimate {
+        let n = self.layout.successor.len();
+        if n == 0 {
+            return self.empty();
+        }
+        let masks = self.masks();
+        let deltas = self.rewards.clone() + self.next_values() * masks.clone() * f64::from(gamma)
+            - self.values.clone().detach();
+        let mut accumulators =
+            Tensor::<2>::zeros([n, 2], (&self.values.device(), self.values.dtype()));
+        let discounts = Tensor::from_data(
+            [[lambda, value_lambda]],
+            (&self.values.device(), self.values.dtype()),
+        ) * f64::from(gamma);
+        for step in self.layout.step_offsets.windows(2).rev() {
+            let (start, end) = (step[0], step[1]);
+            if start == end {
+                continue;
+            }
+            let rows: Vec<_> = (start..end)
+                .map(|i| self.layout.successor[i].unwrap_or(i))
+                .collect();
+            let later = accumulators
+                .clone()
+                .select(0, indices(&rows, &self.values.device()));
+            let current = deltas.clone().slice_dim(0, start..end).repeat_dim(1, 2)
+                + later * masks.clone().slice_dim(0, start..end) * discounts.clone();
+            accumulators = accumulators.slice_assign([start..end, 0..2], current);
+        }
+        AdvantageEstimate {
+            advantages: accumulators.clone().slice_dim(1, 0..1),
+            value_targets: self.values.clone().detach() + accumulators.slice_dim(1, 1..2),
+        }
+    }
+    fn n_step(&self, gamma: f32, n_steps: usize) -> AdvantageEstimate {
+        let n = self.layout.successor.len();
+        if n == 0 {
+            return self.empty();
+        }
+        let source = Tensor::cat(vec![self.rewards.clone(), self.next_values()], 1);
+        let mut rows: Vec<_> = (0..n).collect();
+        let mut live = vec![true; n];
+        let mut targets = Tensor::<2>::zeros([n, 1], (&self.values.device(), self.values.dtype()));
+        let mut discount = Tensor::<2>::ones([n, 1], (&self.values.device(), self.values.dtype()));
+        for offset in 0..n_steps {
+            let current = source
+                .clone()
+                .select(0, indices(&rows, &self.values.device()));
+            targets = targets + discount.clone() * current.clone().slice_dim(1, 0..1);
+            let continuing: Vec<_> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, &row)| live[i] && !self.dones[row] && !self.truncateds[row])
+                .collect();
+            discount = discount * flags(continuing.clone(), self.values) * f64::from(gamma);
+            let next_live: Vec<_> = rows
+                .iter()
+                .enumerate()
+                .map(|(i, &row)| {
+                    continuing[i] && offset + 1 < n_steps && self.layout.successor[row].is_some()
+                })
+                .collect();
+            targets = targets
+                + discount.clone()
+                    * current.slice_dim(1, 1..2)
+                    * flags(next_live.iter().map(|&v| !v).collect(), self.values);
+            discount = discount * flags(next_live.clone(), self.values);
+            for (i, row) in rows.iter_mut().enumerate() {
+                if next_live[i] {
+                    *row = self.layout.successor[*row].unwrap_or(*row);
+                }
+            }
+            live = next_live;
+            if !live.contains(&true) {
+                break;
+            }
+        }
+        AdvantageEstimate {
+            advantages: targets.clone() - self.values.clone().detach(),
+            value_targets: targets,
+        }
+    }
+    /// Computes compact upgoing advantages with critic targets [rows, 1].
+    fn upgo(&self, gamma: f32, value_targets: Tensor<2>) -> AdvantageEstimate {
+        let n = self.layout.successor.len();
+        if n == 0 {
+            return self.empty();
+        }
+        let next_values = self.next_values();
+        let masks = self.masks();
+        let mut accumulators =
+            Tensor::<2>::zeros([n, 2], (&self.values.device(), self.values.dtype()));
+        for step in self.layout.step_offsets.windows(2).rev() {
+            let (start, end) = (step[0], step[1]);
+            if start == end {
+                continue;
+            }
+            let rows: Vec<_> = (start..end)
+                .map(|i| self.layout.successor[i].unwrap_or(i))
+                .collect();
+            let next_value = next_values.clone().slice_dim(0, start..end);
+            let tail = Tensor::<2, Bool>::from_data(
+                burn::tensor::TensorData::new(
+                    (start..end)
+                        .map(|i| self.layout.successor[i].is_none())
+                        .collect::<Vec<_>>(),
+                    [end - start, 1],
+                ),
+                &self.values.device(),
+            )
+            .repeat_dim(1, 2);
+            let later = accumulators
+                .clone()
+                .select(0, indices(&rows, &self.values.device()))
+                .mask_where(tail, next_value.clone().repeat_dim(1, 2));
+            let continuation = next_value.clone().mask_where(
+                later
+                    .clone()
+                    .slice_dim(1, 0..1)
+                    .greater_equal(next_value.clone()),
+                later.slice_dim(1, 1..2),
+            );
+            let reward = self.rewards.clone().slice_dim(0, start..end);
+            let mask = masks.clone().slice_dim(0, start..end);
+            let current_return = reward.clone() + continuation * mask.clone() * f64::from(gamma);
+            let q = reward + next_value * mask * f64::from(gamma);
+            accumulators = accumulators
+                .slice_assign([start..end, 0..2], Tensor::cat(vec![q, current_return], 1));
+        }
+        AdvantageEstimate {
+            advantages: accumulators.slice_dim(1, 1..2) - self.values.clone().detach(),
+            value_targets,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum GAEError {
     #[error("GAE lambda must be finite and in 0..=1")]
@@ -97,10 +460,10 @@ impl GAE {
     }
 }
 
-impl AdvantageEstimator for GAE {
+impl DenseAdvantageEstimator for GAE {
     /// Computes GAE advantages shaped `[time, env_count, 1]`; value targets are the
     /// `value_lambda` λ-returns.
-    fn estimate(
+    fn estimate_dense(
         &self,
         rewards: &Tensor<3>,
         values: &Tensor<3>,
@@ -108,7 +471,7 @@ impl AdvantageEstimator for GAE {
         next_truncateds: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f32,
-    ) -> AdvantageEstimate {
+    ) -> AdvantageEstimate<3> {
         let dtype = values.dtype();
         let rewards = rewards.clone();
         let next_dones = next_dones.clone().float().cast(dtype);
@@ -199,9 +562,9 @@ impl NStep {
     }
 }
 
-impl AdvantageEstimator for NStep {
+impl DenseAdvantageEstimator for NStep {
     /// Computes n-step advantages and value targets shaped `[time, env_count, 1]`.
-    fn estimate(
+    fn estimate_dense(
         &self,
         rewards: &Tensor<3>,
         values: &Tensor<3>,
@@ -209,7 +572,7 @@ impl AdvantageEstimator for NStep {
         next_truncateds: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f32,
-    ) -> AdvantageEstimate {
+    ) -> AdvantageEstimate<3> {
         let device = values.device();
         let dtype = values.dtype();
         let rewards = rewards.clone();
@@ -283,10 +646,10 @@ impl<V> UPGO<V> {
     }
 }
 
-impl<V: AdvantageEstimator> AdvantageEstimator for UPGO<V> {
+impl<V: AdvantageEstimator> DenseAdvantageEstimator for UPGO<V> {
     /// Computes upgoing advantages shaped `[time, env_count, 1]`; value targets come from
     /// `value_estimator`.
-    fn estimate(
+    fn estimate_dense(
         &self,
         rewards: &Tensor<3>,
         values: &Tensor<3>,
@@ -294,18 +657,21 @@ impl<V: AdvantageEstimator> AdvantageEstimator for UPGO<V> {
         next_truncateds: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f32,
-    ) -> AdvantageEstimate {
+    ) -> AdvantageEstimate<3> {
         let value_targets = self
             .value_estimator
             .estimate(
-                rewards,
-                values,
-                next_dones,
-                next_truncateds,
-                bootstrapped_values,
+                AdvantageInput::Dense {
+                    rewards,
+                    values,
+                    next_dones,
+                    next_truncateds,
+                    bootstrapped_values,
+                },
                 gamma,
             )
-            .value_targets;
+            .value_targets
+            .reshape(values.dims());
         let dtype = values.dtype();
         let rewards = rewards.clone();
         let values = values.clone().detach();
@@ -351,9 +717,65 @@ impl<V: AdvantageEstimator> AdvantageEstimator for UPGO<V> {
     }
 }
 
+macro_rules! estimate_input {
+    ($self:ident, $input:ident, $gamma:ident, $ragged:expr) => {
+        match $input {
+            AdvantageInput::Dense {
+                rewards,
+                values,
+                next_dones,
+                next_truncateds,
+                bootstrapped_values,
+            } => {
+                let result = $self.estimate_dense(
+                    rewards,
+                    values,
+                    next_dones,
+                    next_truncateds,
+                    bootstrapped_values,
+                    $gamma,
+                );
+                AdvantageEstimate {
+                    advantages: result.advantages.flatten(0, 1),
+                    value_targets: result.value_targets.flatten(0, 1),
+                }
+            }
+            AdvantageInput::Ragged(r) => ($ragged)(r),
+        }
+    };
+}
+impl AdvantageEstimator for GAE {
+    fn estimate(&self, input: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate {
+        estimate_input!(self, input, gamma, |r: RaggedRollout<'_>| r.gae(
+            gamma,
+            self.lambda,
+            self.value_lambda
+        ))
+    }
+}
+impl AdvantageEstimator for NStep {
+    fn estimate(&self, input: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate {
+        estimate_input!(self, input, gamma, |r: RaggedRollout<'_>| r
+            .n_step(gamma, self.n))
+    }
+}
+impl<V: AdvantageEstimator> AdvantageEstimator for UPGO<V> {
+    fn estimate(&self, input: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate {
+        estimate_input!(self, input, gamma, |r: RaggedRollout<'_>| r.upgo(
+            gamma,
+            self.value_estimator
+                .estimate(AdvantageInput::Ragged(r), gamma)
+                .value_targets
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AdvantageEstimator, GAE, GAEError, NStep, NStepError, UPGO};
+    use super::{
+        AdvantageEstimator, AdvantageInput, GAE, GAEError, NStep, NStepError, RaggedRollout,
+        RolloutLayout, RolloutLayoutError, UPGO,
+    };
     use burn::tensor::{Bool, DType, Device, Tensor, TensorData};
     use proptest::{collection::vec, prelude::*};
 
@@ -406,15 +828,20 @@ mod tests {
             };
             let bootstrap = TensorData::new(self.bootstrap.clone(), [self.envs, 1]);
             let estimate = estimator.estimate(
-                &float(&self.rewards),
-                &float(&self.values),
-                &flags(&self.dones),
-                &flags(&self.truncateds),
-                &Tensor::from_data(bootstrap, (&device, dtype)),
+                AdvantageInput::Dense {
+                    rewards: &float(&self.rewards),
+                    values: &float(&self.values),
+                    next_dones: &flags(&self.dones),
+                    next_truncateds: &flags(&self.truncateds),
+                    bootstrapped_values: &Tensor::from_data(bootstrap, (&device, dtype)),
+                },
                 gamma,
             );
-            let values = |tensor: Tensor<3>| {
-                assert_eq!((tensor.dims(), tensor.dtype()), (shape, dtype));
+            let values = |tensor: Tensor<2>| {
+                assert_eq!(
+                    (tensor.dims(), tensor.dtype()),
+                    ([self.rewards.len(), 1], dtype)
+                );
                 tensor
                     .into_data()
                     .convert::<f64>()
@@ -422,6 +849,54 @@ mod tests {
                     .unwrap()
             };
             (values(estimate.advantages), values(estimate.value_targets))
+        }
+
+        fn estimate_ragged(
+            &self,
+            estimator: &impl AdvantageEstimator,
+            gamma: f32,
+            dtype: DType,
+        ) -> Estimate {
+            let device = Device::flex().autodiff();
+            let steps: Vec<_> = (0..self.rewards.len() / self.envs)
+                .map(|_| (0..self.envs).collect::<Vec<_>>())
+                .collect();
+            let layout =
+                RolloutLayout::from_steps(&steps.iter().map(Vec::as_slice).collect::<Vec<_>>())
+                    .unwrap();
+            let n = self.rewards.len();
+            let float = |v: Vec<f32>| {
+                let count = v.len();
+                Tensor::from_data(TensorData::new(v, [count, 1]), (&device, dtype))
+            };
+            let rewards = float(self.rewards.clone());
+            let values = float(self.values.clone());
+            let bootstrap = float(
+                (n - self.envs..n)
+                    .filter(|&i| !self.dones[i] && !self.truncateds[i])
+                    .map(|i| self.bootstrap[i % self.envs])
+                    .collect(),
+            );
+            let result = estimator.estimate(
+                AdvantageInput::Ragged(
+                    RaggedRollout::new(
+                        &rewards,
+                        &values,
+                        &self.dones,
+                        &self.truncateds,
+                        &layout,
+                        &bootstrap,
+                    )
+                    .unwrap(),
+                ),
+                gamma,
+            );
+            let data = |t: Tensor<2>| {
+                assert_eq!(t.dims(), [n, 1]);
+                assert_eq!(t.dtype(), dtype);
+                t.to_data().convert::<f64>().try_to_vec::<f64>().unwrap()
+            };
+            (data(result.advantages), data(result.value_targets))
         }
 
         /// Backward recurrence `acc_i = delta_i + discount * mask_i * acc_{i + envs}`.
@@ -563,6 +1038,7 @@ mod tests {
         ) {
             let estimator = GAE::new(lambda).unwrap().with_value_lambda(value_lambda).unwrap();
             let actual = rollout.estimate(&estimator, gamma, dtype);
+            assert_estimates_close(rollout.estimate_ragged(&estimator, gamma, dtype), actual.clone(), dtype);
             assert_estimates_close(actual, rollout.gae(gamma, lambda, value_lambda), dtype);
         }
 
@@ -574,6 +1050,7 @@ mod tests {
             dtype in float_dtype(),
         ) {
             let actual = rollout.estimate(&NStep::new(n).unwrap(), gamma, dtype);
+            assert_estimates_close(rollout.estimate_ragged(&NStep::new(n).unwrap(), gamma, dtype), actual.clone(), dtype);
             assert_estimates_close(actual, rollout.n_step(gamma, n), dtype);
         }
 
@@ -598,9 +1075,140 @@ mod tests {
             lambda in unit_interval(),
         ) {
             let actual = rollout.estimate(&UPGO::new(GAE::new(lambda).unwrap()), gamma, DType::F64);
+            assert_estimates_close(rollout.estimate_ragged(&UPGO::new(GAE::new(lambda).unwrap()), gamma, DType::F64), actual.clone(), DType::F64);
             let expected = (rollout.upgo_advantages(gamma), rollout.gae(gamma, lambda, lambda).1);
             assert_estimates_close(actual, expected, DType::F64);
         }
+    }
+
+    #[test]
+    fn irregular_interleaved_rollouts_match_independent_slot_references() {
+        let steps = [
+            vec![3, 7],
+            vec![usize::MAX, 3],
+            vec![],
+            vec![7],
+            vec![3, usize::MAX],
+            vec![7, usize::MAX, 3],
+        ];
+        let layout =
+            RolloutLayout::from_steps(&steps.iter().map(Vec::as_slice).collect::<Vec<_>>())
+                .unwrap();
+        assert_eq!(
+            layout.successor(),
+            &[
+                Some(3),
+                Some(4),
+                Some(6),
+                Some(5),
+                Some(7),
+                Some(9),
+                Some(8),
+                None,
+                None,
+                None
+            ]
+        );
+        let slots: Vec<_> = steps.into_iter().flatten().collect();
+        let gamma = 0.91f32;
+        let mut rewards = vec![1.0, -2.0, 3.5, 2.0, -4.0, 7.0, 1.0, 2.5, 4.0, -1.0];
+        rewards[3] += gamma * 5.5;
+        rewards[8] += gamma * 3.75;
+        let values = vec![0.2, 1.0, -2.5, 3.0, 0.7, -1.0, 5.0, 1.5, -0.4, 2.0];
+        let dones = vec![
+            false, false, true, false, true, false, false, false, false, false,
+        ];
+        let truncateds = vec![
+            false, false, true, true, false, false, false, false, true, false,
+        ];
+        for dtype in [DType::F32, DType::F64] {
+            let device = Device::flex().autodiff();
+            let float = |v: Vec<f32>| {
+                let n = v.len();
+                Tensor::from_data(TensorData::new(v, [n, 1]), (&device, dtype))
+            };
+            let r = float(rewards.clone());
+            let v = float(values.clone());
+            let b = float(vec![11.0, 17.0]);
+            let ragged = RaggedRollout::new(&r, &v, &dones, &truncateds, &layout, &b).unwrap();
+            let estimators: Vec<Box<dyn AdvantageEstimator>> = vec![
+                Box::new(GAE::new(0.73).unwrap().with_value_lambda(0.41).unwrap()),
+                Box::new(NStep::new(1).unwrap()),
+                Box::new(NStep::new(2).unwrap()),
+                Box::new(NStep::new(6).unwrap()),
+                Box::new(UPGO::new(
+                    GAE::new(0.73).unwrap().with_value_lambda(0.41).unwrap(),
+                )),
+            ];
+            for (kind, estimator) in estimators.iter().enumerate() {
+                let estimate = estimator.estimate(AdvantageInput::Ragged(ragged), gamma);
+                let mut expected = (vec![0.0; slots.len()], vec![0.0; slots.len()]);
+                for slot in [3, 7, usize::MAX] {
+                    let rows: Vec<_> = slots
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, &s)| (s == slot).then_some(i))
+                        .collect();
+                    let sequence = Rollout {
+                        envs: 1,
+                        rewards: rows.iter().map(|&i| rewards[i]).collect(),
+                        values: rows.iter().map(|&i| values[i]).collect(),
+                        dones: rows.iter().map(|&i| dones[i]).collect(),
+                        truncateds: rows.iter().map(|&i| truncateds[i]).collect(),
+                        bootstrap: vec![if slot == 3 {
+                            17.0
+                        } else if slot == 7 {
+                            11.0
+                        } else {
+                            0.0
+                        }],
+                    };
+                    let reference = match kind {
+                        0 => sequence.gae(gamma, 0.73, 0.41),
+                        1..=3 => sequence.n_step(gamma, [1, 2, 6][kind - 1]),
+                        _ => (
+                            sequence.upgo_advantages(gamma),
+                            sequence.gae(gamma, 0.73, 0.41).1,
+                        ),
+                    };
+                    for (j, &row) in rows.iter().enumerate() {
+                        expected.0[row] = reference.0[j];
+                        expected.1[row] = reference.1[j];
+                    }
+                }
+                let data = |t: Tensor<2>| t.to_data().convert::<f64>().try_to_vec::<f64>().unwrap();
+                assert_estimates_close(
+                    (data(estimate.advantages), data(estimate.value_targets)),
+                    expected,
+                    dtype,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_and_invalid_compact_rollouts_are_checked() {
+        assert!(matches!(
+            RolloutLayout::from_steps(&[&[7, 7]]),
+            Err(RolloutLayoutError::DuplicateSlot { slot: 7, step: 0 })
+        ));
+        let layout = RolloutLayout::from_steps(&[&[], &[]]).unwrap();
+        let device = Device::flex();
+        let empty = Tensor::zeros([0, 1], &device);
+        let rollout = RaggedRollout::new(&empty, &empty, &[], &[], &layout, &empty).unwrap();
+        for estimator in [
+            Box::new(GAE::new(0.9).unwrap()) as Box<dyn AdvantageEstimator>,
+            Box::new(NStep::new(2).unwrap()),
+            Box::new(UPGO::new(GAE::new(0.9).unwrap())),
+        ] {
+            let result = estimator.estimate(AdvantageInput::Ragged(rollout), 0.99);
+            assert_eq!(result.advantages.dims(), [0, 1]);
+            assert_eq!(result.value_targets.dims(), [0, 1]);
+        }
+        assert!(RaggedRollout::new(&empty, &empty, &[true], &[], &layout, &empty).is_err());
+        let one = Tensor::zeros([1, 1], &device);
+        assert!(RaggedRollout::new(&one, &empty, &[], &[], &layout, &empty).is_err());
+        assert!(RaggedRollout::new(&empty, &empty, &[], &[], &layout, &one).is_err());
     }
 
     #[test]

@@ -299,7 +299,7 @@ mod schedule_tests {
 
     use super::*;
     use crate::{
-        advantage_estimation::AdvantageEstimate,
+        advantage_estimation::{AdvantageEstimate, AdvantageInput},
         agents::{Agent, ToEnvironmentActions},
         distributions::{CategoricalDistribution, GaussianDistribution},
         gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
@@ -555,7 +555,7 @@ mod schedule_tests {
         }
 
         agent.add_advantages_and_returns(&validation).unwrap();
-        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
         for (transition, expected) in agent.rollout_buffer.iter().zip([1.99f32, 1.0]) {
             let prepared = transition.prepared.as_ref().unwrap();
             let old_values = prepared.old_values.as_ref().unwrap();
@@ -570,16 +570,9 @@ mod schedule_tests {
         struct RewardMinusValue;
 
         impl AdvantageEstimator for RewardMinusValue {
-            /// Returns reward-minus-value advantages and reward value targets, shaped `[time, env_count, 1]`.
-            fn estimate(
-                &self,
-                rewards: &Tensor<3>,
-                values: &Tensor<3>,
-                _next_dones: &Tensor<3, Bool>,
-                _next_truncateds: &Tensor<3, Bool>,
-                _bootstrapped_values: &Tensor<2>,
-                _gamma: f32,
-            ) -> AdvantageEstimate {
+            /// Returns reward-minus-value advantages and reward targets [rows, 1].
+            fn estimate(&self, input: AdvantageInput<'_>, _gamma: f32) -> AdvantageEstimate {
+                let (rewards, values) = input.rewards_and_values();
                 AdvantageEstimate {
                     advantages: rewards.clone() - values.clone(),
                     value_targets: rewards.clone(),
@@ -624,19 +617,12 @@ mod schedule_tests {
         struct MismatchedEstimator;
 
         impl AdvantageEstimator for MismatchedEstimator {
-            /// Returns advantages shaped `[time, env_count, 2]` and value targets shaped `[time, env_count, 1]`.
-            fn estimate(
-                &self,
-                rewards: &Tensor<3>,
-                values: &Tensor<3>,
-                _next_dones: &Tensor<3, Bool>,
-                _next_truncateds: &Tensor<3, Bool>,
-                _bootstrapped_values: &Tensor<2>,
-                _gamma: f32,
-            ) -> AdvantageEstimate {
+            /// Returns invalid advantages [rows, 2] and value targets [rows, 1].
+            fn estimate(&self, input: AdvantageInput<'_>, _gamma: f32) -> AdvantageEstimate {
+                let (rewards, values) = input.rewards_and_values();
                 let advantages = rewards.clone() - values.clone();
                 AdvantageEstimate {
-                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 2),
+                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 1),
                     value_targets: rewards.clone(),
                 }
             }
@@ -1035,12 +1021,18 @@ mod schedule_tests {
         assert_eq!(transition.rewards.dtype(), DType::F64);
         assert_eq!(transition.training_rewards.dtype(), DType::F64);
         let expected = 0.25 + 1.0000000001 * f64::from(agent.gamma);
-        assert!(
-            (transition.training_rewards.clone().into_scalar::<f64>() - expected).abs() < 1e-12
-        );
         let explained_variance = agent
             .add_advantages_and_returns(&agent.network_info.valid())
             .unwrap();
+        assert!(
+            (agent.rollout_buffer[0]
+                .training_rewards
+                .clone()
+                .into_scalar::<f64>()
+                - expected)
+                .abs()
+                < 1e-12
+        );
         let prepared = agent.rollout_buffer[0].prepared.as_ref().unwrap();
         assert_eq!(prepared.returns.dtype(), DType::F64);
         assert!((prepared.returns.clone().into_scalar::<f64>() - expected).abs() < 1e-12);
@@ -1404,8 +1396,11 @@ mod schedule_tests {
                 .unwrap(),
             [1.0]
         );
+        agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
         assert!(
-            (item
+            (agent.rollout_buffer[0]
                 .training_rewards
                 .clone()
                 .into_data()
@@ -1415,9 +1410,7 @@ mod schedule_tests {
                 .abs()
                 < 1e-6
         );
-        agent
-            .add_advantages_and_returns(&agent.network_info.valid())
-            .unwrap();
+
         let returns = agent.rollout_buffer[0]
             .prepared
             .as_ref()
@@ -1559,29 +1552,43 @@ mod schedule_tests {
             .build()
             .unwrap();
         let observations = Tensor::zeros([2, 4], (&device, DType::F32));
-        let actual = agent
-            .bootstrap_truncated_rewards(
-                &agent.network_info.valid(),
-                Tensor::zeros([2, 1], (&device, DType::F32)),
-                &observations,
-                &[true, false],
-                &[true, true],
-            )
-            .unwrap();
-        assert_eq!(actual.into_data().try_to_vec::<f32>().unwrap(), [0.0, 0.99]);
-        assert!(matches!(
-            agent.bootstrap_truncated_rewards(
-                &agent.network_info.valid(),
-                Tensor::zeros([2, 1], (&device, DType::F64)),
-                &observations,
-                &[true, false],
-                &[true, true],
-            ),
-            Err(PPOError::CriticRewardDTypeMismatch {
-                critic: DType::F32,
-                reward: DType::F64,
-            })
-        ));
+        for dtype in [DType::F32, DType::F64] {
+            agent.rollout_buffer.clear();
+            agent.rollout_rows = 2;
+            agent.rollout_buffer.push(
+                PPOExperience::builder()
+                    .observations(observations.clone())
+                    .next_observations(observations.clone())
+                    .actions(Tensor::zeros([2, 1], &device))
+                    .rewards(Tensor::zeros([2, 1], (&device, dtype)))
+                    .training_rewards(Tensor::zeros([2, 1], (&device, dtype)))
+                    .next_dones(vec![true, false])
+                    .truncateds(vec![true, true])
+                    .log_probs(Tensor::zeros([2, 1], &device))
+                    .values(Tensor::zeros([2, 1], (&device, dtype)))
+                    .build(),
+            );
+            let result = agent.add_advantages_and_returns(&agent.network_info.valid());
+            if dtype == DType::F32 {
+                result.unwrap();
+                assert_eq!(
+                    agent.rollout_buffer[0]
+                        .training_rewards
+                        .to_data()
+                        .try_to_vec::<f32>()
+                        .unwrap(),
+                    [0.0, 0.99]
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(PPOError::CriticRewardDTypeMismatch {
+                        critic: DType::F32,
+                        reward: DType::F64
+                    })
+                ));
+            }
+        }
     }
 
     #[test]
@@ -1945,21 +1952,15 @@ mod schedule_tests {
     }
 
     impl AdvantageEstimator for FailOnceEstimator {
-        /// Records rollout lengths and returns mismatched advantages shaped `[time, env_count, 2]` once.
-        fn estimate(
-            &self,
-            rewards: &Tensor<3>,
-            values: &Tensor<3>,
-            _next_dones: &Tensor<3, Bool>,
-            _next_truncateds: &Tensor<3, Bool>,
-            _bootstrapped_values: &Tensor<2>,
-            _gamma: f32,
-        ) -> AdvantageEstimate {
-            self.time_steps.lock().unwrap().push(rewards.dims()[0]);
+        /// Records rollout lengths and returns mismatched advantages [rows, 2] once.
+        fn estimate(&self, input: AdvantageInput<'_>, _gamma: f32) -> AdvantageEstimate {
+            let step_count = input.step_count();
+            let (rewards, values) = input.rewards_and_values();
+            self.time_steps.lock().unwrap().push(step_count);
             let advantages = rewards.clone() - values.clone();
             if self.fail_next.swap(false, Ordering::Relaxed) {
                 AdvantageEstimate {
-                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 2),
+                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 1),
                     value_targets: rewards.clone(),
                 }
             } else {
@@ -2091,6 +2092,112 @@ mod schedule_tests {
         }
 
         assert_eq!(*time_steps.lock().unwrap(), vec![2, 2]);
+    }
+
+    #[test]
+    fn bootstrap_critic_evaluates_only_truncations_and_live_tails_once() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        #[derive(Module, Debug)]
+        struct RecordingCritic {
+            weight: Param<Tensor<1>>,
+            #[module(skip)]
+            batches: Arc<Mutex<Vec<Vec<f32>>>>,
+        }
+        impl Forward<2, 2> for RecordingCritic {
+            type InputKind = Float;
+            type OutputKind = Float;
+            type Error = Infallible;
+
+            /// Records the first feature of real observations `[batch, 4]` and returns values `[batch, 1]`.
+            fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+                let values = observations.slice_dim(1, 0..1);
+                self.batches
+                    .lock()
+                    .unwrap()
+                    .push(values.to_data().try_to_vec::<f32>().unwrap());
+                Ok(values * self.weight.val().unsqueeze::<2>())
+            }
+        }
+        let device = Device::flex().autodiff();
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(RecordingCritic {
+                weight: Param::from_tensor(Tensor::ones([1], &device)),
+                batches: batches.clone(),
+            })
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(64)
+            .mini_batch_size(2)
+            .training_horizon(64)
+            .build()
+            .unwrap();
+        for (slots, next, dones, truncateds) in [
+            (
+                vec![7, 2],
+                vec![41.0, 12.0],
+                vec![false, false],
+                vec![true, false],
+            ),
+            (vec![2], vec![22.0], vec![true], vec![false]),
+            (
+                vec![9, 7],
+                vec![39.0, 47.0],
+                vec![true, false],
+                vec![false, false],
+            ),
+        ] {
+            let n = slots.len();
+            let next = Tensor::from_data(TensorData::new(next, [n, 1]), &device).repeat_dim(1, 4);
+            agent.rollout_buffer.push(
+                PPOExperience::builder()
+                    .slots(slots)
+                    .observations(Tensor::ones([n, 4], &device))
+                    .next_observations(next)
+                    .actions(Tensor::zeros([n, 1], &device))
+                    .rewards(Tensor::ones([n, 1], &device))
+                    .training_rewards(Tensor::ones([n, 1], &device))
+                    .next_dones(dones)
+                    .truncateds(truncateds)
+                    .values(Tensor::ones([n, 1], &device))
+                    .log_probs(Tensor::zeros([n, 1], &device))
+                    .build(),
+            );
+            agent.rollout_rows += n;
+        }
+        agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
+        assert_eq!(*batches.lock().unwrap(), vec![vec![41.0, 47.0]]);
+        assert_eq!(
+            agent
+                .rollout_buffer
+                .iter()
+                .map(|x| x.prepared.as_ref().unwrap().returns.dims()[0])
+                .sum::<usize>(),
+            5
+        );
+        batches.lock().unwrap().clear();
+        for experience in &mut agent.rollout_buffer {
+            experience.next_dones.fill(true);
+            experience.truncateds.fill(false);
+        }
+        agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
+        assert!(batches.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2250,14 +2357,19 @@ mod schedule_tests {
                     let mut dones = vec![false; time];
                     dones[time - 1] = slot == 0 && terminate_first_slot;
                     GAE::new(0.95).unwrap().estimate(
-                        &Tensor::full([time, 1, 1], (slot + 1) as f32, &device),
-                        &Tensor::from_data(
-                            TensorData::new(values[slot].clone(), [time, 1, 1]),
-                            &device,
-                        ),
-                        &Tensor::from_data(TensorData::new(dones, [time, 1, 1]), &device),
-                        &Tensor::full([time, 1, 1], false, &device),
-                        &Tensor::from_data([[bootstraps[slot]]], &device),
+                        AdvantageInput::Dense {
+                            rewards: &Tensor::full([time, 1, 1], (slot + 1) as f32, &device),
+                            values: &Tensor::from_data(
+                                TensorData::new(values[slot].clone(), [time, 1, 1]),
+                                &device,
+                            ),
+                            next_dones: &Tensor::from_data(
+                                TensorData::new(dones, [time, 1, 1]),
+                                &device,
+                            ),
+                            next_truncateds: &Tensor::full([time, 1, 1], false, &device),
+                            bootstrapped_values: &Tensor::from_data([[bootstraps[slot]]], &device),
+                        },
                         agent.gamma,
                     )
                 })

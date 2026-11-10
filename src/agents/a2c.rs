@@ -39,6 +39,8 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
+    #[error("invalid rollout layout: {0}")]
+    Layout(#[from] crate::advantage_estimation::RolloutLayoutError),
     #[error("invalid slots: {0}")]
     Slots(#[from] crate::buffers::experience_replay::ReplayStorageError),
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
@@ -46,7 +48,7 @@ where
     #[error(
         "advantage estimates must match rollout values: shape {expected:?}, dtype {dtype:?}, and device"
     )]
-    AdvantageEstimateMismatch { expected: [usize; 3], dtype: DType },
+    AdvantageEstimateMismatch { expected: [usize; 2], dtype: DType },
     #[error("network failed: {0}")]
     NetworkError(#[source] AE),
     #[error("gym failed: {0}")]
@@ -80,6 +82,7 @@ impl<AE: std::fmt::Debug, GE: std::fmt::Debug, SE: std::fmt::Debug> From<PPOErro
 {
     fn from(error: PPOError<AE, GE, SE>) -> Self {
         match error {
+            PPOError::Layout(error) => Self::Layout(error),
             PPOError::Slots(error) => Self::Slots(error),
             PPOError::CriticRewardDTypeMismatch { critic, reward } => {
                 Self::CriticRewardDTypeMismatch { critic, reward }

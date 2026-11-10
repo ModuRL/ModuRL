@@ -22,6 +22,21 @@ PPO estimates advantages with `GAE` (lambda `0.95`) by default. Pass any
 `.advantage_estimator(GAE::new(0.9)?)`. An estimator returns an
 `AdvantageEstimate` with the advantages and the critic's value targets; `GAE`
 uses `values + advantages` as those targets.
+
+The trait method is `estimate(&self, rollout: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate`.
+Outputs are flat `[rows, 1]` tensors in collection order. `AdvantageInput::Dense` preserves
+`[time, env_count, 1]` inputs for identity-slot rollouts without building a slot layout.
+`AdvantageInput::Ragged` carries a validated `RaggedRollout`: flat rewards and values,
+termination flags, a `RolloutLayout`, and values for live tails in flat row order.
+Build the layout with `RolloutLayout::from_steps`, passing each step's slot slice;
+its offsets delimit compact chunks and its successors link the same slot across gaps.
+Construct ragged inputs with `RaggedRollout::new`, which returns recoverable validation errors.
+Both variants receive rewards already corrected by `gamma * V(terminal)` for
+non-done truncations. Done and truncated rows stop the recurrence, including when
+both flags are true. PPO evaluates terminal observations and live-tail next observations
+in one compact critic batch during rollout preparation. Dead tails and slots with
+no stored rows require no bootstrap evaluation. Custom estimators can use
+`rollout.rewards_and_values()` to obtain flat tensors for either variant.
 The built-in `NStep::new(n)?` estimator is an alternative for n-step returns.
 Use `GAE::new(0.95)?.with_value_lambda(1.0)?` to use a separate lambda for value targets.
 The built-in `UPGO::new(GAE::new(0.95)?)` estimator is also available for upgoing policy updates.
