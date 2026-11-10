@@ -144,27 +144,27 @@ mod rollout_batch_tests {
             });
         }
         let batch = PPOExperience::batch(&experiences).unwrap();
-        let observations: Tensor<4> = batch.observations;
-        let actions: Tensor<3> = batch.actions;
-        assert_eq!(observations.dims(), [2, 2, 1, 2]);
-        assert_eq!(actions.dims(), [2, 2, 1]);
+        let observations: Tensor<3> = batch.observations;
+        let actions: Tensor<2> = batch.actions;
+        assert_eq!(observations.dims(), [4, 1, 2]);
+        assert_eq!(actions.dims(), [4, 1]);
         assert_eq!(observations.dtype(), DType::F64);
         assert_eq!(observations.device(), device);
-        assert_eq!(batch.rewards.dims(), [2, 2, 1]);
+        assert_eq!(batch.rewards.dims(), [4, 1]);
         assert_eq!(batch.rewards.dtype(), DType::F64);
         assert_eq!(
             batch.rewards.into_data().try_to_vec::<f64>().unwrap(),
             [3.0, 4.0, 12.0, 13.0]
         );
-        assert_eq!(batch.log_probs.dims(), [2, 2, 1]);
+        assert_eq!(batch.log_probs.dims(), [4, 1]);
         let prepared = batch.prepared.unwrap();
-        assert_eq!(prepared.advantages.dims(), [2, 2, 1]);
-        assert_eq!(prepared.returns.dims(), [2, 2, 1]);
+        assert_eq!(prepared.advantages.dims(), [4, 1]);
+        assert_eq!(prepared.returns.dims(), [4, 1]);
         assert_eq!(
             prepared.returns.into_data().try_to_vec::<f64>().unwrap(),
             [103.0, 104.0, 112.0, 113.0]
         );
-        assert_eq!(prepared.old_values.unwrap().dims(), [2, 2, 1]);
+        assert_eq!(prepared.old_values.unwrap().dims(), [4, 1]);
 
         let gradients = observations.sum().backward();
         for item in experiences {
@@ -193,6 +193,44 @@ mod rollout_batch_tests {
             PPOExperience::batch(&experiences),
             Err(ExperienceBatchError::DTypeMismatch { index: 1, .. })
         ));
+        experiences[1].rewards = experiences[1].rewards.clone().cast(DType::F64);
+        experiences[1].observations = experiences[1].observations.clone().reshape([2, 2, 1]);
+        assert!(matches!(
+            PPOExperience::batch(&experiences),
+            Err(ExperienceBatchError::ShapeMismatch { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn rollout_batch_concatenates_steps_with_different_row_counts() {
+        let device = Device::flex().autodiff();
+        let mut experiences = [transition(1.0, &device), transition(10.0, &device)];
+        experiences[1].slots = vec![1];
+        experiences[1].observations = experiences[1].observations.clone().slice_dim(0, 1..2);
+        experiences[1].actions = experiences[1].actions.clone().slice_dim(0, 1..2);
+        experiences[1].rewards = experiences[1].rewards.clone().slice_dim(0, 1..2);
+        experiences[1].log_probs = experiences[1].log_probs.clone().slice_dim(0, 1..2);
+        for item in &mut experiences {
+            item.prepared = Some(PPOPreparedExperience {
+                advantages: item.rewards.clone(),
+                returns: item.rewards.clone() + 100.0,
+                old_values: Some(item.log_probs.clone()),
+            });
+        }
+        let batch = PPOExperience::batch(&experiences).unwrap();
+        assert_eq!(batch.observations.dims(), [3, 1, 2]);
+        assert_eq!(batch.actions.dims(), [3, 1]);
+        assert_eq!(
+            batch.rewards.to_data().try_to_vec::<f64>().unwrap(),
+            [3.0, 4.0, 13.0]
+        );
+        let prepared = batch.prepared.unwrap();
+        assert_eq!(prepared.advantages.dims(), [3, 1]);
+        assert_eq!(prepared.old_values.unwrap().dims(), [3, 1]);
+        assert_eq!(
+            prepared.returns.to_data().try_to_vec::<f64>().unwrap(),
+            [103.0, 104.0, 113.0]
+        );
     }
 
     #[test]
@@ -2032,6 +2070,207 @@ mod schedule_tests {
     }
 
     #[test]
+    fn sparse_rollout_stores_only_active_observation_rows() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(1024)
+            .mini_batch_size(2)
+            .training_horizon(1024)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([256, 4], &device);
+        for time in 0..4 {
+            let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+            let mut active = vec![false; 256];
+            active[255] = time != 2;
+            let step = MultiGymStepInfo {
+                observations: observations.clone(),
+                rewards: Tensor::ones([256, 1], &device),
+                infos: vec![(); 256],
+                dones: vec![false; 256],
+                truncateds: vec![false; 256],
+                terminal_observations: vec![None; 256],
+            };
+            agent
+                .learn_from_timesteps(&observations, actions, step, &active)
+                .unwrap();
+        }
+        let stored_rows: usize = agent
+            .rollout_buffer
+            .iter()
+            .map(|step| step.observations.dims()[0])
+            .sum();
+        assert_eq!(stored_rows, 3);
+        assert_eq!(agent.rollout_active_rows, 3);
+        assert_eq!(agent.rollout_buffer.len(), 3);
+        for step in &agent.rollout_buffer {
+            assert_eq!(step.slots, [255]);
+            assert_eq!(step.next_observations.dims()[0], 1);
+            assert_eq!(step.actions.dims()[0], 1);
+            assert_eq!(step.log_probs.dims(), [1, 1]);
+            assert_eq!(step.values.dims(), [1, 1]);
+            assert_eq!(step.rewards.dims(), [1, 1]);
+            assert_eq!(step.training_rewards.dims(), [1, 1]);
+            assert_eq!(step.next_dones.len(), 1);
+            assert_eq!(step.truncateds.len(), 1);
+        }
+    }
+
+    #[test]
+    fn compact_gae_matches_each_slots_own_sequence_and_bootstrap() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        for terminate_first_slot in [true, false] {
+            let networks = SeparatePPONetwork::builder()
+                .actor_network(ProbabilisticPolicyModel::new(
+                    mlp(4, 2, &device),
+                    CategoricalDistribution,
+                ))
+                .critic_network(mlp(4, 1, &device))
+                .actor_optimizer(SgdConfig::new().init())
+                .critic_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(1e-3)
+                .critic_learning_rate(1e-3)
+                .build()
+                .unwrap();
+            let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+                .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+                .action_space(Discrete::new(2).unwrap())
+                .network_info(networks)
+                .batch_size(12)
+                .mini_batch_size(2)
+                .training_horizon(12)
+                .build()
+                .unwrap();
+            let mut values = [Vec::new(), Vec::new()];
+            let mut bootstraps = [0.0f32; 2];
+            for time in 0..4 {
+                let observations = Tensor::from_data(
+                    [[time as f32; 4], [time as f32 + 2.0; 4], [1e6; 4]],
+                    &device,
+                );
+                let next = Tensor::from_data(
+                    [[time as f32 + 1.0; 4], [time as f32 + 3.0; 4], [1e6; 4]],
+                    &device,
+                );
+                let validation = agent.network_info.valid();
+                let current_values = agent
+                    .critic_network_forward(&validation, &observations, DType::F32)
+                    .unwrap()
+                    .to_data()
+                    .try_to_vec::<f32>()
+                    .unwrap();
+                let next_values = agent
+                    .critic_network_forward(&validation, &next, DType::F32)
+                    .unwrap()
+                    .to_data()
+                    .try_to_vec::<f32>()
+                    .unwrap();
+                for slot in 0..2 {
+                    if slot == 1 || time < 2 {
+                        values[slot].push(current_values[slot]);
+                        bootstraps[slot] = next_values[slot];
+                    }
+                }
+                let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+                let step = MultiGymStepInfo {
+                    observations: next,
+                    rewards: Tensor::from_data([[1.0], [2.0], [1e6]], &device),
+                    infos: vec![(); 3],
+                    dones: vec![terminate_first_slot && time == 1, false, false],
+                    truncateds: vec![false; 3],
+                    terminal_observations: vec![None; 3],
+                };
+                agent
+                    .learn_from_timesteps(&observations, actions, step, &[time < 2, true, false])
+                    .unwrap();
+            }
+            agent
+                .add_advantages_and_returns(&agent.network_info.valid())
+                .unwrap();
+            let expected: Vec<_> = (0..2)
+                .map(|slot| {
+                    let time = values[slot].len();
+                    let mut dones = vec![false; time];
+                    dones[time - 1] = slot == 0 && terminate_first_slot;
+                    GAE::new(0.95).unwrap().estimate(
+                        &Tensor::full([time, 1, 1], (slot + 1) as f32, &device),
+                        &Tensor::from_data(
+                            TensorData::new(values[slot].clone(), [time, 1, 1]),
+                            &device,
+                        ),
+                        &Tensor::from_data(TensorData::new(dones, [time, 1, 1]), &device),
+                        &Tensor::full([time, 1, 1], false, &device),
+                        &Tensor::from_data([[bootstraps[slot]]], &device),
+                        agent.gamma,
+                    )
+                })
+                .collect();
+            for (time, step) in agent.rollout_buffer.iter().enumerate() {
+                let prepared = step.prepared.as_ref().unwrap();
+                let slots: Vec<_> = if time < 2 { vec![0, 1] } else { vec![1] };
+                let expected_advantages: Vec<_> = slots
+                    .iter()
+                    .map(|&slot| {
+                        expected[slot]
+                            .advantages
+                            .to_data()
+                            .try_to_vec::<f32>()
+                            .unwrap()[time]
+                    })
+                    .collect();
+                let expected_returns: Vec<_> = slots
+                    .iter()
+                    .map(|&slot| {
+                        expected[slot]
+                            .value_targets
+                            .to_data()
+                            .try_to_vec::<f32>()
+                            .unwrap()[time]
+                    })
+                    .collect();
+                assert_eq!(prepared.advantages.dims()[0], slots.len());
+                for (actual, expected) in prepared
+                    .advantages
+                    .to_data()
+                    .try_to_vec::<f32>()
+                    .unwrap()
+                    .into_iter()
+                    .zip(expected_advantages)
+                {
+                    assert!((actual - expected).abs() < 1e-5);
+                }
+                for (actual, expected) in prepared
+                    .returns
+                    .to_data()
+                    .try_to_vec::<f32>()
+                    .unwrap()
+                    .into_iter()
+                    .zip(expected_returns)
+                {
+                    assert!((actual - expected).abs() < 1e-5);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn sparse_episode_timestamp_counts_only_active_rows() {
         #[derive(Default)]
         struct Logger(Vec<(usize, usize)>);
@@ -2148,21 +2387,21 @@ mod schedule_tests {
     #[test]
     fn sparse_rollout_waits_for_batch_size_active_rows() {
         let progress = sparse_rollout_progress(false);
-        assert_eq!(&progress[..4], &[(1, 0), (2, 0), (3, 0), (4, 0)]);
+        assert_eq!(&progress[..4], &[(0, 0), (1, 0), (2, 0), (3, 0)]);
     }
 
     #[test]
     fn sparse_rollout_schedule_counts_only_active_rows() {
         let progress = sparse_rollout_progress(false);
         assert_eq!(progress[4], (0, 4));
-        assert_eq!(progress[5], (1, 4));
+        assert_eq!(progress[5], (0, 4));
     }
 
     #[test]
     fn sparse_rollout_counts_active_rows_past_batch_size() {
         let progress = sparse_rollout_progress(true);
         assert_eq!(progress[4], (0, 5));
-        assert_eq!(progress[5], (1, 5));
+        assert_eq!(progress[5], (0, 5));
     }
 
     fn sparse_rollout_progress(final_row_active: bool) -> Vec<(usize, usize)> {
@@ -2314,7 +2553,7 @@ mod schedule_tests {
                     .unwrap();
             }
             assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
-            assert_eq!(agent.rollout_buffer.len(), 2);
+            assert_eq!(agent.rollout_buffer.len(), 0);
             assert_eq!(agent.rollout_active_rows, 0);
             let mut parameters = Parameters(Vec::new());
             agent.network().visit(&mut parameters);
