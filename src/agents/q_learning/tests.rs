@@ -397,14 +397,14 @@ fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
         before.observations.into_data().try_to_vec::<f64>().unwrap(),
         [1.0]
     );
-    let batch = storage.gather(&[0, 1, 2, 3]).unwrap();
+    let batch = storage.gather(&[3, 0, 1]).unwrap();
     assert_eq!(
         batch.observations.into_data().try_to_vec::<f64>().unwrap(),
-        [5.0, 6.0, 3.0, 4.0]
+        [4.0, 5.0, 6.0]
     );
-    assert_eq!(batch.actions.dims(), [4, 1]);
-    assert_eq!(batch.next_dones.dims(), [4, 1]);
-    assert_eq!(batch.rewards.dims(), [4, 1]);
+    assert_eq!(batch.actions.dims(), [3, 1]);
+    assert_eq!(batch.next_dones.dims(), [3, 1]);
+    assert_eq!(batch.rewards.dims(), [3, 1]);
 }
 
 #[test]

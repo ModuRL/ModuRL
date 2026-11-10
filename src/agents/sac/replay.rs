@@ -533,19 +533,19 @@ mod tests {
         storage.insert(2, next).unwrap();
         assert_eq!(
             storage
-                .gather(&[0])
+                .gather(&[1])
                 .unwrap()
                 .next_observations
                 .into_data()
                 .try_to_vec::<i64>()
                 .unwrap(),
-            [10]
+            [20]
         );
-        assert_eq!(storage.sampleable_len(4), 4);
+        assert_eq!(storage.sampleable_len(4), 3);
         storage
             .insert(0, integer_transitions(&device, DType::I64))
             .unwrap();
-        assert_eq!(storage.sampleable_len(4), 4);
+        assert_eq!(storage.sampleable_len(4), 3);
     }
 
     #[test]

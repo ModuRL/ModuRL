@@ -1044,7 +1044,7 @@ fn caller_collected_training_matches_learn() {
             .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
             .action_space(action_space)
             .observation_space(observation_space)
-            .replay_capacity(2)
+            .replay_capacity(3)
             .batch_size(2)
             .training_start(0)
             .training_horizon(8)
