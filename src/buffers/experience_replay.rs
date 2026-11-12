@@ -156,13 +156,52 @@ impl<const R: usize, K: Autodiff> TensorReplayColumn<R, K> {
     }
 }
 
-struct ReplaySlotHead {
-    slot: usize,
-    row: Option<usize>,
+struct ReplaySlotHeads {
+    dense: Vec<Option<usize>>,
+    sparse: HashMap<usize, usize>,
+    count: usize,
+}
+
+impl ReplaySlotHeads {
+    fn get(&self, slot: usize) -> Option<usize> {
+        self.dense
+            .get(slot)
+            .copied()
+            .flatten()
+            .or_else(|| self.sparse.get(&slot).copied())
+    }
+
+    fn insert(&mut self, slot: usize, row: usize) {
+        let previous = if let Some(head) = self.dense.get_mut(slot) {
+            head.replace(row)
+        } else {
+            self.sparse.insert(slot, row)
+        };
+        self.count += usize::from(previous.is_none());
+    }
+
+    fn remove(&mut self, slot: usize) {
+        let previous = if let Some(head) = self.dense.get_mut(slot) {
+            head.take()
+        } else {
+            self.sparse.remove(&slot)
+        };
+        self.count -= usize::from(previous.is_some());
+    }
+
+    fn len(&self) -> usize {
+        self.count
+    }
+
+    fn clear(&mut self) {
+        self.dense.fill(None);
+        self.sparse.clear();
+        self.count = 0;
+    }
 }
 
 /// Stores native observations `[capacity + reserved_slots, ...item_shape]` with Int pointers.
-/// Slot reservation starts at the environment count and grows geometrically for new slots.
+/// Slot reservation starts at the environment count and grows geometrically for live heads.
 /// Continuous streams retain the full transition capacity with one cached head per slot.
 /// Short or discontinuous episodes may evict oldest transitions before reaching capacity
 /// to reclaim observation rows; at least half capacity fits even without any row reuse.
@@ -173,7 +212,7 @@ pub(crate) struct PointerObservationReplay<const R: usize, K: Autodiff = Float> 
     transitions: Vec<Option<(usize, usize)>>,
     references: Vec<u8>,
     owners: Vec<Option<usize>>,
-    latest: Vec<ReplaySlotHead>,
+    latest: ReplaySlotHeads,
     slot_capacity: usize,
     oldest: usize,
     len: usize,
@@ -210,7 +249,11 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
             transitions: vec![None; capacity],
             references: vec![0; shape[0]],
             owners: vec![None; shape[0]],
-            latest: Vec::new(),
+            latest: ReplaySlotHeads {
+                dense: vec![None; environment_count],
+                sparse: HashMap::new(),
+                count: 0,
+            },
             slot_capacity: environment_count,
             oldest: 0,
             len: 0,
@@ -227,9 +270,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
     }
 
     pub(crate) fn clear_streams(&mut self) {
-        for head in &mut self.latest {
-            head.row = None;
-        }
+        self.latest.clear();
         self.owners.fill(None);
     }
 
@@ -285,7 +326,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
         if count == 0 {
             return Ok(0);
         }
-        self.register_slots(slots)?;
+        self.reserve_slots(slots)?;
         let device = self.observations.tensor().device();
         let next_states = next_states.to_device(&device).without_autodiff();
         for offset in 0..count {
@@ -294,14 +335,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
             }
         }
         // Pin reusable rows before allocating, including slots later in this batch.
-        let mut obs_rows: Vec<_> = slots
-            .iter()
-            .map(|&slot| {
-                self.slot_position(slot)
-                    .ok()
-                    .and_then(|index| self.latest[index].row)
-            })
-            .collect();
+        let mut obs_rows: Vec<_> = slots.iter().map(|&slot| self.latest.get(slot)).collect();
         for row in obs_rows.iter().flatten() {
             if self.references[*row] == 0 {
                 self.free_rows -= 1;
@@ -343,32 +377,23 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
         for (offset, &slot) in slots.iter().enumerate() {
             let next = next_rows[offset];
             self.transitions[(start + offset) % capacity] = Some((obs_rows[offset], next));
-            if let Ok(index) = self.slot_position(slot) {
-                self.latest[index].row = (!ends[offset]).then_some(next);
-            }
-            if !ends[offset] {
+            if ends[offset] {
+                self.latest.remove(slot);
+            } else {
+                self.latest.insert(slot, next);
                 self.owners[next] = Some(slot);
             }
         }
         Ok(count)
     }
 
-    fn slot_position(&self, slot: usize) -> Result<usize, usize> {
-        if self.latest.get(slot).is_some_and(|head| head.slot == slot) {
-            Ok(slot)
-        } else {
-            self.latest.binary_search_by_key(&slot, |head| head.slot)
-        }
-    }
-
-    fn register_slots(&mut self, slots: &[usize]) -> Result<(), ReplayStorageError> {
-        for &slot in slots {
-            if let Err(index) = self.slot_position(slot) {
-                self.latest
-                    .insert(index, ReplaySlotHead { slot, row: None });
-            }
-        }
-        if self.latest.len() <= self.slot_capacity {
+    fn reserve_slots(&mut self, slots: &[usize]) -> Result<(), ReplayStorageError> {
+        let needed = self.latest.len()
+            + slots
+                .iter()
+                .filter(|&&slot| self.latest.get(slot).is_none())
+                .count();
+        if needed <= self.slot_capacity {
             return Ok(());
         }
         let reserved = self
@@ -378,7 +403,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
                 capacity: self.slot_capacity,
                 additional: self.slot_capacity,
             })?
-            .max(self.latest.len());
+            .max(needed);
         let total = validate_replay_alignment(self.transitions.len(), reserved)?;
         let additional = total - self.references.len();
         let mut shape = self.observations.tensor().dims();
@@ -404,6 +429,15 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
         self.references[row] -= 1;
         if self.references[row] == 0 {
             self.free_rows += 1;
+            self.release_head(row);
+        }
+    }
+
+    fn release_head(&mut self, row: usize) {
+        if let Some(slot) = self.owners[row].take()
+            && self.latest.get(slot) == Some(row)
+        {
+            self.latest.remove(slot);
         }
     }
 
@@ -427,12 +461,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
             self.cursor = (self.cursor + 1) % self.references.len();
         }
         let row = self.cursor;
-        if let Some(slot) = self.owners[row].take()
-            && let Ok(index) = self.slot_position(slot)
-            && self.latest[index].row == Some(row)
-        {
-            self.latest[index].row = None;
-        }
+        self.release_head(row);
         self.references[row] = 1;
         self.free_rows -= 1;
         self.cursor = (row + 1) % self.references.len();
@@ -722,6 +751,28 @@ mod tests {
             gathered.into_data().try_to_vec::<u64>().unwrap(),
             vec![values[1], values[0]]
         );
+    }
+
+    #[test]
+    fn distinct_one_shot_slots_keep_observation_storage_bounded() {
+        let device = Device::flex();
+        let capacity = 8;
+        for ended in [true, false] {
+            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 1, &device).unwrap();
+            for time in 0..400 {
+                replay
+                    .insert(
+                        time % capacity,
+                        Tensor::full([1, 1], time as f32, &device),
+                        Tensor::full([1, 1], (time + 1) as f32, &device),
+                        &[ended],
+                        &[usize::MAX - time],
+                    )
+                    .unwrap();
+                assert!(replay.latest.len() <= if ended { 0 } else { capacity });
+                assert!(replay.observations.tensor().dims()[0] <= capacity * 3);
+            }
+        }
     }
 
     #[test]
