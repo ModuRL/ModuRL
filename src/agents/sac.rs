@@ -376,8 +376,8 @@ impl SACEpisodeTracker {
 
         Some(SACEpisodeLogEntry {
             environment_index,
-            episode_return: std::mem::take(&mut self.returns[environment_index]),
-            episode_length: std::mem::take(&mut self.lengths[environment_index]),
+            episode_return: self.returns.take(environment_index),
+            episode_length: self.lengths.take(environment_index),
             collection_timestep,
             terminated,
             truncated,

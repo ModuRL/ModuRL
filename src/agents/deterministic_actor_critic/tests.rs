@@ -15,6 +15,20 @@ use burn::{
 use std::convert::Infallible;
 
 #[test]
+fn completed_episodes_release_sparse_slot_state() {
+    let mut tracker = EpisodeTracker::new(0);
+    for slot in (usize::MAX - 1000)..usize::MAX {
+        let entry = tracker
+            .record(slot, 2.0, slot % 2 == 0, slot % 2 != 0, 1)
+            .unwrap();
+        assert_eq!(entry.episode_return, 2.0);
+        assert_eq!(entry.episode_length, 1);
+        assert!(tracker.returns.sparse.is_empty());
+        assert!(tracker.lengths.sparse.is_empty());
+    }
+}
+
+#[test]
 fn episode_tracker_handles_arbitrary_slots_and_reset_after_absence() {
     let mut tracker = EpisodeTracker::new(0);
     assert!(tracker.record(usize::MAX, 2.0, false, false, 1).is_none());

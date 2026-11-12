@@ -52,6 +52,16 @@ impl<T> std::ops::Index<usize> for SlotValues<T> {
     }
 }
 
+impl<T: Default> SlotValues<T> {
+    fn take(&mut self, slot: usize) -> T {
+        if let Some(value) = self.dense.get_mut(slot) {
+            std::mem::take(value)
+        } else {
+            self.sparse.remove(&slot).unwrap_or_default()
+        }
+    }
+}
+
 impl<T: Default> std::ops::IndexMut<usize> for SlotValues<T> {
     fn index_mut(&mut self, slot: usize) -> &mut T {
         if slot == self.dense.len() {

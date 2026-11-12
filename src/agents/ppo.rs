@@ -420,14 +420,12 @@ impl PPOEpisodeTracker {
 
         let entry = PPOEpisodeLogEntry {
             environment_index,
-            episode_return: self.returns[environment_index],
-            episode_length: self.lengths[environment_index],
+            episode_return: self.returns.take(environment_index),
+            episode_length: self.lengths.take(environment_index),
             terminated,
             truncated,
             collection_timestep,
         };
-        self.returns[environment_index] = 0.0;
-        self.lengths[environment_index] = 0;
         Some(entry)
     }
 }
