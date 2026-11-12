@@ -397,6 +397,25 @@ mod ppo_configuration {
 use burn::tensor::{Device, Int, Tensor};
 use modurl::prelude::*;
 
+pub fn learn_collected_step<G: Agent<ObservationSpace = BoxSpace>>(
+    agent: &mut G,
+    mut current: MultiAgentObservations,
+    training_actions: G::TrainingActions,
+    result: MultiAgentStepInfo,
+) -> Result<MultiAgentObservations, G::Error> {
+    agent.learn_from_timesteps(
+        &current.observations,
+        training_actions,
+        result.step,
+        &current.slots,
+    )?;
+    current = MultiAgentObservations {
+        observations: result.next_observations,
+        slots: result.next_slots,
+    };
+    Ok(current)
+}
+
 #[test]
 fn documentation_programs_compile_without_running_training() {
     getting_started::compile_program();
@@ -423,6 +442,13 @@ fn custom_gym_can_be_vectorized() {
 fn mirrored_book_snippets_match() {
     let source = include_str!("documentation_examples.rs");
     for (book, block_index) in [
+        (
+            include_str!("../../../docs/src/getting-started.md")
+                .split_once("### Complete File")
+                .unwrap()
+                .1,
+            0,
+        ),
         (
             include_str!("../../../docs/src/getting-started.md"),
             usize::MAX,
