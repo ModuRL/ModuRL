@@ -47,8 +47,6 @@ pub enum PPOConfigurationError {
     InvalidLearningRate,
     #[error("the environment count must be nonzero")]
     ZeroEnvironments,
-    #[error("batch size must be divisible by the environment count")]
-    BatchNotDivisibleByEnvironmentCount,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1404,9 +1402,6 @@ where
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
         if count == 0 {
             return Err(PPOConfigurationError::ZeroEnvironments.into());
-        }
-        if !self.batch_size.is_multiple_of(count) {
-            return Err(PPOConfigurationError::BatchNotDivisibleByEnvironmentCount.into());
         }
         Ok(())
     }
