@@ -5,7 +5,7 @@ use burn::tensor::{
 
 use crate::buffers::experience_replay::{
     ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayStorage,
-    ReplayStorageError, TensorReplayColumn, replay_index_tensor,
+    ReplayStorageError, TensorReplayColumn, insert_replay_rows, replay_index_tensor,
 };
 use crate::tensor_operations::transfer_bool_tensor;
 
@@ -212,14 +212,6 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
         validate_shape("actions", &transitions.actions, action_shape)?;
         validate_shape("rewards", &transitions.rewards, [count, 1])?;
         validate_shape("termination", &transitions.terminated, [count, 1])?;
-        if transitions.truncateds.len() != count {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "truncations",
-                expected: count,
-                actual: transitions.truncateds.len(),
-            }
-            .into());
-        }
         Ok(count)
     }
 }
@@ -277,45 +269,24 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
     /// Pointer storage validates and transfers observations; truncations preserve terminal next observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = self.validate_insert(start, &transitions)?;
-        for (field, actual) in [
-            ("dones", transitions.dones.len()),
-            ("truncations", transitions.truncateds.len()),
-        ] {
-            if actual != count {
-                return Err(ReplayStorageError::BatchLengthMismatch {
-                    field,
-                    expected: count,
-                    actual,
-                }
-                .into());
-            }
-        }
-        let ends: Vec<_> = transitions
-            .dones
-            .iter()
-            .zip(&transitions.truncateds)
-            .map(|(&done, &truncated)| done || truncated)
-            .collect();
-        if transitions.slots.is_empty() {
-            return Ok(0);
-        }
-        let inserted = count;
-        let device = self.rewards.tensor().device();
-        let dtype = self.rewards.tensor().dtype();
-        self.observations.insert(
-            start,
-            transitions.observations,
-            transitions.next_observations,
-            &ends,
-            &transitions.slots,
-        )?;
-        self.actions
-            .write(start, transitions.actions.to_device(&device).cast(dtype))?;
-        self.rewards
-            .write(start, transitions.rewards.to_device(&device).cast(dtype))?;
-        self.terminated
-            .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
-        Ok(inserted)
+        insert_replay_rows(count, &transitions.dones, &transitions.truncateds, |ends| {
+            let device = self.rewards.tensor().device();
+            let dtype = self.rewards.tensor().dtype();
+            self.observations.insert(
+                start,
+                transitions.observations,
+                transitions.next_observations,
+                ends,
+                &transitions.slots,
+            )?;
+            self.actions
+                .write(start, transitions.actions.to_device(&device).cast(dtype))?;
+            self.rewards
+                .write(start, transitions.rewards.to_device(&device).cast(dtype))?;
+            self.terminated
+                .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
+            Ok(())
+        })
     }
 
     /// Gathers host indices [sample_count] into native observations, Float actions, and scalars with a leading sample axis.

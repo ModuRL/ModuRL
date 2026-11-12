@@ -654,17 +654,24 @@ where
         &self.observation_space
     }
 
-    /// Checks native observations [batch_size, ...observation_shape] without casting or repairing axes.
-    /// Requires a nonempty batch and the established replay dtype once replay storage exists.
+    /// Checks nonempty native observations `[batch_size, ...observation_shape]` before policy evaluation.
     fn validate_observations(
         &self,
         observations: &Tensor<O, OS::Kind>,
-        allow_empty: bool,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
-        let count = observations.dims()[0];
-        if !allow_empty && count == 0 {
+        if observations.dims()[0] == 0 {
             return Err(DeterministicActorCriticError::EmptyBatch);
         }
+        self.validate_observation_shape(observations)
+    }
+
+    /// Checks native observations `[batch_size, ...observation_shape]` and the established replay dtype; empty collection batches are valid.
+    fn validate_observation_shape(
+        &self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let count = observations.dims()[0];
+
         let expected =
             space_storage_shape::<O>("observations", self.observation_space.shape(), count)?;
         if observations.dims() != expected {
@@ -738,7 +745,7 @@ where
         &self,
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
-        self.validate_observations(observations, false)?;
+        self.validate_observations(observations)?;
         let latent = self
             .online_actor
             .forward(
@@ -756,7 +763,7 @@ where
         &self,
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
-        self.validate_observations(observations, false)?;
+        self.validate_observations(observations)?;
         let latent = self
             .online_actor
             .forward(
@@ -777,7 +784,7 @@ where
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
         let actions = if self.schedule_progress.elapsed_steps() < self.training_start {
-            self.validate_observations(observations, false)?;
+            self.validate_observations(observations)?;
             self.random_actions(observations.dims()[0])?
         } else {
             self.act(observations)?
@@ -1118,8 +1125,8 @@ where
                 .into());
             }
         }
-        self.validate_observations(observations, true)?;
-        self.validate_observations(&step.observations, true)?;
+        self.validate_observation_shape(observations)?;
+        self.validate_observation_shape(&step.observations)?;
         let expected_rewards = [count, 1];
         if step.rewards.dims() != expected_rewards {
             return Err(DeterministicActorCriticError::Shape {
@@ -1257,7 +1264,7 @@ where
         let mut observations = env
             .reset()
             .map_err(DeterministicActorCriticError::GymError)?;
-        self.validate_observations(&observations, false)?;
+        self.validate_observations(&observations)?;
         if observations.dims()[0] != count {
             return Err(DeterministicActorCriticError::Shape {
                 field: "environment observations",

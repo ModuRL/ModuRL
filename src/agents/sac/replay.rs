@@ -2,7 +2,7 @@ use burn::tensor::{Bool, Cast, DType, Device, Tensor, kind::Autodiff};
 
 use crate::buffers::experience_replay::{
     ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayStorage,
-    ReplayStorageError, TensorReplayColumn, replay_index_tensor,
+    ReplayStorageError, TensorReplayColumn, insert_replay_rows, replay_index_tensor,
 };
 use crate::tensor_operations::transfer_bool_tensor;
 
@@ -180,15 +180,6 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
             [real_count, 1],
         )?;
 
-        if transitions.truncateds.len() != count {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "truncations",
-                expected: count,
-                actual: transitions.truncateds.len(),
-            }
-            .into());
-        }
-
         Ok(count)
     }
 
@@ -233,71 +224,50 @@ where
     /// Validates non-observation fields before writing; pointer storage validates and transfers observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = self.validate_insert(&transitions)?;
-        for (field, actual) in [
-            ("dones", transitions.dones.len()),
-            ("truncations", transitions.truncateds.len()),
-        ] {
-            if actual != count {
-                return Err(ReplayStorageError::BatchLengthMismatch {
-                    field,
-                    expected: count,
-                    actual,
-                }
-                .into());
-            }
-        }
-        let ends: Vec<_> = transitions
-            .dones
-            .iter()
-            .zip(&transitions.truncateds)
-            .map(|(&done, &truncated)| done || truncated)
-            .collect();
-        if transitions.slots.is_empty() {
-            return Ok(0);
-        }
-        let inserted = count;
-        let device = self.rewards.tensor().device();
-        let statistics_dtype = self.rewards.tensor().dtype();
-        let action_dtype = self.actions.tensor().dtype();
+        insert_replay_rows(count, &transitions.dones, &transitions.truncateds, |ends| {
+            let device = self.rewards.tensor().device();
+            let statistics_dtype = self.rewards.tensor().dtype();
+            let action_dtype = self.actions.tensor().dtype();
 
-        self.observations.insert(
-            start,
-            transitions.observations,
-            transitions.next_observations,
-            &ends,
-            &transitions.slots,
-        )?;
-        self.actions.write(
-            start,
-            <DType as Cast<A, L>>::cast(transitions.actions.to_device(&device), action_dtype),
-        )?;
+            self.observations.insert(
+                start,
+                transitions.observations,
+                transitions.next_observations,
+                ends,
+                &transitions.slots,
+            )?;
+            self.actions.write(
+                start,
+                <DType as Cast<A, L>>::cast(transitions.actions.to_device(&device), action_dtype),
+            )?;
 
-        self.rewards.write(
-            start,
-            transitions
-                .rewards
-                .to_device(&device)
-                .cast(statistics_dtype),
-        )?;
-        self.terminated
-            .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
+            self.rewards.write(
+                start,
+                transitions
+                    .rewards
+                    .to_device(&device)
+                    .cast(statistics_dtype),
+            )?;
+            self.terminated
+                .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
 
-        self.collection_policy_entropies.write(
-            start,
-            transitions
-                .collection_policy_entropies
-                .to_device(&device)
-                .cast(statistics_dtype),
-        )?;
-        self.entropy_change_weights.write(
-            start,
-            transitions
-                .entropy_change_weights
-                .to_device(&device)
-                .cast(statistics_dtype),
-        )?;
+            self.collection_policy_entropies.write(
+                start,
+                transitions
+                    .collection_policy_entropies
+                    .to_device(&device)
+                    .cast(statistics_dtype),
+            )?;
+            self.entropy_change_weights.write(
+                start,
+                transitions
+                    .entropy_change_weights
+                    .to_device(&device)
+                    .cast(statistics_dtype),
+            )?;
 
-        Ok(inserted)
+            Ok(())
+        })
     }
 
     /// Gathers host indices `[sample_count]` into detached observations, actions, and statistics with one leading sample axis.

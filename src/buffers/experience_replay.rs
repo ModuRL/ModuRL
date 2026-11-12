@@ -52,6 +52,34 @@ pub enum ReplayStorageError {
     IndexTooLarge(usize),
 }
 
+pub(crate) fn insert_replay_rows<E: From<ReplayStorageError>>(
+    count: usize,
+    dones: &[bool],
+    truncateds: &[bool],
+    insert: impl FnOnce(&[bool]) -> Result<(), E>,
+) -> Result<usize, E> {
+    for (field, actual) in [("dones", dones.len()), ("truncations", truncateds.len())] {
+        if actual != count {
+            return Err(ReplayStorageError::BatchLengthMismatch {
+                field,
+                expected: count,
+                actual,
+            }
+            .into());
+        }
+    }
+    if count == 0 {
+        return Ok(0);
+    }
+    let ends: Vec<_> = dones
+        .iter()
+        .zip(truncateds)
+        .map(|(&done, &truncated)| done || truncated)
+        .collect();
+    insert(&ends)?;
+    Ok(count)
+}
+
 impl From<ExperienceReplayError<ReplayStorageError>> for ReplayStorageError {
     fn from(error: ExperienceReplayError<ReplayStorageError>) -> Self {
         match error {
@@ -313,14 +341,12 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
                 });
             }
         }
-        for (field, actual) in [("episode ends", ends.len())] {
-            if actual != count {
-                return Err(ReplayStorageError::BatchLengthMismatch {
-                    field,
-                    expected: count,
-                    actual,
-                });
-            }
+        if ends.len() != count {
+            return Err(ReplayStorageError::BatchLengthMismatch {
+                field: "episode ends",
+                expected: count,
+                actual: ends.len(),
+            });
         }
         if count == 0 {
             return Ok(0);
@@ -652,6 +678,50 @@ mod tests {
     use burn::tensor::Bool;
     use proptest::{collection::vec, prelude::*};
     use std::convert::Infallible;
+
+    #[test]
+    fn replay_rows_validate_flags_and_skip_empty_inserts() {
+        let writes = std::cell::Cell::new(0);
+        let inserted = insert_replay_rows::<ReplayStorageError>(
+            3,
+            &[true, false, false],
+            &[false, true, false],
+            |ends| {
+                assert_eq!(ends, &[true, true, false]);
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(inserted, 3);
+        assert_eq!(writes.get(), 1);
+        for (count, dones, truncateds) in [
+            (0, vec![], vec![]),
+            (2, vec![true], vec![false; 2]),
+            (2, vec![false; 2], vec![true]),
+        ] {
+            let result =
+                insert_replay_rows::<ReplayStorageError>(count, &dones, &truncateds, |_| {
+                    writes.set(writes.get() + 1);
+                    Ok(())
+                });
+            if count == 0 {
+                assert_eq!(result.unwrap(), 0);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(ReplayStorageError::BatchLengthMismatch { .. })
+                ));
+            }
+            assert_eq!(writes.get(), 1);
+        }
+        assert!(matches!(
+            insert_replay_rows(1, &[false], &[false], |_| Err(
+                ReplayStorageError::ObservationPoolExhausted
+            )),
+            Err(ReplayStorageError::ObservationPoolExhausted)
+        ));
+    }
 
     struct IndexStorage {
         capacity: usize,

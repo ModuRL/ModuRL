@@ -710,7 +710,7 @@ where
         &mut self,
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A, AS::Kind>, SACError<PE, GE, SE, CE>> {
-        self.validate_observations(observations, false)?;
+        self.validate_observations(observations)?;
 
         let latent = self
             .policy
@@ -724,17 +724,25 @@ where
         self.decode_actions(latent, observations.dims()[0])
     }
 
-    /// Validates rank-O observations `[batch_size, ...observation_shape]`, preserving native kind, dtype, and device.
+    /// Checks nonempty native observations `[batch_size, ...observation_shape]` before policy evaluation.
     fn validate_observations(
         &self,
         observations: &Tensor<O, OS::Kind>,
-        allow_empty: bool,
+    ) -> Result<(), SACError<PE, GE, SE, CE>> {
+        if observations.dims()[0] == 0 {
+            return Err(SACError::EmptyBatch);
+        }
+        self.validate_observation_shape(observations)
+    }
+
+    /// Checks native observations `[batch_size, ...observation_shape]`; empty collection batches are valid.
+    fn validate_observation_shape(
+        &self,
+        observations: &Tensor<O, OS::Kind>,
     ) -> Result<(), SACError<PE, GE, SE, CE>> {
         let mut expected = vec![observations.dims()[0]];
         expected.extend(self.observation_space.shape());
-        if !allow_empty && observations.dims()[0] == 0 {
-            return Err(SACError::EmptyBatch);
-        }
+
         if observations.dims().to_vec() != expected {
             return Err(SACError::Shape {
                 field: "observations",
@@ -788,7 +796,7 @@ where
         &self,
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A, AS::Kind>, SACError<PE, GE, SE, CE>> {
-        self.validate_observations(observations, false)?;
+        self.validate_observations(observations)?;
 
         let latent = self
             .policy
@@ -808,7 +816,7 @@ where
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<Tensor<A, AS::Kind>, SACError<PE, GE, SE, CE>> {
         if self.schedule_progress.elapsed_steps() < self.training_start {
-            self.validate_observations(observations, false)?;
+            self.validate_observations(observations)?;
             let actions = self
                 .action_space
                 .sample_batch(
@@ -1161,7 +1169,7 @@ where
         if let Some(replay) = self.replay.as_mut() {
             replay.clear_streams();
         }
-        self.validate_observations(&observations, false)?;
+        self.validate_observations(&observations)?;
         if observations.dims()[0] != count {
             return Err(SACError::Shape {
                 field: "environment observations",
@@ -1263,8 +1271,8 @@ where
             }
         }
 
-        self.validate_observations(observations, true)?;
-        self.validate_observations(&step.observations, true)?;
+        self.validate_observation_shape(observations)?;
+        self.validate_observation_shape(&step.observations)?;
         if step.rewards.dims() != [count, 1] {
             return Err(SACError::Shape {
                 field: "environment rewards",

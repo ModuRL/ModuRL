@@ -15,7 +15,8 @@ use crate::{
     agents::ReplayStorageConfig,
     buffers::experience_replay::{
         ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayStorage,
-        ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_replay_alignment,
+        ReplayStorageError, TensorReplayColumn, insert_replay_rows, replay_index_tensor,
+        validate_replay_alignment,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
@@ -320,67 +321,46 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 .into());
             }
         }
-        for (field, actual) in [
-            ("dones", transitions.dones.len()),
-            ("truncations", transitions.truncateds.len()),
-        ] {
-            if actual != count {
-                return Err(ReplayStorageError::BatchLengthMismatch {
-                    field,
-                    expected: count,
-                    actual,
-                }
-                .into());
+        insert_replay_rows(count, &transitions.dones, &transitions.truncateds, |ends| {
+            let dtype = transitions.observations.dtype();
+            let mut new_observations = if self.observations.is_none() {
+                Some(PointerObservationReplay::new(
+                    self.observation_storage_shape,
+                    count,
+                    (&self.device, dtype),
+                )?)
+            } else {
+                None
+            };
+            let observations = match (&mut self.observations, &mut new_observations) {
+                (Some(observations), _) => observations,
+                (None, Some(observations)) => observations,
+                (None, None) => return Err(ReplayStorageError::EnvironmentCountNotSet.into()),
+            };
+            observations.insert(
+                start,
+                transitions.observations,
+                transitions.next_observations,
+                ends,
+                &transitions.slots,
+            )?;
+            if let Some(observations) = new_observations {
+                self.observations = Some(observations);
             }
-        }
-        let ends: Vec<_> = transitions
-            .dones
-            .iter()
-            .zip(&transitions.truncateds)
-            .map(|(&done, &truncated)| done || truncated)
-            .collect();
-        if transitions.slots.is_empty() {
-            return Ok(0);
-        }
-        let inserted = count;
-        let dtype = transitions.observations.dtype();
-        let mut new_observations = if self.observations.is_none() {
-            Some(PointerObservationReplay::new(
-                self.observation_storage_shape,
-                count,
-                (&self.device, dtype),
-            )?)
-        } else {
-            None
-        };
-        let observations = match (&mut self.observations, &mut new_observations) {
-            (Some(observations), _) => observations,
-            (None, Some(observations)) => observations,
-            (None, None) => return Err(ReplayStorageError::EnvironmentCountNotSet.into()),
-        };
-        observations.insert(
-            start,
-            transitions.observations,
-            transitions.next_observations,
-            &ends,
-            &transitions.slots,
-        )?;
-        if let Some(observations) = new_observations {
-            self.observations = Some(observations);
-        }
-        self.actions.write(
-            start,
-            transitions.actions.to_device(&self.device).cast(DType::U32),
-        )?;
-        self.rewards.write(
-            start,
-            transitions.rewards.to_device(&self.device).cast(DType::F32),
-        )?;
-        self.next_dones.write(
-            start,
-            transfer_bool_tensor(transitions.next_dones, &self.device),
-        )?;
-        Ok(inserted)
+            self.actions.write(
+                start,
+                transitions.actions.to_device(&self.device).cast(DType::U32),
+            )?;
+            self.rewards.write(
+                start,
+                transitions.rewards.to_device(&self.device).cast(DType::F32),
+            )?;
+            self.next_dones.write(
+                start,
+                transfer_bool_tensor(transitions.next_dones, &self.device),
+            )?;
+            Ok(())
+        })
     }
 
     /// Samples detached native rank-R observations [sample_count, ...observation_shape], actions [sample_count, 1], and statistics [sample_count, 1].
