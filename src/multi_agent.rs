@@ -1,13 +1,62 @@
-//! Multi-agent environments with vectorized, jointly ending episodes.
+//! Multi-agent environments with vectorized slots and compact per-agent rows.
 
 use crate::gym::MultiGymStepInfo;
 use crate::spaces::{ActionSpace, ObservationSpace};
-use crate::tensor_rank::TensorBatchTypes;
+use crate::tensor_rank::{NextRank, TensorBatchTypes};
+use burn::tensor::Tensor;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SlotError {
+    #[error("slot count {actual} does not match row count {expected}")]
+    LengthMismatch { expected: usize, actual: usize },
+    #[error("duplicate slot {0}")]
+    DuplicateSlot(usize),
+}
+
+/// Validates one unique slot per compact row; identity slots need no allocation.
+pub(crate) fn validate_slots(count: usize, slots: &[usize]) -> Result<(), SlotError> {
+    if slots.len() != count {
+        return Err(SlotError::LengthMismatch {
+            expected: count,
+            actual: slots.len(),
+        });
+    }
+    if !slots.iter().copied().eq(0..count) {
+        let mut sorted = slots.to_vec();
+        sorted.sort_unstable();
+        if let Some(pair) = sorted.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(SlotError::DuplicateSlot(pair[0]));
+        }
+    }
+    Ok(())
+}
+
+/// Compact observations and the slot of each row.
+#[derive(Debug, Clone)]
+pub struct MultiAgentObservations<T = Tensor<2>> {
+    pub observations: T,
+    pub slots: Vec<usize>,
+}
+
+/// Reset observations and slots for each agent in agent order.
+pub type MultiAgentResetResult<T, E> = Result<Vec<MultiAgentObservations<T>>, E>;
+
+/// One agent's transitions in action order, plus the rows that act next.
+#[derive(Debug, Clone)]
+pub struct MultiAgentStepInfo<I = (), T: NextRank = Tensor<1>> {
+    /// One row per agent row that acted, in the order of actions passed to `step`.
+    pub step: MultiGymStepInfo<I, T>,
+    /// One row per next acting slot, including slots that just reset.
+    pub next_observations: T::Next,
+    /// Slot of each next observation row.
+    pub next_slots: Vec<usize>,
+}
 
 /// An ordered group of agents sharing a fixed batch of environment slots.
 /// `O` and `A` are batch ranks; kinds and devices follow each agent's spaces.
-/// Episodes end jointly: dones and truncateds must be identical across agents.
-/// Ended slots auto-reset, retaining each agent's terminal observation.
+/// An agent's death step is its last transition, with done=true; dead agents produce no rows until reset.
+/// A slot resets once every agent in it is done or truncated, retaining terminal observations.
+/// After reset all agents in the slot act again. The environment tracks each agent's acting slots.
 pub trait MultiAgentGym<I = (), const O: usize = 2, const A: usize = 2> {
     type Error;
     type ObservationSpace: ObservationSpace<O>;
@@ -18,21 +67,41 @@ pub trait MultiAgentGym<I = (), const O: usize = 2, const A: usize = 2> {
     fn observation_space(&self, agent: usize) -> Self::ObservationSpace;
     fn action_space(&self, agent: usize) -> Self::ActionSpace;
 
-    /// Resets all slots, returning one `[num_envs, ...observation_shape]` batch per agent in agent order.
+    /// Resets all slots, returning observations and their slots per agent in agent order.
     /// Reset before the first step. Observation dtype and device follow the agent's space.
     fn reset(
         &mut self,
-    ) -> Result<Vec<<Self::ObservationSpace as TensorBatchTypes>::Batch>, Self::Error>;
+    ) -> MultiAgentResetResult<<Self::ObservationSpace as TensorBatchTypes>::Batch, Self::Error>;
 
-    /// Steps with one `[num_envs, ...action_shape]` batch per agent in agent order.
-    /// Returns one transition batch per agent, with joint flags and auto-reset observations.
-    /// An action count different from `num_agents()` must return an error, never panic.
+    /// Steps with one compact action batch per agent, ordered by its current acting slots.
+    /// Transition rows correspond to the actions passed; next rows may differ after deaths and resets.
+    /// Incorrect agent counts or action-row counts must return recoverable errors, never panic.
     #[allow(clippy::type_complexity)]
     fn step(
         &mut self,
         actions: Vec<<Self::ActionSpace as TensorBatchTypes>::Batch>,
     ) -> Result<
-        Vec<MultiGymStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>>,
+        Vec<MultiAgentStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>>,
         Self::Error,
     >;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SlotError, validate_slots};
+
+    #[test]
+    fn compact_slots_validate_identity_sparse_empty_and_invalid_batches() {
+        assert_eq!(validate_slots(0, &[]), Ok(()));
+        assert_eq!(validate_slots(2, &[0, 1]), Ok(()));
+        assert_eq!(validate_slots(2, &[usize::MAX, 7]), Ok(()));
+        assert_eq!(
+            validate_slots(2, &[9]),
+            Err(SlotError::LengthMismatch {
+                expected: 2,
+                actual: 1
+            })
+        );
+        assert_eq!(validate_slots(2, &[9, 9]), Err(SlotError::DuplicateSlot(9)));
+    }
 }

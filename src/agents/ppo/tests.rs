@@ -1,4 +1,5 @@
 use super::*;
+
 use crate::tensor_rank::TensorBatchTypes;
 use crate::{
     gym::{Gym, ResetInfo, StepInfo},
@@ -16,6 +17,43 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+
+impl<AS: ActionSpace<A>, E, const L: usize, const A: usize> crate::agents::test_support::SelectRows
+    for PolicySamples<AS, E, L, A>
+{
+    fn select_rows(mut self, rows: &[usize]) -> Self {
+        self.neurons = crate::agents::test_support::SelectRows::select_rows(self.neurons, rows);
+        self
+    }
+}
+
+#[test]
+fn completed_episodes_release_sparse_slot_state() {
+    let mut tracker = PPOEpisodeTracker::new(0);
+    for slot in (usize::MAX - 1000)..usize::MAX {
+        let entry = tracker
+            .record(slot, 2.0, slot % 2 == 0, slot % 2 != 0, 1)
+            .unwrap();
+        assert_eq!(entry.episode_return, 2.0);
+        assert_eq!(entry.episode_length, 1);
+        assert!(tracker.returns.sparse.is_empty());
+        assert!(tracker.lengths.sparse.is_empty());
+    }
+}
+
+#[test]
+fn episode_tracker_handles_slots_that_disappear_and_reset() {
+    let mut tracker = PPOEpisodeTracker::new(0);
+    assert!(tracker.record(usize::MAX, 2.0, false, false, 1).is_none());
+    assert!(tracker.record(7, 9.0, false, false, 2).is_none());
+    let completed = tracker.record(usize::MAX, 3.0, true, false, 3).unwrap();
+    assert_eq!(completed.environment_index, usize::MAX);
+    assert_eq!(completed.episode_return, 5.0);
+    assert_eq!(completed.episode_length, 2);
+    let reset = tracker.record(usize::MAX, 4.0, false, true, 4).unwrap();
+    assert_eq!(reset.episode_return, 4.0);
+    assert_eq!(reset.episode_length, 1);
+}
 
 pub(super) fn assert_close(actual: f64, expected: f64) {
     assert!(
@@ -117,6 +155,7 @@ mod rollout_batch_tests {
         .require_grad();
         let rewards = Tensor::from_data([[value + 2.0], [value + 3.0]], (device, DType::F64));
         PPOExperience::builder()
+            .slots(vec![0, 1])
             .observations(observations.clone())
             .next_observations(observations + 10.0)
             .actions(Tensor::from_data(
@@ -144,27 +183,27 @@ mod rollout_batch_tests {
             });
         }
         let batch = PPOExperience::batch(&experiences).unwrap();
-        let observations: Tensor<4> = batch.observations;
-        let actions: Tensor<3> = batch.actions;
-        assert_eq!(observations.dims(), [2, 2, 1, 2]);
-        assert_eq!(actions.dims(), [2, 2, 1]);
+        let observations: Tensor<3> = batch.observations;
+        let actions: Tensor<2> = batch.actions;
+        assert_eq!(observations.dims(), [4, 1, 2]);
+        assert_eq!(actions.dims(), [4, 1]);
         assert_eq!(observations.dtype(), DType::F64);
         assert_eq!(observations.device(), device);
-        assert_eq!(batch.rewards.dims(), [2, 2, 1]);
+        assert_eq!(batch.rewards.dims(), [4, 1]);
         assert_eq!(batch.rewards.dtype(), DType::F64);
         assert_eq!(
             batch.rewards.into_data().try_to_vec::<f64>().unwrap(),
             [3.0, 4.0, 12.0, 13.0]
         );
-        assert_eq!(batch.log_probs.dims(), [2, 2, 1]);
+        assert_eq!(batch.log_probs.dims(), [4, 1]);
         let prepared = batch.prepared.unwrap();
-        assert_eq!(prepared.advantages.dims(), [2, 2, 1]);
-        assert_eq!(prepared.returns.dims(), [2, 2, 1]);
+        assert_eq!(prepared.advantages.dims(), [4, 1]);
+        assert_eq!(prepared.returns.dims(), [4, 1]);
         assert_eq!(
             prepared.returns.into_data().try_to_vec::<f64>().unwrap(),
             [103.0, 104.0, 112.0, 113.0]
         );
-        assert_eq!(prepared.old_values.unwrap().dims(), [2, 2, 1]);
+        assert_eq!(prepared.old_values.unwrap().dims(), [4, 1]);
 
         let gradients = observations.sum().backward();
         for item in experiences {
@@ -193,6 +232,44 @@ mod rollout_batch_tests {
             PPOExperience::batch(&experiences),
             Err(ExperienceBatchError::DTypeMismatch { index: 1, .. })
         ));
+        experiences[1].rewards = experiences[1].rewards.clone().cast(DType::F64);
+        experiences[1].observations = experiences[1].observations.clone().reshape([2, 2, 1]);
+        assert!(matches!(
+            PPOExperience::batch(&experiences),
+            Err(ExperienceBatchError::ShapeMismatch { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn rollout_batch_concatenates_steps_with_different_row_counts() {
+        let device = Device::flex().autodiff();
+        let mut experiences = [transition(1.0, &device), transition(10.0, &device)];
+        experiences[1].slots = vec![1];
+        experiences[1].observations = experiences[1].observations.clone().slice_dim(0, 1..2);
+        experiences[1].actions = experiences[1].actions.clone().slice_dim(0, 1..2);
+        experiences[1].rewards = experiences[1].rewards.clone().slice_dim(0, 1..2);
+        experiences[1].log_probs = experiences[1].log_probs.clone().slice_dim(0, 1..2);
+        for item in &mut experiences {
+            item.prepared = Some(PPOPreparedExperience {
+                advantages: item.rewards.clone(),
+                returns: item.rewards.clone() + 100.0,
+                old_values: Some(item.log_probs.clone()),
+            });
+        }
+        let batch = PPOExperience::batch(&experiences).unwrap();
+        assert_eq!(batch.observations.dims(), [3, 1, 2]);
+        assert_eq!(batch.actions.dims(), [3, 1]);
+        assert_eq!(
+            batch.rewards.to_data().try_to_vec::<f64>().unwrap(),
+            [3.0, 4.0, 13.0]
+        );
+        let prepared = batch.prepared.unwrap();
+        assert_eq!(prepared.advantages.dims(), [3, 1]);
+        assert_eq!(prepared.old_values.unwrap().dims(), [3, 1]);
+        assert_eq!(
+            prepared.returns.to_data().try_to_vec::<f64>().unwrap(),
+            [103.0, 104.0, 113.0]
+        );
     }
 
     #[test]
@@ -237,7 +314,7 @@ mod schedule_tests {
 
     use super::*;
     use crate::{
-        advantage_estimation::AdvantageEstimate,
+        advantage_estimation::{AdvantageEstimate, AdvantageInput},
         agents::{Agent, ToEnvironmentActions},
         distributions::{CategoricalDistribution, GaussianDistribution},
         gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
@@ -493,7 +570,7 @@ mod schedule_tests {
         }
 
         agent.add_advantages_and_returns(&validation).unwrap();
-        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
         for (transition, expected) in agent.rollout_buffer.iter().zip([1.99f32, 1.0]) {
             let prepared = transition.prepared.as_ref().unwrap();
             let old_values = prepared.old_values.as_ref().unwrap();
@@ -508,16 +585,9 @@ mod schedule_tests {
         struct RewardMinusValue;
 
         impl AdvantageEstimator for RewardMinusValue {
-            /// Returns reward-minus-value advantages and reward value targets, shaped `[time, env_count, 1]`.
-            fn estimate(
-                &self,
-                rewards: &Tensor<3>,
-                values: &Tensor<3>,
-                _next_dones: &Tensor<3, Bool>,
-                _next_truncateds: &Tensor<3, Bool>,
-                _bootstrapped_values: &Tensor<2>,
-                _gamma: f32,
-            ) -> AdvantageEstimate {
+            /// Returns reward-minus-value advantages and reward targets [rows, 1].
+            fn estimate(&self, input: AdvantageInput<'_>, _gamma: f32) -> AdvantageEstimate {
+                let (rewards, values) = input.rewards_and_values();
                 AdvantageEstimate {
                     advantages: rewards.clone() - values.clone(),
                     value_targets: rewards.clone(),
@@ -562,19 +632,12 @@ mod schedule_tests {
         struct MismatchedEstimator;
 
         impl AdvantageEstimator for MismatchedEstimator {
-            /// Returns advantages shaped `[time, env_count, 2]` and value targets shaped `[time, env_count, 1]`.
-            fn estimate(
-                &self,
-                rewards: &Tensor<3>,
-                values: &Tensor<3>,
-                _next_dones: &Tensor<3, Bool>,
-                _next_truncateds: &Tensor<3, Bool>,
-                _bootstrapped_values: &Tensor<2>,
-                _gamma: f32,
-            ) -> AdvantageEstimate {
+            /// Returns invalid advantages [rows, 2] and value targets [rows, 1].
+            fn estimate(&self, input: AdvantageInput<'_>, _gamma: f32) -> AdvantageEstimate {
+                let (rewards, values) = input.rewards_and_values();
                 let advantages = rewards.clone() - values.clone();
                 AdvantageEstimate {
-                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 2),
+                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 1),
                     value_targets: rewards.clone(),
                 }
             }
@@ -973,12 +1036,18 @@ mod schedule_tests {
         assert_eq!(transition.rewards.dtype(), DType::F64);
         assert_eq!(transition.training_rewards.dtype(), DType::F64);
         let expected = 0.25 + 1.0000000001 * f64::from(agent.gamma);
-        assert!(
-            (transition.training_rewards.clone().into_scalar::<f64>() - expected).abs() < 1e-12
-        );
         let explained_variance = agent
             .add_advantages_and_returns(&agent.network_info.valid())
             .unwrap();
+        assert!(
+            (agent.rollout_buffer[0]
+                .training_rewards
+                .clone()
+                .into_scalar::<f64>()
+                - expected)
+                .abs()
+                < 1e-12
+        );
         let prepared = agent.rollout_buffer[0].prepared.as_ref().unwrap();
         assert_eq!(prepared.returns.dtype(), DType::F64);
         assert!((prepared.returns.clone().into_scalar::<f64>() - expected).abs() < 1e-12);
@@ -1342,8 +1411,11 @@ mod schedule_tests {
                 .unwrap(),
             [1.0]
         );
+        agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
         assert!(
-            (item
+            (agent.rollout_buffer[0]
                 .training_rewards
                 .clone()
                 .into_data()
@@ -1353,9 +1425,7 @@ mod schedule_tests {
                 .abs()
                 < 1e-6
         );
-        agent
-            .add_advantages_and_returns(&agent.network_info.valid())
-            .unwrap();
+
         let returns = agent.rollout_buffer[0]
             .prepared
             .as_ref()
@@ -1497,29 +1567,44 @@ mod schedule_tests {
             .build()
             .unwrap();
         let observations = Tensor::zeros([2, 4], (&device, DType::F32));
-        let actual = agent
-            .bootstrap_truncated_rewards(
-                &agent.network_info.valid(),
-                Tensor::zeros([2, 1], (&device, DType::F32)),
-                &observations,
-                &[true, false],
-                &[true, true],
-            )
-            .unwrap();
-        assert_eq!(actual.into_data().try_to_vec::<f32>().unwrap(), [0.0, 0.99]);
-        assert!(matches!(
-            agent.bootstrap_truncated_rewards(
-                &agent.network_info.valid(),
-                Tensor::zeros([2, 1], (&device, DType::F64)),
-                &observations,
-                &[true, false],
-                &[true, true],
-            ),
-            Err(PPOError::CriticRewardDTypeMismatch {
-                critic: DType::F32,
-                reward: DType::F64,
-            })
-        ));
+        for dtype in [DType::F32, DType::F64] {
+            agent.rollout_buffer.clear();
+            agent.rollout_rows = 2;
+            agent.rollout_buffer.push(
+                PPOExperience::builder()
+                    .slots(vec![0, 1])
+                    .observations(observations.clone())
+                    .next_observations(observations.clone())
+                    .actions(Tensor::zeros([2, 1], &device))
+                    .rewards(Tensor::zeros([2, 1], (&device, dtype)))
+                    .training_rewards(Tensor::zeros([2, 1], (&device, dtype)))
+                    .next_dones(vec![true, false])
+                    .truncateds(vec![true, true])
+                    .log_probs(Tensor::zeros([2, 1], &device))
+                    .values(Tensor::zeros([2, 1], (&device, dtype)))
+                    .build(),
+            );
+            let result = agent.add_advantages_and_returns(&agent.network_info.valid());
+            if dtype == DType::F32 {
+                result.unwrap();
+                assert_eq!(
+                    agent.rollout_buffer[0]
+                        .training_rewards
+                        .to_data()
+                        .try_to_vec::<f32>()
+                        .unwrap(),
+                    [0.0, 0.99]
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(PPOError::CriticRewardDTypeMismatch {
+                        critic: DType::F32,
+                        reward: DType::F64
+                    })
+                ));
+            }
+        }
     }
 
     #[test]
@@ -1664,7 +1749,12 @@ mod schedule_tests {
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         let next_observations = step.observations.clone();
         agent
-            .learn_from_timesteps(&observations, actions, step)
+            .learn_from_timesteps(
+                &observations,
+                actions,
+                step,
+                &(0..observations.dims()[0]).collect::<Vec<_>>(),
+            )
             .unwrap();
 
         agent.reset_current_observations();
@@ -1672,7 +1762,12 @@ mod schedule_tests {
         let actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
         let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
         agent
-            .learn_from_timesteps(&next_observations, actions, step)
+            .learn_from_timesteps(
+                &next_observations,
+                actions,
+                step,
+                &(0..next_observations.dims()[0]).collect::<Vec<_>>(),
+            )
             .unwrap();
 
         assert_eq!(logger.0, [(1.0, 1)]);
@@ -1853,7 +1948,12 @@ mod schedule_tests {
                 .unwrap();
             let next_observations = step.observations.clone();
             caller_agent
-                .learn_from_timesteps(&observations, training_actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    training_actions,
+                    step,
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
+                )
                 .unwrap();
             observations = next_observations;
         }
@@ -1868,21 +1968,15 @@ mod schedule_tests {
     }
 
     impl AdvantageEstimator for FailOnceEstimator {
-        /// Records rollout lengths and returns mismatched advantages shaped `[time, env_count, 2]` once.
-        fn estimate(
-            &self,
-            rewards: &Tensor<3>,
-            values: &Tensor<3>,
-            _next_dones: &Tensor<3, Bool>,
-            _next_truncateds: &Tensor<3, Bool>,
-            _bootstrapped_values: &Tensor<2>,
-            _gamma: f32,
-        ) -> AdvantageEstimate {
-            self.time_steps.lock().unwrap().push(rewards.dims()[0]);
+        /// Records rollout lengths and returns mismatched advantages [rows, 2] once.
+        fn estimate(&self, input: AdvantageInput<'_>, _gamma: f32) -> AdvantageEstimate {
+            let step_count = input.step_count();
+            let (rewards, values) = input.rewards_and_values();
+            self.time_steps.lock().unwrap().push(step_count);
             let advantages = rewards.clone() - values.clone();
             if self.fail_next.swap(false, Ordering::Relaxed) {
                 AdvantageEstimate {
-                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 2),
+                    advantages: Tensor::cat(vec![advantages.clone(), advantages], 1),
                     value_targets: rewards.clone(),
                 }
             } else {
@@ -1939,7 +2033,12 @@ mod schedule_tests {
                 .step(training_actions.to_environment_actions().unwrap())
                 .unwrap();
             let next_observations = step.observations.clone();
-            let result = agent.learn_from_timesteps(&observations, training_actions, step);
+            let result = agent.learn_from_timesteps(
+                &observations,
+                training_actions,
+                step,
+                &(0..observations.dims()[0]).collect::<Vec<_>>(),
+            );
             if step_index == 1 {
                 assert!(result.is_err());
             } else {
@@ -1998,7 +2097,12 @@ mod schedule_tests {
                 .unwrap();
             let next_observations = step.observations.clone();
             agent
-                .learn_from_timesteps(&observations, training_actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    training_actions,
+                    step,
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
+                )
                 .unwrap();
             observations = next_observations;
         }
@@ -2007,7 +2111,704 @@ mod schedule_tests {
     }
 
     #[test]
-    fn caller_collected_rollout_rejects_environment_count_changes() {
+    fn bootstrap_critic_evaluates_only_truncations_and_live_tails_once() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        #[derive(Module, Debug)]
+        struct RecordingCritic {
+            weight: Param<Tensor<1>>,
+            #[module(skip)]
+            batches: Arc<Mutex<Vec<Vec<f32>>>>,
+        }
+        impl Forward<2, 2> for RecordingCritic {
+            type InputKind = Float;
+            type OutputKind = Float;
+            type Error = Infallible;
+
+            /// Records the first feature of real observations `[batch, 4]` and returns values `[batch, 1]`.
+            fn forward(&self, observations: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+                let values = observations.slice_dim(1, 0..1);
+                self.batches
+                    .lock()
+                    .unwrap()
+                    .push(values.to_data().try_to_vec::<f32>().unwrap());
+                Ok(values * self.weight.val().unsqueeze::<2>())
+            }
+        }
+        let device = Device::flex().autodiff();
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(RecordingCritic {
+                weight: Param::from_tensor(Tensor::ones([1], &device)),
+                batches: batches.clone(),
+            })
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(64)
+            .mini_batch_size(2)
+            .training_horizon(64)
+            .build()
+            .unwrap();
+        for (slots, next, dones, truncateds) in [
+            (
+                vec![7, 2],
+                vec![41.0, 12.0],
+                vec![false, false],
+                vec![true, false],
+            ),
+            (vec![2], vec![22.0], vec![true], vec![false]),
+            (
+                vec![9, 7],
+                vec![39.0, 47.0],
+                vec![true, false],
+                vec![false, false],
+            ),
+        ] {
+            let n = slots.len();
+            let next = Tensor::from_data(TensorData::new(next, [n, 1]), &device).repeat_dim(1, 4);
+            agent.rollout_buffer.push(
+                PPOExperience::builder()
+                    .slots(slots)
+                    .observations(Tensor::ones([n, 4], &device))
+                    .next_observations(next)
+                    .actions(Tensor::zeros([n, 1], &device))
+                    .rewards(Tensor::ones([n, 1], &device))
+                    .training_rewards(Tensor::ones([n, 1], &device))
+                    .next_dones(dones)
+                    .truncateds(truncateds)
+                    .values(Tensor::ones([n, 1], &device))
+                    .log_probs(Tensor::zeros([n, 1], &device))
+                    .build(),
+            );
+            agent.rollout_rows += n;
+        }
+        agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
+        assert_eq!(*batches.lock().unwrap(), vec![vec![41.0, 47.0]]);
+        assert_eq!(
+            agent
+                .rollout_buffer
+                .iter()
+                .map(|x| x.prepared.as_ref().unwrap().returns.dims()[0])
+                .sum::<usize>(),
+            5
+        );
+        batches.lock().unwrap().clear();
+        for experience in &mut agent.rollout_buffer {
+            experience.next_dones.fill(true);
+            experience.truncateds.fill(false);
+        }
+        agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
+        assert!(batches.lock().unwrap().is_empty());
+        agent.rollout_buffer.clear();
+        agent.rollout_buffer.push(
+            PPOExperience::builder()
+                .slots(vec![0, 1, 2, 3])
+                .observations(Tensor::ones([4, 4], &device))
+                .next_observations(
+                    Tensor::from_data([[100.0], [20.0], [30.0], [400.0]], &device).repeat_dim(1, 4),
+                )
+                .actions(Tensor::zeros([4, 1], &device))
+                .rewards(Tensor::ones([4, 1], &device))
+                .training_rewards(Tensor::ones([4, 1], &device))
+                .next_dones(vec![true, false, false, true])
+                .truncateds(vec![false, true, false, true])
+                .values(Tensor::ones([4, 1], &device))
+                .log_probs(Tensor::zeros([4, 1], &device))
+                .build(),
+        );
+        agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
+        assert_eq!(*batches.lock().unwrap(), vec![vec![20.0, 30.0]]);
+        let experience = &agent.rollout_buffer[0];
+        let targets = experience
+            .prepared
+            .as_ref()
+            .unwrap()
+            .returns
+            .to_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        for (actual, expected) in
+            targets
+                .into_iter()
+                .zip([1.0, 1.0 + agent.gamma * 20.0, 1.0 + agent.gamma * 30.0, 1.0])
+        {
+            assert!((actual - expected).abs() < 1e-4);
+        }
+        assert_eq!(
+            experience
+                .training_rewards
+                .to_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![1.0, 1.0 + agent.gamma * 20.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn sparse_rollout_stores_only_active_observation_rows() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(1024)
+            .mini_batch_size(2)
+            .training_horizon(1024)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([256, 4], &device);
+        for time in 0..4 {
+            let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+            let slots = if time != 2 { vec![255] } else { vec![] };
+            let step = MultiGymStepInfo {
+                observations: observations.clone(),
+                rewards: Tensor::ones([256, 1], &device),
+                infos: vec![(); 256],
+                dones: vec![false; 256],
+                truncateds: vec![false; 256],
+                terminal_observations: vec![None; 256],
+            };
+            crate::agents::test_support::learn_selected_rows(
+                &mut agent,
+                &observations,
+                actions,
+                step,
+                &slots,
+            )
+            .unwrap();
+        }
+        let stored_rows: usize = agent
+            .rollout_buffer
+            .iter()
+            .map(|step| step.observations.dims()[0])
+            .sum();
+        assert_eq!(stored_rows, 3);
+        assert_eq!(agent.rollout_rows, 3);
+        assert_eq!(agent.rollout_buffer.len(), 3);
+        for step in &agent.rollout_buffer {
+            assert_eq!(step.slots, [255]);
+            assert_eq!(step.next_observations.dims()[0], 1);
+            assert_eq!(step.actions.dims()[0], 1);
+            assert_eq!(step.log_probs.dims(), [1, 1]);
+            assert_eq!(step.values.dims(), [1, 1]);
+            assert_eq!(step.rewards.dims(), [1, 1]);
+            assert_eq!(step.training_rewards.dims(), [1, 1]);
+            assert_eq!(step.next_dones.len(), 1);
+            assert_eq!(step.truncateds.len(), 1);
+        }
+    }
+
+    #[test]
+    fn compact_gae_matches_each_slots_own_sequence_and_bootstrap() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        for terminate_first_slot in [true, false] {
+            let networks = SeparatePPONetwork::builder()
+                .actor_network(ProbabilisticPolicyModel::new(
+                    mlp(4, 2, &device),
+                    CategoricalDistribution,
+                ))
+                .critic_network(mlp(4, 1, &device))
+                .actor_optimizer(SgdConfig::new().init())
+                .critic_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(1e-3)
+                .critic_learning_rate(1e-3)
+                .build()
+                .unwrap();
+            let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+                .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+                .action_space(Discrete::new(2).unwrap())
+                .network_info(networks)
+                .batch_size(12)
+                .mini_batch_size(2)
+                .training_horizon(12)
+                .build()
+                .unwrap();
+            let mut values = [Vec::new(), Vec::new()];
+            let mut bootstraps = [0.0f32; 2];
+            for time in 0..4 {
+                let observations = Tensor::from_data(
+                    [[time as f32; 4], [time as f32 + 2.0; 4], [1e6; 4]],
+                    &device,
+                );
+                let next = Tensor::from_data(
+                    [[time as f32 + 1.0; 4], [time as f32 + 3.0; 4], [1e6; 4]],
+                    &device,
+                );
+                let validation = agent.network_info.valid();
+                let current_values = agent
+                    .critic_network_forward(&validation, &observations, DType::F32)
+                    .unwrap()
+                    .to_data()
+                    .try_to_vec::<f32>()
+                    .unwrap();
+                let next_values = agent
+                    .critic_network_forward(&validation, &next, DType::F32)
+                    .unwrap()
+                    .to_data()
+                    .try_to_vec::<f32>()
+                    .unwrap();
+                for slot in 0..2 {
+                    if slot == 1 || time < 2 {
+                        values[slot].push(current_values[slot]);
+                        bootstraps[slot] = next_values[slot];
+                    }
+                }
+                let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+                let step = MultiGymStepInfo {
+                    observations: next,
+                    rewards: Tensor::from_data([[1.0], [2.0], [1e6]], &device),
+                    infos: vec![(); 3],
+                    dones: vec![terminate_first_slot && time == 1, false, false],
+                    truncateds: vec![false; 3],
+                    terminal_observations: vec![None; 3],
+                };
+                let rows = if time == 0 {
+                    vec![1, 0]
+                } else if time < 2 {
+                    vec![0, 1]
+                } else {
+                    vec![1]
+                };
+                let slots: Vec<_> = rows.iter().map(|&row| [42, usize::MAX][row]).collect();
+                let observations =
+                    crate::agents::test_support::SelectRows::select_rows(observations, &rows);
+                let actions = crate::agents::test_support::SelectRows::select_rows(actions, &rows);
+                let step = crate::agents::test_support::select_step(step, &rows);
+                agent
+                    .learn_from_timesteps(&observations, actions, step, &slots)
+                    .unwrap();
+            }
+            agent
+                .add_advantages_and_returns(&agent.network_info.valid())
+                .unwrap();
+            let expected: Vec<_> = (0..2)
+                .map(|slot| {
+                    let time = values[slot].len();
+                    let mut dones = vec![false; time];
+                    dones[time - 1] = slot == 0 && terminate_first_slot;
+                    GAE::new(0.95).unwrap().estimate(
+                        AdvantageInput::Dense {
+                            rewards: &Tensor::full([time, 1, 1], (slot + 1) as f32, &device),
+                            values: &Tensor::from_data(
+                                TensorData::new(values[slot].clone(), [time, 1, 1]),
+                                &device,
+                            ),
+                            next_dones: &Tensor::from_data(
+                                TensorData::new(dones, [time, 1, 1]),
+                                &device,
+                            ),
+                            next_truncateds: &Tensor::full([time, 1, 1], false, &device),
+                            bootstrapped_values: &Tensor::from_data([[bootstraps[slot]]], &device),
+                        },
+                        agent.gamma,
+                    )
+                })
+                .collect();
+            for (time, step) in agent.rollout_buffer.iter().enumerate() {
+                let prepared = step.prepared.as_ref().unwrap();
+                let slots: Vec<_> = if time == 0 {
+                    vec![1, 0]
+                } else if time < 2 {
+                    vec![0, 1]
+                } else {
+                    vec![1]
+                };
+                let expected_advantages: Vec<_> = slots
+                    .iter()
+                    .map(|&slot| {
+                        expected[slot]
+                            .advantages
+                            .to_data()
+                            .try_to_vec::<f32>()
+                            .unwrap()[time]
+                    })
+                    .collect();
+                let expected_returns: Vec<_> = slots
+                    .iter()
+                    .map(|&slot| {
+                        expected[slot]
+                            .value_targets
+                            .to_data()
+                            .try_to_vec::<f32>()
+                            .unwrap()[time]
+                    })
+                    .collect();
+                assert_eq!(prepared.advantages.dims()[0], slots.len());
+                for (actual, expected) in prepared
+                    .advantages
+                    .to_data()
+                    .try_to_vec::<f32>()
+                    .unwrap()
+                    .into_iter()
+                    .zip(expected_advantages)
+                {
+                    assert!((actual - expected).abs() < 1e-5);
+                }
+                for (actual, expected) in prepared
+                    .returns
+                    .to_data()
+                    .try_to_vec::<f32>()
+                    .unwrap()
+                    .into_iter()
+                    .zip(expected_returns)
+                {
+                    assert!((actual - expected).abs() < 1e-5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_episode_timestamp_counts_only_active_rows() {
+        #[derive(Default)]
+        struct Logger(Vec<(usize, usize)>);
+        impl PPOLogger for Logger {
+            fn log(&mut self, _entry: &PPOLogEntry) {}
+
+            fn log_collection(&mut self, entry: &PPOCollectionLogEntry) {
+                self.0.extend(
+                    entry
+                        .completed_episodes
+                        .iter()
+                        .map(|episode| (episode.environment_index, episode.collection_timestep)),
+                );
+            }
+        }
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut logger = Logger::default();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(4)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .training_horizon(8)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([2, 4], &device);
+        let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+        let step = MultiGymStepInfo {
+            observations: observations.clone(),
+            rewards: Tensor::ones([2, 1], &device),
+            infos: vec![(); 2],
+            dones: vec![false, true],
+            truncateds: vec![false; 2],
+            terminal_observations: vec![None; 2],
+        };
+        crate::agents::test_support::learn_selected_rows(
+            &mut agent,
+            &observations,
+            actions,
+            step,
+            &[1],
+        )
+        .unwrap();
+        assert_eq!(logger.0, vec![(1, 1)]);
+    }
+
+    #[test]
+    fn sparse_rollout_forms_full_active_minibatches() {
+        #[derive(Default)]
+        struct Logger(Vec<usize>);
+        impl PPOLogger for Logger {
+            fn log(&mut self, entry: &PPOLogEntry) {
+                self.0.push(entry.rewards.dims()[0]);
+            }
+        }
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        device.seed(153);
+        let mut logger = Logger::default();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(8)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .normalize_advantage(true)
+            .ent_coef(0.0)
+            .training_horizon(8)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([2, 4], &device);
+        for _ in 0..8 {
+            let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+            let step = MultiGymStepInfo {
+                observations: observations.clone(),
+                rewards: Tensor::ones([2, 1], &device),
+                infos: vec![(); 2],
+                dones: vec![false; 2],
+                truncateds: vec![false; 2],
+                terminal_observations: vec![None; 2],
+            };
+            crate::agents::test_support::learn_selected_rows(
+                &mut agent,
+                &observations,
+                actions,
+                step,
+                &[0],
+            )
+            .unwrap();
+        }
+        assert_eq!(logger.0, vec![2; 4]);
+    }
+
+    #[test]
+    fn sparse_rollout_waits_for_batch_size_active_rows() {
+        let progress = sparse_rollout_progress(false);
+        assert_eq!(&progress[..4], &[(0, 0), (1, 0), (2, 0), (3, 0)]);
+    }
+
+    #[test]
+    fn sparse_rollout_schedule_counts_only_active_rows() {
+        let progress = sparse_rollout_progress(false);
+        assert_eq!(progress[4], (0, 4));
+        assert_eq!(progress[5], (0, 4));
+    }
+
+    #[test]
+    fn sparse_rollout_counts_active_rows_past_batch_size() {
+        let progress = sparse_rollout_progress(true);
+        assert_eq!(progress[4], (0, 5));
+        assert_eq!(progress[5], (0, 5));
+    }
+
+    fn sparse_rollout_progress(final_row_active: bool) -> Vec<(usize, usize)> {
+        #[derive(Default)]
+        struct Logger {
+            collections: Vec<usize>,
+            updates: Vec<usize>,
+        }
+        impl PPOLogger for Logger {
+            fn log(&mut self, entry: &PPOLogEntry) {
+                self.updates.push(entry.timestep);
+            }
+            fn log_collection(&mut self, entry: &PPOCollectionLogEntry) {
+                self.collections.push(entry.collection_timestep);
+            }
+        }
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut logger = Logger::default();
+        let networks = SeparatePPONetwork::builder()
+            .actor_network(ProbabilisticPolicyModel::new(
+                mlp(4, 2, &device),
+                CategoricalDistribution,
+            ))
+            .critic_network(mlp(4, 1, &device))
+            .actor_optimizer(SgdConfig::new().init())
+            .critic_optimizer(SgdConfig::new().init())
+            .actor_learning_rate(1e-3)
+            .critic_learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+            .action_space(Discrete::new(2).unwrap())
+            .network_info(networks)
+            .batch_size(4)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .training_horizon(10)
+            .logging_info(&mut logger)
+            .build()
+            .unwrap();
+        let observations = Tensor::zeros([2, 4], &device);
+        let mut progress = Vec::new();
+        for time in 0..6 {
+            let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+            let step = MultiGymStepInfo {
+                observations: observations.clone(),
+                rewards: Tensor::ones([2, 1], &device),
+                infos: vec![(); 2],
+                dones: vec![false; 2],
+                truncateds: vec![false; 2],
+                terminal_observations: vec![None; 2],
+            };
+            let mut slots = Vec::new();
+            if time > 0 && time < 5 {
+                slots.push(0);
+            }
+            if final_row_active && time == 4 {
+                slots.push(1);
+            }
+            crate::agents::test_support::learn_selected_rows(
+                &mut agent,
+                &observations,
+                actions,
+                step,
+                &slots,
+            )
+            .unwrap();
+            progress.push((
+                agent.rollout_buffer.len(),
+                agent.schedule_progress.elapsed_steps(),
+            ));
+        }
+        let collected = if final_row_active { 5 } else { 4 };
+        assert_eq!(logger.collections, vec![1, 2, 3, collected]);
+        assert!(!logger.updates.is_empty());
+        assert!(logger.updates.iter().all(|&timestep| timestep == collected));
+        progress
+    }
+
+    #[test]
+    fn padding_does_not_change_updates_or_episode_statistics() {
+        struct Parameters(Vec<f32>);
+        impl ModuleVisitor for Parameters {
+            /// Visits parameters with their native tensor shape.
+            fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<D>>) {
+                self.0
+                    .extend(param.val().to_data().try_to_vec::<f32>().unwrap());
+            }
+        }
+        #[derive(Default)]
+        struct Logger {
+            rewards: Vec<f32>,
+            episodes: Vec<(f32, usize)>,
+        }
+        impl PPOLogger for Logger {
+            fn log(&mut self, entry: &PPOLogEntry) {
+                assert!(entry.actor_loss.to_data().try_to_vec::<f32>().unwrap()[0].is_finite());
+                self.rewards
+                    .extend(entry.rewards.to_data().try_to_vec::<f32>().unwrap());
+            }
+            fn log_collection(&mut self, entry: &PPOCollectionLogEntry) {
+                assert_eq!(entry.collection_rewards.dims()[0], 1);
+                self.episodes.extend(
+                    entry
+                        .completed_episodes
+                        .iter()
+                        .map(|e| (e.episode_return, e.episode_length)),
+                );
+            }
+        }
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut results = Vec::new();
+        for padding in [0.0, 1e6] {
+            device.seed(153);
+            let mut logger = Logger::default();
+            let networks = SeparatePPONetwork::builder()
+                .actor_network(ProbabilisticPolicyModel::new(
+                    mlp(4, 2, &device),
+                    CategoricalDistribution,
+                ))
+                .critic_network(mlp(4, 1, &device))
+                .actor_optimizer(SgdConfig::new().init())
+                .critic_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(1e-3)
+                .critic_learning_rate(1e-3)
+                .build()
+                .unwrap();
+            let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
+                .observation_space(BoxSpace::new_unbounded([1, 4], &device))
+                .action_space(Discrete::new(2).unwrap())
+                .network_info(networks)
+                .batch_size(2)
+                .mini_batch_size(1)
+                .num_epochs(1)
+                .training_horizon(8)
+                .logging_info(&mut logger)
+                .build()
+                .unwrap();
+            for time in 0..4 {
+                let observations = Tensor::from_data([[0.1, 0.2, 0.3, 0.4], [padding; 4]], &device);
+                let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+                let slots = if time < 2 { vec![0] } else { vec![] };
+                let step = MultiGymStepInfo {
+                    observations: observations.clone(),
+                    rewards: Tensor::from_data([[1.0], [padding]], &device),
+                    infos: vec![(); 2],
+                    dones: vec![time == 1, false],
+                    truncateds: vec![false; 2],
+                    terminal_observations: vec![None; 2],
+                };
+                crate::agents::test_support::learn_selected_rows(
+                    &mut agent,
+                    &observations,
+                    actions,
+                    step,
+                    &slots,
+                )
+                .unwrap();
+            }
+            assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+            assert_eq!(agent.rollout_buffer.len(), 0);
+            assert_eq!(agent.rollout_rows, 0);
+            let mut parameters = Parameters(Vec::new());
+            agent.network().visit(&mut parameters);
+            results.push((parameters.0, logger.rewards, logger.episodes));
+        }
+        assert_eq!(results[0].0, results[1].0);
+        for (_, rewards, episodes) in results {
+            assert_eq!(rewards, vec![1.0, 1.0]);
+            assert_eq!(episodes, vec![(2.0, 2)]);
+        }
+    }
+
+    #[test]
+    fn caller_collected_rollout_accepts_varying_slot_subsets() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let mut env: VectorizedGymWrapper<TwoStepTestGym, usize> = vec![
@@ -2041,13 +2842,38 @@ mod schedule_tests {
             .unwrap();
 
         let observations = env.reset().unwrap();
-        let training_actions = agent.act_for_training(&observations, &mut ()).unwrap();
-        let step = env
-            .step(training_actions.to_environment_actions().unwrap())
-            .unwrap();
+        let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
+        assert!(matches!(
+            agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[0]),
+            Err(PPOError::Slots(
+                crate::multi_agent::SlotError::LengthMismatch {
+                    expected: 2,
+                    actual: 1
+                }
+            ))
+        ));
+        assert!(matches!(
+            agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[7, 7]),
+            Err(PPOError::Slots(
+                crate::multi_agent::SlotError::DuplicateSlot(7)
+            ))
+        ));
+
+        crate::agents::test_support::learn_selected_rows(
+            &mut agent,
+            &observations,
+            actions.clone(),
+            step.clone(),
+            &[],
+        )
+        .unwrap();
+        assert!(agent.rollout_buffer.is_empty());
+        assert_eq!(agent.schedule_progress.elapsed_steps(), 0);
+        assert_eq!(agent.episode_tracker.environment_count(), 0);
         let next_observations = step.observations.clone();
         agent
-            .learn_from_timesteps(&observations, training_actions, step)
+            .learn_from_timesteps(&observations, actions, step, &[usize::MAX, 7])
             .unwrap();
 
         let mut single_env = VectorizedGymWrapper::from(TwoStepTestGym::new(device.clone(), false));
@@ -2058,22 +2884,16 @@ mod schedule_tests {
         let single_step = single_env
             .step(single_actions.to_environment_actions().unwrap())
             .unwrap();
-        assert!(matches!(
-            agent.learn_from_timesteps(&single_observations, single_actions, single_step),
-            Err(PPOError::BatchLengthMismatch {
-                field: "environment count",
-                expected: 2,
-                actual: 1,
-            })
-        ));
-
-        let training_actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
-        let step = env
-            .step(training_actions.to_environment_actions().unwrap())
-            .unwrap();
         agent
-            .learn_from_timesteps(&next_observations, training_actions, step)
+            .learn_from_timesteps(&single_observations, single_actions, single_step, &[7])
             .unwrap();
+
+        let actions = agent.act_for_training(&next_observations, &mut ()).unwrap();
+        let step = env.step(actions.to_environment_actions().unwrap()).unwrap();
+        agent
+            .learn_from_timesteps(&next_observations, actions, step, &[7, usize::MAX])
+            .unwrap();
+        assert_eq!(agent.schedule_progress.elapsed_steps(), 5);
     }
 
     #[test]

@@ -109,6 +109,9 @@ Replay stores detached transitions and uses terminal observations for truncation
 
 Important defaults and constraints are:
 
+Timesteps and schedule horizons count agent transition rows, not environment
+steps. Compact collection advances them only for rows actually passed to the agent.
+
 | Setting | Default | Constraint or effect |
 | --- | --- | --- |
 | `actor_learning_rate` | Required | Finite and positive |

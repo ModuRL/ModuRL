@@ -72,6 +72,39 @@ pub(crate) fn stack_tensor_field<T, const D: usize, const B: usize, K: Basic>(
     Ok(Tensor::stack(fields, 0))
 }
 
+/// Concatenates `[rows, ...]` fields without adding an axis. Trailing shapes,
+/// dtypes, and devices must match; gradients remain connected.
+pub(crate) fn cat_tensor_field<T, const D: usize, K: Basic>(
+    experiences: &[T],
+    select: fn(&T) -> Tensor<D, K>,
+) -> Result<Tensor<D, K>, ExperienceBatchError> {
+    if experiences.is_empty() {
+        return Err(ExperienceBatchError::EmptyBatch);
+    }
+    let fields: Vec<_> = experiences.iter().map(select).collect();
+    let first = &fields[0];
+    for (index, field) in fields.iter().enumerate().skip(1) {
+        if field.dims()[1..] != first.dims()[1..] {
+            return Err(ExperienceBatchError::ShapeMismatch {
+                index,
+                expected: first.dims().to_vec(),
+                actual: field.dims().to_vec(),
+            });
+        }
+        if field.dtype() != first.dtype() {
+            return Err(ExperienceBatchError::DTypeMismatch {
+                index,
+                expected: first.dtype(),
+                actual: field.dtype(),
+            });
+        }
+        if field.device() != first.device() {
+            return Err(ExperienceBatchError::DeviceMismatch { index });
+        }
+    }
+    Ok(Tensor::cat(fields, 0))
+}
+
 /// Converts one `[item_count]` boolean field from each experience into an
 /// `Bool` tensor shaped `[batch, item_count, 1]`. Every field must have the same
 /// length. Numeric mask conversion belongs to the algorithm consuming the batch.

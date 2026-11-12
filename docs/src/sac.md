@@ -216,6 +216,8 @@ agent.learn(&mut env, total_timesteps)?;
 `training_horizon` defines how many collected transitions parameter schedules
 take to reach their final values. Schedule progress continues across `learn`
 calls and stops at the end of the horizon.
+Transitions here are agent rows, not environment steps: a compact batch advances
+the schedule by its row count, while absent agents do not advance it.
 
 Important defaults and constraints are:
 

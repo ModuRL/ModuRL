@@ -104,6 +104,9 @@ every second optimization. On skipped actor updates, logger fields such as
 
 Important defaults and constraints are:
 
+Timesteps and schedule horizons count agent transition rows, not environment
+steps. Compact collection advances them only for rows actually passed to the agent.
+
 | Setting | Default | Constraint or effect |
 | --- | --- | --- |
 | `gamma` | `0.99` | Finite and between zero and one |

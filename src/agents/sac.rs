@@ -84,6 +84,8 @@ pub enum SACConfigurationError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SACError<PE, GE, SE, CE = std::convert::Infallible> {
+    #[error("invalid slots: {0}")]
+    Slots(#[from] crate::multi_agent::SlotError),
     #[error("policy failed: {0}")]
     PolicyError(#[source] PE),
     #[error("gym failed: {0}")]
@@ -317,6 +319,7 @@ pub struct SACCollectionLogEntry<I = ()> {
 
 #[derive(Debug, Clone)]
 pub struct SACEpisodeLogEntry {
+    /// Stable slot ID, not the row position within a compact batch.
     pub environment_index: usize,
     pub episode_return: f32,
     pub episode_length: usize,
@@ -347,15 +350,15 @@ impl<I> SACLogger<I> for Option<&mut dyn SACLogger<I>> {
 
 #[derive(Clone)]
 struct SACEpisodeTracker {
-    returns: Vec<f32>,
-    lengths: Vec<usize>,
+    returns: super::SlotValues<f32>,
+    lengths: super::SlotValues<usize>,
 }
 
 impl SACEpisodeTracker {
     fn new(environment_count: usize) -> Self {
         Self {
-            returns: vec![0.0; environment_count],
-            lengths: vec![0; environment_count],
+            returns: super::SlotValues::new(environment_count),
+            lengths: super::SlotValues::new(environment_count),
         }
     }
 
@@ -375,8 +378,8 @@ impl SACEpisodeTracker {
 
         Some(SACEpisodeLogEntry {
             environment_index,
-            episode_return: std::mem::take(&mut self.returns[environment_index]),
-            episode_length: std::mem::take(&mut self.lengths[environment_index]),
+            episode_return: self.returns.take(environment_index),
+            episode_length: self.lengths.take(environment_index),
             collection_timestep,
             terminated,
             truncated,
@@ -721,16 +724,25 @@ where
         self.decode_actions(latent, observations.dims()[0])
     }
 
-    /// Validates rank-O observations `[batch_size, ...observation_shape]`, preserving native kind, dtype, and device.
+    /// Checks nonempty native observations `[batch_size, ...observation_shape]` before policy evaluation.
     fn validate_observations(
+        &self,
+        observations: &Tensor<O, OS::Kind>,
+    ) -> Result<(), SACError<PE, GE, SE, CE>> {
+        if observations.dims()[0] == 0 {
+            return Err(SACError::EmptyBatch);
+        }
+        self.validate_observation_shape(observations)
+    }
+
+    /// Checks native observations `[batch_size, ...observation_shape]`; empty collection batches are valid.
+    fn validate_observation_shape(
         &self,
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<(), SACError<PE, GE, SE, CE>> {
         let mut expected = vec![observations.dims()[0]];
         expected.extend(self.observation_space.shape());
-        if observations.dims()[0] == 0 {
-            return Err(SACError::EmptyBatch);
-        }
+
         if observations.dims().to_vec() != expected {
             return Err(SACError::Shape {
                 field: "observations",
@@ -1114,7 +1126,7 @@ where
         environment_count: usize,
         random_actions: bool,
     ) -> Result<SACCollectionEntropy, SACError<PE, GE, SE, CE>> {
-        if self.entropy_change_penalty.is_none() || random_actions {
+        if environment_count == 0 || self.entropy_change_penalty.is_none() || random_actions {
             return Ok(SACCollectionEntropy {
                 values: Tensor::zeros(
                     [environment_count, 1],
@@ -1154,6 +1166,9 @@ where
         let count = env.num_envs();
         self.validate_replay_environment_count(count)?;
         let observations = env.reset().map_err(SACError::GymError)?;
+        if let Some(replay) = self.replay.as_mut() {
+            replay.clear_streams();
+        }
         self.validate_observations(&observations)?;
         if observations.dims()[0] != count {
             return Err(SACError::Shape {
@@ -1194,6 +1209,7 @@ where
         env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
         observations: &mut Tensor<O, OS::Kind>,
         episodes: &mut SACEpisodeTracker,
+        slots: &[usize],
     ) -> Result<SACCollectionLogEntry<I>, SACError<PE, GE, SE, CE>>
     where
         OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
@@ -1210,7 +1226,7 @@ where
 
         let step = env.step(actions.clone()).map_err(SACError::GymError)?;
         self.validate_timestep(observations, &actions, &step)?;
-        let stored = self.store_timestep(observations, actions, step, episodes)?;
+        let stored = self.store_timestep(observations, actions, step, slots, episodes)?;
         *observations = stored.next_observations;
         Ok(stored.log_entry)
     }
@@ -1255,8 +1271,8 @@ where
             }
         }
 
-        self.validate_observations(observations)?;
-        self.validate_observations(&step.observations)?;
+        self.validate_observation_shape(observations)?;
+        self.validate_observation_shape(&step.observations)?;
         if step.rewards.dims() != [count, 1] {
             return Err(SACError::Shape {
                 field: "environment rewards",
@@ -1298,6 +1314,7 @@ where
         observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A, AS::Kind>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        slots: &[usize],
         episodes: &mut SACEpisodeTracker,
     ) -> Result<SACStoredTimestep<I, O, OS::Kind>, SACError<PE, GE, SE, CE>>
     where
@@ -1365,6 +1382,8 @@ where
             .ok_or(ReplayStorageError::EnvironmentCountNotSet)
             .map_err(SACReplayError::from)?
             .insert(SACReplayInsert {
+                dones: dones.clone(),
+                slots: slots.to_vec(),
                 observations: observations.clone(),
                 next_observations: transition_next_observations,
                 actions,
@@ -1386,7 +1405,7 @@ where
         if let Some(reward_values) = reward_values {
             for (index, reward) in reward_values.into_iter().enumerate() {
                 if let Some(entry) = episodes.record(
-                    index,
+                    slots[index],
                     reward,
                     dones[index],
                     truncateds[index],
@@ -1398,11 +1417,12 @@ where
         }
 
         self.schedule_progress.advance_steps(count);
+        let collection_rewards = rewards.detach();
 
         Ok(SACStoredTimestep {
             next_observations,
             log_entry: SACCollectionLogEntry {
-                collection_rewards: rewards.detach(),
+                collection_rewards,
                 infos,
                 collection_timestep: self.schedule_progress.elapsed_steps(),
                 completed_episodes,
@@ -1516,10 +1536,11 @@ where
         let mut next_observations = self.prepare_replay_collection(env)?;
         self.schedule_progress.default_horizon(num_timesteps);
         let mut episodes = SACEpisodeTracker::new(env.num_envs());
+        let slots: Vec<_> = (0..env.num_envs()).collect();
 
         while elapsed_timesteps < num_timesteps {
             let collection =
-                self.collect_transitions(env, &mut next_observations, &mut episodes)?;
+                self.collect_transitions(env, &mut next_observations, &mut episodes, &slots)?;
             let collected_timesteps = collection.collection_rewards.dims()[0];
             elapsed_timesteps += collected_timesteps;
             self.train_on_collected_transitions(collected_timesteps)?;
@@ -1535,18 +1556,25 @@ where
         observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A, AS::Kind>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        slots: &[usize],
     ) -> Result<(), Self::Error> {
-        self.validate_replay_environment_count(observations.dims()[0])?;
+        crate::multi_agent::validate_slots(observations.dims()[0], slots)?;
         let count = self.validate_timestep(observations, &actions, &step)?;
+        if slots.is_empty() {
+            return Ok(());
+        }
         let mut episodes = match self.timestep_episodes.take() {
-            Some(episodes) if episodes.returns.len() == count => episodes,
+            Some(episodes) => episodes,
             _ => SACEpisodeTracker::new(count),
         };
         let result = (|| {
-            let collection = self.store_timestep(observations, actions, step, &mut episodes)?;
-            let collected_timesteps = collection.log_entry.collection_rewards.dims()[0];
+            let collection =
+                self.store_timestep(observations, actions, step, slots, &mut episodes)?;
+            let collected_timesteps = count;
             self.train_on_collected_transitions(collected_timesteps)?;
-            if let Some(logger) = &mut self.logger {
+            if let Some(logger) = &mut self.logger
+                && collected_timesteps > 0
+            {
                 logger.log_collection(&collection.log_entry);
             }
             Ok(())

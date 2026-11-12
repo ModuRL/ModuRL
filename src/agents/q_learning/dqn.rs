@@ -205,9 +205,10 @@ where
         observations: &Tensor<R, S::Kind>,
         actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
+        slots: &[usize],
     ) -> Result<(), Self::Error> {
         self.inner
-            .learn_from_timesteps(observations, actions, step, &mut self.logging_info)
+            .learn_from_timesteps(observations, actions, step, slots, &mut self.logging_info)
     }
 }
 
@@ -302,7 +303,12 @@ mod tests {
             let actions = agent.act_for_training(&observations, &mut ()).unwrap();
             let step = env.step(actions.clone()).unwrap();
             agent
-                .learn_from_timesteps(&observations, actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    actions,
+                    step,
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
+                )
                 .unwrap();
             assert_eq!(agent.inner.schedule_progress.elapsed_steps(), 4);
             drop(agent);
@@ -404,7 +410,12 @@ mod tests {
             let step = caller_env.step(actions.clone()).unwrap();
             let next_observations = step.observations.clone();
             caller_agent
-                .learn_from_timesteps(&observations, actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    actions,
+                    step,
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
+                )
                 .unwrap();
             observations = next_observations;
         }
@@ -468,7 +479,12 @@ mod tests {
         let step = env.step(actions.clone()).unwrap();
         assert!(
             agent
-                .learn_from_timesteps(&observations, actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    actions,
+                    step,
+                    &(0..observations.dims()[0]).collect::<Vec<_>>()
+                )
                 .is_err()
         );
         assert!(calls.load(Ordering::Relaxed) > 0);
@@ -532,7 +548,12 @@ mod tests {
         let step = env.step(actions.clone()).unwrap();
         assert!(
             agent
-                .learn_from_timesteps(&observations, actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    actions,
+                    step,
+                    &(0..observations.dims()[0]).collect::<Vec<_>>()
+                )
                 .is_err()
         );
         assert_eq!(calls.load(Ordering::Relaxed), 4);
@@ -576,7 +597,12 @@ mod tests {
             let step = env.step(actions.clone()).unwrap();
             let next_observations = step.observations.clone();
             agent
-                .learn_from_timesteps(&observations, actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    actions,
+                    step,
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
+                )
                 .unwrap();
             assert_eq!(agent.inner.current_epsilon, expected_epsilon);
             observations = next_observations;

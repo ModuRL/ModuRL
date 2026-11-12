@@ -1,6 +1,5 @@
 use burn::tensor::{
-    DType, Device, Float, IndexingUpdateOp, Int, Slice, Tensor, TensorCreationOptions, TensorData,
-    kind::{Autodiff, Kind},
+    DType, Device, Float, Int, Slice, Tensor, TensorCreationOptions, TensorData, kind::Autodiff,
 };
 use rand::RngExt;
 use std::collections::HashMap;
@@ -22,6 +21,10 @@ pub enum ReplayStorageError {
         expected: usize,
         actual: usize,
     },
+    #[error("replay start {start} must be below capacity {capacity}")]
+    InvalidStart { start: usize, capacity: usize },
+    #[error("no observation row can be reclaimed from replay")]
+    ObservationPoolExhausted,
     #[error("replay field {field} has shape {actual:?}, expected {expected:?}")]
     ShapeMismatch {
         field: &'static str,
@@ -36,9 +39,7 @@ pub enum ReplayStorageError {
     },
     #[error("cannot insert {inserted} items into replay capacity {capacity}")]
     InsertionExceedsCapacity { capacity: usize, inserted: usize },
-    #[error("replay environment count {actual} does not match expected count {expected}")]
-    EnvironmentCountMismatch { expected: usize, actual: usize },
-    #[error("replay capacity {capacity} is not aligned to environment count {environment_count}")]
+    #[error("replay capacity {capacity} and environment count {environment_count} must be nonzero")]
     InvalidReplayAlignment {
         capacity: usize,
         environment_count: usize,
@@ -49,6 +50,34 @@ pub enum ReplayStorageError {
     EnvironmentCountNotSet,
     #[error("replay index {0} exceeds the supported integer range")]
     IndexTooLarge(usize),
+}
+
+pub(crate) fn insert_replay_rows<E: From<ReplayStorageError>>(
+    count: usize,
+    dones: &[bool],
+    truncateds: &[bool],
+    insert: impl FnOnce(&[bool]) -> Result<(), E>,
+) -> Result<usize, E> {
+    for (field, actual) in [("dones", dones.len()), ("truncations", truncateds.len())] {
+        if actual != count {
+            return Err(ReplayStorageError::BatchLengthMismatch {
+                field,
+                expected: count,
+                actual,
+            }
+            .into());
+        }
+    }
+    if count == 0 {
+        return Ok(0);
+    }
+    let ends: Vec<_> = dones
+        .iter()
+        .zip(truncateds)
+        .map(|(&done, &truncated)| done || truncated)
+        .collect();
+    insert(&ends)?;
+    Ok(count)
 }
 
 impl From<ExperienceReplayError<ReplayStorageError>> for ReplayStorageError {
@@ -151,30 +180,80 @@ impl<const R: usize, K: Autodiff> TensorReplayColumn<R, K> {
     }
 }
 
-/// Stores observations in one `[capacity + environment_count, ...item_shape]` tensor of rank `R`.
-/// A transition at row `i` uses observations at `i` and `i + environment_count`.
-/// Terminal observations are retained separately when an environment resets after truncation.
-pub(crate) struct AlignedObservationReplay<const R: usize, K: Autodiff = Float> {
-    observations: Tensor<R, K>,
-    truncated_next_states: HashMap<usize, Tensor<R, K>>,
-    environment_count: usize,
-    frontier: usize,
-    frontier_is_invalid: bool,
-    inserted: usize,
+struct ReplaySlotHeads {
+    dense: Vec<Option<usize>>,
+    sparse: HashMap<usize, usize>,
+    count: usize,
 }
 
-impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
-    /// Returns the logical shape `[capacity, ...item_shape]`, excluding the extra rows for next observations.
+impl ReplaySlotHeads {
+    fn get(&self, slot: usize) -> Option<usize> {
+        self.dense
+            .get(slot)
+            .copied()
+            .flatten()
+            .or_else(|| self.sparse.get(&slot).copied())
+    }
+
+    fn insert(&mut self, slot: usize, row: usize) {
+        let previous = if let Some(head) = self.dense.get_mut(slot) {
+            head.replace(row)
+        } else {
+            self.sparse.insert(slot, row)
+        };
+        self.count += usize::from(previous.is_none());
+    }
+
+    fn remove(&mut self, slot: usize) {
+        let previous = if let Some(head) = self.dense.get_mut(slot) {
+            head.take()
+        } else {
+            self.sparse.remove(&slot)
+        };
+        self.count -= usize::from(previous.is_some());
+    }
+
+    fn len(&self) -> usize {
+        self.count
+    }
+
+    fn clear(&mut self) {
+        self.dense.fill(None);
+        self.sparse.clear();
+        self.count = 0;
+    }
+}
+
+/// Stores native observations `[capacity + reserved_slots, ...item_shape]` with Int pointers.
+/// Slot reservation starts at the environment count and grows geometrically for live heads.
+/// Continuous streams retain the full transition capacity with one cached head per slot.
+/// Short or discontinuous episodes may evict oldest transitions before reaching capacity
+/// to reclaim observation rows; at least half capacity fits even without any row reuse.
+pub(crate) struct PointerObservationReplay<const R: usize, K: Autodiff = Float> {
+    observations: TensorReplayColumn<R, K>,
+    obs_rows: TensorReplayColumn<1, Int>,
+    next_obs_rows: TensorReplayColumn<1, Int>,
+    transitions: Vec<Option<(usize, usize)>>,
+    references: Vec<u8>,
+    owners: Vec<Option<usize>>,
+    latest: ReplaySlotHeads,
+    slot_capacity: usize,
+    oldest: usize,
+    len: usize,
+    free_rows: usize,
+    cursor: usize,
+}
+
+impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
+    /// Returns logical observation shape `[capacity, ...item_shape]`.
     pub(crate) fn shape(&self) -> [usize; R] {
-        let mut shape = self.observations.dims();
-        shape[0] -= self.environment_count;
+        let mut shape = self.observations.tensor().dims();
+        shape[0] = self.transitions.len();
         shape
     }
 
-    /// Returns storage `[capacity + environment_count, ...item_shape]` of rank `R` without copying tensor data.
-    /// Allocates rank-`R >= 2` storage from logical shape `[capacity, ...item_shape]`.
-    /// Adds `environment_count` rows for next observations. Capacity must exceed and be divisible by the environment count.
-    /// The selected dtype must belong to kind `K`. Storage has no autodiff association.
+    /// Allocates native observations `[capacity + environment_count, ...item_shape]` and Int pointers `[capacity]`.
+    /// Storage is detached. Environment count reserves the initial per-slot observation heads.
     pub(crate) fn new(
         mut shape: [usize; R],
         environment_count: usize,
@@ -183,16 +262,27 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         const {
             assert!(R >= 2, "replay observations require capacity and item axes");
         }
-        shape[0] = validate_replay_alignment(shape[0], environment_count)?;
-        let mut options = options.into();
-        options.device = options.device.without_autodiff();
+        let capacity = shape[0];
+        shape[0] = validate_replay_alignment(capacity, environment_count)?;
+        let options = options.into();
+        let device = options.device.clone().without_autodiff();
         Ok(Self {
-            observations: Tensor::zeros(shape, options),
-            truncated_next_states: HashMap::new(),
-            environment_count,
-            frontier: 0,
-            frontier_is_invalid: false,
-            inserted: 0,
+            observations: TensorReplayColumn::new(shape, options),
+            obs_rows: TensorReplayColumn::new([capacity], (&device, DType::I64)),
+            next_obs_rows: TensorReplayColumn::new([capacity], (&device, DType::I64)),
+            transitions: vec![None; capacity],
+            references: vec![0; shape[0]],
+            owners: vec![None; shape[0]],
+            latest: ReplaySlotHeads {
+                dense: vec![None; environment_count],
+                sparse: HashMap::new(),
+                count: 0,
+            },
+            slot_capacity: environment_count,
+            oldest: 0,
+            len: 0,
+            free_rows: shape[0],
+            cursor: 0,
         })
     }
 
@@ -200,34 +290,45 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
         &self,
         environment_count: usize,
     ) -> Result<(), ReplayStorageError> {
-        if self.environment_count != environment_count {
-            return Err(ReplayStorageError::EnvironmentCountMismatch {
-                expected: self.environment_count,
-                actual: environment_count,
-            });
-        }
-        Ok(())
+        validate_replay_alignment(self.transitions.len(), environment_count).map(|_| ())
     }
 
-    /// Validates and stores `states` and `next_states` shaped `[environment_count, ...item_shape]` of rank `R`.
-    /// Both tensors must match storage shape, kind, and dtype; they are transferred to the storage device.
-    /// Start must be a multiple of `environment_count` below capacity; `truncateds` has one flag per environment.
-    /// Removes autodiff associations. Later state batches overwrite shared next-state rows.
+    pub(crate) fn clear_streams(&mut self) {
+        self.latest.clear();
+        self.owners.fill(None);
+    }
+
+    /// Stores real observations and next observations `[slots.len(), ...item_shape]`.
+    /// Continuing slots must supply the previous next observation as their current observation:
+    /// replay may reuse its cached row instead of the supplied current row.
+    /// Signal an episode end before resetting or reusing a slot for a new stream.
+    /// Each slot continues until an episode end; absent slots write nothing.
+    /// Cached next rows are reused only while their contents have not been overwritten.
+    /// Slots have already been validated at the collection boundary.
     pub(crate) fn insert(
         &mut self,
         start: usize,
         states: Tensor<R, K>,
         next_states: Tensor<R, K>,
-        truncateds: &[bool],
+        ends: &[bool],
+        slots: &[usize],
     ) -> Result<usize, ReplayStorageError> {
         let capacity = self.shape()[0];
         let count = states.dims()[0];
+        if start >= capacity {
+            return Err(ReplayStorageError::InvalidStart { start, capacity });
+        }
+        if count > capacity {
+            return Err(ReplayStorageError::InsertionExceedsCapacity {
+                capacity,
+                inserted: count,
+            });
+        }
         let mut expected_shape = self.shape();
         expected_shape[0] = count;
         validate_replay_shape("observations", &states, expected_shape)?;
         validate_replay_shape("next observations", &next_states, expected_shape)?;
-
-        let expected_dtype = self.observations.dtype();
+        let expected_dtype = self.observations.tensor().dtype();
         for (field, actual) in [
             ("observations", states.dtype()),
             ("next observations", next_states.dtype()),
@@ -240,117 +341,199 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
                 });
             }
         }
-        if truncateds.len() != count {
+        if ends.len() != count {
             return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "truncateds",
+                field: "episode ends",
                 expected: count,
-                actual: truncateds.len(),
+                actual: ends.len(),
             });
         }
-        self.validate_environment_count(count)?;
-        let device = self.observations.device();
-        let states = states.to_device(&device).without_autodiff();
-        let next_states = next_states.to_device(&device).without_autodiff();
-        let offsets: Vec<_> = truncateds
-            .iter()
-            .enumerate()
-            .filter_map(|(offset, &truncated)| truncated.then_some(offset))
-            .collect();
-        let terminal_states = if offsets.is_empty() {
-            None
-        } else {
-            Some(next_states.clone().select(
-                0,
-                replay_index_tensor(&offsets, &self.observations.device())?,
-            ))
-        };
-        let observations = &mut self.observations;
-        // Reuse the previous batch's next-observation rows for current observations to avoid storing each observation twice.
-        observations
-            .inplace(|tensor| tensor.slice_assign([Slice::from(start..start + count)], states));
-        // Place next observations one environment batch ahead so transition i reads rows i and i + count.
-        observations.inplace(|tensor| {
-            tensor.slice_assign([Slice::from(start + count..start + 2 * count)], next_states)
-        });
-        for offset in 0..count {
-            self.truncated_next_states
-                .remove(&((start + offset) % capacity));
+        if count == 0 {
+            return Ok(0);
         }
-        if let Some(terminals) = terminal_states {
-            for (row, offset) in offsets.into_iter().enumerate() {
-                // Each saved row references the compact terminal batch rather than the replay buffer.
-                self.truncated_next_states.insert(
-                    (start + offset) % capacity,
-                    terminals.clone().slice([Slice::from(row..row + 1)]),
-                );
+        self.reserve_slots(slots)?;
+        let device = self.observations.tensor().device();
+        let next_states = next_states.to_device(&device).without_autodiff();
+        for offset in 0..count {
+            while self.transitions[(start + offset) % capacity].is_some() {
+                self.evict_oldest();
             }
         }
-        self.frontier_is_invalid |= self.inserted >= capacity;
-        self.inserted = self.inserted.saturating_add(count);
-        self.frontier = (start + count) % capacity;
+        // Pin reusable rows before allocating, including slots later in this batch.
+        let mut obs_rows: Vec<_> = slots.iter().map(|&slot| self.latest.get(slot)).collect();
+        for row in obs_rows.iter().flatten() {
+            if self.references[*row] == 0 {
+                self.free_rows -= 1;
+            }
+            self.references[*row] += 1;
+        }
+        let mut missing = Vec::new();
+        let mut written_rows = Vec::new();
+        for (offset, row) in obs_rows.iter_mut().enumerate() {
+            if row.is_none() {
+                let allocated = self.allocate_row()?;
+                *row = Some(allocated);
+                missing.push(offset);
+                written_rows.push(allocated);
+            }
+        }
+        if !missing.is_empty() {
+            let state_device = states.device();
+            let states = if missing.len() == count {
+                states
+            } else {
+                states.select(0, replay_index_tensor(&missing, &state_device)?)
+            };
+            self.write_rows(&written_rows, states.to_device(&device))?;
+        }
+        let next_rows: Vec<_> = (0..count)
+            .map(|_| self.allocate_row())
+            .collect::<Result<_, _>>()?;
+        self.write_rows(&next_rows, next_states)?;
+        let obs_rows: Vec<_> = obs_rows.into_iter().flatten().collect();
+        self.obs_rows
+            .write(start, replay_index_tensor(&obs_rows, &device)?)?;
+        self.next_obs_rows
+            .write(start, replay_index_tensor(&next_rows, &device)?)?;
+        if self.len == 0 {
+            self.oldest = start;
+        }
+        self.len += count;
+        for (offset, &slot) in slots.iter().enumerate() {
+            let next = next_rows[offset];
+            self.transitions[(start + offset) % capacity] = Some((obs_rows[offset], next));
+            if ends[offset] {
+                self.latest.remove(slot);
+            } else {
+                self.latest.insert(slot, next);
+                self.owners[next] = Some(slot);
+            }
+        }
         Ok(count)
     }
 
-    pub(crate) fn sampleable_len(&self, len: usize) -> usize {
-        let capacity = self.shape()[0];
-        if len == capacity && self.frontier_is_invalid {
-            len - self.environment_count
-        } else {
-            len
+    fn reserve_slots(&mut self, slots: &[usize]) -> Result<(), ReplayStorageError> {
+        let needed = self.latest.len()
+            + slots
+                .iter()
+                .filter(|&&slot| self.latest.get(slot).is_none())
+                .count();
+        if needed <= self.slot_capacity {
+            return Ok(());
+        }
+        let reserved = self
+            .slot_capacity
+            .checked_mul(2)
+            .ok_or(ReplayStorageError::CapacityOverflow {
+                capacity: self.slot_capacity,
+                additional: self.slot_capacity,
+            })?
+            .max(needed);
+        let total = validate_replay_alignment(self.transitions.len(), reserved)?;
+        let additional = total - self.references.len();
+        let mut shape = self.observations.tensor().dims();
+        shape[0] = additional;
+        let extension = Tensor::zeros(
+            shape,
+            (
+                &self.observations.tensor().device(),
+                self.observations.tensor().dtype(),
+            ),
+        );
+        self.observations
+            .tensor
+            .inplace(|tensor| Tensor::cat(vec![tensor, extension], 0));
+        self.references.resize(total, 0);
+        self.owners.resize(total, None);
+        self.free_rows += additional;
+        self.slot_capacity = reserved;
+        Ok(())
+    }
+
+    fn release_row(&mut self, row: usize) {
+        self.references[row] -= 1;
+        if self.references[row] == 0 {
+            self.free_rows += 1;
+            self.release_head(row);
         }
     }
 
-    pub(crate) fn sample_index(&self, index: usize, len: usize) -> usize {
-        let capacity = self.shape()[0];
-        if len == capacity && self.frontier_is_invalid {
-            (self.frontier + self.environment_count + index) % capacity
-        } else {
-            index
+    fn release_head(&mut self, row: usize) {
+        if let Some(slot) = self.owners[row].take()
+            && self.latest.get(slot) == Some(row)
+        {
+            self.latest.remove(slot);
         }
     }
 
-    /// Returns states and next states `[sample_count, ...item_shape]` of rank `R` for host indices `[sample_count]`.
-    /// Indices must address rows containing stored transitions. Repeated indices are supported.
-    /// Both results preserve storage kind, dtype, and device without gradients.
-    /// Terminal observations replace next states for truncated transitions; later writes do not change the returned batches.
+    fn evict_oldest(&mut self) {
+        if let Some((obs, next)) = self.transitions[self.oldest].take() {
+            self.release_row(obs);
+            self.release_row(next);
+            self.len -= 1;
+        }
+        self.oldest = (self.oldest + 1) % self.transitions.len();
+    }
+
+    fn allocate_row(&mut self) -> Result<usize, ReplayStorageError> {
+        while self.free_rows == 0 {
+            if self.len == 0 {
+                return Err(ReplayStorageError::ObservationPoolExhausted);
+            }
+            self.evict_oldest();
+        }
+        while self.references[self.cursor] != 0 {
+            self.cursor = (self.cursor + 1) % self.references.len();
+        }
+        let row = self.cursor;
+        self.release_head(row);
+        self.references[row] = 1;
+        self.free_rows -= 1;
+        self.cursor = (row + 1) % self.references.len();
+        Ok(row)
+    }
+
+    /// Writes real observations `[rows.len(), ...item_shape]` in contiguous ring runs.
+    fn write_rows(
+        &mut self,
+        rows: &[usize],
+        source: Tensor<R, K>,
+    ) -> Result<(), ReplayStorageError> {
+        let mut begin = 0;
+        while begin < rows.len() {
+            let mut end = begin + 1;
+            while end < rows.len() && rows[end] == (rows[end - 1] + 1) % self.references.len() {
+                end += 1;
+            }
+            self.observations
+                .write(rows[begin], source.clone().slice([Slice::from(begin..end)]))?;
+            begin = end;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn sampleable_len(&self, _len: usize) -> usize {
+        self.len
+    }
+    pub(crate) fn sample_index(&self, index: usize, _len: usize) -> usize {
+        (self.oldest + index) % self.transitions.len()
+    }
+
+    /// Gathers native observations and next observations `[sample_count, ...item_shape]`.
+    /// Int pointer columns resolve both rows, including terminal next observations.
     pub(crate) fn gather(
         &self,
         indices: &[usize],
     ) -> Result<(Tensor<R, K>, Tensor<R, K>), ReplayStorageError> {
-        let observations = &self.observations;
-        let environment_count = self.environment_count;
-        let rows = replay_index_tensor(indices, &self.observations.device())?;
-        let states = observations.clone().select(0, rows.clone());
-        let mut next_states = observations
-            .clone()
-            .select(0, rows + environment_count as i64);
-        let mut positions = Vec::new();
-        let mut terminals = Vec::new();
-        for (batch_index, replay_index) in indices.iter().copied().enumerate() {
-            if let Some(terminal_state) = self.truncated_next_states.get(&replay_index) {
-                positions.push(batch_index);
-                terminals.push(terminal_state.clone());
-            }
-        }
-        if !positions.is_empty() {
-            if const { matches!(K::KIND, Kind::Bool) } {
-                // Boolean indexed updates support OR, so replace each terminal row with a slice assignment.
-                for (position, terminal) in positions.into_iter().zip(terminals) {
-                    next_states =
-                        next_states.slice_assign([Slice::from(position..position + 1)], terminal);
-                }
-            } else {
-                let terminal_states = Tensor::cat(terminals, 0);
-                let rows = replay_index_tensor(&positions, &self.observations.device())?;
-                next_states =
-                    next_states.select_assign(0, rows, terminal_states, IndexingUpdateOp::Assign);
-            }
-        }
-        Ok((states, next_states))
+        let rows = replay_index_tensor(indices, &self.observations.tensor().device())?;
+        Ok((
+            self.observations.gather(self.obs_rows.gather(rows.clone())),
+            self.observations.gather(self.next_obs_rows.gather(rows)),
+        ))
     }
 }
 
-/// Validates a replay tensor's shape against the expected shape.
+/// Checks native observations `[batch_size, ...item_shape]` against the storage axes.
 fn validate_replay_shape<const R: usize, K: Autodiff>(
     field: &'static str,
     tensor: &Tensor<R, K>,
@@ -366,15 +549,12 @@ fn validate_replay_shape<const R: usize, K: Autodiff>(
     Ok(())
 }
 
-/// Validates the replay capacity and returns the allocated row count, including one next observation per environment.
+/// Validates replay capacity and returns the observation rows including initially reserved slots.
 pub(crate) fn validate_replay_alignment(
     capacity: usize,
     environment_count: usize,
 ) -> Result<usize, ReplayStorageError> {
-    if environment_count == 0
-        || capacity <= environment_count
-        || !capacity.is_multiple_of(environment_count)
-    {
+    if environment_count == 0 || capacity == 0 {
         return Err(ReplayStorageError::InvalidReplayAlignment {
             capacity,
             environment_count,
@@ -461,7 +641,7 @@ where
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.len() == 0
     }
 
     pub fn get_batch_size(&self) -> usize {
@@ -499,6 +679,50 @@ mod tests {
     use proptest::{collection::vec, prelude::*};
     use std::convert::Infallible;
 
+    #[test]
+    fn replay_rows_validate_flags_and_skip_empty_inserts() {
+        let writes = std::cell::Cell::new(0);
+        let inserted = insert_replay_rows::<ReplayStorageError>(
+            3,
+            &[true, false, false],
+            &[false, true, false],
+            |ends| {
+                assert_eq!(ends, &[true, true, false]);
+                writes.set(writes.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(inserted, 3);
+        assert_eq!(writes.get(), 1);
+        for (count, dones, truncateds) in [
+            (0, vec![], vec![]),
+            (2, vec![true], vec![false; 2]),
+            (2, vec![false; 2], vec![true]),
+        ] {
+            let result =
+                insert_replay_rows::<ReplayStorageError>(count, &dones, &truncateds, |_| {
+                    writes.set(writes.get() + 1);
+                    Ok(())
+                });
+            if count == 0 {
+                assert_eq!(result.unwrap(), 0);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(ReplayStorageError::BatchLengthMismatch { .. })
+                ));
+            }
+            assert_eq!(writes.get(), 1);
+        }
+        assert!(matches!(
+            insert_replay_rows(1, &[false], &[false], |_| Err(
+                ReplayStorageError::ObservationPoolExhausted
+            )),
+            Err(ReplayStorageError::ObservationPoolExhausted)
+        ));
+    }
+
     struct IndexStorage {
         capacity: usize,
     }
@@ -525,23 +749,27 @@ mod tests {
     fn terminal_patches_preserve_bytes_duplicates_and_overwrites() {
         let device = Device::flex();
         let mut replay =
-            AlignedObservationReplay::<3, Int>::new([6, 2, 2], 3, (&device, DType::U8)).unwrap();
+            PointerObservationReplay::<3, Int>::new([6, 2, 2], 3, (&device, DType::U8)).unwrap();
         let batch = |value: u8| Tensor::<3, Int>::full([3, 2, 2], value, (&device, DType::U8));
         let terminals = Tensor::from_data(
             TensorData::new((20u8..32).collect(), [3, 2, 2]),
             (&device, DType::U8),
         );
         replay
-            .insert(0, batch(1), terminals, &[true, false, true])
+            .insert(0, batch(1), terminals, &[true, false, true], &[0, 1, 2])
             .unwrap();
-        replay.insert(3, batch(2), batch(3), &[false; 3]).unwrap();
-        let (_, next) = replay.gather(&[2, 0, 2, 1]).unwrap();
+        replay
+            .insert(3, batch(2), batch(3), &[false; 3], &[0, 1, 2])
+            .unwrap();
+        let (_, next) = replay.gather(&[2, 2, 1]).unwrap();
         assert_eq!(next.dtype(), DType::U8);
         assert_eq!(
             next.clone().into_data().try_to_vec::<u8>().unwrap(),
-            vec![28, 29, 30, 31, 20, 21, 22, 23, 28, 29, 30, 31, 2, 2, 2, 2]
+            vec![28, 29, 30, 31, 28, 29, 30, 31, 24, 25, 26, 27]
         );
-        replay.insert(0, batch(4), batch(5), &[false; 3]).unwrap();
+        replay
+            .insert(0, batch(4), batch(5), &[false; 3], &[0, 1, 2])
+            .unwrap();
         let (_, overwritten) = replay.gather(&[0, 2]).unwrap();
         assert_eq!(
             overwritten.into_data().try_to_vec::<u8>().unwrap(),
@@ -576,15 +804,273 @@ mod tests {
     }
 
     #[test]
+    fn distinct_one_shot_slots_keep_observation_storage_bounded() {
+        let device = Device::flex();
+        let capacity = 8;
+        for ended in [true, false] {
+            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 1, &device).unwrap();
+            for time in 0..400 {
+                replay
+                    .insert(
+                        time % capacity,
+                        Tensor::full([1, 1], time as f32, &device),
+                        Tensor::full([1, 1], (time + 1) as f32, &device),
+                        &[ended],
+                        &[usize::MAX - time],
+                    )
+                    .unwrap();
+                assert!(replay.latest.len() <= if ended { 0 } else { capacity });
+                assert!(replay.observations.tensor().dims()[0] <= capacity * 3);
+            }
+        }
+    }
+
+    #[test]
+    fn continuous_observation_allocation_is_capacity_plus_slots() {
+        let device = Device::flex();
+        let mut replay = PointerObservationReplay::<2>::new([16, 1], 3, &device).unwrap();
+        assert_eq!(replay.observations.tensor().dims()[0], 19);
+        for time in 0..24 {
+            let start = time * 3 % 16;
+            replay
+                .insert(
+                    start,
+                    Tensor::full([3, 1], time as f32, &device),
+                    Tensor::full([3, 1], (time + 1) as f32, &device),
+                    &[false; 3],
+                    &[0, 1, 2],
+                )
+                .unwrap();
+            assert_eq!(replay.observations.tensor().dims()[0], 19);
+            assert_eq!(
+                replay.sampleable_len(((time + 1) * 3).min(16)),
+                ((time + 1) * 3).min(16)
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_every_step_keeps_at_least_half_capacity_and_correct_rows() {
+        let device = Device::flex();
+        let capacity = 8;
+        let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 1, &device).unwrap();
+        let mut expected = [(0.0, 0.0); 8];
+        for time in 0..100 {
+            let state = (time * 10) as f32;
+            replay
+                .insert(
+                    time % capacity,
+                    Tensor::from_data([[state]], &device),
+                    Tensor::from_data([[state + 1.0]], &device),
+                    &[true],
+                    &[0],
+                )
+                .unwrap();
+            expected[time % capacity] = (state as f64, (state + 1.0) as f64);
+            let len = replay.sampleable_len((time + 1).min(capacity));
+            assert!(len >= (time + 1).min(capacity / 2));
+            let rows: Vec<_> = (0..len)
+                .map(|index| replay.sample_index(index, (time + 1).min(capacity)))
+                .collect();
+            let (states, next) = replay.gather(&rows).unwrap();
+            assert_eq!(
+                column_values(states),
+                rows.iter().map(|&row| expected[row].0).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                column_values(next),
+                rows.iter().map(|&row| expected[row].1).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn new_slots_grow_observation_reservation_in_chunks_and_preserve_history() {
+        let device = Device::flex();
+        let mut replay = PointerObservationReplay::<2>::new([8, 1], 1, &device).unwrap();
+        for (time, slot) in [usize::MAX, 40, 20, 10].into_iter().enumerate() {
+            let state = time as f32;
+            replay
+                .insert(
+                    time,
+                    Tensor::from_data([[state]], &device),
+                    Tensor::from_data([[state + 1.0]], &device),
+                    &[false],
+                    &[slot],
+                )
+                .unwrap();
+            assert_eq!(
+                replay.observations.tensor().dims()[0],
+                8 + [1, 2, 4, 4][time]
+            );
+            let rows: Vec<_> = (0..=time).collect();
+            let (states, next) = replay.gather(&rows).unwrap();
+            assert_eq!(
+                column_values(states),
+                rows.iter().map(|&row| row as f64).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                column_values(next),
+                rows.iter().map(|&row| row as f64 + 1.0).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn continuous_slots_write_only_one_next_row_per_transition() {
+        let device = Device::flex();
+        let mut replay = PointerObservationReplay::<2>::new([8, 1], 2, &device).unwrap();
+        replay
+            .insert(
+                0,
+                Tensor::zeros([2, 1], &device),
+                Tensor::ones([2, 1], &device),
+                &[false; 2],
+                &[0, 1],
+            )
+            .unwrap();
+        assert_eq!(replay.cursor, 4);
+        let previous = [
+            replay.transitions[0].unwrap().1,
+            replay.transitions[1].unwrap().1,
+        ];
+        replay
+            .insert(
+                2,
+                Tensor::ones([2, 1], &device),
+                Tensor::full([2, 1], 2.0, &device),
+                &[false; 2],
+                &[0, 1],
+            )
+            .unwrap();
+        assert_eq!(replay.cursor, 6);
+        assert_eq!(
+            [
+                replay.transitions[2].unwrap().0,
+                replay.transitions[3].unwrap().0
+            ],
+            previous
+        );
+        assert_eq!(replay.transitions.iter().flatten().count(), 4);
+    }
+
+    #[test]
+    fn cleared_streams_preserve_history_without_reusing_reset_observations() {
+        let device = Device::flex();
+        let mut replay = PointerObservationReplay::<2>::new([3, 1], 1, &device).unwrap();
+        replay
+            .insert(
+                0,
+                Tensor::zeros([1, 1], &device),
+                Tensor::ones([1, 1], &device),
+                &[false],
+                &[0],
+            )
+            .unwrap();
+        replay.clear_streams();
+        replay
+            .insert(
+                1,
+                Tensor::full([1, 1], 10.0, &device),
+                Tensor::full([1, 1], 11.0, &device),
+                &[false],
+                &[0],
+            )
+            .unwrap();
+        let (states, next) = replay.gather(&[0, 1]).unwrap();
+        assert_eq!(column_values(states), [0.0, 10.0]);
+        assert_eq!(column_values(next), [1.0, 11.0]);
+    }
+
+    #[test]
+    fn pointer_rows_reuse_continuous_slots_and_preserve_episodes() {
+        let device = Device::flex();
+        let mut replay = PointerObservationReplay::<2>::new([5, 1], 2, &device).unwrap();
+        let batch = |values: Vec<f32>| {
+            let count = values.len();
+            Tensor::from_data(TensorData::new(values, [count, 1]), &device)
+        };
+        replay
+            .insert(
+                0,
+                batch(vec![1.0, 10.0]),
+                batch(vec![2.0, 11.0]),
+                &[false; 2],
+                &[7, 900],
+            )
+            .unwrap();
+        let first_next = replay.transitions[0].unwrap().1;
+        replay
+            .insert(2, batch(vec![11.0]), batch(vec![12.0]), &[false], &[900])
+            .unwrap();
+        replay
+            .insert(3, batch(vec![12.0]), batch(vec![13.0]), &[true], &[900])
+            .unwrap();
+        replay
+            .insert(4, batch(vec![2.0]), batch(vec![3.0]), &[true], &[7])
+            .unwrap();
+        assert_eq!(replay.transitions[4].unwrap().0, first_next);
+        replay
+            .insert(0, batch(vec![100.0]), batch(vec![101.0]), &[false], &[900])
+            .unwrap();
+        let (states, next) = replay.gather(&[0, 2, 3, 4]).unwrap();
+        assert_eq!(column_values(states), [100.0, 11.0, 12.0, 2.0]);
+        assert_eq!(column_values(next), [101.0, 12.0, 13.0, 3.0]);
+        let transitions = replay.transitions.clone();
+        let references = replay.references.clone();
+        replay
+            .insert(1, batch(vec![]), batch(vec![]), &[], &[])
+            .unwrap();
+        assert_eq!(replay.transitions, transitions);
+        assert_eq!(replay.references, references);
+    }
+
+    #[test]
+    fn pointer_rows_wrap_without_overwriting_live_observations() {
+        let device = Device::flex();
+        let mut replay = PointerObservationReplay::<2>::new([3, 1], 1, &device).unwrap();
+        let mut expected = [(0.0, 0.0); 3];
+        for time in 0..100 {
+            let slot = if time % 3 == 0 { usize::MAX } else { 42 };
+            let state = (time * 10) as f32;
+            let next = state + 1.0;
+            replay
+                .insert(
+                    time % 3,
+                    Tensor::from_data([[state]], &device),
+                    Tensor::from_data([[next]], &device),
+                    &[true],
+                    &[slot],
+                )
+                .unwrap();
+            expected[time % 3] = (state as f64, next as f64);
+            let len = replay.sampleable_len((time + 1).min(3));
+            let rows: Vec<_> = (0..len)
+                .map(|index| replay.sample_index(index, len))
+                .collect();
+            let (states, next) = replay.gather(&rows).unwrap();
+            assert_eq!(
+                column_values(states),
+                rows.iter().map(|&row| expected[row].0).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                column_values(next),
+                rows.iter().map(|&row| expected[row].1).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn boolean_observations_preserve_terminal_overrides() {
         let device = Device::flex();
-        let mut replay = AlignedObservationReplay::<2, Bool>::new([2, 2], 1, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2, Bool>::new([3, 2], 1, &device).unwrap();
         replay
             .insert(
                 0,
                 Tensor::from_data([[false, false]], &device),
                 Tensor::from_data([[false, false]], &device),
                 &[true],
+                &[0],
             )
             .unwrap();
         replay
@@ -593,6 +1079,7 @@ mod tests {
                 Tensor::from_data([[true, true]], &device),
                 Tensor::from_data([[true, true]], &device),
                 &[false],
+                &[0],
             )
             .unwrap();
         let (states, next) = replay.gather(&[0, 0, 1]).unwrap();
@@ -618,9 +1105,9 @@ mod tests {
                 .gather(replay_index_tensor(&[0], &storage_device).unwrap())
                 .is_autodiff()
         );
-        let mut replay = AlignedObservationReplay::<2>::new([2, 2], 1, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2>::new([2, 2], 1, &device).unwrap();
         replay
-            .insert(0, input.clone(), input.clone() * 2.0, &[true])
+            .insert(0, input.clone(), input.clone() * 2.0, &[true], &[0])
             .unwrap();
         let (states, next) = replay.gather(&[0]).unwrap();
         assert!(!states.is_autodiff());
@@ -642,16 +1129,14 @@ mod tests {
     }
 
     #[test]
-    fn aligned_storage_rejects_invalid_configurations() {
+    fn pointer_storage_rejects_invalid_configurations() {
         let device = Device::flex();
-        for capacity in [0, 2, 3] {
-            assert!(matches!(
-                AlignedObservationReplay::<2>::new([capacity, 1], 2, &device),
-                Err(ReplayStorageError::InvalidReplayAlignment { .. })
-            ));
-        }
         assert!(matches!(
-            AlignedObservationReplay::<2>::new([usize::MAX - 1, 1], 2, &device),
+            PointerObservationReplay::<2>::new([0, 1], 2, &device),
+            Err(ReplayStorageError::InvalidReplayAlignment { .. })
+        ));
+        assert!(matches!(
+            PointerObservationReplay::<2>::new([usize::MAX - 1, 1], 2, &device),
             Err(ReplayStorageError::CapacityOverflow { .. })
         ));
     }
@@ -699,6 +1184,48 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
         #[test]
+        fn sparse_pointer_rows_match_a_transition_model(
+            capacity in 3usize..=12,
+            steps in vec((any::<[bool; 3]>(), any::<[bool; 3]>(), any::<bool>()), 1..=40),
+        ) {
+            let device = Device::flex();
+            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 3, &device).unwrap();
+            let mut observations = [1.0f32, 2.0, 3.0];
+            let mut model = vec![None; capacity];
+            let mut position = 0;
+            let mut inserted = 0;
+            let mut id = 4.0;
+            for (active, ends, reverse) in steps {
+                let mut slots: Vec<_> = (0..3).filter(|&slot| active[slot]).collect();
+                if reverse { slots.reverse(); }
+                let count = slots.len();
+                let states: Vec<_> = slots.iter().map(|&slot| observations[slot]).collect();
+                let next: Vec<_> = (0..count).map(|_| { id += 1.0; id }).collect();
+                let episode_ends: Vec<_> = slots.iter().map(|&slot| ends[slot]).collect();
+                let batch = |values: Vec<f32>| Tensor::from_data(TensorData::new(values, [count, 1]), &device);
+                let slot_ids: Vec<_> = slots.iter().map(|&slot| [usize::MAX, 100, 9][slot]).collect();
+                replay.insert(position, batch(states.clone()), batch(next.clone()), &episode_ends, &slot_ids).unwrap();
+                for (offset, &slot) in slots.iter().enumerate() {
+                    model[(position + offset) % capacity] = Some((states[offset] as f64, next[offset] as f64));
+                    if ends[slot] { id += 1.0; observations[slot] = id; }
+                    else { observations[slot] = next[offset]; }
+                }
+                position = (position + count) % capacity;
+                inserted += count;
+                let len = replay.sampleable_len(inserted.min(capacity));
+                prop_assert_eq!(replay.transitions.iter().flatten().count(), len);
+                prop_assert!(len >= inserted.min(capacity / 2));
+                prop_assert!(len <= inserted.min(capacity));
+                let rows: Vec<_> = (0..len).map(|index| replay.sample_index(index, len)).collect();
+                if !rows.is_empty() {
+                    let (states, next) = replay.gather(&rows).unwrap();
+                    prop_assert_eq!(column_values(states), rows.iter().map(|&row| model[row].unwrap().0).collect::<Vec<_>>());
+                    prop_assert_eq!(column_values(next), rows.iter().map(|&row| model[row].unwrap().1).collect::<Vec<_>>());
+                }
+            }
+        }
+
+        #[test]
         fn column_matches_a_ring_model(
             capacity in 1usize..=6,
             writes in vec(0usize..=7, 1..=8),
@@ -736,14 +1263,14 @@ mod tests {
         }
 
         #[test]
-        fn aligned_observations_match_a_transition_model(
+        fn pointer_observations_match_a_transition_model(
             (environment_count, capacity, steps) in aligned_replay_run(),
         ) {
             let device = Device::flex();
             let n = environment_count;
-            let mut replay = AlignedObservationReplay::<2>::new([capacity, 1], n, &device).unwrap();
+            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], n, &device).unwrap();
             let all_rows: Vec<_> = (0..capacity).collect();
-            let gather_all = |replay: &AlignedObservationReplay<2>| {
+            let gather_all = |replay: &PointerObservationReplay<2>| {
                 let (states, next) = replay.gather(&all_rows).unwrap();
                 (column_values(states), column_values(next))
             };
@@ -757,29 +1284,30 @@ mod tests {
             let (mut position, mut inserted) = (0, 0);
             for (ends, invalid) in steps {
                 let next_states: Vec<f32> = ids.by_ref().take(n).collect();
-                let truncateds: Vec<_> = ends.iter().map(|end| *end == EpisodeEnd::Truncate).collect();
+                let truncateds: Vec<_> = ends.iter().map(|end| *end != EpisodeEnd::Continue).collect();
+                let slots: Vec<_> = (0..n).collect();
                 if let Some(invalid) = invalid {
                     let before = gather_all(&replay);
                     let (states, next) = (batch(&observations, DType::F32), batch(&next_states, DType::F32));
                     let error = match invalid {
-                        0 => replay.insert(position, states, Tensor::zeros([n, 2], &device), &truncateds),
+                        0 => replay.insert(position, states, Tensor::zeros([n, 2], &device), &truncateds, &slots),
                         1 => replay.insert(
                             position,
                             batch(&observations, DType::F64),
                             batch(&next_states, DType::F64),
                             &truncateds,
-                        ),
-                        2 => replay.insert(position, states, next, &vec![false; n + 1]),
-                        _ => replay.insert(position, Tensor::zeros([n + 1, 1], &device), Tensor::zeros([n + 1, 1], &device), &vec![false; n + 1]),
+                         &slots,),
+                        2 => replay.insert(position, states, next, &vec![false; n + 1], &slots),
+                        _ => replay.insert(position, Tensor::zeros([n, 2], &device), next, &truncateds, &slots),
                     }
                     .unwrap_err();
-                    let expected = ["ShapeMismatch", "DTypeMismatch", "BatchLengthMismatch", "EnvironmentCountMismatch"];
+                    let expected = ["ShapeMismatch", "DTypeMismatch", "BatchLengthMismatch", "ShapeMismatch"];
                     prop_assert!(format!("{error:?}").starts_with(expected[invalid]), "{error:?}");
                     prop_assert_eq!(gather_all(&replay), before);
                 }
 
                 replay
-                    .insert(position, batch(&observations, DType::F32), batch(&next_states, DType::F32), &truncateds)
+                    .insert(position, batch(&observations, DType::F32), batch(&next_states, DType::F32), &truncateds, &slots)
                     .unwrap();
                 for (env, end) in ends.into_iter().enumerate() {
                     let next = (end != EpisodeEnd::Terminate).then_some(next_states[env]);
@@ -790,8 +1318,8 @@ mod tests {
 
                 let len = inserted.min(capacity);
                 let sampleable = replay.sampleable_len(len);
-                // Once the ring has wrapped, the oldest batch shares rows with the newest next states.
-                prop_assert_eq!(sampleable, if inserted > capacity { len - n } else { len });
+                prop_assert!(sampleable <= len);
+                prop_assert!(sampleable >= inserted.min(capacity / 2));
                 let rows: Vec<_> = (0..sampleable).map(|index| replay.sample_index(index, len)).collect();
                 let mut newest: Vec<_> = (1..=sampleable).map(|age| (position + capacity - age) % capacity).collect();
                 let mut sorted_rows = rows.clone();

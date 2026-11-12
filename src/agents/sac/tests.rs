@@ -203,6 +203,40 @@ impl SACLogger for RecordingLogger {
 }
 
 #[test]
+fn completed_episodes_release_sparse_slot_state() {
+    let mut tracker = SACEpisodeTracker::new(0);
+    for slot in (usize::MAX - 1000)..usize::MAX {
+        let entry = tracker
+            .record(slot, 2.0, slot % 2 == 0, slot % 2 != 0, 1)
+            .unwrap();
+        assert_eq!(entry.episode_return, 2.0);
+        assert_eq!(entry.episode_length, 1);
+        assert!(tracker.returns.sparse.is_empty());
+        assert!(tracker.lengths.sparse.is_empty());
+    }
+}
+
+#[test]
+fn episode_tracker_handles_arbitrary_slots_and_reset_after_absence() {
+    let mut tracker = SACEpisodeTracker::new(0);
+    assert!(tracker.record(usize::MAX, 2.0, false, false, 1).is_none());
+    assert!(tracker.record(7, 9.0, false, false, 2).is_none());
+    let completed = tracker.record(usize::MAX, 3.0, true, false, 3).unwrap();
+    assert_eq!(completed.environment_index, usize::MAX);
+    assert_eq!(completed.episode_return, 5.0);
+    assert_eq!(completed.episode_length, 2);
+    let reset = tracker.record(usize::MAX, 4.0, false, true, 4).unwrap();
+    assert_eq!(reset.episode_return, 4.0);
+    assert_eq!(reset.episode_length, 1);
+    for slot in 0..7 {
+        tracker.record(slot, 1.0, false, false, 5);
+    }
+    let promoted = tracker.record(7, 1.0, true, false, 6).unwrap();
+    assert_eq!(promoted.episode_return, 10.0);
+    assert_eq!(promoted.episode_length, 2);
+}
+
+#[test]
 fn alpha_and_entropy_drift_losses_preserve_reference_gradients() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
@@ -564,15 +598,7 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
         terminated: false,
         terminal_width: 1,
     });
-    assert!(matches!(
-        agent.learn(&mut different_environment, 1),
-        Err(SACError::ReplayStorageError(SACReplayError::Storage(
-            ReplayStorageError::EnvironmentCountMismatch {
-                expected: 2,
-                actual: 1,
-            }
-        )))
-    ));
+    agent.learn(&mut different_environment, 0).unwrap();
     assert_eq!(agent.optimization_steps, 3);
     assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
     assert_eq!(logger.updates, [2, 3, 4]);
@@ -738,17 +764,59 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     bad_step.dones.pop();
     assert!(
         agent
-            .learn_from_timesteps(&observations, actions, bad_step)
+            .learn_from_timesteps(
+                &observations,
+                actions,
+                bad_step,
+                &(0..observations.dims()[0]).collect::<Vec<_>>()
+            )
             .is_err()
     );
 
     let observations = env.reset().unwrap();
     let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     let step = env.step(actions.clone()).unwrap();
+    for slots in [vec![0], vec![7, 7]] {
+        assert!(
+            agent
+                .learn_from_timesteps(&observations, actions.clone(), step.clone(), &slots)
+                .is_err()
+        );
+    }
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 0);
+
     agent
-        .learn_from_timesteps(&observations, actions, step)
+        .learn_from_timesteps(
+            &crate::agents::test_support::SelectRows::select_rows(observations.clone(), &[0]),
+            crate::agents::test_support::SelectRows::select_rows(actions.clone(), &[0]),
+            crate::agents::test_support::select_step(step.clone(), &[0]),
+            &[usize::MAX],
+        )
         .unwrap();
-    assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    crate::agents::test_support::learn_selected_rows(
+        &mut agent,
+        &observations,
+        actions.clone(),
+        step.clone(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 1);
+    assert!(
+        agent
+            .learn_from_timesteps(&observations, actions.clone(), step.clone(), &[])
+            .is_err()
+    );
+    agent
+        .learn_from_timesteps(
+            &observations,
+            actions,
+            step,
+            &(0..observations.dims()[0]).collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 3);
 }
 
 #[test]
@@ -887,11 +955,98 @@ fn caller_collection_entropy_weight_is_one_after_warmup() {
     let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     let step = environment.step(actions.clone()).unwrap();
     agent
-        .learn_from_timesteps(&observations, actions, step)
+        .learn_from_timesteps(
+            &observations,
+            actions,
+            step,
+            &(0..observations.dims()[0]).collect::<Vec<_>>(),
+        )
         .unwrap();
 
     let stored = agent.replay.as_ref().unwrap().sample().unwrap();
     assert_eq!(numbers(stored.entropy_change_weights), [1.0; 2]);
+}
+
+#[derive(Module, Debug)]
+struct SingleRowModel {
+    weight: Param<Tensor<2>>,
+}
+
+impl Forward<2, 2> for SingleRowModel {
+    type InputKind = Float;
+    type OutputKind = Float;
+    type Error = std::io::Error;
+
+    /// Maps real observations `[1, 1]` to logits `[1, 2]`, rejecting padding batches.
+    fn forward(&self, input: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+        if input.dims()[0] != 1 {
+            return Err(std::io::Error::other(format!(
+                "policy received {} rows, expected one real row",
+                input.dims()[0]
+            )));
+        }
+        Ok(input.matmul(self.weight.val()))
+    }
+}
+
+#[test]
+fn collection_entropy_evaluates_only_real_rows() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex().autodiff();
+    let mut agent = SACAgent::<_, _, _, Infallible>::builder()
+        .policy(ProbabilisticPolicyModel::new(
+            SingleRowModel {
+                weight: Param::from_tensor(Tensor::zeros([1, 2], &device)),
+            },
+            CategoricalDistribution,
+        ))
+        .actor_optimizer(SgdConfig::new().init())
+        .actor_learning_rate(0.01)
+        .critics(vec![discrete_critic(&device, DType::F32)])
+        .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
+        .action_space(Discrete::new(2).unwrap())
+        .observation_space(BoxSpace::new(
+            Tensor::full([1, 1], -1.0, &device),
+            Tensor::ones([1, 1], &device),
+        ))
+        .replay_capacity(8)
+        .batch_size(4)
+        .training_start(0)
+        .training_horizon(4)
+        .entropy_change_penalty(0.5)
+        .build()
+        .unwrap();
+    for slots in [vec![1], vec![]] {
+        crate::agents::test_support::learn_selected_rows(
+            &mut agent,
+            &Tensor::zeros([2, 1], &device),
+            Tensor::zeros([2, 1], &device),
+            MultiGymStepInfo {
+                observations: Tensor::ones([2, 1], &device),
+                rewards: Tensor::ones([2, 1], &device),
+                dones: vec![false; 2],
+                truncateds: vec![false; 2],
+                infos: vec![(); 2],
+                terminal_observations: vec![None; 2],
+            },
+            &slots,
+        )
+        .unwrap();
+    }
+    assert_eq!(agent.replay.as_ref().unwrap().len(), 1);
+    assert!(
+        (numbers(
+            agent
+                .replay
+                .as_ref()
+                .unwrap()
+                .sample()
+                .unwrap()
+                .collection_policy_entropies
+        )[0] - std::f64::consts::LN_2)
+            .abs()
+            < 1e-6
+    );
 }
 
 #[test]
@@ -929,7 +1084,7 @@ fn caller_collected_training_matches_learn() {
             .entropy_configuration(SACEntropyConfiguration::fixed(0.2).unwrap())
             .action_space(action_space)
             .observation_space(observation_space)
-            .replay_capacity(2)
+            .replay_capacity(3)
             .batch_size(2)
             .training_start(0)
             .training_horizon(8)
@@ -963,7 +1118,12 @@ fn caller_collected_training_matches_learn() {
         let step = caller_env.step(actions.clone()).unwrap();
         let next_observations = step.observations.clone();
         caller_agent
-            .learn_from_timesteps(&observations, actions, step)
+            .learn_from_timesteps(
+                &observations,
+                actions,
+                step,
+                &(0..observations.dims()[0]).collect::<Vec<_>>(),
+            )
             .unwrap();
         observations = next_observations;
     }

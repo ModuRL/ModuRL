@@ -14,8 +14,9 @@ use std::marker::PhantomData;
 use crate::{
     agents::ReplayStorageConfig,
     buffers::experience_replay::{
-        AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
-        ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_replay_alignment,
+        ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayStorage,
+        ReplayStorageError, TensorReplayColumn, insert_replay_rows, replay_index_tensor,
+        validate_replay_alignment,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
@@ -72,6 +73,8 @@ where
     GE: std::fmt::Debug,
     ME: std::fmt::Debug,
 {
+    #[error("invalid slots: {0}")]
+    Slots(#[from] crate::multi_agent::SlotError),
     #[error("Q-learning tensor operation failed: {0}")]
     TensorError(#[from] TensorReadError),
     #[error("Q-learning model failed: {0}")]
@@ -158,6 +161,7 @@ pub struct QCollectionLogEntry<I = ()> {
 }
 
 pub struct QEpisodeLogEntry {
+    /// Stable slot ID, not the row position within a compact batch.
     pub environment_index: usize,
     pub episode_return: f32,
     pub episode_length: usize,
@@ -167,15 +171,15 @@ pub struct QEpisodeLogEntry {
 }
 
 struct QEpisodeTracker {
-    returns: Vec<f32>,
-    lengths: Vec<usize>,
+    returns: super::SlotValues<f32>,
+    lengths: super::SlotValues<usize>,
 }
 
 impl QEpisodeTracker {
     fn new(environment_count: usize) -> Self {
         Self {
-            returns: vec![0.0; environment_count],
-            lengths: vec![0; environment_count],
+            returns: super::SlotValues::new(environment_count),
+            lengths: super::SlotValues::new(environment_count),
         }
     }
 
@@ -195,14 +199,12 @@ impl QEpisodeTracker {
 
         let entry = QEpisodeLogEntry {
             environment_index,
-            episode_return: self.returns[environment_index],
-            episode_length: self.lengths[environment_index],
+            episode_return: self.returns.take(environment_index),
+            episode_length: self.lengths.take(environment_index),
             terminated,
             truncated,
             collection_timestep,
         };
-        self.returns[environment_index] = 0.0;
-        self.lengths[environment_index] = 0;
         Some(entry)
     }
 }
@@ -237,16 +239,18 @@ struct QLearningBatch<const R: usize, K: Autodiff> {
 }
 
 struct QLearningInsert<const R: usize, K: Autodiff> {
+    slots: Vec<usize>,
     observations: Tensor<R, K>,
     next_observations: Tensor<R, K>,
     actions: Tensor<2, Int>,
     rewards: Tensor<2>,
     next_dones: Tensor<2, Bool>,
+    dones: Vec<bool>,
     truncateds: Vec<bool>,
 }
 
 struct QLearningReplayStorage<const R: usize, K: Autodiff> {
-    observations: Option<AlignedObservationReplay<R, K>>,
+    observations: Option<PointerObservationReplay<R, K>>,
     actions: TensorReplayColumn<2, Int>,
     rewards: TensorReplayColumn<2>,
     next_dones: TensorReplayColumn<2, Bool>,
@@ -317,43 +321,46 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 .into());
             }
         }
-        let dtype = transitions.observations.dtype();
-        let mut new_observations = if self.observations.is_none() {
-            Some(AlignedObservationReplay::new(
-                self.observation_storage_shape,
-                count,
-                (&self.device, dtype),
-            )?)
-        } else {
-            None
-        };
-        let observations = match (&mut self.observations, &mut new_observations) {
-            (Some(observations), _) => observations,
-            (None, Some(observations)) => observations,
-            (None, None) => return Err(ReplayStorageError::EnvironmentCountNotSet.into()),
-        };
-        observations.insert(
-            start,
-            transitions.observations,
-            transitions.next_observations,
-            &transitions.truncateds,
-        )?;
-        if let Some(observations) = new_observations {
-            self.observations = Some(observations);
-        }
-        self.actions.write(
-            start,
-            transitions.actions.to_device(&self.device).cast(DType::U32),
-        )?;
-        self.rewards.write(
-            start,
-            transitions.rewards.to_device(&self.device).cast(DType::F32),
-        )?;
-        self.next_dones.write(
-            start,
-            transfer_bool_tensor(transitions.next_dones, &self.device),
-        )?;
-        Ok(count)
+        insert_replay_rows(count, &transitions.dones, &transitions.truncateds, |ends| {
+            let dtype = transitions.observations.dtype();
+            let mut new_observations = if self.observations.is_none() {
+                Some(PointerObservationReplay::new(
+                    self.observation_storage_shape,
+                    count,
+                    (&self.device, dtype),
+                )?)
+            } else {
+                None
+            };
+            let observations = match (&mut self.observations, &mut new_observations) {
+                (Some(observations), _) => observations,
+                (None, Some(observations)) => observations,
+                (None, None) => return Err(ReplayStorageError::EnvironmentCountNotSet.into()),
+            };
+            observations.insert(
+                start,
+                transitions.observations,
+                transitions.next_observations,
+                ends,
+                &transitions.slots,
+            )?;
+            if let Some(observations) = new_observations {
+                self.observations = Some(observations);
+            }
+            self.actions.write(
+                start,
+                transitions.actions.to_device(&self.device).cast(DType::U32),
+            )?;
+            self.rewards.write(
+                start,
+                transitions.rewards.to_device(&self.device).cast(DType::F32),
+            )?;
+            self.next_dones.write(
+                start,
+                transfer_bool_tensor(transitions.next_dones, &self.device),
+            )?;
+            Ok(())
+        })
     }
 
     /// Samples detached native rank-R observations [sample_count, ...observation_shape], actions [sample_count, 1], and statistics [sample_count, 1].
@@ -388,6 +395,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
 }
 
 struct QCollectedTransitions<'a, const R: usize, K: Autodiff> {
+    slots: &'a [usize],
     observations: &'a Tensor<R, K>,
     next_observations: &'a Tensor<R, K>,
     actions: &'a Tensor<2, Int>,
@@ -694,6 +702,8 @@ where
             &self.replay_storage_config.storage_device(),
         );
         self.experience_replay.add(QLearningInsert {
+            dones: transitions.dones.to_vec(),
+            slots: transitions.slots.to_vec(),
             observations: transitions.observations.clone(),
             next_observations: transitions.next_observations.clone(),
             actions: transitions.actions.clone(),
@@ -707,7 +717,7 @@ where
                 .first_timestep
                 .saturating_add(environment_index + 1);
             if let Some(entry) = episodes.record(
-                environment_index,
+                transitions.slots[environment_index],
                 reward,
                 transitions.dones[environment_index],
                 transitions.truncateds[environment_index],
@@ -757,18 +767,20 @@ where
         observations: &Tensor<R, S::Kind>,
         actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
+        slots: &[usize],
         episodes: &mut QEpisodeTracker,
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>
     where
         Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
-        let count = step.dones.len();
+        let count = slots.len();
         let first_timestep = self.schedule_progress.elapsed_steps();
         let transition_next_observations = step.transition_next_observations();
         let collection_rewards = step.rewards.clone();
         let completed_episodes = self.store_vectorized_transitions(
             QCollectedTransitions {
+                slots,
                 observations,
                 next_observations: &transition_next_observations,
                 actions: &actions,
@@ -779,15 +791,16 @@ where
             },
             episodes,
         )?;
+        let infos = step.infos;
         let entry = QCollectionLogEntry {
             collection_rewards,
-            infos: step.infos,
+            infos,
             epsilon: self.current_epsilon,
             collection_timestep: first_timestep.saturating_add(count),
             completed_episodes,
         };
         let update_result = self.run_scheduled_updates(first_timestep, count, logger);
-        if update_result.is_ok() {
+        if update_result.is_ok() && count > 0 {
             logger.log_collection(&entry);
         }
         self.schedule_progress.advance_steps(count);
@@ -851,8 +864,12 @@ where
             .storage_mut()
             .validate_environment_count(environment_count)?;
         let mut observations = env.reset().map_err(QAgentError::GymError)?;
+        if let Some(observations) = self.experience_replay.storage_mut().observations.as_mut() {
+            observations.clear_streams();
+        }
         self.schedule_progress.default_horizon(num_timesteps);
         let mut episodes = QEpisodeTracker::new(environment_count);
+        let slots: Vec<_> = (0..environment_count).collect();
         while elapsed_timesteps < num_timesteps {
             self.current_epsilon = validate_epsilon(
                 self.schedule_progress
@@ -869,6 +886,7 @@ where
                 &observations_before,
                 actions,
                 step_info,
+                &slots,
                 &mut episodes,
                 logger,
             )?;
@@ -882,20 +900,24 @@ where
         observations: &Tensor<R, S::Kind>,
         actions: Tensor<2, Int>,
         step: MultiGymStepInfo<I, Tensor<U, S::Kind>>,
+        slots: &[usize],
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>
     where
         Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
+        crate::multi_agent::validate_slots(observations.dims()[0], slots)?;
         let count = self.validate_timestep(observations, &actions, &step)?;
-        self.experience_replay
-            .storage_mut()
-            .validate_environment_count(count)?;
+        if slots.is_empty() {
+            return Ok(());
+        }
+
         let mut episodes = match self.timestep_episodes.take() {
-            Some(episodes) if episodes.returns.len() == count => episodes,
+            Some(episodes) => episodes,
             _ => QEpisodeTracker::new(count),
         };
-        let result = self.collect_timestep(observations, actions, step, &mut episodes, logger);
+        let result =
+            self.collect_timestep(observations, actions, step, slots, &mut episodes, logger);
         self.timestep_episodes = Some(episodes);
         result
     }

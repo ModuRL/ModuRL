@@ -16,6 +16,66 @@ pub mod sac;
 
 pub(crate) use replay_device_strategy::ReplayStorageConfig;
 
+#[derive(Clone)]
+pub(crate) struct SlotValues<T> {
+    dense: Vec<T>,
+    sparse: std::collections::BTreeMap<usize, T>,
+    zero: T,
+}
+
+impl<T: Default + Clone> SlotValues<T> {
+    fn new(count: usize) -> Self {
+        Self {
+            dense: vec![T::default(); count],
+            sparse: Default::default(),
+            zero: T::default(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.dense.clear();
+        self.sparse.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.dense.len()
+    }
+}
+
+impl<T> std::ops::Index<usize> for SlotValues<T> {
+    type Output = T;
+    fn index(&self, slot: usize) -> &T {
+        self.dense
+            .get(slot)
+            .or_else(|| self.sparse.get(&slot))
+            .unwrap_or(&self.zero)
+    }
+}
+
+impl<T: Default> SlotValues<T> {
+    fn take(&mut self, slot: usize) -> T {
+        if let Some(value) = self.dense.get_mut(slot) {
+            std::mem::take(value)
+        } else {
+            self.sparse.remove(&slot).unwrap_or_default()
+        }
+    }
+}
+
+impl<T: Default> std::ops::IndexMut<usize> for SlotValues<T> {
+    fn index_mut(&mut self, slot: usize) -> &mut T {
+        if slot == self.dense.len() {
+            self.dense
+                .push(self.sparse.remove(&slot).unwrap_or_default());
+        }
+        if slot < self.dense.len() {
+            &mut self.dense[slot]
+        } else {
+            self.sparse.entry(slot).or_default()
+        }
+    }
+}
+
 /// Training actions selected by [`Agent::act_for_training`] and converted for the environment on demand.
 pub trait ToEnvironmentActions {
     type Actions;
@@ -82,16 +142,29 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
     /// Terminal observations have rank `O - 1`; scalar terminal observations use `[1]`.
     /// The environment must use the associated space types and meet the agent's dtype and device requirements.
+    /// `num_timesteps` and schedule progress count agent transition rows, not calls to `step`.
     fn learn(&mut self, env: &mut Self::Env<'_>, num_timesteps: usize) -> Result<(), Self::Error>;
 
-    /// Stores one caller-collected step from observations shaped `[num_envs, ...observation_shape]`.
-    /// `actions` must come from `act_for_training` on those observations; steps must be consecutive for the same environments.
+    /// Stores compact observations and training actions with one row per slot in `slots`.
+    ///
+    /// **Continuity:** until a slot ends, its observation must equal its previous next observation.
+    /// Replay-backed agents may reuse that cached next observation instead of the supplied row.
+    /// Report done or truncated before resetting an environment or reusing its slot for a new episode.
+    /// Omitting a slot does not end its stream.
+    ///
+    /// Training actions must come from `act_for_training` on those observations.
+    /// Slot IDs must be unique in each call and match the row count; violations return errors.
+    /// Empty batches are valid no-ops.
+    /// Each slot is a continuous stream: pass its rows in time order, starting a new episode
+    /// only after its done or truncated row. Slots may disappear between calls and have any ID.
     /// Schedules need the builder's `training_horizon` because this method has no total timestep count.
+    /// Timesteps, rollout sizes, and schedules count agent rows; empty batches advance none of them.
     fn learn_from_timesteps(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,
         training_actions: Self::TrainingActions,
         step: MultiGymStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>,
+        slots: &[usize],
     ) -> Result<(), Self::Error>;
 }
 
@@ -104,6 +177,71 @@ pub(crate) mod test_support {
         gym::{Gym, ResetInfo, StepInfo},
         spaces::{BoxSpace, Discrete},
     };
+
+    pub(crate) trait SelectRows: Sized {
+        fn select_rows(self, rows: &[usize]) -> Self;
+    }
+
+    impl<const D: usize, K: burn::tensor::kind::Basic> SelectRows for Tensor<D, K> {
+        fn select_rows(self, rows: &[usize]) -> Self {
+            if rows.iter().copied().eq(0..self.dims()[0]) {
+                return self;
+            }
+            let indices = Tensor::<1, Int>::from_data(
+                burn::tensor::TensorData::new(
+                    rows.iter().map(|&row| row as i64).collect::<Vec<_>>(),
+                    [rows.len()],
+                ),
+                (&self.device(), DType::I64),
+            );
+            self.select(0, indices)
+        }
+    }
+
+    pub(crate) fn select_step<I: Clone, T: crate::tensor_rank::NextRank + Clone>(
+        step: crate::gym::MultiGymStepInfo<I, T>,
+        rows: &[usize],
+    ) -> crate::gym::MultiGymStepInfo<I, T>
+    where
+        T::Next: SelectRows,
+    {
+        crate::gym::MultiGymStepInfo {
+            observations: step.observations.select_rows(rows),
+            rewards: step.rewards.select_rows(rows),
+            infos: rows.iter().map(|&row| step.infos[row].clone()).collect(),
+            dones: rows.iter().map(|&row| step.dones[row]).collect(),
+            truncateds: rows.iter().map(|&row| step.truncateds[row]).collect(),
+            terminal_observations: rows
+                .iter()
+                .map(|&row| step.terminal_observations[row].clone())
+                .collect(),
+        }
+    }
+
+    pub(crate) fn learn_selected_rows<G, I: Clone, const O: usize, const A: usize>(
+        agent: &mut G,
+        observations: &<G::ObservationSpace as crate::tensor_rank::TensorBatchTypes>::Batch,
+        actions: G::TrainingActions,
+        step: crate::gym::MultiGymStepInfo<
+            I,
+            <G::ObservationSpace as crate::tensor_rank::TensorBatchTypes>::Item,
+        >,
+        slots: &[usize],
+    ) -> Result<(), G::Error>
+    where
+        G: super::Agent<I, O, A>,
+        <G::ObservationSpace as crate::tensor_rank::TensorBatchTypes>::Batch: Clone + SelectRows,
+        <G::ObservationSpace as crate::tensor_rank::TensorBatchTypes>::Item: Clone,
+        G::TrainingActions: SelectRows,
+    {
+        let observations = observations.clone().select_rows(slots);
+        agent.learn_from_timesteps(
+            &observations,
+            actions.select_rows(slots),
+            select_step(step, slots),
+            slots,
+        )
+    }
 
     pub(crate) struct FixedEnv {
         device: Device,
@@ -293,6 +431,7 @@ mod tests {
             _observations: &Tensor<2>,
             _training_actions: Tensor<2, Int>,
             _step: MultiGymStepInfo<(), Tensor<1>>,
+            _slots: &[usize],
         ) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -370,6 +509,7 @@ mod tests {
             _observations: &Tensor<2>,
             _training_actions: Tensor<2, Int>,
             _step: MultiGymStepInfo<(), Tensor<1>>,
+            _slots: &[usize],
         ) -> Result<(), Self::Error> {
             Ok(())
         }

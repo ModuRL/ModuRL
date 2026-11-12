@@ -5,7 +5,8 @@
 //! the tensor framework and ModuRL Gym are intentionally left explicit.
 
 pub use crate::advantage_estimation::{
-    AdvantageEstimate, AdvantageEstimator, GAE, GAEError, NStep, NStepError, UPGO,
+    AdvantageEstimate, AdvantageEstimator, AdvantageInput, GAE, GAEError, NStep, NStepError,
+    RaggedRollout, RolloutLayout, RolloutLayoutError, UPGO,
 };
 pub use crate::agents::{
     Agent, ToEnvironmentActions,
@@ -61,7 +62,9 @@ pub use crate::models::{
     probabilistic_model::ProbabilisticPolicy, probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
-pub use crate::multi_agent::MultiAgentGym;
+pub use crate::multi_agent::{
+    MultiAgentGym, MultiAgentObservations, MultiAgentResetResult, MultiAgentStepInfo, SlotError,
+};
 pub use crate::objectives::{bellman_targets, clipped_value_loss};
 pub use crate::parameter_schedule::{
     ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,

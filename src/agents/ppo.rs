@@ -8,13 +8,13 @@ mod tests;
 
 use bon::bon;
 use burn::tensor::{
-    DType, Int, Tensor, TensorData, TensorReadError,
+    DType, IndexingUpdateOp, Int, Tensor, TensorData, TensorReadError,
     kind::{Autodiff, Basic},
 };
 use std::{marker::PhantomData, sync::Arc};
 
 use crate::{
-    advantage_estimation::{AdvantageEstimator, GAE},
+    advantage_estimation::{AdvantageEstimator, AdvantageInput, GAE, RaggedRollout, RolloutLayout},
     buffers::experience::{self, Experience, ExperienceBatchError},
     gym::{MultiGym, MultiGymStepInfo},
     objectives::clipped_value_loss,
@@ -47,8 +47,6 @@ pub enum PPOConfigurationError {
     InvalidLearningRate,
     #[error("the environment count must be nonzero")]
     ZeroEnvironments,
-    #[error("batch size must be divisible by the environment count")]
-    BatchNotDivisibleByEnvironmentCount,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -58,12 +56,16 @@ where
     GE: std::fmt::Debug,
     SE: std::fmt::Debug,
 {
+    #[error("invalid rollout layout: {0}")]
+    Layout(#[from] crate::advantage_estimation::RolloutLayoutError),
+    #[error("invalid slots: {0}")]
+    Slots(#[from] crate::multi_agent::SlotError),
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
     CriticRewardDTypeMismatch { critic: DType, reward: DType },
     #[error(
         "advantage estimates must match rollout values: shape {expected:?}, dtype {dtype:?}, and device"
     )]
-    AdvantageEstimateMismatch { expected: [usize; 3], dtype: DType },
+    AdvantageEstimateMismatch { expected: [usize; 2], dtype: DType },
     #[error("network failed: {0}")]
     NetworkError(#[source] AE),
     #[error("gym failed: {0}")]
@@ -186,6 +188,7 @@ struct PPOPreparedExperience {
 
 #[derive(Debug, Clone)]
 struct PPOExperience<O: NextRank = Tensor<2>, A: NextRank = Tensor<2>> {
+    slots: Vec<usize>,
     observations: O,
     next_observations: O,
     actions: A,
@@ -206,22 +209,22 @@ struct PPOCollectionAction<AS: TensorBatchTypes, const L: usize> {
 }
 
 struct PPOPreparedRolloutBatch {
-    advantages: Tensor<3>,
-    returns: Tensor<3>,
-    old_values: Option<Tensor<3>>,
+    advantages: Tensor<2>,
+    returns: Tensor<2>,
+    old_values: Option<Tensor<2>>,
 }
 
 struct PPORolloutBatch<O: NextRank, A: NextRank> {
-    observations: O::Next,
-    actions: A::Next,
-    rewards: Tensor<3>,
-    log_probs: Tensor<3>,
+    observations: O,
+    actions: A,
+    rewards: Tensor<2>,
+    log_probs: Tensor<2>,
     prepared: Option<PPOPreparedRolloutBatch>,
 }
 
 impl PPOPreparedRolloutBatch {
-    /// Stacks prepared Float statistics `[environment_count, 1]` into `[time, environment_count, 1]`.
-    /// Each field must share shape, dtype, and device across time. Retains gradient connections.
+    /// Concatenates prepared Float statistics `[active_rows, 1]` into `[total_rows, 1]`.
+    /// Fields share dtype and device across time. Retains gradient connections.
     /// Returns `None` if no transition has prepared statistics; mixed preparation violates an internal invariant.
     fn batch<O: NextRank, A: NextRank>(
         experiences: &[PPOExperience<O, A>],
@@ -246,10 +249,10 @@ impl PPOPreparedRolloutBatch {
             .collect::<Option<Vec<_>>>();
 
         Ok(Some(Self {
-            advantages: experience::stack_tensor_field(&prepared, |item| item.advantages.clone())?,
-            returns: experience::stack_tensor_field(&prepared, |item| item.returns.clone())?,
+            advantages: experience::cat_tensor_field(&prepared, |item| item.advantages.clone())?,
+            returns: experience::cat_tensor_field(&prepared, |item| item.returns.clone())?,
             old_values: old_values
-                .map(|old_values| experience::stack_tensor_field(&old_values, Clone::clone))
+                .map(|old_values| experience::cat_tensor_field(&old_values, Clone::clone))
                 .transpose()?,
         }))
     }
@@ -259,10 +262,11 @@ impl PPOPreparedRolloutBatch {
 impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
     /// Creates one vectorized rollout transition.
     ///
-    /// `observations` and `next_observations` are `[env_count, ...observation_shape]`.
-    /// `actions` is `[env_count, ...action_shape]`; `rewards`, `log_probs`, and detached collection `values` are `[env_count, 1]`.
+    /// `slots` maps compact rows back to environment slots.
+    /// `observations` and `next_observations` are `[active_rows, ...observation_shape]`.
+    /// `actions` is `[active_rows, ...action_shape]`; `rewards`, `log_probs`, and detached collection `values` are `[active_rows, 1]`.
     /// `rewards` preserves the environment values for logging.
-    /// Training rewards [env_count, 1] include terminal-value corrections for nonterminal truncations and retain the reward dtype.
+    /// Training rewards [active_rows, 1] receive terminal-value corrections during rollout preparation and retain the reward dtype.
     /// Observations preserve their native kind and dtype. Other fields preserve their Float dtype and device; collection detaches stored experience.
     /// PPO training data is added internally after rollout collection.
     #[builder]
@@ -276,8 +280,10 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
         truncateds: Vec<bool>,
         log_probs: Tensor<2>,
         values: Tensor<2>,
+        slots: Vec<usize>,
     ) -> Self {
         Self {
+            slots,
             observations,
             next_observations,
             actions,
@@ -301,21 +307,20 @@ where
     type Batch = PPORolloutBatch<Tensor<O, K>, Tensor<A>>;
     type Error = ExperienceBatchError;
 
-    /// Adds a leading time axis to rank-O observations and rank-A actions, producing tensors with one additional axis.
-    /// Training statistics become `[time, environment_count, 1]` without changing environment order.
-    /// Each tensor field must share shape, dtype, and device across time. Preserves gradient connections.
+    /// Concatenates compact rows in collection order, preserving rank and gradient connections.
+    /// Fields share trailing shape, dtype, and device across time.
     fn batch(experiences: &[Self]) -> Result<Self::Batch, Self::Error> {
         Ok(PPORolloutBatch {
-            observations: experience::stack_tensor_field(experiences, |experience| {
+            observations: experience::cat_tensor_field(experiences, |experience| {
                 experience.observations.clone()
             })?,
-            actions: experience::stack_tensor_field(experiences, |experience| {
+            actions: experience::cat_tensor_field(experiences, |experience| {
                 experience.actions.clone()
             })?,
-            rewards: experience::stack_tensor_field(experiences, |experience| {
+            rewards: experience::cat_tensor_field(experiences, |experience| {
                 experience.rewards.clone()
             })?,
-            log_probs: experience::stack_tensor_field(experiences, |experience| {
+            log_probs: experience::cat_tensor_field(experiences, |experience| {
                 experience.log_probs.clone()
             })?,
             prepared: PPOPreparedRolloutBatch::batch(experiences)?,
@@ -356,7 +361,7 @@ pub struct PPOLogEntry {
     pub advantages: Tensor<2>,
 }
 
-/// Raw Float rewards `[environment_count, 1]` and metadata in environment-slot order.
+/// Raw Float rewards `[active_count, 1]` and metadata in environment-slot order, omitting inactive rows.
 pub struct PPOCollectionLogEntry<I = ()> {
     pub collection_rewards: Tensor<2>,
     pub infos: Vec<I>,
@@ -365,6 +370,7 @@ pub struct PPOCollectionLogEntry<I = ()> {
 }
 
 pub struct PPOEpisodeLogEntry {
+    /// Stable slot ID, not the row position within a compact batch.
     pub environment_index: usize,
     pub episode_return: f32,
     pub episode_length: usize,
@@ -375,15 +381,15 @@ pub struct PPOEpisodeLogEntry {
 
 #[derive(Clone)]
 struct PPOEpisodeTracker {
-    returns: Vec<f32>,
-    lengths: Vec<usize>,
+    returns: super::SlotValues<f32>,
+    lengths: super::SlotValues<usize>,
 }
 
 impl PPOEpisodeTracker {
     fn new(environment_count: usize) -> Self {
         Self {
-            returns: vec![0.0; environment_count],
-            lengths: vec![0; environment_count],
+            returns: super::SlotValues::new(environment_count),
+            lengths: super::SlotValues::new(environment_count),
         }
     }
 
@@ -412,14 +418,12 @@ impl PPOEpisodeTracker {
 
         let entry = PPOEpisodeLogEntry {
             environment_index,
-            episode_return: self.returns[environment_index],
-            episode_length: self.lengths[environment_index],
+            episode_return: self.returns.take(environment_index),
+            episode_length: self.lengths.take(environment_index),
             terminated,
             truncated,
             collection_timestep,
         };
-        self.returns[environment_index] = 0.0;
-        self.lengths[environment_index] = 0;
         Some(entry)
     }
 }
@@ -434,6 +438,76 @@ pub trait PPOLogger<I = ()> {
 struct PPOLosses {
     actor_loss: Tensor<1>,
     critic_loss: Tensor<1>,
+}
+
+struct PPOBootstrap {
+    positions: Vec<(usize, usize, usize)>,
+    final_rows: Vec<Option<usize>>,
+    dones: Vec<bool>,
+    truncateds: Vec<bool>,
+    values: Tensor<2>,
+}
+
+impl PPOBootstrap {
+    /// Selects bootstrap values `[indices.len(), 1]` using Int indices on the value device.
+    fn select(&self, indices: Vec<i64>) -> Tensor<2> {
+        if indices.len() == self.positions.len() {
+            self.values.clone()
+        } else if indices.is_empty() {
+            Tensor::zeros([0, 1], (&self.values.device(), self.values.dtype()))
+        } else {
+            self.values.clone().select(0, self.indices(indices))
+        }
+    }
+
+    /// Builds Int indices `[indices.len()]` on the bootstrap value device.
+    fn indices(&self, indices: Vec<i64>) -> Tensor<1, Int> {
+        let count = indices.len();
+        Tensor::from_data(
+            TensorData::new(indices, [count]),
+            (&self.values.device(), DType::I64),
+        )
+    }
+
+    /// Returns final dense values `[truncateds.len(), 1]`, with one gather for mixed final rows.
+    fn dense_values(&self, truncateds: &[bool]) -> Tensor<2> {
+        if self.positions.len() == self.final_rows.len()
+            && self
+                .final_rows
+                .iter()
+                .copied()
+                .eq((0..self.final_rows.len()).map(Some))
+            && !truncateds.contains(&true)
+        {
+            return self.values.clone();
+        }
+        let start = self
+            .final_rows
+            .iter()
+            .flatten()
+            .next()
+            .copied()
+            .unwrap_or(self.positions.len());
+        let count = self.positions.len() - start;
+        let indices = self
+            .final_rows
+            .iter()
+            .zip(truncateds)
+            .map(|(&row, &truncated)| {
+                row.filter(|_| !truncated).map_or(count, |row| row - start) as i64
+            })
+            .collect();
+        Tensor::cat(
+            vec![
+                self.values
+                    .clone()
+                    .slice_dim(0, start..self.positions.len()),
+                Tensor::zeros([1, 1], (&self.values.device(), self.values.dtype())),
+            ],
+            0,
+        )
+        .select(0, self.indices(indices))
+    }
 }
 
 /// Averages every axis of rank-D Float `values` and returns population variance `[1]`.
@@ -473,6 +547,7 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     action_space: AS,
     network_info: G::Network,
     rollout_buffer: Vec<PPOExperience<G::Observation, G::Action>>,
+    rollout_rows: usize,
     mini_batch_size: usize,
     num_epochs: usize,
     batch_size: usize,
@@ -597,6 +672,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
             observation_space,
             action_space,
             rollout_buffer: Vec::new(),
+            rollout_rows: 0,
             num_epochs,
             batch_size,
             schedule_progress: ScheduleProgress::new(training_horizon),
@@ -646,16 +722,14 @@ where
         Tensor<L>: NextRank<Next = Tensor<BL>>,
     {
         let batch = PPOExperience::<OS::Batch, Tensor<L>>::batch(&self.rollout_buffer)?;
-        let all_observations = batch.observations.flatten::<O>(0, 1);
-        let all_actions = batch.actions.flatten::<L>(0, 1);
-        let all_log_probs = batch.log_probs.flatten::<2>(0, 1);
+        let all_observations = batch.observations;
+        let all_actions = batch.actions;
+        let all_log_probs = batch.log_probs;
         let prepared = batch.prepared.ok_or(PPOError::MissingPreparedRollout)?;
-        let all_advantages = prepared.advantages.flatten::<2>(0, 1);
-        let all_returns = prepared.returns.flatten::<2>(0, 1);
-        let all_rewards = batch.rewards.flatten::<2>(0, 1);
-        let all_old_values = prepared
-            .old_values
-            .map(|old_values| old_values.flatten::<2>(0, 1));
+        let all_advantages = prepared.advantages;
+        let all_returns = prepared.returns;
+        let all_rewards = batch.rewards;
+        let all_old_values = prepared.old_values;
 
         let total_samples = all_observations.dims()[0];
         let device = all_observations.device();
@@ -668,13 +742,13 @@ where
 
             let mut indices: Vec<i64> = (0..total_samples as i64).collect();
             shuffle_with_device_rng(&mut indices, &device)?;
+            let sample_count = indices.len();
             let indices_tensor = Tensor::<1, Int>::from_data(
-                TensorData::new(indices, [total_samples]),
+                TensorData::new(indices, [sample_count]),
                 (&device, DType::I64),
             );
-
-            for start in (0..total_samples).step_by(self.mini_batch_size) {
-                let end = (start + self.mini_batch_size).min(total_samples);
+            for start in (0..sample_count).step_by(self.mini_batch_size) {
+                let end = (start + self.mini_batch_size).min(sample_count);
                 let batch_indices = indices_tensor.clone().slice_dim(0, start..end);
 
                 let batch_observations = all_observations.clone().select(0, batch_indices.clone());
@@ -706,6 +780,7 @@ where
         }
 
         self.rollout_buffer.clear();
+        self.rollout_rows = 0;
         Ok(())
     }
 
@@ -718,55 +793,46 @@ where
             skip_all
         )
     )]
-    /// Returns explained variance `[1]` and prepares detached statistics `[time, env_count, 1]`.
-    /// Reuses stored collection values and evaluates only the final next-observation batch without autodiff.
+    /// Prepares flat rollout statistics, evaluating only truncations and live tails.
     fn add_advantages_and_returns(
         &mut self,
         validation: &N,
     ) -> Result<Tensor<1>, PPOError<N::Error, GE, AS::Error>> {
         let experiences = &self.rollout_buffer;
-        let values_tensor: Tensor<3> =
-            experience::stack_tensor_field(experiences, |experience| experience.values.clone())?;
         let final_experience = experiences.last().ok_or(ExperienceBatchError::EmptyBatch)?;
-        let values_tensor =
-            values_tensor.reshape([experiences.len(), final_experience.rewards.dims()[0], 1]);
-        let bootstrapped_observations = final_experience.next_observations.clone();
-        let latent_bootstrapped_observations = validation
-            .forward_observations(bootstrapped_observations.without_autodiff())
-            .map_err(PPOError::NetworkError)?;
-
-        let bootstrapped_values = self
-            .critic_network_forward(
-                validation,
-                &latent_bootstrapped_observations,
-                final_experience.rewards.dtype(),
-            )?
-            .detach(); // shape [env_count, 1]
-
-        let training_rewards = experience::stack_tensor_field(experiences, |experience| {
-            experience.training_rewards.clone()
-        })?;
-        let next_dones = experience::stack_bool_field(
-            experiences,
-            |experience| &experience.next_dones,
-            &values_tensor.device(),
-        )?;
-        let truncateds = experience::stack_bool_field(
-            experiences,
-            |experience| &experience.truncateds,
-            &values_tensor.device(),
-        )?;
-        let estimate = self.advantage_estimator.estimate(
-            &training_rewards,
-            &values_tensor,
-            &next_dones,
-            &truncateds,
-            &bootstrapped_values,
-            self.gamma,
-        );
-        let expected_shape = values_tensor.dims();
-        let expected_dtype = values_tensor.dtype();
-        let expected_device = values_tensor.device();
+        let width = final_experience.slots.len();
+        let all_dense = experiences
+            .iter()
+            .all(|experience| experience.slots.iter().copied().eq(0..width));
+        let layout = if all_dense {
+            None
+        } else {
+            Some(RolloutLayout::from_valid_steps(
+                &experiences
+                    .iter()
+                    .map(|e| e.slots.as_slice())
+                    .collect::<Vec<_>>(),
+            )?)
+        };
+        let values = if all_dense {
+            experience::stack_tensor_field::<_, 2, 3, _>(experiences, |e| e.values.clone())?
+                .flatten::<2>(0, 1)
+        } else {
+            experience::cat_tensor_field(experiences, |e| e.values.clone())?
+        };
+        let rewards = if all_dense {
+            experience::stack_tensor_field::<_, 2, 3, _>(experiences, |e| e.rewards.clone())?
+                .flatten::<2>(0, 1)
+        } else {
+            experience::cat_tensor_field(experiences, |e| e.rewards.clone())?
+        };
+        let bootstrap = self.bootstrap_inputs(validation, layout.as_ref(), &rewards)?;
+        let training_rewards = self.corrected_rewards(rewards, &bootstrap);
+        let estimate =
+            self.estimate_advantages(layout.as_ref(), &bootstrap, &training_rewards, &values)?;
+        let expected_shape = values.dims();
+        let expected_dtype = values.dtype();
+        let expected_device = values.device();
         if estimate.advantages.dims() != expected_shape
             || estimate.advantages.dtype() != expected_dtype
             || estimate.advantages.device() != expected_device
@@ -779,35 +845,197 @@ where
                 dtype: expected_dtype,
             });
         }
-
         let advantages = estimate.advantages.detach();
         let returns = estimate.value_targets.detach();
-        let rollout_explained_variance = compute_explained_variance(&returns, &values_tensor);
-
-        let experiences = &mut self.rollout_buffer;
-
-        for (i, experience) in experiences.iter_mut().enumerate() {
+        let explained_variance = compute_explained_variance(&returns, &values);
+        let mut offset = 0;
+        for experience in &mut self.rollout_buffer {
+            let end = offset + experience.slots.len();
+            experience.training_rewards =
+                training_rewards.clone().slice_dim(0, offset..end).detach();
             experience.prepared = Some(PPOPreparedExperience {
-                advantages: advantages
-                    .clone()
-                    .slice_dim(0, i..i + 1)
-                    .squeeze_dim(0)
-                    .detach(),
-                returns: returns
-                    .clone()
-                    .slice_dim(0, i..i + 1)
-                    .squeeze_dim(0)
-                    .detach(),
-                // Value-loss clipping compares current values with fixed collection values.
+                advantages: advantages.clone().slice_dim(0, offset..end),
+                returns: returns.clone().slice_dim(0, offset..end),
                 old_values: if self.clip_value_loss {
                     Some(experience.values.clone())
                 } else {
                     None
                 },
             });
+            offset = end;
         }
+        Ok(explained_variance)
+    }
 
-        Ok(rollout_explained_variance)
+    /// Evaluates terminal and tail observations into bootstrap values [rows, 1] matching rewards.
+    fn bootstrap_inputs(
+        &self,
+        validation: &N,
+        layout: Option<&RolloutLayout>,
+        rewards: &Tensor<2>,
+    ) -> Result<PPOBootstrap, PPOError<N::Error, GE, AS::Error>> {
+        let experiences = &self.rollout_buffer;
+        let final_experience = experiences.last().ok_or(ExperienceBatchError::EmptyBatch)?;
+        let width = final_experience.slots.len();
+        let all_dense = layout.is_none();
+        let n = rewards.dims()[0];
+        let mut dones = Vec::with_capacity(if all_dense { 0 } else { n });
+        let mut truncateds = Vec::with_capacity(if all_dense { 0 } else { n });
+        let mut bootstrap_positions = Vec::new();
+        let mut final_bootstrap = if all_dense {
+            vec![None; width]
+        } else {
+            Vec::new()
+        };
+        let mut offset = 0;
+        for (time, experience) in experiences.iter().enumerate() {
+            for (row, (&done, &truncated)) in experience
+                .next_dones
+                .iter()
+                .zip(&experience.truncateds)
+                .enumerate()
+            {
+                let flat = offset + row;
+                let tail = match &layout {
+                    Some(layout) => layout.successor()[flat].is_none(),
+                    None => time + 1 == experiences.len(),
+                };
+                if !all_dense {
+                    dones.push(done);
+                    truncateds.push(truncated);
+                }
+                if !done && (truncated || tail) {
+                    if all_dense && time + 1 == experiences.len() {
+                        final_bootstrap[row] = Some(bootstrap_positions.len());
+                    }
+                    bootstrap_positions.push((time, row, flat));
+                }
+            }
+            offset += experience.slots.len();
+        }
+        let bootstrap_values = if bootstrap_positions.is_empty() {
+            Tensor::zeros([0, 1], (&rewards.device(), rewards.dtype()))
+        } else {
+            let mut chunks = Vec::new();
+            let mut index = 0;
+            while index < bootstrap_positions.len() {
+                let (time, start, _) = bootstrap_positions[index];
+                let mut end = start + 1;
+                index += 1;
+                while index < bootstrap_positions.len()
+                    && bootstrap_positions[index].0 == time
+                    && bootstrap_positions[index].1 == end
+                {
+                    end += 1;
+                    index += 1;
+                }
+                let observations = experiences[time].next_observations.clone();
+                chunks.push(if start == 0 && end == observations.dims()[0] {
+                    observations
+                } else {
+                    observations.slice_dim(0, start..end)
+                });
+            }
+            let observations = if chunks.len() == 1 {
+                chunks.pop().ok_or(ExperienceBatchError::EmptyBatch)?
+            } else {
+                Tensor::cat(chunks, 0)
+            };
+            let latent = validation
+                .forward_observations(observations.without_autodiff())
+                .map_err(PPOError::NetworkError)?;
+            self.critic_network_forward(validation, &latent, rewards.dtype())?
+                .detach()
+        };
+        Ok(PPOBootstrap {
+            positions: bootstrap_positions,
+            final_rows: final_bootstrap,
+            dones,
+            truncateds,
+            values: bootstrap_values,
+        })
+    }
+
+    /// Adds terminal corrections to flat rewards [rows, 1] in one indexed update.
+    fn corrected_rewards(&self, rewards: Tensor<2>, bootstrap: &PPOBootstrap) -> Tensor<2> {
+        let (rows, indices): (Vec<i64>, Vec<i64>) = bootstrap
+            .positions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &(time, row, flat))| {
+                self.rollout_buffer[time].truncateds[row].then_some((flat as i64, index as i64))
+            })
+            .unzip();
+        if rows.is_empty() {
+            return rewards;
+        }
+        let corrections = bootstrap.select(indices) * f64::from(self.gamma);
+        rewards.select_assign(
+            0,
+            bootstrap.indices(rows),
+            corrections,
+            IndexingUpdateOp::Add,
+        )
+    }
+
+    /// Dispatches flat rewards and values [rows, 1] to dense or ragged kernels.
+    fn estimate_advantages(
+        &self,
+        layout: Option<&RolloutLayout>,
+        bootstrap: &PPOBootstrap,
+        rewards: &Tensor<2>,
+        values: &Tensor<2>,
+    ) -> Result<crate::advantage_estimation::AdvantageEstimate, PPOError<N::Error, GE, AS::Error>>
+    {
+        let experiences = &self.rollout_buffer;
+        Ok(match layout {
+            None => {
+                let final_experience =
+                    experiences.last().ok_or(ExperienceBatchError::EmptyBatch)?;
+                let final_values = bootstrap.dense_values(&final_experience.truncateds);
+                let shape = [experiences.len(), final_experience.slots.len(), 1];
+                self.advantage_estimator.estimate(
+                    AdvantageInput::Dense {
+                        rewards: &rewards.clone().reshape(shape),
+                        values: &values.clone().reshape(shape),
+                        next_dones: &experience::stack_bool_field(
+                            experiences,
+                            |e| &e.next_dones,
+                            &values.device(),
+                        )?,
+                        next_truncateds: &experience::stack_bool_field(
+                            experiences,
+                            |e| &e.truncateds,
+                            &values.device(),
+                        )?,
+                        bootstrapped_values: &final_values,
+                    },
+                    self.gamma,
+                )
+            }
+            Some(layout) => {
+                let tails = bootstrap
+                    .positions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, &(_, _, row))| {
+                        (!bootstrap.truncateds[row]).then_some(index as i64)
+                    })
+                    .collect();
+                let tail_values = bootstrap.select(tails);
+                self.advantage_estimator.estimate(
+                    AdvantageInput::Ragged(RaggedRollout::new(
+                        rewards,
+                        values,
+                        &bootstrap.dones,
+                        &bootstrap.truncateds,
+                        layout,
+                        &tail_values,
+                    )?),
+                    self.gamma,
+                )
+            }
+        })
     }
 
     /// Maps rank-O observations `[batch, ...observation_shape]` to rank-H model inputs, preserving the batch axis.
@@ -847,56 +1075,6 @@ where
             });
         }
         Ok(())
-    }
-
-    /// Adds discounted terminal values to rewards [environment_count, 1] for nonterminal truncated rows.
-    /// Rank-O terminal observations are [environment_count, ...observation_shape]; both flag slices have environment_count entries.
-    /// Preserves reward dtype and device, rejecting critic dtype mismatches. Terminal values are detached from the model.
-    /// True termination suppresses bootstrapping, including transitions that also truncate.
-    fn bootstrap_truncated_rewards(
-        &mut self,
-        validation: &N,
-        rewards: Tensor<2>,
-        transition_next_observations: &OS::Batch,
-        dones: &[bool],
-        truncateds: &[bool],
-    ) -> Result<Tensor<2>, PPOError<N::Error, GE, AS::Error>> {
-        if dones.len() != truncateds.len() {
-            return Err(PPOError::MismatchedTerminationBatch {
-                dones: dones.len(),
-                truncateds: truncateds.len(),
-            });
-        }
-        let truncated_indices = truncateds
-            .iter()
-            .zip(dones)
-            .enumerate()
-            .filter_map(|(index, (truncated, done))| (*truncated && !*done).then_some(index as i64))
-            .collect::<Vec<_>>();
-        if truncated_indices.is_empty() {
-            return Ok(rewards);
-        }
-
-        let truncation_count = truncated_indices.len();
-        let truncated_indices = Tensor::<1, Int>::from_data(
-            TensorData::new(truncated_indices, [truncation_count]),
-            (&transition_next_observations.device(), DType::I64),
-        );
-        let truncated_next_observations = transition_next_observations
-            .clone()
-            .select(0, truncated_indices.clone());
-        let latent_observations = validation
-            .forward_observations(truncated_next_observations.without_autodiff())
-            .map_err(PPOError::NetworkError)?;
-        let terminal_values = self
-            .critic_network_forward(validation, &latent_observations, rewards.dtype())?
-            .detach();
-        Ok(rewards.select_assign(
-            0,
-            truncated_indices,
-            terminal_values * f64::from(self.gamma),
-            burn::tensor::IndexingUpdateOp::Add,
-        ))
     }
 
     /// Evaluates rank-L `actions` `[batch, ...action_shape]` for latent or raw
@@ -1122,6 +1300,7 @@ where
         dones: &[bool],
         truncateds: &[bool],
         first_collection_timestep: usize,
+        slots: &[usize],
     ) -> Result<(), TensorReadError> {
         let Some(logging_info) = &mut self.logging_info else {
             return Ok(());
@@ -1133,24 +1312,23 @@ where
             .try_to_vec::<f32>()
             .map_err(TensorReadError::from)?;
         let mut completed_episodes = Vec::new();
-        for (environment_index, reward) in rewards_vec.iter().copied().enumerate() {
-            let collection_timestep =
-                first_collection_timestep.saturating_add(environment_index + 1);
+        for (row, reward) in rewards_vec.iter().copied().enumerate() {
+            let collection_timestep = first_collection_timestep.saturating_add(row + 1);
             if let Some(entry) = self.episode_tracker.record(
-                environment_index,
+                slots[row],
                 reward,
-                dones[environment_index],
-                truncateds[environment_index],
+                dones[row],
+                truncateds[row],
                 collection_timestep,
             ) {
                 completed_episodes.push(entry);
             }
         }
-
+        let collection_rewards = rewards.clone();
         logging_info.logger.log_collection(&PPOCollectionLogEntry {
-            collection_rewards: rewards.clone(),
+            collection_rewards,
             infos,
-            collection_timestep: first_collection_timestep.saturating_add(rewards_vec.len()),
+            collection_timestep: first_collection_timestep.saturating_add(slots.len()),
             completed_episodes,
         });
         Ok(())
@@ -1204,6 +1382,7 @@ where
         let environment_count = env.num_envs();
         self.validate_environment_count(environment_count)?;
         self.rollout_buffer.clear();
+        self.rollout_rows = 0;
         self.prepare_episode_tracker(environment_count);
         Ok(observations)
     }
@@ -1223,9 +1402,6 @@ where
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>> {
         if count == 0 {
             return Err(PPOConfigurationError::ZeroEnvironments.into());
-        }
-        if !self.batch_size.is_multiple_of(count) {
-            return Err(PPOConfigurationError::BatchNotDivisibleByEnvironmentCount.into());
         }
         Ok(())
     }
@@ -1252,7 +1428,8 @@ where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         let environment_count = env.num_envs();
-        while self.rollout_buffer.len() * environment_count < self.batch_size {
+        let slots: Vec<_> = (0..environment_count).collect();
+        while self.rollout_rows < self.batch_size {
             let observations = next_observations.clone();
             let collection_action = self.sample_collection_action(validation, &observations)?;
             let step_info = env
@@ -1264,21 +1441,20 @@ where
                 &step_info,
             )?;
             *next_observations =
-                self.store_timestep(validation, &observations, collection_action, step_info)?;
+                self.store_timestep(&observations, collection_action, step_info, &slots)?;
         }
 
-        Ok(self.rollout_buffer.len() * environment_count)
+        Ok(self.rollout_rows)
     }
 
     fn train_if_rollout_full<const BO: usize, const BL: usize>(
         &mut self,
-        environment_count: usize,
     ) -> Result<(), PPOError<N::Error, GE, AS::Error>>
     where
         Tensor<O, OS::Kind>: NextRank<Next = Tensor<BO, OS::Kind>>,
         Tensor<L>: NextRank<Next = Tensor<BL>>,
     {
-        let collected = self.rollout_buffer.len() * environment_count;
+        let collected = self.rollout_rows;
         if collected < self.batch_size {
             return Ok(());
         }
@@ -1291,6 +1467,7 @@ where
         })();
         if result.is_err() {
             self.rollout_buffer.clear();
+            self.rollout_rows = 0;
         }
         result
     }
@@ -1332,21 +1509,20 @@ where
     /// Stores one already-validated caller or environment transition with batch shape `[num_envs, ...]`.
     fn store_timestep<const U: usize>(
         &mut self,
-        validation: &N,
         observations: &Tensor<O, OS::Kind>,
         collection_action: PPOCollectionAction<AS, L>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        slots: &[usize],
     ) -> Result<OS::Batch, PPOError<N::Error, GE, AS::Error>>
     where
         OS: ObservationSpace<O, Item = Tensor<U, <OS as TensorBatchTypes>::Kind>>,
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
         Self::check_critic_dtype(&collection_action.values, step.rewards.dtype())?;
-        let environment_count = observations.dims()[0];
         let first_collection_timestep = self
             .schedule_progress
             .elapsed_steps()
-            .saturating_add(self.rollout_buffer.len() * environment_count);
+            .saturating_add(self.rollout_rows);
         let training_next_observations = step.transition_next_observations();
         let MultiGymStepInfo {
             observations: next_observations,
@@ -1362,16 +1538,12 @@ where
             &dones,
             &truncateds,
             first_collection_timestep,
+            slots,
         )?;
-        let training_rewards = self.bootstrap_truncated_rewards(
-            validation,
-            rewards.clone().detach(),
-            &training_next_observations,
-            &dones,
-            &truncateds,
-        )?;
+        let training_rewards = rewards.clone().detach();
         self.rollout_buffer.push(
             PPOExperience::builder()
+                .slots(slots.to_vec())
                 .observations(observations.clone().without_autodiff())
                 .next_observations(training_next_observations.without_autodiff())
                 .actions(collection_action.policy_actions.detach())
@@ -1383,6 +1555,7 @@ where
                 .values(collection_action.values)
                 .build(),
         );
+        self.rollout_rows = self.rollout_rows.saturating_add(slots.len());
         Ok(next_observations)
     }
 
@@ -1488,7 +1661,6 @@ where
         let mut elapsed_timesteps = 0;
         let mut next_observations = self.prepare_rollout_collection(env)?;
         self.schedule_progress.default_horizon(num_timesteps);
-        let environment_count = env.num_envs();
 
         let result: Result<(), PPOError<N::Error, GE, AS::Error>> = (|| {
             while elapsed_timesteps < num_timesteps {
@@ -1496,12 +1668,13 @@ where
                 elapsed_timesteps +=
                     self.collect_rollout(&validation, env, &mut next_observations)?;
                 drop(validation);
-                self.train_if_rollout_full(environment_count)?;
+                self.train_if_rollout_full()?;
             }
             Ok(())
         })();
         if result.is_err() {
             self.rollout_buffer.clear();
+            self.rollout_rows = 0;
         }
         result?;
         self.current_observations = Some(next_observations);
@@ -1515,36 +1688,27 @@ where
         observations: &OS::Batch,
         training_actions: Self::TrainingActions,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        slots: &[usize],
     ) -> Result<(), Self::Error> {
         let environment_count =
             Self::validate_timestep_batch(observations, &training_actions.neurons, &step)?;
-        self.validate_environment_count(environment_count)?;
-        if !self.rollout_buffer.is_empty() {
-            let expected = self.rollout_buffer[0].observations.dims()[0];
-            if expected != environment_count {
-                return Err(PPOError::BatchLengthMismatch {
-                    field: "environment count",
-                    expected,
-                    actual: environment_count,
-                });
-            }
+        crate::multi_agent::validate_slots(environment_count, slots)?;
+        if slots.is_empty() {
+            return Ok(());
         }
-        self.prepare_episode_tracker(environment_count);
-        {
-            let validation = self.network_info.valid();
-            let latent_observations = validation
-                .forward_observations(observations.clone().without_autodiff())
-                .map_err(PPOError::NetworkError)?;
-            let environment_actions = training_actions.to_environment_actions()?;
-            let collection_action = self.collection_action(
-                &validation,
-                &latent_observations,
-                training_actions.neurons,
-                environment_actions,
-            )?;
-            self.store_timestep(&validation, observations, collection_action, step)?;
-        }
-        self.train_if_rollout_full(environment_count)?;
+        let validation = self.network_info.valid();
+        let latent_observations = validation
+            .forward_observations(observations.clone().without_autodiff())
+            .map_err(PPOError::NetworkError)?;
+        let environment_actions = training_actions.to_environment_actions()?;
+        let collection_action = self.collection_action(
+            &validation,
+            &latent_observations,
+            training_actions.neurons,
+            environment_actions,
+        )?;
+        self.store_timestep(observations, collection_action, step, slots)?;
+        self.train_if_rollout_full()?;
         Ok(())
     }
 }
