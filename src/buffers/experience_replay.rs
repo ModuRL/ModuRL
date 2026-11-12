@@ -25,8 +25,6 @@ pub enum ReplayStorageError {
     InvalidStart { start: usize, capacity: usize },
     #[error("no observation row can be reclaimed from replay")]
     ObservationPoolExhausted,
-    #[error("duplicate replay slot {0}")]
-    DuplicateSlot(usize),
     #[error("replay field {field} has shape {actual:?}, expected {expected:?}")]
     ShapeMismatch {
         field: &'static str,
@@ -41,8 +39,6 @@ pub enum ReplayStorageError {
     },
     #[error("cannot insert {inserted} items into replay capacity {capacity}")]
     InsertionExceedsCapacity { capacity: usize, inserted: usize },
-    #[error("replay environment count {actual} does not match expected count {expected}")]
-    EnvironmentCountMismatch { expected: usize, actual: usize },
     #[error("replay capacity {capacity} and environment count {environment_count} must be nonzero")]
     InvalidReplayAlignment {
         capacity: usize,
@@ -280,6 +276,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
     /// Signal an episode end before resetting or reusing a slot for a new stream.
     /// Each slot continues until an episode end; absent slots write nothing.
     /// Cached next rows are reused only while their contents have not been overwritten.
+    /// Slots have already been validated at the collection boundary.
     pub(crate) fn insert(
         &mut self,
         start: usize,
@@ -316,7 +313,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
                 });
             }
         }
-        for (field, actual) in [("episode ends", ends.len()), ("slots", slots.len())] {
+        for (field, actual) in [("episode ends", ends.len())] {
             if actual != count {
                 return Err(ReplayStorageError::BatchLengthMismatch {
                     field,
@@ -325,7 +322,6 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
                 });
             }
         }
-        validate_slots(count, slots)?;
         if count == 0 {
             return Ok(0);
         }
@@ -509,25 +505,6 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
             self.observations.gather(self.next_obs_rows.gather(rows)),
         ))
     }
-}
-
-/// Validates one unique slot per compact row; identity slots need no allocation.
-pub(crate) fn validate_slots(count: usize, slots: &[usize]) -> Result<(), ReplayStorageError> {
-    if slots.len() != count {
-        return Err(ReplayStorageError::BatchLengthMismatch {
-            field: "slots",
-            expected: count,
-            actual: slots.len(),
-        });
-    }
-    if !slots.iter().copied().eq(0..count) {
-        let mut sorted = slots.to_vec();
-        sorted.sort_unstable();
-        if let Some(pair) = sorted.windows(2).find(|pair| pair[0] == pair[1]) {
-            return Err(ReplayStorageError::DuplicateSlot(pair[0]));
-        }
-    }
-    Ok(())
 }
 
 /// Checks native observations `[batch_size, ...item_shape]` against the storage axes.
@@ -905,7 +882,6 @@ mod tests {
             previous
         );
         assert_eq!(replay.transitions.iter().flatten().count(), 4);
-        validate_slots(2, &[0, 1]).unwrap();
     }
 
     #[test]
@@ -1011,30 +987,6 @@ mod tests {
                 column_values(next),
                 rows.iter().map(|&row| expected[row].1).collect::<Vec<_>>()
             );
-        }
-    }
-
-    #[test]
-    fn pointer_rows_reject_invalid_slots_without_mutating_storage() {
-        let device = Device::flex();
-        let mut replay = PointerObservationReplay::<2>::new([2, 1], 1, &device).unwrap();
-        for slots in [vec![9], vec![9, 9]] {
-            let error = replay
-                .insert(
-                    0,
-                    Tensor::zeros([2, 1], &device),
-                    Tensor::ones([2, 1], &device),
-                    &[false; 2],
-                    &slots,
-                )
-                .unwrap_err();
-            assert!(matches!(
-                error,
-                ReplayStorageError::BatchLengthMismatch { .. }
-                    | ReplayStorageError::DuplicateSlot(9)
-            ));
-            assert!(replay.transitions.iter().all(Option::is_none));
-            assert!(replay.references.iter().all(|&references| references == 0));
         }
     }
 
@@ -1276,10 +1228,10 @@ mod tests {
                             &truncateds,
                          &slots,),
                         2 => replay.insert(position, states, next, &vec![false; n + 1], &slots),
-                        _ => replay.insert(position, Tensor::zeros([n + 1, 1], &device), Tensor::zeros([n + 1, 1], &device), &vec![false; n + 1], &slots),
+                        _ => replay.insert(position, Tensor::zeros([n, 2], &device), next, &truncateds, &slots),
                     }
                     .unwrap_err();
-                    let expected = ["ShapeMismatch", "DTypeMismatch", "BatchLengthMismatch", "BatchLengthMismatch"];
+                    let expected = ["ShapeMismatch", "DTypeMismatch", "BatchLengthMismatch", "ShapeMismatch"];
                     prop_assert!(format!("{error:?}").starts_with(expected[invalid]), "{error:?}");
                     prop_assert_eq!(gather_all(&replay), before);
                 }

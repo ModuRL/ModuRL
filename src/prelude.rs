@@ -63,7 +63,7 @@ pub use crate::models::{
     probabilistic_model::ProbabilisticPolicyModelError,
 };
 pub use crate::multi_agent::{
-    MultiAgentGym, MultiAgentObservations, MultiAgentResetResult, MultiAgentStepInfo,
+    MultiAgentGym, MultiAgentObservations, MultiAgentResetResult, MultiAgentStepInfo, SlotError,
 };
 pub use crate::objectives::{bellman_targets, clipped_value_loss};
 pub use crate::parameter_schedule::{

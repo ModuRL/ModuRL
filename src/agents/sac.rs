@@ -84,6 +84,8 @@ pub enum SACConfigurationError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SACError<PE, GE, SE, CE = std::convert::Infallible> {
+    #[error("invalid slots: {0}")]
+    Slots(#[from] crate::multi_agent::SlotError),
     #[error("policy failed: {0}")]
     PolicyError(#[source] PE),
     #[error("gym failed: {0}")]
@@ -1548,8 +1550,7 @@ where
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
         slots: &[usize],
     ) -> Result<(), Self::Error> {
-        crate::buffers::experience_replay::validate_slots(observations.dims()[0], slots)
-            .map_err(SACReplayError::from)?;
+        crate::multi_agent::validate_slots(observations.dims()[0], slots)?;
         let count = self.validate_timestep(observations, &actions, &step)?;
         if slots.is_empty() {
             return Ok(());

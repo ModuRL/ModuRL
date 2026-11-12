@@ -59,7 +59,7 @@ where
     #[error("invalid rollout layout: {0}")]
     Layout(#[from] crate::advantage_estimation::RolloutLayoutError),
     #[error("invalid slots: {0}")]
-    Slots(#[from] crate::buffers::experience_replay::ReplayStorageError),
+    Slots(#[from] crate::multi_agent::SlotError),
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
     CriticRewardDTypeMismatch { critic: DType, reward: DType },
     #[error(
@@ -807,7 +807,7 @@ where
         let layout = if all_dense {
             None
         } else {
-            Some(RolloutLayout::from_steps(
+            Some(RolloutLayout::from_valid_steps(
                 &experiences
                     .iter()
                     .map(|e| e.slots.as_slice())
@@ -1692,7 +1692,7 @@ where
     ) -> Result<(), Self::Error> {
         let environment_count =
             Self::validate_timestep_batch(observations, &training_actions.neurons, &step)?;
-        crate::buffers::experience_replay::validate_slots(environment_count, slots)?;
+        crate::multi_agent::validate_slots(environment_count, slots)?;
         if slots.is_empty() {
             return Ok(());
         }

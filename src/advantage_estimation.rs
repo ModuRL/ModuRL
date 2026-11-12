@@ -50,14 +50,24 @@ pub enum RolloutLayoutError {
 impl RolloutLayout {
     /// Builds links from slots in each step's compact row order.
     pub fn from_steps(steps: &[&[usize]]) -> Result<Self, RolloutLayoutError> {
-        let mut step_offsets = vec![0usize];
         for (step, slots) in steps.iter().enumerate() {
-            let mut seen = std::collections::BTreeSet::new();
-            for &slot in *slots {
-                if !seen.insert(slot) {
-                    return Err(RolloutLayoutError::DuplicateSlot { step, slot });
-                }
-            }
+            crate::multi_agent::validate_slots(slots.len(), slots).map_err(
+                |error| match error {
+                    crate::multi_agent::SlotError::DuplicateSlot(slot) => {
+                        RolloutLayoutError::DuplicateSlot { step, slot }
+                    }
+                    crate::multi_agent::SlotError::LengthMismatch { .. } => {
+                        RolloutLayoutError::InvalidBatch("slots length")
+                    }
+                },
+            )?;
+        }
+        Self::from_valid_steps(steps)
+    }
+
+    pub(crate) fn from_valid_steps(steps: &[&[usize]]) -> Result<Self, RolloutLayoutError> {
+        let mut step_offsets = vec![0usize];
+        for slots in steps {
             step_offsets.push(
                 step_offsets
                     .last()
@@ -68,7 +78,7 @@ impl RolloutLayout {
             );
         }
         let mut successor = vec![None; *step_offsets.last().unwrap_or(&0)];
-        let mut latest = std::collections::BTreeMap::new();
+        let mut latest = std::collections::HashMap::new();
         for (step, slots) in steps.iter().enumerate().rev() {
             for (row, &slot) in slots.iter().enumerate() {
                 let index = step_offsets[step] + row;

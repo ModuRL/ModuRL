@@ -107,6 +107,8 @@ pub enum DeterministicActorCriticConfigurationError {
 /// Actor-critic construction, component, or training failure.
 #[derive(Debug, thiserror::Error)]
 pub enum DeterministicActorCriticError<AE, GE, SE, CE = std::convert::Infallible> {
+    #[error("invalid slots: {0}")]
+    Slots(#[from] crate::multi_agent::SlotError),
     #[error("actor model failed: {0}")]
     ActorError(#[source] AE),
     #[error("critic model failed: {0}")]
@@ -1304,7 +1306,7 @@ where
     where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
-        crate::buffers::experience_replay::validate_slots(observations.dims()[0], slots)?;
+        crate::multi_agent::validate_slots(observations.dims()[0], slots)?;
         let count = step.dones.len();
         let validated_count = self.validate_timestep(observations, &actions, &step)?;
         if slots.is_empty() {

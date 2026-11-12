@@ -5,7 +5,7 @@ use burn::tensor::{
 
 use crate::buffers::experience_replay::{
     ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayStorage,
-    ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_slots,
+    ReplayStorageError, TensorReplayColumn, replay_index_tensor,
 };
 use crate::tensor_operations::transfer_bool_tensor;
 
@@ -277,7 +277,6 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
     /// Pointer storage validates and transfers observations; truncations preserve terminal next observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = self.validate_insert(start, &transitions)?;
-        validate_slots(count, &transitions.slots)?;
         for (field, actual) in [
             ("dones", transitions.dones.len()),
             ("truncations", transitions.truncateds.len()),

@@ -42,7 +42,7 @@ where
     #[error("invalid rollout layout: {0}")]
     Layout(#[from] crate::advantage_estimation::RolloutLayoutError),
     #[error("invalid slots: {0}")]
-    Slots(#[from] crate::buffers::experience_replay::ReplayStorageError),
+    Slots(#[from] crate::multi_agent::SlotError),
     #[error("critic dtype {critic:?} must match environment reward dtype {reward:?}")]
     CriticRewardDTypeMismatch { critic: DType, reward: DType },
     #[error(
@@ -636,8 +636,7 @@ mod tests {
         assert!(matches!(
             agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[0]),
             Err(A2CError::Slots(
-                crate::buffers::experience_replay::ReplayStorageError::BatchLengthMismatch {
-                    field: "slots",
+                crate::multi_agent::SlotError::LengthMismatch {
                     expected: 2,
                     actual: 1
                 }
@@ -646,7 +645,7 @@ mod tests {
         assert!(matches!(
             agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[7, 7]),
             Err(A2CError::Slots(
-                crate::buffers::experience_replay::ReplayStorageError::DuplicateSlot(7)
+                crate::multi_agent::SlotError::DuplicateSlot(7)
             ))
         ));
         let bad_actions = PolicySamples::new(

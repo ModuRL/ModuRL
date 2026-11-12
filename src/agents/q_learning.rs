@@ -16,7 +16,6 @@ use crate::{
     buffers::experience_replay::{
         ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayStorage,
         ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_replay_alignment,
-        validate_slots,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
@@ -73,6 +72,8 @@ where
     GE: std::fmt::Debug,
     ME: std::fmt::Debug,
 {
+    #[error("invalid slots: {0}")]
+    Slots(#[from] crate::multi_agent::SlotError),
     #[error("Q-learning tensor operation failed: {0}")]
     TensorError(#[from] TensorReadError),
     #[error("Q-learning model failed: {0}")]
@@ -319,7 +320,6 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 .into());
             }
         }
-        validate_slots(count, &transitions.slots)?;
         for (field, actual) in [
             ("dones", transitions.dones.len()),
             ("truncations", transitions.truncateds.len()),
@@ -926,7 +926,7 @@ where
     where
         Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
-        crate::buffers::experience_replay::validate_slots(observations.dims()[0], slots)?;
+        crate::multi_agent::validate_slots(observations.dims()[0], slots)?;
         let count = self.validate_timestep(observations, &actions, &step)?;
         if slots.is_empty() {
             return Ok(());

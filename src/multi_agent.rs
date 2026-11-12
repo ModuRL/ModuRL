@@ -5,6 +5,32 @@ use crate::spaces::{ActionSpace, ObservationSpace};
 use crate::tensor_rank::{NextRank, TensorBatchTypes};
 use burn::tensor::Tensor;
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SlotError {
+    #[error("slot count {actual} does not match row count {expected}")]
+    LengthMismatch { expected: usize, actual: usize },
+    #[error("duplicate slot {0}")]
+    DuplicateSlot(usize),
+}
+
+/// Validates one unique slot per compact row; identity slots need no allocation.
+pub(crate) fn validate_slots(count: usize, slots: &[usize]) -> Result<(), SlotError> {
+    if slots.len() != count {
+        return Err(SlotError::LengthMismatch {
+            expected: count,
+            actual: slots.len(),
+        });
+    }
+    if !slots.iter().copied().eq(0..count) {
+        let mut sorted = slots.to_vec();
+        sorted.sort_unstable();
+        if let Some(pair) = sorted.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(SlotError::DuplicateSlot(pair[0]));
+        }
+    }
+    Ok(())
+}
+
 /// Compact observations and the slot of each row.
 #[derive(Debug, Clone)]
 pub struct MultiAgentObservations<T = Tensor<2>> {
@@ -58,4 +84,24 @@ pub trait MultiAgentGym<I = (), const O: usize = 2, const A: usize = 2> {
         Vec<MultiAgentStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>>,
         Self::Error,
     >;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SlotError, validate_slots};
+
+    #[test]
+    fn compact_slots_validate_identity_sparse_empty_and_invalid_batches() {
+        assert_eq!(validate_slots(0, &[]), Ok(()));
+        assert_eq!(validate_slots(2, &[0, 1]), Ok(()));
+        assert_eq!(validate_slots(2, &[usize::MAX, 7]), Ok(()));
+        assert_eq!(
+            validate_slots(2, &[9]),
+            Err(SlotError::LengthMismatch {
+                expected: 2,
+                actual: 1
+            })
+        );
+        assert_eq!(validate_slots(2, &[9, 9]), Err(SlotError::DuplicateSlot(9)));
+    }
 }

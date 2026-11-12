@@ -2847,8 +2847,7 @@ mod schedule_tests {
         assert!(matches!(
             agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[0]),
             Err(PPOError::Slots(
-                crate::buffers::experience_replay::ReplayStorageError::BatchLengthMismatch {
-                    field: "slots",
+                crate::multi_agent::SlotError::LengthMismatch {
                     expected: 2,
                     actual: 1
                 }
@@ -2857,7 +2856,7 @@ mod schedule_tests {
         assert!(matches!(
             agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &[7, 7]),
             Err(PPOError::Slots(
-                crate::buffers::experience_replay::ReplayStorageError::DuplicateSlot(7)
+                crate::multi_agent::SlotError::DuplicateSlot(7)
             ))
         ));
 

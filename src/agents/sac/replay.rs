@@ -2,7 +2,7 @@ use burn::tensor::{Bool, Cast, DType, Device, Tensor, kind::Autodiff};
 
 use crate::buffers::experience_replay::{
     ExperienceReplay, ExperienceReplayError, PointerObservationReplay, ReplayStorage,
-    ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_slots,
+    ReplayStorageError, TensorReplayColumn, replay_index_tensor,
 };
 use crate::tensor_operations::transfer_bool_tensor;
 
@@ -162,7 +162,6 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
         transitions: &SACReplayInsert<O, A, K, L>,
     ) -> Result<usize, SACReplayError> {
         let count = transitions.observations.dims()[0];
-        validate_slots(count, &transitions.slots)?;
         let real_count = count;
         let mut action_shape = self.actions.tensor().dims();
         action_shape[0] = count;
