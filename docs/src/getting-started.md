@@ -342,5 +342,16 @@ agents produce no padding rows. The environment resets a slot when all its
 agents have finished, then includes its reset agents in the next acting rows.
 Set each agent's `training_horizon` for caller-owned scheduling.
 
+Timesteps, rollout sizes, and schedule progress count **agent transition rows**,
+not environment `step` calls. A compact batch of `n` rows advances that agent
+by `n`; missing agents and empty batches advance it by zero. Inactive agents
+therefore reach the same schedule horizon later in world steps. Each agent has
+its own progress; the Tron example's `timestep` counter counts PPO rows only.
+
+Until a slot ends, pass its previous next observation as its next current
+observation. Replay-backed agents may reuse the cached row instead of the row
+you supply. Report done or truncated before externally resetting an environment
+or reusing its slot; omitting a slot does not end its stream.
+
 The `ppo_vs_sac_tron` example demonstrates independent PPO and SAC learners using
 this API.

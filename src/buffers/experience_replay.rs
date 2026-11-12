@@ -275,6 +275,9 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
     }
 
     /// Stores real observations and next observations `[slots.len(), ...item_shape]`.
+    /// Continuing slots must supply the previous next observation as their current observation:
+    /// replay may reuse its cached row instead of the supplied current row.
+    /// Signal an episode end before resetting or reusing a slot for a new stream.
     /// Each slot continues until an episode end; absent slots write nothing.
     /// Cached next rows are reused only while their contents have not been overwritten.
     pub(crate) fn insert(

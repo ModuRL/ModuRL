@@ -142,15 +142,23 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
     /// Trains with rank-`O` observation batches and rank-`A` action batches, each with `num_envs` rows.
     /// Terminal observations have rank `O - 1`; scalar terminal observations use `[1]`.
     /// The environment must use the associated space types and meet the agent's dtype and device requirements.
+    /// `num_timesteps` and schedule progress count agent transition rows, not calls to `step`.
     fn learn(&mut self, env: &mut Self::Env<'_>, num_timesteps: usize) -> Result<(), Self::Error>;
 
     /// Stores compact observations and training actions with one row per slot in `slots`.
+    ///
+    /// **Continuity:** until a slot ends, its observation must equal its previous next observation.
+    /// Replay-backed agents may reuse that cached next observation instead of the supplied row.
+    /// Report done or truncated before resetting an environment or reusing its slot for a new episode.
+    /// Omitting a slot does not end its stream.
+    ///
     /// Training actions must come from `act_for_training` on those observations.
     /// Slot IDs must be unique in each call and match the row count; violations return errors.
     /// Empty batches are valid no-ops.
     /// Each slot is a continuous stream: pass its rows in time order, starting a new episode
     /// only after its done or truncated row. Slots may disappear between calls and have any ID.
     /// Schedules need the builder's `training_horizon` because this method has no total timestep count.
+    /// Timesteps, rollout sizes, and schedules count agent rows; empty batches advance none of them.
     fn learn_from_timesteps(
         &mut self,
         observations: &<Self::ObservationSpace as TensorBatchTypes>::Batch,

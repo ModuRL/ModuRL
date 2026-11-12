@@ -1,5 +1,8 @@
 # Double DQN
 
+Timesteps and schedule horizons count agent transition rows, not environment
+steps. Compact collection advances them only for rows actually passed to the agent.
+
 Double DQN, or DDQN, uses the same setup, builder fields, and training loop as
 DQN. Its difference is the next-observation target: the online Q-network chooses the
 next action, and the target Q-network evaluates that selected action. This

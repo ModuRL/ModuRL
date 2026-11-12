@@ -49,6 +49,8 @@ PPO calls `Module::valid()` and removes autodiff from inference observations wit
 It reuses one validation network for collection and fixed value estimates, then releases it before optimizer updates.
 The built-in networks supply these implementations directly. Their learning-rate schedules must implement `Send + Sync`.
 Schedules are shared through `Arc` when a validation network is created.
+Timesteps, rollout sizes, and schedule horizons count agent transition rows,
+not environment steps. Missing agents do not advance that agent's schedule.
 Observations keep `[batch_size, ...observation_shape]`, their native kind, and their dtype.
 Models perform any required conversions. Separate models accept observations directly;
 shared trunks produce Float features, and shared heads accept Float inputs. The compiler rejects incompatible kind connections.
