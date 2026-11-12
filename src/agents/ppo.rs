@@ -280,7 +280,7 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
         truncateds: Vec<bool>,
         log_probs: Tensor<2>,
         values: Tensor<2>,
-        #[builder(default = (0..next_dones.len()).collect())] slots: Vec<usize>,
+        slots: Vec<usize>,
     ) -> Self {
         Self {
             slots,
@@ -1440,13 +1440,8 @@ where
                 &collection_action.policy_actions,
                 &step_info,
             )?;
-            *next_observations = self.store_timestep(
-                validation,
-                &observations,
-                collection_action,
-                step_info,
-                &slots,
-            )?;
+            *next_observations =
+                self.store_timestep(&observations, collection_action, step_info, &slots)?;
         }
 
         Ok(self.rollout_rows)
@@ -1514,7 +1509,6 @@ where
     /// Stores one already-validated caller or environment transition with batch shape `[num_envs, ...]`.
     fn store_timestep<const U: usize>(
         &mut self,
-        _validation: &N,
         observations: &Tensor<O, OS::Kind>,
         collection_action: PPOCollectionAction<AS, L>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
@@ -1713,7 +1707,7 @@ where
             training_actions.neurons,
             environment_actions,
         )?;
-        self.store_timestep(&validation, observations, collection_action, step, slots)?;
+        self.store_timestep(observations, collection_action, step, slots)?;
         self.train_if_rollout_full()?;
         Ok(())
     }

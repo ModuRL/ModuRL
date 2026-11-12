@@ -155,6 +155,7 @@ mod rollout_batch_tests {
         .require_grad();
         let rewards = Tensor::from_data([[value + 2.0], [value + 3.0]], (device, DType::F64));
         PPOExperience::builder()
+            .slots(vec![0, 1])
             .observations(observations.clone())
             .next_observations(observations + 10.0)
             .actions(Tensor::from_data(
@@ -1571,6 +1572,7 @@ mod schedule_tests {
             agent.rollout_rows = 2;
             agent.rollout_buffer.push(
                 PPOExperience::builder()
+                    .slots(vec![0, 1])
                     .observations(observations.clone())
                     .next_observations(observations.clone())
                     .actions(Tensor::zeros([2, 1], &device))
