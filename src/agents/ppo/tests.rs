@@ -2212,6 +2212,51 @@ mod schedule_tests {
             .add_advantages_and_returns(&agent.network_info.valid())
             .unwrap();
         assert!(batches.lock().unwrap().is_empty());
+        agent.rollout_buffer.clear();
+        agent.rollout_buffer.push(
+            PPOExperience::builder()
+                .slots(vec![0, 1, 2, 3])
+                .observations(Tensor::ones([4, 4], &device))
+                .next_observations(
+                    Tensor::from_data([[100.0], [20.0], [30.0], [400.0]], &device).repeat_dim(1, 4),
+                )
+                .actions(Tensor::zeros([4, 1], &device))
+                .rewards(Tensor::ones([4, 1], &device))
+                .training_rewards(Tensor::ones([4, 1], &device))
+                .next_dones(vec![true, false, false, true])
+                .truncateds(vec![false, true, false, true])
+                .values(Tensor::ones([4, 1], &device))
+                .log_probs(Tensor::zeros([4, 1], &device))
+                .build(),
+        );
+        agent
+            .add_advantages_and_returns(&agent.network_info.valid())
+            .unwrap();
+        assert_eq!(*batches.lock().unwrap(), vec![vec![20.0, 30.0]]);
+        let experience = &agent.rollout_buffer[0];
+        let targets = experience
+            .prepared
+            .as_ref()
+            .unwrap()
+            .returns
+            .to_data()
+            .try_to_vec::<f32>()
+            .unwrap();
+        for (actual, expected) in
+            targets
+                .into_iter()
+                .zip([1.0, 1.0 + agent.gamma * 20.0, 1.0 + agent.gamma * 30.0, 1.0])
+        {
+            assert!((actual - expected).abs() < 1e-4);
+        }
+        assert_eq!(
+            experience
+                .training_rewards
+                .to_data()
+                .try_to_vec::<f32>()
+                .unwrap(),
+            vec![1.0, 1.0 + agent.gamma * 20.0, 1.0, 1.0]
+        );
     }
 
     #[test]
