@@ -16,7 +16,9 @@ Implemented Gymnasium v5 environments:
 
 ## Installation
 
-MuJoCo 3.9 is automatically downloaded by `mujoco-rs` on Windows and Linux. A clone of this repository works without extra configuration because [`.cargo/config.toml`](../../.cargo/config.toml) supplies a project-local cache. On Windows, this crate's build script also copies `mujoco.dll` next to Cargo-built executables and tests.
+MuJoCo 3.9 is automatically downloaded by `mujoco-rs` on Windows and Linux. A clone of this repository uses a project-local cache supplied by [`.cargo/config.toml`](../../.cargo/config.toml).
+
+On Windows, add `<MUJOCO_DOWNLOAD_DIR>/mujoco-3.9.0/bin` to `PATH` before running Cargo or its executables, as workspace CI does. This works independently of Cargo's internal artifact layout, including the changes in Cargo 1.100. Do not rely on the build script's adjacent DLL copies to cover every test or example executable. For a manual MuJoCo installation, use the directory containing `mujoco.dll` instead.
 
 When adding `modurl_mujoco` as a dependency, Cargo does not read configuration files from dependencies. Add this to the consuming project's `.cargo/config.toml`:
 

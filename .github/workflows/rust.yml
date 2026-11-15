@@ -193,6 +193,11 @@ jobs:
           printf 'LD_LIBRARY_PATH=%s\n' \
             "$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
             >> "$GITHUB_ENV"
+      - name: Configure MuJoCo runtime library path on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "$env:MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0/bin" >> $env:GITHUB_PATH
       - name: Build core, Gym, and examples
         run: >-
           cargo build --locked --verbose --all-targets
