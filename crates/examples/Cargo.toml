@@ -10,6 +10,10 @@ name = "ppo_vs_sac_tron"
 path = "examples/ppo_vs_sac_tron.rs"
 
 [[example]]
+name = "tron_ffa"
+path = "examples/tron_ffa.rs"
+
+[[example]]
 name = "dqn_cartpole"
 path = "examples/dqn_cartpole.rs"
 

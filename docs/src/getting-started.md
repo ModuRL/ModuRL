@@ -355,3 +355,15 @@ or reusing its slot; omitting a slot does not end its stream.
 
 The `ppo_vs_sac_tron` example demonstrates independent PPO and SAC learners using
 this API.
+
+`tron_ffa` extends this to five players: PPO, A2C, discrete SAC, DQN, and DDQN.
+It uses a 32×32 board and three full-board observation planes (occupied cells,
+own head, other living heads), with absolute actions and no observation rotation.
+Spawn assignments rotate across slots and rounds. Dead players keep their trails
+but produce no rows until the round resets, exercising compact batches and slot gaps.
+Run it with `cargo run --release -p examples --example tron_ffa`.
+`MODURL_TRON_FFA_STEPS` sets world steps (default 256), `MODURL_TRON_FFA_ENVS`
+sets vectorized slots (default 8), and optional `MODURL_TRON_FFA_SECONDS` limits
+training time. Schedules still advance by each learner's own row count.
+The periodic table reports win rate, tied death-order placement, and survival
+length over completed rounds; partial and empty batch counts show compact collection.
