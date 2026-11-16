@@ -2418,19 +2418,28 @@ mod schedule_tests {
                     let mut dones = vec![false; time];
                     dones[time - 1] = slot == 0 && terminate_first_slot;
                     GAE::new(0.95).unwrap().estimate(
-                        AdvantageInput::Dense {
-                            rewards: &Tensor::full([time, 1, 1], (slot + 1) as f32, &device),
-                            values: &Tensor::from_data(
-                                TensorData::new(values[slot].clone(), [time, 1, 1]),
+                        AdvantageInput::new(
+                            &Tensor::full([time, 1], (slot + 1) as f32, &device),
+                            &Tensor::from_data(
+                                TensorData::new(values[slot].clone(), [time, 1]),
                                 &device,
                             ),
-                            next_dones: &Tensor::from_data(
-                                TensorData::new(dones, [time, 1, 1]),
+                            &dones,
+                            &vec![false; time],
+                            &crate::advantage_estimation::RolloutLayout::dense(time, 1).unwrap(),
+                            &Tensor::from_data(
+                                TensorData::new(
+                                    if slot == 0 && terminate_first_slot {
+                                        vec![]
+                                    } else {
+                                        vec![bootstraps[slot]]
+                                    },
+                                    [usize::from(!(slot == 0 && terminate_first_slot)), 1],
+                                ),
                                 &device,
                             ),
-                            next_truncateds: &Tensor::full([time, 1, 1], false, &device),
-                            bootstrapped_values: &Tensor::from_data([[bootstraps[slot]]], &device),
-                        },
+                        )
+                        .unwrap(),
                         agent.gamma,
                     )
                 })

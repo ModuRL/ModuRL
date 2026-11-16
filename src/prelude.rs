@@ -6,7 +6,7 @@
 
 pub use crate::advantage_estimation::{
     AdvantageEstimate, AdvantageEstimator, AdvantageInput, GAE, GAEError, NStep, NStepError,
-    RaggedRollout, RolloutLayout, RolloutLayoutError, UPGO,
+    RolloutLayout, RolloutLayoutError, UPGO,
 };
 pub use crate::agents::{
     Agent, ToEnvironmentActions,
