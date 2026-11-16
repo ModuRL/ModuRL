@@ -299,7 +299,7 @@ impl AdvantageInput<'_> {
             let end = self.layout.step_offsets[step + 1];
             values
                 .clone()
-                .select(0, indices.clone().slice([start..end]))
+                .select(0, indices.clone().slice_dim(0, start..end))
         } else {
             values.clone().slice_dim(
                 0,
