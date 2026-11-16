@@ -318,7 +318,7 @@ impl AdvantageInput<'_> {
             self.values,
         )
     }
-    fn next_values(&self) -> Tensor<2> {
+    fn next_value_indices(&self) -> Tensor<1, burn::tensor::Int> {
         let n = self.layout.successor.len();
         let mut tail = n;
         let prefix = &self.layout.successor_prefix;
@@ -333,32 +333,38 @@ impl AdvantageInput<'_> {
                 }
             })
             .collect();
-        let source = if tail == n {
-            self.values.clone().detach()
+        indices(&rows, &self.values.device())
+    }
+
+    /// Maps values [rows, 1] through successor indices [suffix_rows], inserting live-tail bootstraps.
+    fn next_values_from(
+        &self,
+        values: Tensor<2>,
+        indices: Tensor<1, burn::tensor::Int>,
+    ) -> Tensor<2> {
+        let n = self.layout.successor.len();
+        let prefix = &self.layout.successor_prefix;
+        let source = if self.bootstrap.dims()[0] == 0 {
+            values
         } else {
-            Tensor::cat(
-                vec![
-                    self.values.clone().detach(),
-                    self.bootstrap.clone().detach(),
-                ],
-                0,
-            )
+            Tensor::cat(vec![values, self.bootstrap.clone().detach()], 0)
         };
         if prefix.len() == n {
             source.slice_dim(0, prefix.clone())
         } else if !prefix.is_empty() {
-            let device = source.device();
             Tensor::cat(
                 vec![
                     source.clone().slice_dim(0, prefix.clone()),
-                    source.select(0, indices(&rows, &device)),
+                    source.select(0, indices),
                 ],
                 0,
             )
         } else {
-            let device = source.device();
-            source.select(0, indices(&rows, &device))
+            source.select(0, indices)
         }
+    }
+    fn next_values(&self) -> Tensor<2> {
+        self.next_values_from(self.values.clone().detach(), self.next_value_indices())
     }
     fn empty(&self) -> AdvantageEstimate {
         AdvantageEstimate {
@@ -420,43 +426,12 @@ impl AdvantageInput<'_> {
         if n == 0 {
             return self.empty();
         }
-        let source = Tensor::cat(vec![self.rewards.clone(), self.next_values()], 1);
-        let mut rows: Vec<_> = (0..n).collect();
-        let mut live = vec![true; n];
-        let mut targets = Tensor::<2>::zeros([n, 1], (&self.values.device(), self.values.dtype()));
-        let mut discount = Tensor::<2>::ones([n, 1], (&self.values.device(), self.values.dtype()));
-        for offset in 0..n_steps {
-            let current = source
-                .clone()
-                .select(0, indices(&rows, &self.values.device()));
-            targets = targets + discount.clone() * current.clone().slice_dim(1, 0..1);
-            let continuing: Vec<_> = rows
-                .iter()
-                .enumerate()
-                .map(|(i, &row)| live[i] && !self.dones[row] && !self.truncateds[row])
-                .collect();
-            discount = discount * flags(continuing.clone(), self.values) * f64::from(gamma);
-            let next_live: Vec<_> = rows
-                .iter()
-                .enumerate()
-                .map(|(i, &row)| {
-                    continuing[i] && offset + 1 < n_steps && self.layout.successor[row].is_some()
-                })
-                .collect();
-            targets = targets
-                + discount.clone()
-                    * current.slice_dim(1, 1..2)
-                    * flags(next_live.iter().map(|&v| !v).collect(), self.values);
-            discount = discount * flags(next_live.clone(), self.values);
-            for (i, row) in rows.iter_mut().enumerate() {
-                if next_live[i] {
-                    *row = self.layout.successor[*row].unwrap_or(*row);
-                }
-            }
-            live = next_live;
-            if !live.contains(&true) {
-                break;
-            }
+        let successor_indices = self.next_value_indices();
+        let discounts = self.masks() * f64::from(gamma);
+        let mut targets = self.values.clone().detach();
+        for _ in 0..n_steps.min(self.step_count()) {
+            targets = self.rewards.clone()
+                + self.next_values_from(targets, successor_indices.clone()) * discounts.clone();
         }
         AdvantageEstimate {
             advantages: targets.clone() - self.values.clone().detach(),
@@ -974,6 +949,50 @@ mod tests {
                 assert_estimates_close(
                     (data(result.advantages), data(result.value_targets)),
                     (returns.clone(), returns.clone()),
+                    dtype,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn n_step_horizons_follow_links_across_gaps_and_stop_at_ends() {
+        let layout = RolloutLayout::from_steps(&[&[5, 9], &[5, 9], &[], &[5], &[9, 5]]).unwrap();
+        assert_eq!(layout.successor_prefix, 2..7);
+        let device = Device::flex();
+        for dtype in [DType::F32, DType::F64] {
+            let float = |v: Vec<f32>| {
+                let count = v.len();
+                Tensor::from_data(TensorData::new(v, [count, 1]), (&device, dtype))
+            };
+            let rewards = float(vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 7.0]);
+            let values = float(vec![0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75]);
+            let bootstrap = float(vec![10.0]);
+            let input = AdvantageInput::new(
+                &rewards,
+                &values,
+                &[false, false, true, false, false, false, false],
+                &[false, false, false, false, false, true, false],
+                &layout,
+                &bootstrap,
+            )
+            .unwrap();
+            for (n, targets) in [
+                (1, vec![1.375, 2.5, 3.0, 4.75, 5.875, 10.0, 12.0]),
+                (2, vec![2.5, 4.375, 3.0, 9.0, 11.0, 10.0, 12.0]),
+                (3, vec![2.5, 6.5, 3.0, 9.0, 11.0, 10.0, 12.0]),
+                (99, vec![2.5, 6.5, 3.0, 9.0, 11.0, 10.0, 12.0]),
+            ] {
+                let result = NStep::new(n).unwrap().estimate(input, 0.5);
+                let advantages = targets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &target)| target - (i + 1) as f64 * 0.25)
+                    .collect();
+                let data = |t: Tensor<2>| t.to_data().convert::<f64>().try_to_vec::<f64>().unwrap();
+                assert_estimates_close(
+                    (data(result.advantages), data(result.value_targets)),
+                    (advantages, targets),
                     dtype,
                 );
             }
