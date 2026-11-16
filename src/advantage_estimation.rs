@@ -14,6 +14,15 @@ pub struct AdvantageEstimate {
 pub struct RolloutLayout {
     step_offsets: Vec<usize>,
     successor: Vec<Option<usize>>,
+    links: Vec<StepLinks>,
+    successor_prefix: std::ops::Range<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct StepLinks {
+    range: Option<std::ops::Range<usize>>,
+    has_successors: bool,
+    has_tails: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -46,10 +55,7 @@ impl RolloutLayout {
         step_offsets.extend((0..offsets).map(|step| step * env_count));
         successor
             .extend((0..rows).map(|row| row.checked_add(env_count).filter(|&next| next < rows)));
-        Ok(Self {
-            step_offsets,
-            successor,
-        })
+        Self::with_links(step_offsets, successor)
     }
 
     /// Builds links from slots in each step's compact row order.
@@ -89,9 +95,43 @@ impl RolloutLayout {
                 successor[index] = latest.insert(slot, index);
             }
         }
+        Self::with_links(step_offsets, successor)
+    }
+
+    fn with_links(
+        step_offsets: Vec<usize>,
+        successor: Vec<Option<usize>>,
+    ) -> Result<Self, RolloutLayoutError> {
+        let mut links = Vec::new();
+        links
+            .try_reserve_exact(step_offsets.len() - 1)
+            .map_err(|_| RolloutLayoutError::TooManyRows)?;
+        for step in step_offsets.windows(2) {
+            let (start, end) = (step[0], step[1]);
+            let rows = &successor[start..end];
+            let first = rows.first().copied().flatten();
+            let range = first.filter(|&first| {
+                rows.iter()
+                    .enumerate()
+                    .all(|(i, &row)| row == Some(first + i))
+            });
+            links.push(StepLinks {
+                range: range.map(|first| first..first + end - start),
+                has_successors: rows.iter().any(Option::is_some),
+                has_tails: rows.iter().any(Option::is_none),
+            });
+        }
+        let first = successor.first().copied().flatten().unwrap_or(0);
+        let prefix = successor
+            .iter()
+            .enumerate()
+            .take_while(|&(i, row)| *row == Some(first + i))
+            .count();
         Ok(Self {
             step_offsets,
             successor,
+            links,
+            successor_prefix: first..first + prefix,
         })
     }
 
@@ -224,6 +264,50 @@ fn flags(values: Vec<bool>, like: &Tensor<2>) -> Tensor<2> {
 }
 
 impl AdvantageInput<'_> {
+    fn successor_indices(&self) -> Option<Tensor<1, burn::tensor::Int>> {
+        self.layout
+            .links
+            .iter()
+            .any(|step| step.has_successors && step.range.is_none())
+            .then(|| {
+                Tensor::from_data(
+                    burn::tensor::TensorData::new(
+                        self.layout
+                            .successor
+                            .iter()
+                            .enumerate()
+                            .map(|(i, row)| row.unwrap_or(i) as i64)
+                            .collect::<Vec<_>>(),
+                        [self.layout.successor.len()],
+                    ),
+                    (&self.values.device(), burn::tensor::DType::I64),
+                )
+            })
+    }
+
+    /// Selects successor rows from values [rows, columns] using optional flat indices [rows].
+    fn successors(
+        &self,
+        values: &Tensor<2>,
+        step: usize,
+        indices: &Option<Tensor<1, burn::tensor::Int>>,
+    ) -> Tensor<2> {
+        if let Some(range) = &self.layout.links[step].range {
+            values.clone().slice_dim(0, range.clone())
+        } else if let Some(indices) = indices {
+            let start = self.layout.step_offsets[step];
+            let end = self.layout.step_offsets[step + 1];
+            values
+                .clone()
+                .select(0, indices.clone().slice([start..end]))
+        } else {
+            values.clone().slice_dim(
+                0,
+                self.layout.step_offsets[step]..self.layout.step_offsets[step + 1],
+            )
+        }
+    }
+
     fn masks(&self) -> Tensor<2> {
         flags(
             self.dones
@@ -237,7 +321,8 @@ impl AdvantageInput<'_> {
     fn next_values(&self) -> Tensor<2> {
         let n = self.layout.successor.len();
         let mut tail = n;
-        let rows: Vec<_> = (0..n)
+        let prefix = &self.layout.successor_prefix;
+        let rows: Vec<_> = (prefix.len()..n)
             .map(|i| {
                 if !self.dones[i] && !self.truncateds[i] && self.layout.successor[i].is_none() {
                     let index = tail;
@@ -259,8 +344,21 @@ impl AdvantageInput<'_> {
                 0,
             )
         };
-        let device = source.device();
-        source.select(0, indices(&rows, &device))
+        if prefix.len() == n {
+            source.slice_dim(0, prefix.clone())
+        } else if !prefix.is_empty() {
+            let device = source.device();
+            Tensor::cat(
+                vec![
+                    source.clone().slice_dim(0, prefix.clone()),
+                    source.select(0, indices(&rows, &device)),
+                ],
+                0,
+            )
+        } else {
+            let device = source.device();
+            source.select(0, indices(&rows, &device))
+        }
     }
     fn empty(&self) -> AdvantageEstimate {
         AdvantageEstimate {
@@ -276,30 +374,45 @@ impl AdvantageInput<'_> {
         let masks = self.masks();
         let deltas = self.rewards.clone() + self.next_values() * masks.clone() * f64::from(gamma)
             - self.values.clone().detach();
+        let columns = if lambda == value_lambda { 1 } else { 2 };
         let mut accumulators =
-            Tensor::<2>::zeros([n, 2], (&self.values.device(), self.values.dtype()));
-        let discounts = Tensor::from_data(
-            [[lambda, value_lambda]],
-            (&self.values.device(), self.values.dtype()),
-        ) * f64::from(gamma);
-        for step in self.layout.step_offsets.windows(2).rev() {
-            let (start, end) = (step[0], step[1]);
+            Tensor::<2>::zeros([n, columns], (&self.values.device(), self.values.dtype()));
+        let discounts = if columns == 1 {
+            masks * (f64::from(gamma) * f64::from(lambda))
+        } else {
+            masks
+                * (Tensor::from_data(
+                    [[lambda, value_lambda]],
+                    (&self.values.device(), self.values.dtype()),
+                ) * f64::from(gamma))
+        };
+        let deltas = if columns == 1 {
+            deltas
+        } else {
+            deltas.repeat_dim(1, columns)
+        };
+        let successor_indices = self.successor_indices();
+        for step in (0..self.step_count()).rev() {
+            let (start, end) = (
+                self.layout.step_offsets[step],
+                self.layout.step_offsets[step + 1],
+            );
             if start == end {
                 continue;
             }
-            let rows: Vec<_> = (start..end)
-                .map(|i| self.layout.successor[i].unwrap_or(i))
-                .collect();
-            let later = accumulators
-                .clone()
-                .select(0, indices(&rows, &self.values.device()));
-            let current = deltas.clone().slice_dim(0, start..end).repeat_dim(1, 2)
-                + later * masks.clone().slice_dim(0, start..end) * discounts.clone();
-            accumulators = accumulators.slice_assign([start..end, 0..2], current);
+            let current = if self.layout.links[step].has_successors {
+                deltas.clone().slice_dim(0, start..end)
+                    + self.successors(&accumulators, step, &successor_indices)
+                        * discounts.clone().slice_dim(0, start..end)
+            } else {
+                deltas.clone().slice_dim(0, start..end)
+            };
+            accumulators = accumulators.slice_assign([start..end, 0..columns], current);
         }
         AdvantageEstimate {
             advantages: accumulators.clone().slice_dim(1, 0..1),
-            value_targets: self.values.clone().detach() + accumulators.slice_dim(1, 1..2),
+            value_targets: self.values.clone().detach()
+                + accumulators.slice_dim(1, columns - 1..columns),
         }
     }
     fn n_step(&self, gamma: f32, n_steps: usize) -> AdvantageEstimate {
@@ -357,48 +470,63 @@ impl AdvantageInput<'_> {
             return self.empty();
         }
         let next_values = self.next_values();
-        let masks = self.masks();
+        let discounts = self.masks() * f64::from(gamma);
+        let q = self.rewards.clone() + next_values.clone() * discounts.clone();
         let mut accumulators =
-            Tensor::<2>::zeros([n, 2], (&self.values.device(), self.values.dtype()));
-        for step in self.layout.step_offsets.windows(2).rev() {
-            let (start, end) = (step[0], step[1]);
+            Tensor::<2>::zeros([n, 1], (&self.values.device(), self.values.dtype()));
+        let successor_indices = self.successor_indices();
+        let tails = self
+            .layout
+            .links
+            .iter()
+            .any(|step| step.has_tails && step.has_successors)
+            .then(|| {
+                Tensor::<2, Bool>::from_data(
+                    burn::tensor::TensorData::new(
+                        self.layout
+                            .successor
+                            .iter()
+                            .map(Option::is_none)
+                            .collect::<Vec<_>>(),
+                        [n, 1],
+                    ),
+                    &self.values.device(),
+                )
+            });
+        for step in (0..self.step_count()).rev() {
+            let (start, end) = (
+                self.layout.step_offsets[step],
+                self.layout.step_offsets[step + 1],
+            );
             if start == end {
                 continue;
             }
-            let rows: Vec<_> = (start..end)
-                .map(|i| self.layout.successor[i].unwrap_or(i))
-                .collect();
-            let next_value = next_values.clone().slice_dim(0, start..end);
-            let tail = Tensor::<2, Bool>::from_data(
-                burn::tensor::TensorData::new(
-                    (start..end)
-                        .map(|i| self.layout.successor[i].is_none())
-                        .collect::<Vec<_>>(),
-                    [end - start, 1],
-                ),
-                &self.values.device(),
-            )
-            .repeat_dim(1, 2);
-            let later = accumulators
-                .clone()
-                .select(0, indices(&rows, &self.values.device()))
-                .mask_where(tail, next_value.clone().repeat_dim(1, 2));
-            let continuation = next_value.clone().mask_where(
-                later
-                    .clone()
-                    .slice_dim(1, 0..1)
-                    .greater_equal(next_value.clone()),
-                later.slice_dim(1, 1..2),
-            );
-            let reward = self.rewards.clone().slice_dim(0, start..end);
-            let mask = masks.clone().slice_dim(0, start..end);
-            let current_return = reward.clone() + continuation * mask.clone() * f64::from(gamma);
-            let q = reward + next_value * mask * f64::from(gamma);
-            accumulators = accumulators
-                .slice_assign([start..end, 0..2], Tensor::cat(vec![q, current_return], 1));
+            let current_return = if self.layout.links[step].has_successors {
+                let next_value = next_values.clone().slice_dim(0, start..end);
+                let later = self.successors(&accumulators, step, &successor_indices);
+                let later = if self.layout.links[step].has_tails {
+                    if let Some(tails) = &tails {
+                        later.mask_where(tails.clone().slice_dim(0, start..end), next_value.clone())
+                    } else {
+                        later
+                    }
+                } else {
+                    later
+                };
+                let continuation = next_value.clone().mask_where(
+                    self.successors(&q, step, &successor_indices)
+                        .greater_equal(next_value),
+                    later,
+                );
+                self.rewards.clone().slice_dim(0, start..end)
+                    + continuation * discounts.clone().slice_dim(0, start..end)
+            } else {
+                q.clone().slice_dim(0, start..end)
+            };
+            accumulators = accumulators.slice_assign([start..end, 0..1], current_return);
         }
         AdvantageEstimate {
-            advantages: accumulators.slice_dim(1, 1..2) - self.values.clone().detach(),
+            advantages: accumulators - self.values.clone().detach(),
             value_targets,
         }
     }
@@ -785,6 +913,12 @@ mod tests {
                 let compact = RolloutLayout::from_steps(&steps).unwrap();
                 assert_eq!(dense.step_offsets(), compact.step_offsets());
                 assert_eq!(dense.successor(), compact.successor());
+                assert_eq!(dense.successor_prefix, compact.successor_prefix);
+                for (a, b) in dense.links.iter().zip(&compact.links) {
+                    assert_eq!(a.range, b.range);
+                    assert_eq!(a.has_successors, b.has_successors);
+                    assert_eq!(a.has_tails, b.has_tails);
+                }
             }
         }
         for (time, envs) in [
@@ -798,6 +932,51 @@ mod tests {
                 RolloutLayout::dense(time, envs),
                 Err(RolloutLayoutError::TooManyRows)
             ));
+        }
+    }
+
+    #[test]
+    fn contiguous_links_span_gaps_and_preserve_mixed_tails() {
+        let layout = RolloutLayout::from_steps(&[&[3, 7], &[9], &[3, 7, 11], &[9, 11]]).unwrap();
+        assert_eq!(layout.links[0].range, Some(3..5));
+        assert_eq!(layout.successor_prefix, 3..5);
+        assert_eq!(layout.links[1].range, Some(6..7));
+        assert_eq!(layout.links[2].range, None);
+        assert!(layout.links[2].has_successors);
+        assert!(layout.links[2].has_tails);
+        assert!(!layout.links[3].has_successors);
+        let device = Device::flex();
+        for dtype in [DType::F32, DType::F64] {
+            let float = |v: Vec<f32>| {
+                let count = v.len();
+                Tensor::from_data(TensorData::new(v, [count, 1]), (&device, dtype))
+            };
+            let rewards = float(vec![1.0, 2.0, 3.0, 4.5, 5.0, 6.0, 7.0, 8.0]);
+            let values = float(vec![0.0; 8]);
+            let bootstrap = float(vec![3.0, 4.0]);
+            let input = AdvantageInput::new(
+                &rewards,
+                &values,
+                &[false, false, false, false, true, false, false, false],
+                &[false, false, false, true, false, false, false, false],
+                &layout,
+                &bootstrap,
+            )
+            .unwrap();
+            let returns = vec![3.25, 4.5, 7.25, 4.5, 5.0, 11.0, 8.5, 10.0];
+            for estimator in [
+                Box::new(GAE::new(1.0).unwrap()) as Box<dyn AdvantageEstimator>,
+                Box::new(NStep::new(5).unwrap()),
+                Box::new(UPGO::new(GAE::new(1.0).unwrap())),
+            ] {
+                let result = estimator.estimate(input, 0.5);
+                let data = |t: Tensor<2>| t.to_data().convert::<f64>().try_to_vec::<f64>().unwrap();
+                assert_estimates_close(
+                    (data(result.advantages), data(result.value_targets)),
+                    (returns.clone(), returns.clone()),
+                    dtype,
+                );
+            }
         }
     }
 
