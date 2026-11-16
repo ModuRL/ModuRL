@@ -134,19 +134,25 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
+      - name: Cache MuJoCo 3.9.0
+        id: mujoco-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.MUJOCO_DOWNLOAD_DIR }}/mujoco-3.9.0
+          key: ${{ runner.os }}-${{ runner.arch }}-mujoco-3.9.0
       - name: Install latest stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - name: Install MuJoCo 3.9.0 on macOS
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.mujoco-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
 
           dmg="$RUNNER_TEMP/mujoco-3.9.0-macos-universal2.dmg"
           mount_point="$RUNNER_TEMP/mujoco-3.9.0-mount"
-          install_dir="$RUNNER_TEMP/mujoco-3.9.0-manual"
+          install_dir="$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0"
           expected_sha256="a1229a5d068f52272a329c0962090b9cd0639eff04db48d08ecd2deaaf4a8780"
 
           curl --fail --location --retry 3 \
@@ -171,16 +177,22 @@ jobs:
           fi
           cp -R "$framework_source" "$install_dir/mujoco.framework"
 
+          cleanup
+          trap - EXIT
+      - name: Configure MuJoCo runtime library path on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          install_dir="$MUJOCO_DOWNLOAD_DIR/mujoco-3.9.0"
           framework_dir="$install_dir/mujoco.framework/Versions/Current"
           framework_library="$framework_dir/libmujoco.3.9.0.dylib"
           if [[ ! -f "$framework_library" ]]; then
             echo "MuJoCo framework library was not found at $framework_library" >&2
             exit 1
           fi
-          ln -s "$framework_library" "$install_dir/libmujoco.dylib"
-
-          cleanup
-          trap - EXIT
+          ln -sf "$framework_library" "$install_dir/libmujoco.dylib"
 
           printf 'MUJOCO_DYNAMIC_LINK_DIR=%s\n' "$install_dir" >> "$GITHUB_ENV"
           printf 'DYLD_LIBRARY_PATH=%s\n' \
@@ -262,6 +274,11 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: "valgrind --error-exitcode=1 --leak-check=no"
     steps:
       - uses: actions/checkout@v7
+      - name: Cache MuJoCo 3.9.0
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.MUJOCO_DOWNLOAD_DIR }}/mujoco-3.9.0
+          key: ${{ runner.os }}-${{ runner.arch }}-mujoco-3.9.0
       - name: Install latest stable Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install native memory test dependencies
