@@ -16,7 +16,9 @@ Implemented Gymnasium v5 environments:
 
 ## Installation
 
-MuJoCo 3.9 is automatically downloaded by `mujoco-rs` on Windows and Linux. A clone of this repository works without extra configuration because [`.cargo/config.toml`](../../.cargo/config.toml) supplies a project-local cache. On Windows, this crate's build script also copies `mujoco.dll` next to Cargo-built executables and tests.
+MuJoCo 3.9 is automatically downloaded by `mujoco-rs` on Windows and Linux. A clone of this repository uses a project-local cache supplied by [`.cargo/config.toml`](../../.cargo/config.toml).
+
+On Windows, `cargo run` and `cargo test` need no runtime configuration. The build script stages `mujoco.dll` in its own `OUT_DIR` and emits a library search path that Cargo adds to the runtime environment, independently of Cargo's executable layout. Standalone executables run outside Cargo need `mujoco.dll` and its license and third-party notices next to them.
 
 When adding `modurl_mujoco` as a dependency, Cargo does not read configuration files from dependencies. Add this to the consuming project's `.cargo/config.toml`:
 
@@ -103,7 +105,7 @@ viewers should be created on the application's main thread. Without the
 MuJoCo is Apache-2.0, `mujoco-rs` is used under its MIT option, and the
 Gymnasium-derived XML models retain their upstream MIT notice in
 [`assets/LICENSE`](assets/LICENSE). When available, the build places MuJoCo's
-license and third-party notice files beside Cargo output automatically. Keep
+license and third-party notice files in the crate's `OUT_DIR` automatically. Copy
 those files with any binary distribution that includes the MuJoCo library.
 
 ## Parity tests
