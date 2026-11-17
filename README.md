@@ -22,15 +22,14 @@ cd ModuRL
 cargo run --release -p examples --example ppo_cartpole
 ```
 
-The same `Gym` and `Space` traits used by training agents also support direct environment interaction:
+The same `Gym`, `ObservationSpace`, and `ActionSpace` traits used by training agents also support direct environment interaction:
 
 ```rust
 use burn::tensor::Device;
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
-use modurl_gym::EnvironmentError;
 
-fn main() -> Result<(), EnvironmentError> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::flex();
     let mut env = CartPoleV1::builder().seed(7).build()?;
 
@@ -64,7 +63,7 @@ The suite measures throughput, not final reward or sample efficiency. Emulator v
 
 - Training algorithms: PPO, A2C, SAC, DDPG, TD3, DQN, and Double DQN.
 - Models and policies: MLPs, shared or separate actor-critic networks, categorical and Gaussian policies, transformed distributions, and user-supplied models.
-- Experience: rollout buffers, replay buffers, configurable replay devices, and parameter schedules.
+- Experience: on-policy rollout batching, replay buffers, configurable replay devices, and parameter schedules.
 - Environments: single and vectorized interfaces, classic control, Box2D, MuJoCo, and Atari integrations.
 - Wrappers: time limits, observation and reward normalization, reward clipping, frame stacking, max-and-skip, and raw reward recording.
 - Logging: algorithm-specific hooks, terminal graphs, and TensorBoard event output.
@@ -104,7 +103,7 @@ The public boundaries make each part replaceable:
 
 | Decision | Available choices |
 | --- | --- |
-| Environment execution | Implement `Gym` for one environment or `MultiGym` for a batch. Collect `Gym` implementations with `VectorizedGymWrapper::from(envs)`, or enable `multithreading` and use `MultithreadedVectorizedGymWrapper`. |
+| Environment execution | Implement `Gym` for one environment or `MultiGym` for a batch. Collect `Gym` implementations with `VectorizedGymWrapper::new(envs)` (or `::from(env)` for one environment), or enable `multithreading` and use `MultithreadedVectorizedGymWrapper`. |
 | Network topology | Use `SeparatePPONetwork` for independent actor and critic modules, or `SharedPPONetwork` for one trunk with policy and value heads. |
 | Policy representation | Wrap a model in `ProbabilisticPolicyModel`. Choose a categorical, Gaussian, transformed, or application-defined `Distribution`. |
 | Training state and devices | On-policy agents use rollout storage. Replay agents optimize on the model device and store replay there or on an optional `.replay_device(..)`; observations retain their native dtype. |
