@@ -588,7 +588,9 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
     agent.learn(&mut environment, 2).unwrap();
     let batch = agent.replay.as_ref().unwrap().sample().unwrap();
     assert_eq!(batch.next_observations.device(), Device::ndarray());
-    assert_eq!(numbers(batch.next_observations), [10.0; 2]);
+    let mut next_observations = numbers(batch.next_observations);
+    next_observations.sort_by(f64::total_cmp);
+    assert_eq!(next_observations, [1.0, 10.0]);
     assert_eq!(numbers(batch.collection_policy_entropies), [0.0; 2]);
     assert_eq!(numbers(batch.entropy_change_weights), [0.0; 2]);
     agent.learn(&mut environment, 2).unwrap();

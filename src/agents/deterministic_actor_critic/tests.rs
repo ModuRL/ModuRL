@@ -475,7 +475,7 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
         .storage_mut()
         .gather(&[2, 3])
         .unwrap();
-    assert_eq!(numbers(batch.next_observations), [2.0, 2.0]);
+    assert_eq!(numbers(batch.next_observations), [1.0, 2.0]);
     assert_eq!(
         batch
             .terminated

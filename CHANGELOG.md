@@ -238,6 +238,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Capacity counts transitions, without environment-count alignment; the observation pool has `capacity + max(reserved_slots, batch_size)` rows,
   growing slot reservations as needed. Early eviction may reclaim observation rows, but at least `batch_size` collected transitions remain sampleable,
   even with one-step terminated or truncated episodes.
+  Terminal transitions share their current observation row as next; truncated transitions retain the real next observation for bootstrapping.
 - Removed `ReplayStorageError::EnvironmentCountMismatch` and `ExperienceBatchError::BoolFieldLengthMismatch`; update exhaustive matches.
   `ReplayStorageError::InvalidReplayAlignment` now rejects only zero capacity or environment count.
   Added `ReplayStorageError::InvalidStart`, `ObservationPoolExhausted`, and `InvalidMinimumRetention`.

@@ -278,6 +278,7 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
                 start,
                 transitions.observations,
                 transitions.next_observations,
+                &transitions.dones,
                 ends,
                 &transitions.slots,
             )?;
@@ -441,16 +442,16 @@ mod tests {
                 .into_data()
                 .try_to_vec::<u64>()
                 .unwrap(),
-            [8]
+            [u64::MAX - 2]
         );
-        assert_eq!(storage.sampleable_len(4), 3);
+        assert_eq!(storage.sampleable_len(4), 4);
         let mut wrapped = integer_transitions(&device);
         wrapped.observations = Tensor::from_data([[5u64], [6]], (&device, DType::U64));
         wrapped.truncateds = vec![false, false];
         storage.insert(0, wrapped).unwrap();
-        assert_eq!(storage.sampleable_len(4), 3);
-        assert_eq!(storage.sample_index(0, 4), 3);
-        assert_eq!(storage.sample_index(1, 4), 0);
+        assert_eq!(storage.sampleable_len(4), 4);
+        assert_eq!(storage.sample_index(0, 4), 2);
+        assert_eq!(storage.sample_index(1, 4), 3);
         assert_eq!(
             before.observations.into_data().try_to_vec::<u64>().unwrap(),
             [u64::MAX - 1, u64::MAX - 2]
@@ -659,7 +660,7 @@ mod tests {
                 .into_data()
                 .try_to_vec::<u64>()
                 .unwrap(),
-            [7, 8]
+            [7, u64::MAX - 2]
         );
     }
 

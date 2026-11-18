@@ -235,6 +235,7 @@ where
                 start,
                 transitions.observations,
                 transitions.next_observations,
+                &transitions.dones,
                 ends,
                 &transitions.slots,
             )?;
@@ -488,7 +489,7 @@ mod tests {
                 .into_data()
                 .try_to_vec::<i64>()
                 .unwrap(),
-            [10, 20]
+            [10, 2]
         );
         let invalid = integer_transitions(&device, DType::I32);
         assert!(matches!(
@@ -520,13 +521,13 @@ mod tests {
                 .into_data()
                 .try_to_vec::<i64>()
                 .unwrap(),
-            [20]
+            [2]
         );
-        assert_eq!(storage.sampleable_len(4), 3);
+        assert_eq!(storage.sampleable_len(4), 4);
         storage
             .insert(0, integer_transitions(&device, DType::I64))
             .unwrap();
-        assert_eq!(storage.sampleable_len(4), 3);
+        assert_eq!(storage.sampleable_len(4), 4);
     }
 
     #[test]

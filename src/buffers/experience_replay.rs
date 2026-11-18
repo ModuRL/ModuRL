@@ -315,12 +315,14 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
     /// Signal an episode end before resetting or reusing a slot for a new stream.
     /// Each slot continues until an episode end; absent slots write nothing.
     /// Cached next rows are reused only while their contents have not been overwritten.
+    /// Terminal transitions reuse their current row as next; consumers must mask bootstrap by done.
     /// Slots have already been validated at the collection boundary.
     pub(crate) fn insert(
         &mut self,
         start: usize,
         states: Tensor<R, K>,
         next_states: Tensor<R, K>,
+        dones: &[bool],
         ends: &[bool],
         slots: &[usize],
     ) -> Result<usize, ReplayStorageError> {
@@ -352,19 +354,20 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
                 });
             }
         }
-        if ends.len() != count {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "episode ends",
-                expected: count,
-                actual: ends.len(),
-            });
+        for (field, actual) in [("dones", dones.len()), ("episode ends", ends.len())] {
+            if actual != count {
+                return Err(ReplayStorageError::BatchLengthMismatch {
+                    field,
+                    expected: count,
+                    actual,
+                });
+            }
         }
         if count == 0 {
             return Ok(0);
         }
         self.reserve_slots(slots)?;
         let device = self.observations.tensor().device();
-        let next_states = next_states.to_device(&device).without_autodiff();
         for offset in 0..count {
             while self.transitions[(start + offset) % capacity].is_some() {
                 self.evict_oldest();
@@ -378,30 +381,49 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
             }
             self.references[*row] += 1;
         }
-        let mut missing = Vec::new();
+        let mut source_rows = Vec::new();
         let mut written_rows = Vec::new();
         for (offset, row) in obs_rows.iter_mut().enumerate() {
             if row.is_none() {
                 let allocated = self.allocate_row()?;
                 *row = Some(allocated);
-                missing.push(offset);
+                source_rows.push(offset);
                 written_rows.push(allocated);
             }
         }
-        if !missing.is_empty() {
+        if !source_rows.is_empty() {
             let state_device = states.device();
-            let states = if missing.len() == count {
+            let states = if source_rows.len() == count {
                 states
             } else {
-                states.select(0, replay_index_tensor(&missing, &state_device)?)
+                states.select(0, replay_index_tensor(&source_rows, &state_device)?)
             };
             self.write_rows(&written_rows, states.to_device(&device))?;
         }
-        let next_rows: Vec<_> = (0..count)
-            .map(|_| self.allocate_row())
-            .collect::<Result<_, _>>()?;
-        self.write_rows(&next_rows, next_states)?;
         let obs_rows: Vec<_> = obs_rows.into_iter().flatten().collect();
+        source_rows.clear();
+        written_rows.clear();
+        let mut next_rows = Vec::with_capacity(count);
+        for (offset, &row) in obs_rows.iter().enumerate() {
+            if dones[offset] {
+                self.references[row] += 1;
+                next_rows.push(row);
+            } else {
+                let next = self.allocate_row()?;
+                next_rows.push(next);
+                source_rows.push(offset);
+                written_rows.push(next);
+            }
+        }
+        if !source_rows.is_empty() {
+            let next_states = next_states.to_device(&device).without_autodiff();
+            let next_states = if source_rows.len() == count {
+                next_states
+            } else {
+                next_states.select(0, replay_index_tensor(&source_rows, &device)?)
+            };
+            self.write_rows(&written_rows, next_states)?;
+        }
         self.obs_rows
             .write(start, replay_index_tensor(&obs_rows, &device)?)?;
         self.next_obs_rows
@@ -767,10 +789,17 @@ mod tests {
             (&device, DType::U8),
         );
         replay
-            .insert(0, batch(1), terminals, &[true, false, true], &[0, 1, 2])
+            .insert(
+                0,
+                batch(1),
+                terminals,
+                &[false, false, false],
+                &[true, false, true],
+                &[0, 1, 2],
+            )
             .unwrap();
         replay
-            .insert(3, batch(2), batch(3), &[false; 3], &[0, 1, 2])
+            .insert(3, batch(2), batch(3), &[false; 3], &[false; 3], &[0, 1, 2])
             .unwrap();
         let (_, next) = replay.gather(&[2, 2, 1]).unwrap();
         assert_eq!(next.dtype(), DType::U8);
@@ -779,7 +808,7 @@ mod tests {
             vec![28, 29, 30, 31, 28, 29, 30, 31, 24, 25, 26, 27]
         );
         replay
-            .insert(0, batch(4), batch(5), &[false; 3], &[0, 1, 2])
+            .insert(0, batch(4), batch(5), &[false; 3], &[false; 3], &[0, 1, 2])
             .unwrap();
         let (_, overwritten) = replay.gather(&[0, 2]).unwrap();
         assert_eq!(
@@ -828,6 +857,7 @@ mod tests {
                         Tensor::full([1, 1], time as f32, &device),
                         Tensor::full([1, 1], (time + 1) as f32, &device),
                         &[ended],
+                        &[ended],
                         &[usize::MAX - time],
                     )
                     .unwrap();
@@ -849,6 +879,7 @@ mod tests {
                     start,
                     Tensor::full([3, 1], time as f32, &device),
                     Tensor::full([3, 1], (time + 1) as f32, &device),
+                    &[false; 3],
                     &[false; 3],
                     &[0, 1, 2],
                 )
@@ -883,6 +914,7 @@ mod tests {
                     time % capacity,
                     Tensor::full([1, 1], (time * 10) as f32, &device),
                     Tensor::full([1, 1], (time * 10 + 1) as f32, &device),
+                    &[!truncated],
                     ends,
                     &[0],
                 )?;
@@ -909,6 +941,7 @@ mod tests {
                 Tensor::zeros([0, 1], &device),
                 &[],
                 &[],
+                &[],
             )
             .unwrap();
         assert_eq!(replay.sampleable_len(0), 0);
@@ -918,6 +951,7 @@ mod tests {
                     slot,
                     Tensor::full([1, 1], slot as f32, &device),
                     Tensor::full([1, 1], (slot + 1) as f32, &device),
+                    &[false],
                     &[false],
                     &[slot],
                 )
@@ -937,7 +971,87 @@ mod tests {
     }
 
     #[test]
-    fn terminal_every_step_keeps_at_least_half_capacity_and_correct_rows() {
+    fn done_rows_share_observations_without_continuing_heads() {
+        let device = Device::flex();
+        let mut replay = PointerObservationReplay::<2>::new([8, 1], 1, 0, &device).unwrap();
+        for time in 0..40 {
+            replay
+                .insert(
+                    time % 8,
+                    Tensor::full([1, 1], time as f32, &device),
+                    Tensor::full([1, 1], -1.0, &device),
+                    &[true],
+                    &[true],
+                    &[0],
+                )
+                .unwrap();
+            let (obs, next) = replay.transitions[time % 8].unwrap();
+            assert_eq!(obs, next);
+            assert_eq!(replay.references[obs], 2);
+            assert_eq!(replay.latest.len(), 0);
+            assert_eq!(replay.sampleable_len((time + 1).min(8)), (time + 1).min(8));
+            let (states, next) = replay.gather(&[time % 8]).unwrap();
+            assert_eq!(column_values(states), [time as f64]);
+            assert_eq!(column_values(next), [time as f64]);
+        }
+    }
+
+    #[test]
+    fn mixed_done_and_truncated_rows_preserve_reset_observations() {
+        let device = Device::flex();
+        let mut replay = PointerObservationReplay::<2>::new([8, 1], 3, 5, &device).unwrap();
+        replay
+            .insert(
+                0,
+                Tensor::from_data([[10.0], [20.0], [30.0]], &device),
+                Tensor::from_data([[11.0], [21.0], [31.0]], &device),
+                &[false, true, false],
+                &[false, true, false],
+                &[7, 8, 9],
+            )
+            .unwrap();
+        assert_eq!(replay.cursor, 5);
+        assert_eq!(replay.latest.get(8), None);
+        replay
+            .insert(
+                3,
+                Tensor::from_data([[11.0], [200.0], [31.0]], &device),
+                Tensor::from_data([[12.0], [201.0], [32.0]], &device),
+                &[true, false, false],
+                &[true, false, true],
+                &[7, 8, 9],
+            )
+            .unwrap();
+        assert_eq!(replay.cursor, 8);
+        assert_eq!(replay.latest.get(7), None);
+        assert_eq!(replay.latest.get(9), None);
+        assert!(replay.latest.get(8).is_some());
+        let (states, next) = replay.gather(&[0, 1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(column_values(states), [10.0, 20.0, 30.0, 11.0, 200.0, 31.0]);
+        assert_eq!(column_values(next), [11.0, 20.0, 31.0, 11.0, 201.0, 32.0]);
+        let references = replay.references.clone();
+        let transitions = replay.transitions.clone();
+        assert!(matches!(
+            replay.insert(
+                6,
+                Tensor::zeros([1, 1], &device),
+                Tensor::zeros([1, 1], &device),
+                &[],
+                &[true],
+                &[7],
+            ),
+            Err(ReplayStorageError::BatchLengthMismatch {
+                field: "dones",
+                expected: 1,
+                actual: 0
+            })
+        ));
+        assert_eq!(replay.references, references);
+        assert_eq!(replay.transitions, transitions);
+    }
+
+    #[test]
+    fn truncated_every_step_keeps_at_least_half_capacity_and_correct_rows() {
         let device = Device::flex();
         let capacity = 8;
         let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 1, 0, &device).unwrap();
@@ -949,6 +1063,7 @@ mod tests {
                     time % capacity,
                     Tensor::from_data([[state]], &device),
                     Tensor::from_data([[state + 1.0]], &device),
+                    &[false],
                     &[true],
                     &[0],
                 )
@@ -983,6 +1098,7 @@ mod tests {
                     Tensor::from_data([[state]], &device),
                     Tensor::from_data([[state + 1.0]], &device),
                     &[false],
+                    &[false],
                     &[slot],
                 )
                 .unwrap();
@@ -1013,6 +1129,7 @@ mod tests {
                 Tensor::zeros([2, 1], &device),
                 Tensor::ones([2, 1], &device),
                 &[false; 2],
+                &[false; 2],
                 &[0, 1],
             )
             .unwrap();
@@ -1026,6 +1143,7 @@ mod tests {
                 2,
                 Tensor::ones([2, 1], &device),
                 Tensor::full([2, 1], 2.0, &device),
+                &[false; 2],
                 &[false; 2],
                 &[0, 1],
             )
@@ -1051,6 +1169,7 @@ mod tests {
                 Tensor::zeros([1, 1], &device),
                 Tensor::ones([1, 1], &device),
                 &[false],
+                &[false],
                 &[0],
             )
             .unwrap();
@@ -1060,6 +1179,7 @@ mod tests {
                 1,
                 Tensor::full([1, 1], 10.0, &device),
                 Tensor::full([1, 1], 11.0, &device),
+                &[false],
                 &[false],
                 &[0],
             )
@@ -1083,22 +1203,51 @@ mod tests {
                 batch(vec![1.0, 10.0]),
                 batch(vec![2.0, 11.0]),
                 &[false; 2],
+                &[false; 2],
                 &[7, 900],
             )
             .unwrap();
         let first_next = replay.transitions[0].unwrap().1;
         replay
-            .insert(2, batch(vec![11.0]), batch(vec![12.0]), &[false], &[900])
+            .insert(
+                2,
+                batch(vec![11.0]),
+                batch(vec![12.0]),
+                &[false],
+                &[false],
+                &[900],
+            )
             .unwrap();
         replay
-            .insert(3, batch(vec![12.0]), batch(vec![13.0]), &[true], &[900])
+            .insert(
+                3,
+                batch(vec![12.0]),
+                batch(vec![13.0]),
+                &[false],
+                &[true],
+                &[900],
+            )
             .unwrap();
         replay
-            .insert(4, batch(vec![2.0]), batch(vec![3.0]), &[true], &[7])
+            .insert(
+                4,
+                batch(vec![2.0]),
+                batch(vec![3.0]),
+                &[false],
+                &[true],
+                &[7],
+            )
             .unwrap();
         assert_eq!(replay.transitions[4].unwrap().0, first_next);
         replay
-            .insert(0, batch(vec![100.0]), batch(vec![101.0]), &[false], &[900])
+            .insert(
+                0,
+                batch(vec![100.0]),
+                batch(vec![101.0]),
+                &[false],
+                &[false],
+                &[900],
+            )
             .unwrap();
         let (states, next) = replay.gather(&[0, 2, 3, 4]).unwrap();
         assert_eq!(column_values(states), [100.0, 11.0, 12.0, 2.0]);
@@ -1106,7 +1255,7 @@ mod tests {
         let transitions = replay.transitions.clone();
         let references = replay.references.clone();
         replay
-            .insert(1, batch(vec![]), batch(vec![]), &[], &[])
+            .insert(1, batch(vec![]), batch(vec![]), &[], &[], &[])
             .unwrap();
         assert_eq!(replay.transitions, transitions);
         assert_eq!(replay.references, references);
@@ -1126,6 +1275,7 @@ mod tests {
                     time % 3,
                     Tensor::from_data([[state]], &device),
                     Tensor::from_data([[next]], &device),
+                    &[false],
                     &[true],
                     &[slot],
                 )
@@ -1156,6 +1306,7 @@ mod tests {
                 0,
                 Tensor::from_data([[false, false]], &device),
                 Tensor::from_data([[false, false]], &device),
+                &[false],
                 &[true],
                 &[0],
             )
@@ -1165,6 +1316,7 @@ mod tests {
                 1,
                 Tensor::from_data([[true, true]], &device),
                 Tensor::from_data([[true, true]], &device),
+                &[false],
                 &[false],
                 &[0],
             )
@@ -1194,7 +1346,14 @@ mod tests {
         );
         let mut replay = PointerObservationReplay::<2>::new([2, 2], 1, 0, &device).unwrap();
         replay
-            .insert(0, input.clone(), input.clone() * 2.0, &[true], &[0])
+            .insert(
+                0,
+                input.clone(),
+                input.clone() * 2.0,
+                &[false],
+                &[true],
+                &[0],
+            )
             .unwrap();
         let (states, next) = replay.gather(&[0]).unwrap();
         assert!(!states.is_autodiff());
@@ -1273,10 +1432,12 @@ mod tests {
         #[test]
         fn sparse_pointer_rows_match_a_transition_model(
             capacity in 3usize..=12,
+            minimum in 0usize..=12,
             steps in vec((any::<[bool; 3]>(), any::<[bool; 3]>(), any::<bool>()), 1..=40),
         ) {
             let device = Device::flex();
-            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 3, 0, &device).unwrap();
+            let min_retained = minimum.min(capacity);
+            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 3, min_retained, &device).unwrap();
             let mut observations = [1.0f32, 2.0, 3.0];
             let mut model = vec![None; capacity];
             let mut position = 0;
@@ -1289,11 +1450,13 @@ mod tests {
                 let states: Vec<_> = slots.iter().map(|&slot| observations[slot]).collect();
                 let next: Vec<_> = (0..count).map(|_| { id += 1.0; id }).collect();
                 let episode_ends: Vec<_> = slots.iter().map(|&slot| ends[slot]).collect();
+                let dones: Vec<_> = slots.iter().map(|&slot| ends[slot] && slot != 1).collect();
                 let batch = |values: Vec<f32>| Tensor::from_data(TensorData::new(values, [count, 1]), &device);
                 let slot_ids: Vec<_> = slots.iter().map(|&slot| [usize::MAX, 100, 9][slot]).collect();
-                replay.insert(position, batch(states.clone()), batch(next.clone()), &episode_ends, &slot_ids).unwrap();
+                replay.insert(position, batch(states.clone()), batch(next.clone()), &dones, &episode_ends, &slot_ids).unwrap();
                 for (offset, &slot) in slots.iter().enumerate() {
-                    model[(position + offset) % capacity] = Some((states[offset] as f64, next[offset] as f64));
+                    let stored_next = if dones[offset] { states[offset] } else { next[offset] };
+                    model[(position + offset) % capacity] = Some((states[offset] as f64, stored_next as f64));
                     if ends[slot] { id += 1.0; observations[slot] = id; }
                     else { observations[slot] = next[offset]; }
                 }
@@ -1302,6 +1465,7 @@ mod tests {
                 let len = replay.sampleable_len(inserted.min(capacity));
                 prop_assert_eq!(replay.transitions.iter().flatten().count(), len);
                 prop_assert!(len >= inserted.min(capacity / 2));
+                prop_assert!(len >= inserted.min(min_retained));
                 prop_assert!(len <= inserted.min(capacity));
                 let rows: Vec<_> = (0..len).map(|index| replay.sample_index(index, len)).collect();
                 if !rows.is_empty() {
@@ -1371,21 +1535,23 @@ mod tests {
             let (mut position, mut inserted) = (0, 0);
             for (ends, invalid) in steps {
                 let next_states: Vec<f32> = ids.by_ref().take(n).collect();
+                let dones: Vec<_> = ends.iter().map(|end| *end == EpisodeEnd::Terminate).collect();
                 let truncateds: Vec<_> = ends.iter().map(|end| *end != EpisodeEnd::Continue).collect();
                 let slots: Vec<_> = (0..n).collect();
                 if let Some(invalid) = invalid {
                     let before = gather_all(&replay);
                     let (states, next) = (batch(&observations, DType::F32), batch(&next_states, DType::F32));
                     let error = match invalid {
-                        0 => replay.insert(position, states, Tensor::zeros([n, 2], &device), &truncateds, &slots),
+                        0 => replay.insert(position, states, Tensor::zeros([n, 2], &device), &dones, &truncateds, &slots),
                         1 => replay.insert(
                             position,
                             batch(&observations, DType::F64),
                             batch(&next_states, DType::F64),
+                            &dones,
                             &truncateds,
                          &slots,),
-                        2 => replay.insert(position, states, next, &vec![false; n + 1], &slots),
-                        _ => replay.insert(position, Tensor::zeros([n, 2], &device), next, &truncateds, &slots),
+                        2 => replay.insert(position, states, next, &dones, &vec![false; n + 1], &slots),
+                        _ => replay.insert(position, Tensor::zeros([n, 2], &device), next, &dones, &truncateds, &slots),
                     }
                     .unwrap_err();
                     let expected = ["ShapeMismatch", "DTypeMismatch", "BatchLengthMismatch", "ShapeMismatch"];
@@ -1394,7 +1560,7 @@ mod tests {
                 }
 
                 replay
-                    .insert(position, batch(&observations, DType::F32), batch(&next_states, DType::F32), &truncateds, &slots)
+                    .insert(position, batch(&observations, DType::F32), batch(&next_states, DType::F32), &dones, &truncateds, &slots)
                     .unwrap();
                 for (env, end) in ends.into_iter().enumerate() {
                     let next = (end != EpisodeEnd::Terminate).then_some(next_states[env]);
@@ -1422,6 +1588,8 @@ mod tests {
                     prop_assert_eq!(states[index], f64::from(state), "state at row {}", row);
                     if let Some(expected_next) = expected_next {
                         prop_assert_eq!(next[index], f64::from(expected_next), "next at row {}", row);
+                    } else {
+                        prop_assert_eq!(next[index], f64::from(state), "terminal next at row {}", row);
                     }
                 }
             }

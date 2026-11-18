@@ -344,6 +344,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 start,
                 transitions.observations,
                 transitions.next_observations,
+                &transitions.dones,
                 ends,
                 &transitions.slots,
             )?;

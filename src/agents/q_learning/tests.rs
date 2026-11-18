@@ -787,7 +787,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
             .into_data()
             .try_to_vec::<f32>()
             .unwrap(),
-        [2.0, 2.0]
+        [1.0, 2.0]
     );
     assert_eq!(
         batch
