@@ -84,8 +84,9 @@ jobs:
             # Release tags retain the source configuration they were created
             # with, so set the canonical URL for this versioned build.
             sed -i \
-              "s|^site-url = .*|site-url = \"/ModuRL/$series/\"|" \
+              "s|^site-url = .*|site-url = \"/$series/\"|" \
               "$worktree/docs/book.toml"
+            cp docs/theme/version-switcher.js "$worktree/docs/theme/version-switcher.js"
             mdbook build "$worktree/docs" \
               --dest-dir "$GITHUB_WORKSPACE/_site/$series"
             git worktree remove --force "$worktree"
@@ -118,6 +119,7 @@ jobs:
             printf ']}\n'
           } > _site/versions.json
           touch _site/.nojekyll
+          printf '%s\n' 'docs.modurl.dev' > _site/CNAME
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v5
