@@ -3,7 +3,7 @@
 [![Workspace CI](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml/badge.svg)](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml)
 [![crates.io](https://img.shields.io/crates/v/modurl.svg)](https://crates.io/crates/modurl)
 [![docs.rs](https://docs.rs/modurl/badge.svg)](https://docs.rs/modurl)
-[![book](https://img.shields.io/github/actions/workflow/status/ModuRL/ModuRL/book-pages.yml?branch=master&label=book)](https://modurl.github.io/ModuRL/)
+[![book](https://img.shields.io/github/actions/workflow/status/ModuRL/ModuRL/book-pages.yml?branch=master&label=book)](https://docs.modurl.dev/)
 
 `ModuRL` is a deep reinforcement learning framework for Rust.
 
@@ -110,7 +110,7 @@ The public boundaries make each part replaceable:
 | Training state and devices | On-policy agents use rollout storage. Replay agents optimize on the model device and store replay there or on an optional `.replay_device(..)`; observations retain their native dtype. |
 | Schedules and logging | Use constant, linear, exponential, or application-defined `ParameterSchedule` values. Pass a logger implementation to the agent builder, or omit logging. |
 
-Agents train against these contracts instead of concrete environment, network, or logger types. See [Core Concepts](https://modurl.github.io/ModuRL/dev/core-concepts.html) for how the parts interact.
+Agents train against these contracts instead of concrete environment, network, or logger types. See [Core Concepts](https://docs.modurl.dev/dev/core-concepts.html) for how the parts interact.
 
 ## Workspace crates
 
@@ -134,7 +134,7 @@ support.
 
 ## Documentation
 
-The [ModuRL Guide](https://modurl.github.io/ModuRL/dev/) covers the training algorithms, environment interfaces, models, policies, distributions, and device configuration.
+The [ModuRL Guide](https://docs.modurl.dev/dev/) covers the training algorithms, environment interfaces, models, policies, distributions, and device configuration.
 
 Build the core API documentation locally:
 

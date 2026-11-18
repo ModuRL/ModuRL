@@ -1,7 +1,7 @@
 (() => {
-  const siteBase = "/ModuRL/";
+  const siteBase = "/";
   const match = window.location.pathname.match(
-    /^\/ModuRL\/([^/]+)\/(.*)$/,
+    /^\/([^/]+)\/(.*)$/,
   );
 
   if (!match) {

@@ -6,5 +6,5 @@ src = "src"
 
 [output.html]
 git-repository-url = "https://github.com/ModuRL/ModuRL"
-site-url = "/ModuRL/dev/"
+site-url = "/dev/"
 additional-js = ["theme/version-switcher.js"]
