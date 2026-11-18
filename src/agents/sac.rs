@@ -1371,6 +1371,7 @@ where
                 .observation_dtype(observations.dtype())
                 .action_dtype(actions.dtype())
                 .environment_count(count)
+                .min_retained(self.batch_size)
                 .dtype(self.dtype)
                 .device(storage_device.clone())
                 .build()?;

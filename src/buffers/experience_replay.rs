@@ -44,6 +44,8 @@ pub enum ReplayStorageError {
         capacity: usize,
         environment_count: usize,
     },
+    #[error("minimum replay retention {minimum} exceeds capacity {capacity}")]
+    InvalidMinimumRetention { capacity: usize, minimum: usize },
     #[error("replay capacity {capacity} overflows when adding {additional} items")]
     CapacityOverflow { capacity: usize, additional: usize },
     #[error("the replay environment count is not set")]
@@ -224,11 +226,11 @@ impl ReplaySlotHeads {
     }
 }
 
-/// Stores native observations `[capacity + reserved_slots, ...item_shape]` with Int pointers.
-/// Slot reservation starts at the environment count and grows geometrically for live heads.
+/// Stores native observations `[capacity + max(reserved_slots, min_retained), ...item_shape]` with Int pointers.
+/// Reservation starts at max(environment count, min_retained) and grows geometrically for live heads.
 /// Continuous streams retain the full transition capacity with one cached head per slot.
-/// Short or discontinuous episodes may evict oldest transitions before reaching capacity
-/// to reclaim observation rows; at least half capacity fits even without any row reuse.
+/// Short or discontinuous episodes may evict oldest transitions early, but retain at least
+/// min_retained transitions once collected, even without observation row reuse.
 pub(crate) struct PointerObservationReplay<const R: usize, K: Autodiff = Float> {
     observations: TensorReplayColumn<R, K>,
     obs_rows: TensorReplayColumn<1, Int>,
@@ -252,18 +254,27 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
         shape
     }
 
-    /// Allocates native observations `[capacity + environment_count, ...item_shape]` and Int pointers `[capacity]`.
-    /// Storage is detached. Environment count reserves the initial per-slot observation heads.
+    /// Allocates detached native observations and Int pointers `[capacity]`.
+    /// Reserves enough rows for live heads and the minimum retained transition count.
     pub(crate) fn new(
         mut shape: [usize; R],
         environment_count: usize,
+        min_retained: usize,
         options: impl Into<TensorCreationOptions>,
     ) -> Result<Self, ReplayStorageError> {
         const {
             assert!(R >= 2, "replay observations require capacity and item axes");
         }
         let capacity = shape[0];
-        shape[0] = validate_replay_alignment(capacity, environment_count)?;
+        validate_replay_alignment(capacity, environment_count)?;
+        if min_retained > capacity {
+            return Err(ReplayStorageError::InvalidMinimumRetention {
+                capacity,
+                minimum: min_retained,
+            });
+        }
+        let slot_capacity = environment_count.max(min_retained);
+        shape[0] = validate_replay_alignment(capacity, slot_capacity)?;
         let options = options.into();
         let device = options.device.clone().without_autodiff();
         Ok(Self {
@@ -278,7 +289,7 @@ impl<const R: usize, K: Autodiff> PointerObservationReplay<R, K> {
                 sparse: HashMap::new(),
                 count: 0,
             },
-            slot_capacity: environment_count,
+            slot_capacity,
             oldest: 0,
             len: 0,
             free_rows: shape[0],
@@ -749,7 +760,7 @@ mod tests {
     fn terminal_patches_preserve_bytes_duplicates_and_overwrites() {
         let device = Device::flex();
         let mut replay =
-            PointerObservationReplay::<3, Int>::new([6, 2, 2], 3, (&device, DType::U8)).unwrap();
+            PointerObservationReplay::<3, Int>::new([6, 2, 2], 3, 0, (&device, DType::U8)).unwrap();
         let batch = |value: u8| Tensor::<3, Int>::full([3, 2, 2], value, (&device, DType::U8));
         let terminals = Tensor::from_data(
             TensorData::new((20u8..32).collect(), [3, 2, 2]),
@@ -808,7 +819,8 @@ mod tests {
         let device = Device::flex();
         let capacity = 8;
         for ended in [true, false] {
-            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 1, &device).unwrap();
+            let mut replay =
+                PointerObservationReplay::<2>::new([capacity, 1], 1, 0, &device).unwrap();
             for time in 0..400 {
                 replay
                     .insert(
@@ -828,7 +840,7 @@ mod tests {
     #[test]
     fn continuous_observation_allocation_is_capacity_plus_slots() {
         let device = Device::flex();
-        let mut replay = PointerObservationReplay::<2>::new([16, 1], 3, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2>::new([16, 1], 3, 0, &device).unwrap();
         assert_eq!(replay.observations.tensor().dims()[0], 19);
         for time in 0..24 {
             let start = time * 3 % 16;
@@ -850,10 +862,85 @@ mod tests {
     }
 
     #[test]
+    fn one_step_done_episodes_retain_a_sampleable_batch() {
+        assert_one_step_episodes_retain_a_sampleable_batch(false);
+    }
+
+    #[test]
+    fn one_step_truncated_episodes_retain_a_sampleable_batch() {
+        assert_one_step_episodes_retain_a_sampleable_batch(true);
+    }
+
+    fn assert_one_step_episodes_retain_a_sampleable_batch(truncated: bool) {
+        let device = Device::flex();
+        let capacity = 8;
+        let batch_size = 5;
+        let mut replay =
+            PointerObservationReplay::<2>::new([capacity, 1], 1, batch_size, &device).unwrap();
+        for time in 0..40 {
+            insert_replay_rows::<ReplayStorageError>(1, &[!truncated], &[truncated], |ends| {
+                replay.insert(
+                    time % capacity,
+                    Tensor::full([1, 1], (time * 10) as f32, &device),
+                    Tensor::full([1, 1], (time * 10 + 1) as f32, &device),
+                    ends,
+                    &[0],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            let len = replay.sampleable_len((time + 1).min(capacity));
+            assert!(
+                len >= (time + 1).min(batch_size),
+                "step {time}: retained {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_retention_reserves_rows_until_live_heads_outgrow_it() {
+        let device = Device::flex();
+        let mut replay = PointerObservationReplay::<2>::new([8, 1], 1, 5, &device).unwrap();
+        assert_eq!(replay.observations.tensor().dims()[0], 13);
+        replay
+            .insert(
+                0,
+                Tensor::zeros([0, 1], &device),
+                Tensor::zeros([0, 1], &device),
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(replay.sampleable_len(0), 0);
+        for slot in 0..6 {
+            replay
+                .insert(
+                    slot,
+                    Tensor::full([1, 1], slot as f32, &device),
+                    Tensor::full([1, 1], (slot + 1) as f32, &device),
+                    &[false],
+                    &[slot],
+                )
+                .unwrap();
+            assert_eq!(
+                replay.observations.tensor().dims()[0],
+                if slot < 5 { 13 } else { 18 }
+            );
+        }
+        assert!(matches!(
+            PointerObservationReplay::<2>::new([8, 1], 1, 9, &device),
+            Err(ReplayStorageError::InvalidMinimumRetention {
+                capacity: 8,
+                minimum: 9
+            })
+        ));
+    }
+
+    #[test]
     fn terminal_every_step_keeps_at_least_half_capacity_and_correct_rows() {
         let device = Device::flex();
         let capacity = 8;
-        let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 1, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 1, 0, &device).unwrap();
         let mut expected = [(0.0, 0.0); 8];
         for time in 0..100 {
             let state = (time * 10) as f32;
@@ -887,7 +974,7 @@ mod tests {
     #[test]
     fn new_slots_grow_observation_reservation_in_chunks_and_preserve_history() {
         let device = Device::flex();
-        let mut replay = PointerObservationReplay::<2>::new([8, 1], 1, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2>::new([8, 1], 1, 0, &device).unwrap();
         for (time, slot) in [usize::MAX, 40, 20, 10].into_iter().enumerate() {
             let state = time as f32;
             replay
@@ -919,7 +1006,7 @@ mod tests {
     #[test]
     fn continuous_slots_write_only_one_next_row_per_transition() {
         let device = Device::flex();
-        let mut replay = PointerObservationReplay::<2>::new([8, 1], 2, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2>::new([8, 1], 2, 0, &device).unwrap();
         replay
             .insert(
                 0,
@@ -957,7 +1044,7 @@ mod tests {
     #[test]
     fn cleared_streams_preserve_history_without_reusing_reset_observations() {
         let device = Device::flex();
-        let mut replay = PointerObservationReplay::<2>::new([3, 1], 1, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2>::new([3, 1], 1, 0, &device).unwrap();
         replay
             .insert(
                 0,
@@ -985,7 +1072,7 @@ mod tests {
     #[test]
     fn pointer_rows_reuse_continuous_slots_and_preserve_episodes() {
         let device = Device::flex();
-        let mut replay = PointerObservationReplay::<2>::new([5, 1], 2, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2>::new([5, 1], 2, 0, &device).unwrap();
         let batch = |values: Vec<f32>| {
             let count = values.len();
             Tensor::from_data(TensorData::new(values, [count, 1]), &device)
@@ -1028,7 +1115,7 @@ mod tests {
     #[test]
     fn pointer_rows_wrap_without_overwriting_live_observations() {
         let device = Device::flex();
-        let mut replay = PointerObservationReplay::<2>::new([3, 1], 1, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2>::new([3, 1], 1, 0, &device).unwrap();
         let mut expected = [(0.0, 0.0); 3];
         for time in 0..100 {
             let slot = if time % 3 == 0 { usize::MAX } else { 42 };
@@ -1063,7 +1150,7 @@ mod tests {
     #[test]
     fn boolean_observations_preserve_terminal_overrides() {
         let device = Device::flex();
-        let mut replay = PointerObservationReplay::<2, Bool>::new([3, 2], 1, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2, Bool>::new([3, 2], 1, 0, &device).unwrap();
         replay
             .insert(
                 0,
@@ -1105,7 +1192,7 @@ mod tests {
                 .gather(replay_index_tensor(&[0], &storage_device).unwrap())
                 .is_autodiff()
         );
-        let mut replay = PointerObservationReplay::<2>::new([2, 2], 1, &device).unwrap();
+        let mut replay = PointerObservationReplay::<2>::new([2, 2], 1, 0, &device).unwrap();
         replay
             .insert(0, input.clone(), input.clone() * 2.0, &[true], &[0])
             .unwrap();
@@ -1132,11 +1219,11 @@ mod tests {
     fn pointer_storage_rejects_invalid_configurations() {
         let device = Device::flex();
         assert!(matches!(
-            PointerObservationReplay::<2>::new([0, 1], 2, &device),
+            PointerObservationReplay::<2>::new([0, 1], 2, 0, &device),
             Err(ReplayStorageError::InvalidReplayAlignment { .. })
         ));
         assert!(matches!(
-            PointerObservationReplay::<2>::new([usize::MAX - 1, 1], 2, &device),
+            PointerObservationReplay::<2>::new([usize::MAX - 1, 1], 2, 0, &device),
             Err(ReplayStorageError::CapacityOverflow { .. })
         ));
     }
@@ -1189,7 +1276,7 @@ mod tests {
             steps in vec((any::<[bool; 3]>(), any::<[bool; 3]>(), any::<bool>()), 1..=40),
         ) {
             let device = Device::flex();
-            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 3, &device).unwrap();
+            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], 3, 0, &device).unwrap();
             let mut observations = [1.0f32, 2.0, 3.0];
             let mut model = vec![None; capacity];
             let mut position = 0;
@@ -1268,7 +1355,7 @@ mod tests {
         ) {
             let device = Device::flex();
             let n = environment_count;
-            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], n, &device).unwrap();
+            let mut replay = PointerObservationReplay::<2>::new([capacity, 1], n, 0, &device).unwrap();
             let all_rows: Vec<_> = (0..capacity).collect();
             let gather_all = |replay: &PointerObservationReplay<2>| {
                 let (states, next) = replay.gather(&all_rows).unwrap();

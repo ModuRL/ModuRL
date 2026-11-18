@@ -122,6 +122,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
         observation_dtype: DType,
         action_dtype: DType,
         environment_count: usize,
+        #[builder(default)] min_retained: usize,
         dtype: DType,
         device: Device,
     ) -> Result<Self, SACReplayError> {
@@ -141,6 +142,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
         let observations = PointerObservationReplay::new(
             observation_shape,
             environment_count,
+            min_retained,
             (&device, observation_dtype),
         )?;
 

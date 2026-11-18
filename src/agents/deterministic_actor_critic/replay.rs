@@ -145,6 +145,7 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
         action_shape: [usize; A],
         observation_dtype: DType,
         environment_count: usize,
+        #[builder(default)] min_retained: usize,
         dtype: DType,
         device: Device,
     ) -> Result<Self, DeterministicReplayError> {
@@ -172,6 +173,7 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
         let observations = PointerObservationReplay::new(
             observation_shape,
             environment_count,
+            min_retained,
             (&device, observation_dtype),
         )?;
         Ok(Self {

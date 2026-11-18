@@ -1058,6 +1058,7 @@ where
                 )?)
                 .observation_dtype(transitions.observations.dtype())
                 .environment_count(count)
+                .min_retained(self.batch_size)
                 .dtype(self.dtype)
                 .device(self.replay_storage_config.storage_device())
                 .build()?;

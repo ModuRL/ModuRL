@@ -255,13 +255,14 @@ struct QLearningReplayStorage<const R: usize, K: Autodiff> {
     rewards: TensorReplayColumn<2>,
     next_dones: TensorReplayColumn<2, Bool>,
     observation_storage_shape: [usize; R],
+    min_retained: usize,
     device: Device,
 }
 
 impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
     /// Configures observation storage [capacity, ...observation_shape], Int actions [capacity, 1], and scalar statistics [capacity, 1].
     /// The first observation batch selects the observation dtype. All stored experience has no autodiff graph.
-    fn new(observation_storage_shape: [usize; R], device: Device) -> Self {
+    fn new(observation_storage_shape: [usize; R], min_retained: usize, device: Device) -> Self {
         const {
             assert!(R >= 2, "observations require batch and item axes");
         }
@@ -277,6 +278,7 @@ impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
             ),
             next_dones: TensorReplayColumn::new([observation_storage_shape[0], 1], &device),
             observation_storage_shape,
+            min_retained,
             device,
         }
     }
@@ -327,6 +329,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 Some(PointerObservationReplay::new(
                     self.observation_storage_shape,
                     count,
+                    self.min_retained,
                     (&self.device, dtype),
                 )?)
             } else {
@@ -510,6 +513,7 @@ where
                 .ok_or(QLearningConfigurationError::ModelDevice)?;
         let replay_storage = QLearningReplayStorage::<R, S::Kind>::new(
             observation_storage_shape,
+            batch_size,
             replay_storage_config.storage_device(),
         );
         let optimization_device = replay_storage_config.optimization_device();

@@ -235,11 +235,12 @@ they do not imply that all workspace packages build together. See [Remaining mig
   and `ItemShapeMismatch` are removed. `UninitializedEnvironmentCount` becomes `EnvironmentCountNotSet`.
   Added `ReplayStorageError::IndexTooLarge` for indices outside the signed 64-bit range.
 - SAC, DQN/DDQN, and DDPG/TD3 replay stores only real transitions, using pointers into shared observation rows.
-  Capacity counts transitions, without environment-count alignment; the observation pool is approximately capacity plus reserved live-slot heads,
-  growing slot reservations as needed. Short episodes can evict oldest transitions before capacity is reached to reclaim observation rows.
+  Capacity counts transitions, without environment-count alignment; the observation pool has `capacity + max(reserved_slots, batch_size)` rows,
+  growing slot reservations as needed. Early eviction may reclaim observation rows, but at least `batch_size` collected transitions remain sampleable,
+  even with one-step terminated or truncated episodes.
 - Removed `ReplayStorageError::EnvironmentCountMismatch` and `ExperienceBatchError::BoolFieldLengthMismatch`; update exhaustive matches.
   `ReplayStorageError::InvalidReplayAlignment` now rejects only zero capacity or environment count.
-  Added `ReplayStorageError::InvalidStart` and `ObservationPoolExhausted`.
+  Added `ReplayStorageError::InvalidStart`, `ObservationPoolExhausted`, and `InvalidMinimumRetention`.
 - Removed `ReplayDeviceStrategy` and `ReplayStorageConfig`. SAC, DDPG, TD3, DQN and DDQN optimize on the device of their model parameters,
   which must share one device (`ModelDevice` otherwise, now also on `QLearningConfigurationError`).
   Replay is stored on that device unless the builder sets `.replay_device(..)`.

@@ -568,6 +568,41 @@ mod tests {
     }
 
     #[test]
+    fn one_step_done_episodes_optimize_with_batch_above_half_capacity() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env =
+            VectorizedGymWrapper::new(vec![FixedEnv::new(device.clone().without_autodiff())])
+                .unwrap();
+        let mut agent = DQNAgent::<_, _, VectorizedGymError<Infallible>>::builder()
+            .action_space(Discrete::new(2).unwrap())
+            .observation_space(env.observation_space())
+            .online_q_network(network(&device, DType::F32))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(0.01)
+            .epsilon_schedule(ConstantSchedule::new(0.0))
+            .replay_capacity(8)
+            .batch_size(5)
+            .training_start(0)
+            .update_frequency(1)
+            .target_update_interval(2)
+            .training_horizon(20)
+            .build()
+            .unwrap();
+        for _ in 0..20 {
+            let observations = env.reset().unwrap();
+            let actions = agent.act_for_training(&observations, &mut ()).unwrap();
+            let mut step = env.step(actions.clone()).unwrap();
+            step.dones.fill(true);
+            step.truncateds.fill(false);
+            agent
+                .learn_from_timesteps(&observations, actions, step, &[0])
+                .unwrap();
+        }
+        assert!(agent.inner.optimization_steps > 0);
+    }
+
+    #[test]
     fn caller_collected_steps_advance_the_epsilon_schedule() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();

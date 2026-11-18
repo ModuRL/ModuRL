@@ -411,7 +411,7 @@ fn replay_insert(values: &[f64], device: &Device) -> QLearningInsert<2, Float> {
 fn inactive_rows_are_never_sampled_across_ring_overwrites() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex();
-    let storage = QLearningReplayStorage::<2, Float>::new([4, 1], device.clone());
+    let storage = QLearningReplayStorage::<2, Float>::new([4, 1], 0, device.clone());
     let mut replay = ExperienceReplay::with_storage(storage, 1);
     for _ in 0..8 {
         let mut transitions = replay_insert(&[1.0, 999.0], &device);
@@ -435,7 +435,7 @@ fn inactive_rows_are_never_sampled_across_ring_overwrites() {
 #[test]
 fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
     let device = Device::flex();
-    let mut storage = QLearningReplayStorage::<2, Float>::new([4, 1], device.clone());
+    let mut storage = QLearningReplayStorage::<2, Float>::new([4, 1], 0, device.clone());
     storage
         .insert(0, replay_insert(&[1.0, 2.0], &device))
         .unwrap();
@@ -463,7 +463,7 @@ fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
 #[test]
 fn replay_preserves_native_integer_and_boolean_observations() {
     let device = Device::flex();
-    let mut integer = QLearningReplayStorage::<2, Int>::new([4, 1], device.clone());
+    let mut integer = QLearningReplayStorage::<2, Int>::new([4, 1], 0, device.clone());
     let values = [u64::MAX - 1, u64::MAX - 2];
     integer
         .insert(
@@ -492,7 +492,7 @@ fn replay_preserves_native_integer_and_boolean_observations() {
         batch.observations.into_data().try_to_vec::<u64>().unwrap(),
         values
     );
-    let mut boolean = QLearningReplayStorage::<2, Bool>::new([4, 1], device.clone());
+    let mut boolean = QLearningReplayStorage::<2, Bool>::new([4, 1], 0, device.clone());
     boolean
         .insert(
             0,
@@ -616,7 +616,7 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
 #[test]
 fn matching_replay_rejects_dtype_changes_without_overwriting_existing_rows() {
     let device = Device::flex();
-    let mut storage = QLearningReplayStorage::<2, Float>::new([4, 1], device.clone());
+    let mut storage = QLearningReplayStorage::<2, Float>::new([4, 1], 0, device.clone());
     storage
         .insert(0, replay_insert(&[1.0, 2.0], &device))
         .unwrap();
