@@ -58,11 +58,13 @@ threads. Applications can also implement the public `MultiGym` trait when
 they need a different way to manage or step a batch of environments.
 
 Vectorized environments auto-reset each inner environment when it returns
-`done` or `truncated`. The `states` field in `MultiGymStepInfo` contains the
-next state to continue training from. If an inner environment ended, that next
-state is already the reset state for the next episode.
+`done` or `truncated`. The `observations` field in `MultiGymStepInfo` contains the
+next observation to continue training from. If an inner environment ended, that next
+observation is already the reset observation for the next episode; the final
+observation is kept in `terminal_observations`.
 
-A `Space` describes what observations or actions look like.
+An observation space (`ObservationSpace`) or action space (`ActionSpace`)
+describes what observations or actions look like.
 
 For observations, the space tells you the input shape your networks need. For
 actions, the space tells you what kind of actions the environment accepts.

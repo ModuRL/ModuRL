@@ -170,12 +170,12 @@ impl<AE, GE, SE, CE> From<ExperienceReplayError<DeterministicReplayError>>
 
 /// Metrics from one replay update.
 pub struct DeterministicActorCriticLogEntry<const A: usize = 2> {
-    /// One detached optimization loss [1] per critic.
+    /// One detached optimization loss `[1]` per critic.
     pub critic_losses: Vec<Tensor<1>>,
     /// Each critic's Q predictions for the sampled replay observation-action pairs.
     /// Every tensor is shaped `[batch_size, 1]`.
     pub critic_q_values: Vec<Tensor<2>>,
-    /// Detached negative mean policy Q loss [1].
+    /// Detached negative mean policy Q loss `[1]`.
     ///
     /// This is `None` on updates where TD3 delays the actor.
     pub actor_loss: Option<Tensor<1>>,

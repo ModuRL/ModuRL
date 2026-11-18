@@ -33,7 +33,8 @@ bounds include a size-one batch axis. Invalid rank relationships fail during com
 
 `InputMapMultiGymWrapper` and `OutputMapMultiGymWrapper` callbacks return
 `Result` with a caller-defined error type. Callback errors use
-`TensorMapMultiGymError::Mapping`; environment errors use `Gym`. Callbacks
+`TensorMapMultiGymError::Mapping`; environment errors use
+`TensorMapMultiGymError::Gym`. Callbacks
 must preserve the documented tensor layouts and kinds. Observation normalization
 reports host-read failures through `NormalizeObservationGymError::TensorRead`.
 Output callbacks use the observation space's `Batch` type for batched observations
