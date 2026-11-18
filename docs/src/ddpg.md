@@ -118,7 +118,7 @@ steps. Compact collection advances them only for rows actually passed to the age
 | `gamma` | `0.99` | Finite and between zero and one |
 | `tau` | `0.005` | Target-network update coefficient from zero to one |
 | `exploration_noise` | `0.1` | Non-negative Gaussian standard deviation |
-| `replay_capacity` | `1_000_000` | At least `batch_size`; at first `learn`, larger than and divisible by `env.num_envs()` |
+| `replay_capacity` | `1_000_000` | At least `batch_size`, and at least the number of agent rows inserted per step |
 | `batch_size` | `256` | Nonzero |
 | `update_frequency` | `1` | Nonzero transition interval |
 | `training_start` | `1_000` | Random-action transitions before optimization |
