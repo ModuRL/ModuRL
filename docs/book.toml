@@ -7,4 +7,7 @@ src = "src"
 [output.html]
 git-repository-url = "https://github.com/ModuRL/ModuRL"
 site-url = "/dev/"
-additional-js = ["theme/version-switcher.js"]
+additional-js = ["theme/version-switcher.js", "theme/code-blocks.js", "theme/search-modal.js"]
+additional-css = ["theme/modurl.css"]
+default-theme = "coal"
+preferred-dark-theme = "coal"
