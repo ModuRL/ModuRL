@@ -81,14 +81,38 @@ jobs:
               continue
             fi
 
-            # Release tags retain the source configuration they were created
-            # with, so set the canonical URL for this versioned build.
-            sed -i \
-              "s|^site-url = .*|site-url = \"/$series/\"|" \
-              "$worktree/docs/book.toml"
-            cp docs/theme/version-switcher.js "$worktree/docs/theme/version-switcher.js"
-            mdbook build "$worktree/docs" \
-              --dest-dir "$GITHUB_WORKSPACE/_site/$series"
+            # Keep release content, but share master's theme and navigation.
+            rm -rf "$worktree/docs/theme"
+            cp -a docs/theme "$worktree/docs/theme"
+            python3 - "$worktree/docs" "$series" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          book_dir, series = sys.argv[1:]
+          theme_config = tomllib.loads(Path("docs/book.toml").read_text())["output"]["html"]
+          theme_keys = (
+              "additional-css",
+              "additional-js",
+              "default-theme",
+              "preferred-dark-theme",
+          )
+          build_env = os.environ.copy()
+          for key in theme_keys:
+              if key in theme_config:
+                  name = "MDBOOK_OUTPUT__HTML__" + key.upper().replace("-", "_")
+                  build_env[name] = json.dumps(theme_config[key])
+          build_env["MDBOOK_OUTPUT__HTML__SITE_URL"] = f"/{series}/"
+          destination = Path(os.environ["GITHUB_WORKSPACE"]) / "_site" / series
+          subprocess.run(
+              ["mdbook", "build", book_dir, "--dest-dir", str(destination)],
+              check=True,
+              env=build_env,
+          )
+          PY
             git worktree remove --force "$worktree"
 
             built_series[$series]=1
