@@ -107,7 +107,7 @@ fn ppo_cartpole() {
         .advantage_estimator(GAE::new(0.95).unwrap())
         .num_epochs(10)
         .training_horizon(100_000)
-        .logging_info(&mut logger)
+        .logger(&mut logger)
         .build()
         .unwrap();
 

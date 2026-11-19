@@ -696,7 +696,7 @@ mod schedule_tests {
             .mini_batch_size(2)
             .num_epochs(1)
             .training_horizon(2)
-            .logging_info(&mut logger)
+            .logger(&mut logger)
             .build()
             .unwrap();
         agent.learn(&mut env, 2).unwrap();
@@ -1065,7 +1065,7 @@ mod schedule_tests {
             .mini_batch_size(2)
             .num_epochs(1)
             .training_horizon(2)
-            .logging_info(&mut logger)
+            .logger(&mut logger)
             .build()
             .unwrap();
         assert!(matches!(
@@ -1166,7 +1166,7 @@ mod schedule_tests {
                     .mini_batch_size(2)
                     .num_epochs(1)
                     .training_horizon(2)
-                    .logging_info(&mut logger)
+                    .logger(&mut logger)
                     .build()
                     .unwrap();
 
@@ -1213,7 +1213,7 @@ mod schedule_tests {
                 .mini_batch_size(2)
                 .num_epochs(2)
                 .training_horizon(8)
-                .logging_info(&mut logger)
+                .logger(&mut logger)
                 .build()
                 .unwrap();
             device.seed(42);
@@ -1597,7 +1597,7 @@ mod schedule_tests {
             .mini_batch_size(2)
             .num_epochs(1)
             .training_horizon(4)
-            .logging_info(&mut logger)
+            .logger(&mut logger)
             .build()
             .unwrap();
         agent.learn(&mut env, 2).unwrap();
@@ -1655,7 +1655,7 @@ mod schedule_tests {
             .mini_batch_size(8)
             .num_epochs(1)
             .training_horizon(4)
-            .logging_info(&mut logger)
+            .logger(&mut logger)
             .build()
             .unwrap();
 
@@ -1776,7 +1776,7 @@ mod schedule_tests {
             .mini_batch_size(8)
             .num_epochs(1)
             .training_horizon(8)
-            .logging_info(&mut logger)
+            .logger(&mut logger)
             .build()
             .unwrap();
 

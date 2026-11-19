@@ -137,7 +137,7 @@ fn main() {
         .ent_coef(0.0)
         .vf_coef(0.5)
         .training_horizon(TOTAL_TIMESTEPS)
-        .logging_info(&mut grapher)
+        .logger(&mut grapher)
         .build()
         .unwrap();
 

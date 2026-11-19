@@ -120,7 +120,7 @@ fn main() {
         // SB3 A2C collects five steps from each environment per update.
         .batch_size(rollout_batch_size)
         .training_horizon(TOTAL_TIMESTEPS)
-        .logging_info(&mut grapher)
+        .logger(&mut grapher)
         .build()
         .unwrap();
 

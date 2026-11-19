@@ -188,7 +188,7 @@ fn main() {
         .ent_coef(ENTROPY_COEFFICIENT)
         .gradient_clip(MAX_GRADIENT_NORM)
         .training_horizon(TRAINING_TIMESTEPS)
-        .logging_info(&mut logger)
+        .logger(&mut logger)
         .build()
         .expect("invalid PPO configuration");
 
