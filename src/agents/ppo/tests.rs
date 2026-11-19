@@ -2236,6 +2236,7 @@ mod schedule_tests {
             .unwrap();
         assert_eq!(*batches.lock().unwrap(), vec![vec![20.0, 30.0]]);
         let experience = &agent.rollout_buffer[0];
+        let gamma = agent.gamma as f32;
         let targets = experience
             .prepared
             .as_ref()
@@ -2247,7 +2248,7 @@ mod schedule_tests {
         for (actual, expected) in
             targets
                 .into_iter()
-                .zip([1.0, 1.0 + agent.gamma * 20.0, 1.0 + agent.gamma * 30.0, 1.0])
+                .zip([1.0, 1.0 + gamma * 20.0, 1.0 + gamma * 30.0, 1.0])
         {
             assert!((actual - expected).abs() < 1e-4);
         }
@@ -2257,7 +2258,7 @@ mod schedule_tests {
                 .to_data()
                 .try_to_vec::<f32>()
                 .unwrap(),
-            vec![1.0, 1.0 + agent.gamma * 20.0, 1.0, 1.0]
+            vec![1.0, 1.0 + gamma * 20.0, 1.0, 1.0]
         );
     }
 
