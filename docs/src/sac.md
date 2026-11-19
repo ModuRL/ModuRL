@@ -234,7 +234,9 @@ Important defaults and constraints are:
 Models and automatic log alpha must use the optimization device. Critic outputs must use the configured compute dtype.
 Replay storage is allocated for the first collected transition and retained across `learn` calls.
 Replay preserves native observation kind and first-batch dtype; later observation dtype changes return an error.
-User models or explicit preprocessing perform input conversions. Rewards and policy statistics are converted to compute dtype for optimization.
+User models or explicit preprocessing perform input conversions. Replay stores rewards without casting them;
+environment rewards must match the configured dtype and critic outputs. Policy statistics are still converted to compute dtype.
+For F64 critics, configure the environment to emit F64 rewards or map them explicitly before passing them to the agent.
 The agent owns concrete native policy and critic models; the builder returns `SACConfigurationError` for invalid construction.
 Runtime failures retain policy, critic, environment, space, tensor-read, and replay causes in `SACError`.
 

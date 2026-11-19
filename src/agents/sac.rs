@@ -481,7 +481,7 @@ pub struct SACAgent<'a, G: SACModelTypes, OS, AS, GE, I = (), const A: usize = 2
 impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS, GE, I, A> {
     /// Builds SAC for observations `[batch_size, ...observation_shape]` and environment actions `[batch_size, ...action_shape]`.
     /// Preserves observation kind and dtype; policy and critic models own input conversions. Candidate actions add one axis after batch.
-    /// Models and automatic log alpha must use the optimization device. Critic outputs must use dtype; replay transfers detached tensors to its storage device.
+    /// Models and automatic log alpha must use the optimization device. Critic outputs and environment rewards must use dtype.
     /// Rejects invalid sizes, ranks, dtypes, devices, learning rates, and parameter ranges.
     #[builder]
     pub fn new<

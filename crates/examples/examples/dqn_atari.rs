@@ -112,7 +112,6 @@ fn main() {
     let optimizer = AdamWConfig::new().with_weight_decay(0.0).init();
     let mut grapher = DQNGrapher::atari();
     let mut agent = DQNAgent::builder()
-        .dtype(DType::F32)
         .action_space(action_space)
         .observation_space(observation_space)
         .online_q_network(online_q_network)
