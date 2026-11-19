@@ -28,13 +28,13 @@ impl QLearningTarget for TestTarget {
         next_dones: &Tensor<2, Bool>,
         _online: Option<&Tensor<2>>,
         target: &Tensor<2>,
-        gamma: f32,
+        gamma: f64,
     ) -> Tensor<2> {
         bellman_targets(
             rewards.clone(),
             next_dones.clone(),
             target.clone().max_dim(1),
-            f64::from(gamma),
+            gamma,
         )
     }
 }

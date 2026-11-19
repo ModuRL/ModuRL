@@ -60,18 +60,13 @@ impl QLearningTarget for DDQNTarget {
         next_dones: &Tensor<2, Bool>,
         online_next_q_values: Option<&Tensor<2>>,
         target_next_q_values: &Tensor<2>,
-        gamma: f32,
+        gamma: f64,
     ) -> Tensor<2> {
         let online_next_q_values = online_next_q_values
             .expect("DDQN target calculation requires online next-observation Q values");
         let next_actions = online_next_q_values.clone().argmax(1);
         let next_q_values = selected_action_q_values(target_next_q_values, &next_actions);
-        bellman_targets(
-            rewards.clone(),
-            next_dones.clone(),
-            next_q_values,
-            f64::from(gamma),
-        )
+        bellman_targets(rewards.clone(), next_dones.clone(), next_q_values, gamma)
     }
 }
 
@@ -117,7 +112,7 @@ where
         epsilon_schedule: Box<dyn ParameterSchedule>,
         #[builder(default = 10000)] replay_capacity: usize,
         #[builder(default = 32)] batch_size: usize,
-        #[builder(default = 0.99)] gamma: f32,
+        #[builder(default = 0.99)] gamma: f64,
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         training_horizon: Option<usize>,
