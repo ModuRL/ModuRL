@@ -5,7 +5,7 @@
 [![docs.rs](https://docs.rs/modurl/badge.svg)](https://docs.rs/modurl)
 [![book](https://img.shields.io/github/actions/workflow/status/ModuRL/ModuRL/book-pages.yml?branch=master&label=book)](https://docs.modurl.dev/)
 
-`ModuRL` is a deep reinforcement learning framework for Rust.
+`ModuRL` is a deep reinforcement learning framework for Rust. Learn more at [modurl.dev](https://modurl.dev).
 
 It provides training algorithms, environments, models, policy distributions, storage, schedules, and logging. Tensor shapes, devices, networks, and optimizer configuration remain explicit.
 
