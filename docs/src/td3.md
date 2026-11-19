@@ -104,6 +104,9 @@ every second optimization. On skipped actor updates, logger fields such as
 
 Important defaults and constraints are:
 
+Timesteps and schedule horizons count agent transition rows, not environment
+steps. Compact collection advances them only for rows actually passed to the agent.
+
 | Setting | Default | Constraint or effect |
 | --- | --- | --- |
 | `gamma` | `0.99` | Finite and between zero and one |
@@ -112,7 +115,7 @@ Important defaults and constraints are:
 | `target_policy_noise` | `0.2` | Non-negative target-noise deviation |
 | `target_noise_clip` | `0.5` | Non-negative target-noise bound |
 | `actor_update_interval` | `2` | Nonzero replay-update interval |
-| `replay_capacity` | `1_000_000` | At least `batch_size`; at first `learn`, larger than and divisible by `env.num_envs()` |
+| `replay_capacity` | `1_000_000` | At least `batch_size`, and at least the number of agent rows inserted per step |
 | `batch_size` | `256` | Nonzero |
 | `update_frequency` | `1` | Nonzero transition interval |
 | `training_start` | `1_000` | Random-action transitions before optimization |

@@ -216,6 +216,8 @@ agent.learn(&mut env, total_timesteps)?;
 `training_horizon` defines how many collected transitions parameter schedules
 take to reach their final values. Schedule progress continues across `learn`
 calls and stops at the end of the horizon.
+Transitions here are agent rows, not environment steps: a compact batch advances
+the schedule by its row count, while absent agents do not advance it.
 
 Important defaults and constraints are:
 
@@ -223,7 +225,7 @@ Important defaults and constraints are:
 | --- | --- | --- |
 | `gamma` | `0.99` | Finite and between zero and one |
 | `tau` | `0.005` | Target-network update coefficient from zero to one |
-| `replay_capacity` | `1_000_000` | At least `batch_size`; at first `learn`, larger than and divisible by `env.num_envs()` |
+| `replay_capacity` | `1_000_000` | At least `batch_size`, and at least the number of agent rows inserted per step |
 | `batch_size` | `256` | Nonzero |
 | `training_start` | `1_000` | Random-action collection before optimization |
 | `samples` | `1` | Continuous expectation candidates per observation |

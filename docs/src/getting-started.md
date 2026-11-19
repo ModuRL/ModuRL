@@ -311,3 +311,62 @@ stochastic categorical policy, and a value model. Read [Understand a PPO
 Training Run](./understand-ppo-training.md) to learn what the example's metrics
 show, or [Use Vectorized Environments](./vectorized-environments.md) to work
 directly with batched environments.
+
+## Caller-Owned Multi-Agent Collection
+
+Use `Agent::learn_from_timesteps` when the caller owns collection. Its observation,
+training-action, reward, and termination batches contain only real rows. Pass a
+unique `slots: &[usize]` identifying those rows in the same order; mismatched
+lengths and duplicate IDs return errors. An ordinary `MultiGym` batch uses
+`0..num_envs`.
+
+`MultiAgentGym::reset` returns one `MultiAgentObservations { observations, slots }`
+per agent. Act on those compact observations and pass each agent's actions to
+`step` in its current slot order. Each result contains transition rows in action
+order, plus `next_observations` and `next_slots` for the next action selection:
+
+```rust,ignore
+agent.learn_from_timesteps(
+    &current.observations,
+    training_actions,
+    result.step,
+    &current.slots,
+)?;
+current = MultiAgentObservations {
+    observations: result.next_observations,
+    slots: result.next_slots,
+};
+```
+
+A slot ID identifies a continuous stream, not a batch position. Pass each slot's
+transitions in time order; it may disappear between calls. Its new episode
+starts after a done or truncated row. A death step is the last real row: dead
+agents produce no padding rows. The environment resets a slot when all its
+agents have finished, then includes its reset agents in the next acting rows.
+Set each agent's `training_horizon` for caller-owned scheduling.
+
+Timesteps, rollout sizes, and schedule progress count **agent transition rows**,
+not environment `step` calls. A compact batch of `n` rows advances that agent
+by `n`; missing agents and empty batches advance it by zero. Inactive agents
+therefore reach the same schedule horizon later in world steps. Each agent has
+its own progress; the Tron example's `timestep` counter counts PPO rows only.
+
+Until a slot ends, pass its previous next observation as its next current
+observation. Replay-backed agents may reuse the cached row instead of the row
+you supply. Report done or truncated before externally resetting an environment
+or reusing its slot; omitting a slot does not end its stream.
+
+The `ppo_vs_sac_tron` example demonstrates independent PPO and SAC learners using
+this API.
+
+`tron_ffa` extends this to five players: PPO, A2C, discrete SAC, DQN, and DDQN.
+It uses a 32×32 board and three full-board observation planes (occupied cells,
+own head, other living heads), with absolute actions and no observation rotation.
+Spawn assignments rotate across slots and rounds. Dead players keep their trails
+but produce no rows until the round resets, exercising compact batches and slot gaps.
+Run it with `cargo run --release -p examples --example tron_ffa`.
+`MODURL_TRON_FFA_STEPS` sets world steps (default 256), `MODURL_TRON_FFA_ENVS`
+sets vectorized slots (default 8), and optional `MODURL_TRON_FFA_SECONDS` limits
+training time. Schedules still advance by each learner's own row count.
+The periodic table reports win rate, tied death-order placement, and survival
+length over completed rounds; partial and empty batch counts show compact collection.

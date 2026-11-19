@@ -1200,6 +1200,36 @@ mod tests {
 
     #[test]
     fn failed_first_learn_does_not_fix_default_horizon() {
+        struct EmptyGym(VectorizedGymWrapper<TwoStepTestGym, usize>);
+        impl MultiGym<usize> for EmptyGym {
+            type Error = crate::gym::VectorizedGymError<Infallible>;
+            type ObservationSpace = BoxSpace;
+            type ActionSpace = crate::spaces::Discrete;
+
+            fn num_envs(&self) -> usize {
+                0
+            }
+
+            /// Forwards actions [n, 1] and observations [n, 4].
+            fn step(
+                &mut self,
+                actions: Tensor<2, burn::tensor::Int>,
+            ) -> Result<crate::gym::MultiGymStepInfo<usize>, Self::Error> {
+                self.0.step(actions)
+            }
+
+            /// Returns observations [n, 4].
+            fn reset(&mut self) -> Result<Tensor<2>, Self::Error> {
+                self.0.reset()
+            }
+
+            fn observation_space(&self) -> Self::ObservationSpace {
+                self.0.observation_space()
+            }
+            fn action_space(&self) -> Self::ActionSpace {
+                self.0.action_space()
+            }
+        }
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         let device = Device::flex().autodiff();
         let env = |count| -> VectorizedGymWrapper<TwoStepTestGym, usize> {
@@ -1209,7 +1239,7 @@ mod tests {
                 .try_into()
                 .unwrap()
         };
-        let mut invalid_env = env(3);
+        let mut invalid_env = EmptyGym(env(2));
         let mut valid_env = env(2);
         let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
         let networks = SharedPPONetwork::builder()
@@ -1233,10 +1263,47 @@ mod tests {
         assert!(matches!(
             agent.learn(&mut invalid_env, 100),
             Err(super::super::PPOError::ConfigurationError(
-                PPOConfigurationError::BatchNotDivisibleByEnvironmentCount
+                PPOConfigurationError::ZeroEnvironments
             ))
         ));
         agent.learn(&mut valid_env, 4).unwrap();
+        assert_close(agent.schedule_progress.parameter(&*agent.clip_range), 0.1);
+    }
+
+    #[test]
+    fn nondivisible_environment_batches_train_and_count_real_rows() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let env = |count| -> VectorizedGymWrapper<TwoStepTestGym, usize> {
+            (0..count)
+                .map(|_| TwoStepTestGym::new(device.clone(), false))
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap()
+        };
+        let mut nondivisible_env = env(3);
+        let valid_env = env(2);
+        let actor = ProbabilisticPolicyModel::new(mlp(4, 2, &device), CategoricalDistribution);
+        let networks = SharedPPONetwork::builder()
+            .shared_network(mlp(4, 4, &device))
+            .actor_head(actor)
+            .critic_head(mlp(4, 1, &device))
+            .optimizer(SgdConfig::new().init())
+            .learning_rate(1e-3)
+            .build()
+            .unwrap();
+        let mut agent = PPOAgent::builder()
+            .observation_space(valid_env.observation_space())
+            .action_space(valid_env.action_space())
+            .network_info(networks)
+            .batch_size(2)
+            .mini_batch_size(2)
+            .num_epochs(1)
+            .clip_range(LinearSchedule::new(0.2, 0.1))
+            .build()
+            .unwrap();
+        agent.learn(&mut nondivisible_env, 6).unwrap();
+        assert_eq!(agent.schedule_progress.elapsed_steps(), 6);
         assert_close(agent.schedule_progress.parameter(&*agent.clip_range), 0.1);
     }
 }

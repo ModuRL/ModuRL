@@ -8,6 +8,8 @@ experience replay buffer. You need Rust, Cargo, and the dependencies from
 The program trains for 500,000 environment transitions, so the first complete
 run takes longer than the PPO quick-start. Lower `training_horizon` and the
 argument to `learn` together when you only want to check that the program runs.
+Timesteps and schedule horizons count agent transition rows, not environment
+steps. Compact collection advances them only for rows actually passed to the agent.
 
 ## The Q-Networks
 

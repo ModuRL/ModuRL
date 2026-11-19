@@ -345,9 +345,10 @@ where
         observations: &Tensor<O, OS::Kind>,
         actions: Tensor<A>,
         step: MultiGymStepInfo<I, Tensor<U, OS::Kind>>,
+        slots: &[usize],
     ) -> Result<(), Self::Error> {
         self.inner
-            .learn_from_timesteps(observations, actions, step, &mut self.logging_info)
+            .learn_from_timesteps(observations, actions, step, slots, &mut self.logging_info)
     }
 }
 
@@ -517,7 +518,12 @@ mod tests {
             let actions = agent.act_for_training(&observations, &mut ()).unwrap();
             let step = env.step(actions.clone()).unwrap();
             agent
-                .learn_from_timesteps(&observations, actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    actions,
+                    step,
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
+                )
                 .unwrap();
             drop(agent);
             assert_eq!(logger.updates, 6);
@@ -755,7 +761,7 @@ mod tests {
                 .observation_space(observation_space)
                 .dtype(DType::F32)
                 .exploration_noise(0.0)
-                .replay_capacity(4)
+                .replay_capacity(2)
                 .batch_size(2)
                 .update_frequency(6)
                 .training_start(0)
@@ -789,7 +795,12 @@ mod tests {
             let step = caller_env.step(actions.clone()).unwrap();
             let next_observations = step.observations.clone();
             caller_agent
-                .learn_from_timesteps(&observations, actions, step)
+                .learn_from_timesteps(
+                    &observations,
+                    actions,
+                    step,
+                    &(0..observations.dims()[0]).collect::<Vec<_>>(),
+                )
                 .unwrap();
             observations = next_observations;
         }

@@ -39,7 +39,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - Scalars now have item shape `[1]`, batch shape `[batch_size, 1]`, and frame-stack shape `[stack_size, 1]`.
   The old scalar layouts `[]` and `[batch_size]` are no longer accepted at environment boundaries.
   Rewards, values, log probabilities, entropy, and termination masks also use `[batch_size, 1]`.
-  Rollout scalars use `[time, num_envs, 1]`; candidate scalars use `[batch_size, candidate_count, 1]`.
+  Rollout scalars use flat `[rows, 1]`; candidate scalars use `[batch_size, candidate_count, 1]`.
   Reductions over action components retain a trailing scalar axis. Overall scalar losses remain `[1]`.
 - `Discrete::shape()` now returns `[1]`, rather than a category-logit shape.
   `Discrete::policy_shape()` returns `[action_count]`, including `[1]` for a one-category space.
@@ -67,6 +67,12 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - `Agent::GymError` is replaced by `type Env<'e>`, the environment type `learn` accepts.
   Built-in agents use `dyn MultiGym + 'e` with their gym error type, so environments may borrow locals; `Agent` is no longer dyn compatible.
 - `Agent` gains `type ActContext<'c>`, passed as `&mut` to `act_for_training` and `act`; built-in agents use `()`.
+- `Agent::learn_from_timesteps` now requires `slots: &[usize]`, one unique slot per compact row.
+  PPO, A2C, SAC, DQN, DDQN, DDPG, and TD3 accept changing row counts and arbitrary `usize` slot IDs;
+  duplicate IDs and slot/row length mismatches return `SlotError` through agent errors. Empty batches are no-ops.
+  Pass rows in time order per slot; omitting a slot does not end its stream.
+  Replay-backed agents reuse a continuing slot's cached next observation; report `done` or `truncated` before resetting or reusing it.
+  Timesteps, rollout sizes, and schedules count agent rows, not environment steps.
 - Renamed `ResetInfo::state` and `StepInfo::state` to `observation`.
   Both structures gain an observation tensor type parameter: `ResetInfo<I, T>` and `StepInfo<I, T>`.
 - Renamed `MultiGymStepInfo::states` to `observations`, `terminal_states` to `terminal_observations`,
@@ -109,6 +115,22 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   `NStepError::ZeroSteps`.
 - Add `GAE::with_value_lambda(..)` to use a separate lambda for value targets.
 - Add the built-in `UPGO::new(value_estimator)` advantage estimator for upgoing policy updates.
+- `AdvantageEstimator::estimate` now takes `(AdvantageInput, gamma)`. Migrate custom estimators to validated
+  `AdvantageInput::new` inputs and flat `AdvantageEstimate` tensors `[rows, 1]` instead of `[time, env_count, 1]`.
+  Use `RolloutLayout::dense` for fixed identity-ordered slots or `RolloutLayout::from_steps` for compact per-step slots;
+  invalid layouts or inputs return `RolloutLayoutError`. GAE, NStep, and UPGO support ragged layouts, including gaps and reordered slots.
+- PPO stores compact rollout rows; its internal `PPOExperience` now requires `slots`.
+  `learn()` no longer requires `batch_size % env_count == 0`; rollout thresholds count actual agent rows.
+  Removed `PPOConfigurationError::BatchNotDivisibleByEnvironmentCount`; update exhaustive matches.
+- SAC collection entropy is computed only over live compact observation rows, without padded inactive agents.
+
+### Multi-agent environments
+
+- `MultiAgentGym::reset` now returns `MultiAgentResetResult` containing `MultiAgentObservations` with compact `observations` and `slots` per agent.
+  `step` returns `MultiAgentStepInfo`: `step` contains transitions in action order, while `next_observations` and `next_slots` identify the next acting rows.
+  Migrate loops to act on those next rows and pass the acting slots to `learn_from_timesteps`; do not pad inactive agents.
+- Agents may end independently; a dead agent produces its final done transition, then no rows until the slot resets.
+  Slots auto-reset after all agents end, retaining terminal observations. Invalid agent or action-row counts must return recoverable errors.
 
 - Added `MultiAgentGym` in `modurl::multi_agent` and the prelude: an ordered group of agents sharing a fixed batch of slots,
   with per-agent spaces, one observation and action batch per agent, joint episode ends, and auto-reset.
@@ -218,6 +240,14 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   `ExperienceReplayError::TensorError` and `ReplayStorageError::TensorError`, `MissingBatchDimension`,
   and `ItemShapeMismatch` are removed. `UninitializedEnvironmentCount` becomes `EnvironmentCountNotSet`.
   Added `ReplayStorageError::IndexTooLarge` for indices outside the signed 64-bit range.
+- SAC, DQN/DDQN, and DDPG/TD3 replay stores only real transitions, using pointers into shared observation rows.
+  Capacity counts transitions, without environment-count alignment; the observation pool has `capacity + max(reserved_slots, batch_size)` rows,
+  growing slot reservations as needed. Early eviction may reclaim observation rows, but at least `batch_size` collected transitions remain sampleable,
+  even with one-step terminated or truncated episodes.
+  Terminal transitions share their current observation row as next; truncated transitions retain the real next observation for bootstrapping.
+- Removed `ReplayStorageError::EnvironmentCountMismatch` and `ExperienceBatchError::BoolFieldLengthMismatch`; update exhaustive matches.
+  `ReplayStorageError::InvalidReplayAlignment` now rejects only zero capacity or environment count.
+  Added `ReplayStorageError::InvalidStart`, `ObservationPoolExhausted`, and `InvalidMinimumRetention`.
 - Removed `ReplayDeviceStrategy` and `ReplayStorageConfig`. SAC, DDPG, TD3, DQN and DDQN optimize on the device of their model parameters,
   which must share one device (`ModelDevice` otherwise, now also on `QLearningConfigurationError`).
   Replay is stored on that device unless the builder sets `.replay_device(..)`.
@@ -267,5 +297,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 - Added exports for `Forward`, `ModelError`, `PolicyTypes`, `ObservationSpace`, `ActionSpace`, `ActionMap`, `SpaceError`,
   `DistributionTensorError`, `QLearningReplayError`, `NextRank`, `PrevRank`, and the new input/output/device wrappers.
+- Added exports for `AdvantageInput`, `RolloutLayout`, `RolloutLayoutError`, `MultiAgentObservations`,
+  `MultiAgentResetResult`, `MultiAgentStepInfo`, and `SlotError`.
 - Removed exports for `Space`, `TensorMapMultiGymWrapper`, and the three removed MLP initializer types.
   Buffer and sampling errors remain available through their defining modules.
