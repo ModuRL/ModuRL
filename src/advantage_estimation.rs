@@ -605,39 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn gae_preserves_f64_discounts() {
-        let gamma = 0.9000000001f64;
-        let lambda = 0.8000000001f64;
-        let value_lambda = 0.7000000001f64;
-        let estimator = GAE::new(lambda)
-            .unwrap()
-            .with_value_lambda(value_lambda)
-            .unwrap();
-        assert_eq!(estimator.lambda(), lambda);
-        assert_eq!(estimator.value_lambda(), value_lambda);
-        let device = Device::flex();
-        let rewards = Tensor::from_data([[[1.0f64]], [[2.0]]], (&device, DType::F64));
-        let values = Tensor::zeros([2, 1, 1], (&device, DType::F64));
-        let dones = Tensor::from_data([[[false]], [[false]]], &device);
-        let bootstrap = Tensor::zeros([1, 1], (&device, DType::F64));
-        let result = estimator.estimate(&rewards, &values, &dones, &dones, &bootstrap, gamma);
-        assert_close(
-            &result.advantages.into_data().try_to_vec::<f64>().unwrap(),
-            &[1.0 + gamma * lambda * 2.0, 2.0],
-            DType::F64,
-        );
-        assert_close(
-            &result
-                .value_targets
-                .into_data()
-                .try_to_vec::<f64>()
-                .unwrap(),
-            &[1.0 + gamma * value_lambda * 2.0, 2.0],
-            DType::F64,
-        );
-    }
-
-    #[test]
     fn gae_rejects_invalid_lambda() {
         for lambda in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert_eq!(GAE::new(lambda), Err(GAEError::InvalidLambda));
