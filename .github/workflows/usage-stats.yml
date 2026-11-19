@@ -1,0 +1,62 @@
+name: Usage stats
+
+# Records crates.io downloads and GitHub adoption metrics on the `usage-stats`
+# branch. GitHub only keeps 14 days of traffic, so the daily run is what makes
+# a long-term history. Traffic needs a USAGE_STATS_TOKEN secret: a fine-grained
+# token with read-only "Administration" access to ModuRL/ModuRL and
+# ModuRL/Modurl-Site. Without it, traffic is skipped and the rest still runs.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: usage-stats
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: Collect usage stats
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Check out stats branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin usage-stats >/dev/null; then
+            git fetch --depth=1 origin usage-stats
+            git worktree add stats FETCH_HEAD
+            git -C stats checkout -B usage-stats
+          else
+            git worktree add --detach stats
+            git -C stats checkout --orphan usage-stats
+            git -C stats rm -rf --quiet .
+          fi
+
+      - name: Collect
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          USAGE_STATS_TOKEN: ${{ secrets.USAGE_STATS_TOKEN }}
+        run: python3 .github/usage-stats/collect.py stats
+
+      - name: Commit
+        shell: bash
+        working-directory: stats
+        run: |
+          set -euo pipefail
+          git add --all
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898729+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "Usage stats for $(date -u +%F)"
+          git push origin usage-stats
