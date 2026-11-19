@@ -6,7 +6,7 @@ use crate::tensor_rank::TensorBatchTypes;
 
 /// An ordered group of agents sharing a fixed batch of environment slots.
 /// `O` and `A` are batch ranks; kinds and devices follow each agent's spaces.
-/// Episodes end jointly: dones and truncateds must be identical across agents.
+/// Episodes end jointly: `terminated` and `truncated` must be identical across agents.
 /// Ended slots auto-reset, retaining each agent's terminal observation.
 pub trait MultiAgentGym<I = (), const O: usize = 2, const A: usize = 2> {
     type Error;

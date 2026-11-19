@@ -551,7 +551,7 @@ mod tests {
             .unwrap();
         assert_eq!(step.observations.dims(), [2, 1]);
         assert_eq!(step.rewards.dims(), [2, 1]);
-        assert_eq!(step.dones, [true, true]);
+        assert_eq!(step.terminated, [true, true]);
         assert!(
             step.terminal_observations
                 .iter()
@@ -639,8 +639,8 @@ mod tests {
             }
         );
         let ended = env.step(actions).unwrap();
-        assert_eq!(ended.dones, vec![true, false]);
-        assert_eq!(ended.truncateds, vec![false, true]);
+        assert_eq!(ended.terminated, vec![true, false]);
+        assert_eq!(ended.truncated, vec![false, true]);
         assert_eq!(
             ended
                 .transition_next_observations()
@@ -783,7 +783,7 @@ mod tests {
             b.observations.clone().into_data()
         );
         assert_eq!(a.infos, b.infos);
-        assert_eq!(a.dones, b.dones);
+        assert_eq!(a.terminated, b.terminated);
         assert_eq!(
             a.transition_next_observations().into_data(),
             b.transition_next_observations().into_data()

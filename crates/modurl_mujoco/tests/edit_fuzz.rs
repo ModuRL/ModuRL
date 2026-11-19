@@ -176,7 +176,7 @@ impl MujocoTask for FuzzTask {
     fn transition(&mut self, _: &MujocoState, _: &MujocoState, _: &[f64]) -> TaskStep {
         TaskStep {
             reward: 0.0,
-            done: false,
+            terminated: false,
             truncated: false,
         }
     }

@@ -62,11 +62,11 @@ where
         transitions.push((
             step.observation.to_data(),
             step.reward.to_bits(),
-            step.done,
+            step.terminated,
             step.truncated,
         ));
 
-        if step.done || step.truncated || index == actions.len() / 2 {
+        if step.terminated || step.truncated || index == actions.len() / 2 {
             environment.reset().expect("Failed to reset during replay.");
         }
     }
@@ -77,7 +77,7 @@ where
 struct ExpectedOutput {
     observation: Vec<f32>,
     reward: f32,
-    done: bool,
+    terminated: bool,
     truncated: bool,
     info: Option<serde_json::Value>,
 }
@@ -151,7 +151,7 @@ pub(crate) fn check_discrete_parity<T, E>(
         let action = inputs[i];
         let action_tensor = Tensor::from_data(TensorData::new(vec![action], [1]), &Device::flex());
 
-        if i == 0 || expected_outputs[i - 1].done || expected_outputs[i - 1].truncated {
+        if i == 0 || expected_outputs[i - 1].terminated || expected_outputs[i - 1].truncated {
             reset(&mut environment).expect("Failed to reset environment");
         } else {
             let state_dim = expected_outputs[i - 1].observation.len();
@@ -193,11 +193,11 @@ pub(crate) fn check_discrete_parity<T, E>(
         }
 
         assert!(
-            step_info.done == expected.done,
-            "Mismatch at step {}: expected done {}, got {}",
+            step_info.terminated == expected.terminated,
+            "Mismatch at step {}: expected terminated={}, got {}",
             i + 1,
-            expected.done,
-            step_info.done
+            expected.terminated,
+            step_info.terminated
         );
 
         assert!(

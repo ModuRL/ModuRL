@@ -5,7 +5,7 @@
       -0.001500000013038516
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -14,7 +14,7 @@
       -0.004999974742531776
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -23,7 +23,7 @@
       -0.007499499246478081
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -32,7 +32,7 @@
       -0.008997295051813126
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -41,7 +41,7 @@
       -0.011491348035633564
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -50,7 +50,7 @@
       -0.01497797854244709
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -59,7 +59,7 @@
       -0.018450502306222916
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -68,7 +68,7 @@
       -0.0198987890034914
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -77,7 +77,7 @@
       -0.02131253480911255
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -86,7 +86,7 @@
       -0.02367975190281868
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -95,7 +95,7 @@
       -0.02698393538594246
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -104,7 +104,7 @@
       -0.029202144593000412
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -113,7 +113,7 @@
       -0.030310960486531258
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -122,7 +122,7 @@
       -0.03128913417458534
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -131,7 +131,7 @@
       -0.03211531788110733
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -140,7 +140,7 @@
       -0.03476879000663757
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -149,7 +149,7 @@
       -0.03621804341673851
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -158,7 +158,7 @@
       -0.03643785044550896
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -167,7 +167,7 @@
       -0.03841230273246765
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -176,7 +176,7 @@
       -0.039115577936172485
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -185,7 +185,7 @@
       -0.04053314030170441
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -194,7 +194,7 @@
       -0.040648628026247025
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -203,7 +203,7 @@
       -0.0394594706594944
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -212,7 +212,7 @@
       -0.038977231830358505
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -221,7 +221,7 @@
       -0.03721209987998009
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -230,7 +230,7 @@
       -0.036186583340168
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -239,7 +239,7 @@
       -0.035920076072216034
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -248,7 +248,7 @@
       -0.0334290936589241
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -257,7 +257,7 @@
       -0.031744688749313354
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -266,7 +266,7 @@
       -0.029892249032855034
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -275,7 +275,7 @@
       -0.026896903291344643
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -284,7 +284,7 @@
       -0.02578664757311344
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -293,7 +293,7 @@
       -0.023579107597470284
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -302,7 +302,7 @@
       -0.02229415811598301
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -311,7 +311,7 @@
       -0.01894652284681797
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -320,7 +320,7 @@
       -0.01755385473370552
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -329,7 +329,7 @@
       -0.01612635888159275
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -338,7 +338,7 @@
       -0.013672798871994019
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -347,7 +347,7 @@
       -0.01120163407176733
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -356,7 +356,7 @@
       -0.00971914455294609
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -365,7 +365,7 @@
       -0.007229098118841648
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -374,7 +374,7 @@
       -0.003734804689884186
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -383,7 +383,7 @@
       -0.0022387763019651175
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -392,7 +392,7 @@
       0.0012581419432535768
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -401,7 +401,7 @@
       0.002754573943093419
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -410,7 +410,7 @@
       0.006249817553907633
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -419,7 +419,7 @@
       0.007741732522845268
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -428,7 +428,7 @@
       0.009228309616446495
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -437,7 +437,7 @@
       0.010706773027777672
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -446,7 +446,7 @@
       0.01417344156652689
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -455,7 +455,7 @@
       0.01762058585882187
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -464,7 +464,7 @@
       0.020037293434143066
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -473,7 +473,7 @@
       0.021411189809441566
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -482,7 +482,7 @@
       0.022729868069291115
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -491,7 +491,7 @@
       0.023979468271136284
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -500,7 +500,7 @@
       0.027144866064190865
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -509,7 +509,7 @@
       0.029201453551650047
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -518,7 +518,7 @@
       0.03212578967213631
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -527,7 +527,7 @@
       0.033887624740600586
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -536,7 +536,7 @@
       0.03546035662293434
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -545,7 +545,7 @@
       0.03581785410642624
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -554,7 +554,7 @@
       0.03794237598776817
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -563,7 +563,7 @@
       0.0388060100376606
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   },
   {
@@ -572,7 +572,7 @@
       0.03939129412174225
     ],
     "reward": -1.0,
-    "done": false,
+    "terminated": false,
     "truncated": false
   }
 ]

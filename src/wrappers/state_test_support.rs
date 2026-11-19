@@ -44,7 +44,7 @@ impl Gym for StateTestGym {
         Ok(StepInfo {
             observation: Tensor::from_data([self.rng.random::<f32>()], &self.device),
             reward: self.rng.random::<f32>(),
-            done: self.step_count.is_multiple_of(3),
+            terminated: self.step_count.is_multiple_of(3),
             truncated: false,
             info: (),
         })
@@ -113,7 +113,7 @@ pub(super) fn assert_state_round_trip<G, I, const O: usize, const A: usize, T>(
                 (
                     observation_data(step.observation),
                     step.reward,
-                    step.done,
+                    step.terminated,
                     step.truncated,
                     project_info(&step.info),
                 )
@@ -132,8 +132,8 @@ pub(super) fn assert_state_round_trip<G, I, const O: usize, const A: usize, T>(
 struct SlotStepRecord {
     observations: TensorData,
     rewards: TensorData,
-    dones: Vec<bool>,
-    truncateds: Vec<bool>,
+    terminated: Vec<bool>,
+    truncated: Vec<bool>,
     observation_rows: Vec<TensorData>,
     reward_rows: Vec<TensorData>,
 }
@@ -176,8 +176,8 @@ pub(crate) fn assert_slot_round_trip<G, I, const O: usize, const A: usize>(
                 SlotStepRecord {
                     observations: step.observations.into_data(),
                     rewards: step.rewards.into_data(),
-                    dones: step.dones,
-                    truncateds: step.truncateds,
+                    terminated: step.terminated,
+                    truncated: step.truncated,
                     observation_rows,
                     reward_rows,
                 }
@@ -193,8 +193,8 @@ pub(crate) fn assert_slot_round_trip<G, I, const O: usize, const A: usize>(
     for (first, second) in first_half.iter().zip(&second_half) {
         assert_eq!(first.observation_rows[slot], second.observation_rows[slot]);
         assert_eq!(first.reward_rows[slot], second.reward_rows[slot]);
-        assert_eq!(first.dones[slot], second.dones[slot]);
-        assert_eq!(first.truncateds[slot], second.truncateds[slot]);
+        assert_eq!(first.terminated[slot], second.terminated[slot]);
+        assert_eq!(first.truncated[slot], second.truncated[slot]);
     }
 
     for (index, (actual, expected)) in first_half
@@ -203,7 +203,7 @@ pub(crate) fn assert_slot_round_trip<G, I, const O: usize, const A: usize>(
         .zip(&uninterrupted)
         .enumerate()
     {
-        for other_slot in 0..actual.dones.len() {
+        for other_slot in 0..actual.terminated.len() {
             if other_slot != slot {
                 assert_eq!(
                     actual.observation_rows[other_slot], expected.observation_rows[other_slot],
@@ -213,11 +213,11 @@ pub(crate) fn assert_slot_round_trip<G, I, const O: usize, const A: usize>(
                     actual.reward_rows[other_slot], expected.reward_rows[other_slot],
                     "reward row differs at step {index}, slot {other_slot}",
                 );
-                assert_eq!(actual.dones[other_slot], expected.dones[other_slot]);
                 assert_eq!(
-                    actual.truncateds[other_slot],
-                    expected.truncateds[other_slot]
+                    actual.terminated[other_slot],
+                    expected.terminated[other_slot]
                 );
+                assert_eq!(actual.truncated[other_slot], expected.truncated[other_slot]);
             }
         }
     }
@@ -225,7 +225,7 @@ pub(crate) fn assert_slot_round_trip<G, I, const O: usize, const A: usize>(
     for (actual, expected) in first_half.iter().zip(&uninterrupted) {
         assert_eq!(actual.observations, expected.observations);
         assert_eq!(actual.rewards, expected.rewards);
-        assert_eq!(actual.dones, expected.dones);
-        assert_eq!(actual.truncateds, expected.truncateds);
+        assert_eq!(actual.terminated, expected.terminated);
+        assert_eq!(actual.truncated, expected.truncated);
     }
 }

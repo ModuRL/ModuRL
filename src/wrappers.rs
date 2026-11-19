@@ -540,8 +540,8 @@ mod tests {
                 ],
                 observations,
                 infos: vec![(), ()],
-                dones: vec![false, true],
-                truncateds: vec![false, false],
+                terminated: vec![false, true],
+                truncated: vec![false, false],
             })
         }
 
@@ -610,8 +610,8 @@ mod tests {
             step.rewards.into_data().try_to_vec::<f32>().unwrap(),
             vec![2.0, 4.0]
         );
-        assert_eq!(step.dones, vec![false, true]);
-        assert_eq!(step.truncateds, vec![false, false]);
+        assert_eq!(step.terminated, vec![false, true]);
+        assert_eq!(step.truncated, vec![false, false]);
         assert_eq!(step.infos, vec![(), ()]);
         assert!(step.terminal_observations[0].is_none());
         assert_eq!(
@@ -684,8 +684,8 @@ mod tests {
             observations: Tensor::<2, Int>::from_data([[4i32], [5]], &device),
             rewards: Tensor::zeros([2, 1], &device),
             infos: vec![(), ()],
-            dones: vec![false, true],
-            truncateds: vec![false, false],
+            terminated: vec![false, true],
+            truncated: vec![false, false],
             terminal_observations: vec![None, Some(Tensor::from_data([8i32], &device))],
         };
         transfer_batched_observations(&mut integers, &device);
@@ -706,8 +706,8 @@ mod tests {
             observations: Tensor::<2, Bool>::from_data([[true, false], [false, true]], &device),
             rewards: Tensor::zeros([2, 1], &device),
             infos: vec![(), ()],
-            dones: vec![false, true],
-            truncateds: vec![false, false],
+            terminated: vec![false, true],
+            truncated: vec![false, false],
             terminal_observations: vec![None, Some(Tensor::from_data([true, true], &device))],
         };
         transfer_batched_observations(&mut booleans, &device);
@@ -784,14 +784,14 @@ mod test_support {
         pub(super) fn step(
             observation: f32,
             reward: f32,
-            done: bool,
+            terminated: bool,
             truncated: bool,
             sequence: u32,
         ) -> StepInfo<TestInfo> {
             StepInfo {
                 observation: Tensor::from_data([observation], &Device::flex()),
                 reward,
-                done,
+                terminated,
                 truncated,
                 info: TestInfo { sequence },
             }

@@ -125,7 +125,7 @@ pub(crate) mod test_support {
             Ok(StepInfo {
                 observation: Tensor::zeros([4], (&self.device, DType::F32)),
                 reward: 1.0,
-                done: false,
+                terminated: false,
                 truncated: false,
                 info: (),
             })
@@ -210,7 +210,7 @@ pub(crate) mod test_support {
             Ok(StepInfo {
                 observation: Tensor::zeros([4], (&self.device, DType::F32)),
                 reward: 1.0,
-                done: false,
+                terminated: false,
                 truncated: false,
                 info: (),
             })
@@ -410,8 +410,8 @@ mod tests {
         assert_eq!(step.observations.dims(), [1, 4]);
         assert_eq!(step.observations.dtype(), DType::F32);
         assert_eq!(step.rewards.into_scalar::<f32>(), 1.0);
-        assert_eq!(step.dones, vec![false]);
-        assert_eq!(step.truncateds, vec![false]);
+        assert_eq!(step.terminated, vec![false]);
+        assert_eq!(step.truncated, vec![false]);
 
         let mut continuous = FixedContinuousEnv::new(device.clone());
         assert_eq!(continuous.reset().unwrap().observation.dims(), [4]);
@@ -423,7 +423,7 @@ mod tests {
             .unwrap();
         assert_eq!(step.observations.dims(), [1, 4]);
         assert_eq!(step.rewards.into_scalar::<f32>(), 1.0);
-        assert_eq!(step.dones, vec![false]);
-        assert_eq!(step.truncateds, vec![false]);
+        assert_eq!(step.terminated, vec![false]);
+        assert_eq!(step.truncated, vec![false]);
     }
 }

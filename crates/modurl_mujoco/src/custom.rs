@@ -62,7 +62,7 @@ impl MujocoState {
 #[derive(Debug, Clone, Copy)]
 pub struct TaskStep {
     pub reward: f32,
-    pub done: bool,
+    pub terminated: bool,
     pub truncated: bool,
 }
 
@@ -267,7 +267,7 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
         Ok(StepInfo {
             observation: self.make_observation()?,
             reward: outcome.reward,
-            done: outcome.done,
+            terminated: outcome.terminated,
             truncated: outcome.truncated,
             info: (),
         })

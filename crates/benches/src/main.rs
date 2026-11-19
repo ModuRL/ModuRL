@@ -503,7 +503,7 @@ mod tests {
             Ok(StepInfo {
                 observation: Tensor::full([4, 84, 84], 127, (&Device::flex(), DType::U8)),
                 reward: 1.0,
-                done: false,
+                terminated: false,
                 truncated: true,
                 info: (),
             })

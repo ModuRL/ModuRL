@@ -274,7 +274,7 @@ where
         let mut step = self.gym.step(action)?;
         self.discounted_reward = self.discounted_reward * self.gamma + f64::from(step.reward);
         self.statistics.update(&[self.discounted_reward]);
-        if step.done || step.truncated {
+        if step.terminated || step.truncated {
             self.discounted_reward = 0.0;
         }
 

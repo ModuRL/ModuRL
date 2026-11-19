@@ -112,14 +112,14 @@ where
         let mut observations = Vec::with_capacity(count);
         let mut rewards = Vec::with_capacity(count);
         let mut infos = Vec::with_capacity(count);
-        let mut dones = Vec::with_capacity(count);
-        let mut truncateds = Vec::with_capacity(count);
+        let mut terminated = Vec::with_capacity(count);
+        let mut truncated = Vec::with_capacity(count);
         let mut terminal_observations = Vec::with_capacity(count);
         for (index, env) in self.envs.iter_mut().enumerate() {
             let actions = action.clone().slice([Slice::from(index..index + 1)]);
             let actions = actions.squeeze_dim::<A>(0);
             let mut step = env.step(actions).map_err(VectorizedGymError::Single)?;
-            let ended = step.done || step.truncated;
+            let ended = step.terminated || step.truncated;
             terminal_observations.push(ended.then(|| step.observation.clone()));
             if ended {
                 // Save the transition's terminal observation before replacing it with the reset observation.
@@ -128,8 +128,8 @@ where
             observations.push(step.observation);
             rewards.push(step.reward);
             infos.push(step.info);
-            dones.push(step.done);
-            truncateds.push(step.truncated);
+            terminated.push(step.terminated);
+            truncated.push(step.truncated);
         }
         let observations: Tensor<BO, K> = Tensor::stack(observations, 0);
         let rewards = Tensor::from_data(
@@ -140,8 +140,8 @@ where
             observations,
             rewards,
             infos,
-            dones,
-            truncateds,
+            terminated,
+            truncated,
             terminal_observations,
         })
     }
@@ -290,8 +290,8 @@ mod tests {
             expected.observations.into_data()
         );
         assert_eq!(actual.rewards.into_data(), expected.rewards.into_data());
-        assert_eq!(actual.dones, expected.dones);
-        assert_eq!(actual.truncateds, expected.truncateds);
+        assert_eq!(actual.terminated, expected.terminated);
+        assert_eq!(actual.truncated, expected.truncated);
     }
 
     #[test]
@@ -388,9 +388,11 @@ mod tests {
             ]
         );
         assert!(first.terminal_observations.iter().all(Option::is_none));
+        assert_eq!(first.terminated, [false, false]);
+        assert_eq!(first.truncated, [false, false]);
         let ended = env.step(actions).unwrap();
-        assert_eq!(ended.dones, vec![true, false]);
-        assert_eq!(ended.truncateds, vec![false, true]);
+        assert_eq!(ended.terminated, vec![true, false]);
+        assert_eq!(ended.truncated, vec![false, true]);
         assert_eq!(
             ended
                 .observations
@@ -461,7 +463,7 @@ mod tests {
             Ok(StepInfo {
                 observation: action.cast(DType::U64),
                 reward: 1.0,
-                done: false,
+                terminated: false,
                 truncated: false,
                 info: (),
             })
@@ -514,7 +516,7 @@ mod tests {
             Ok(StepInfo {
                 observation: Tensor::ones([1, 2, 2], (&Device::flex(), DType::F64)),
                 reward: 1.0,
-                done: true,
+                terminated: true,
                 truncated: false,
                 info: (),
             })
@@ -606,8 +608,8 @@ mod tests {
         let step = env.step(actions.clone()).unwrap();
         assert_eq!(step.observations.dims(), [2, 1]);
         assert_eq!(step.rewards.dims(), [2, 1]);
-        assert_eq!(step.dones, [true, true]);
-        assert_eq!(step.truncateds, [false, false]);
+        assert_eq!(step.terminated, [true, true]);
+        assert_eq!(step.truncated, [false, false]);
         assert!(
             step.terminal_observations
                 .iter()

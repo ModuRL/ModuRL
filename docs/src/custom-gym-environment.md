@@ -62,11 +62,11 @@ impl Gym for CounterEnv {
             action => return Err(CounterEnvError::InvalidAction(action)),
         }
 
-        let done = self.state.abs() >= 4;
+        let terminated = self.state.abs() >= 4;
         Ok(StepInfo {
             observation: self.observation(),
             reward: 1.0,
-            done,
+            terminated,
             truncated: false,
             info: (),
         })

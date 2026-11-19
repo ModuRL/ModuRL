@@ -57,7 +57,7 @@ where
     ) -> Result<StepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         let mut info = self.gym.step(action)?;
         self.elapsed_steps += 1;
-        if self.elapsed_steps >= self.max_episode_steps && !info.done {
+        if self.elapsed_steps >= self.max_episode_steps && !info.terminated {
             info.truncated = true;
         }
         Ok(info)
@@ -118,7 +118,7 @@ mod tests {
     };
 
     struct TestGym {
-        done: bool,
+        terminated: bool,
         truncated: bool,
     }
 
@@ -140,7 +140,7 @@ mod tests {
             Ok(StepInfo {
                 observation: self.reset()?.observation,
                 reward: 3.0,
-                done: self.done,
+                terminated: self.terminated,
                 truncated: self.truncated,
                 info: action.into_scalar::<i32>() as u32,
             })
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn truncates_at_limit_and_resets_elapsed_steps() {
         let gym = TestGym {
-            done: false,
+            terminated: false,
             truncated: false,
         };
         let mut wrapper = TimeLimitGym::new(gym, 2);
@@ -181,10 +181,16 @@ mod tests {
 
     #[test]
     fn preserves_termination_and_existing_truncation() {
-        for (done, truncated) in [(true, false), (false, true), (true, true)] {
-            let mut wrapper = TimeLimitGym::new(TestGym { done, truncated }, 1);
+        for (terminated, truncated) in [(true, false), (false, true), (true, true)] {
+            let mut wrapper = TimeLimitGym::new(
+                TestGym {
+                    terminated,
+                    truncated,
+                },
+                1,
+            );
             let step = wrapper.step(action()).unwrap();
-            assert_eq!((step.done, step.truncated), (done, truncated));
+            assert_eq!((step.terminated, step.truncated), (terminated, truncated));
         }
     }
 
@@ -192,7 +198,7 @@ mod tests {
     fn preserves_observations_rewards_metadata_and_spaces() {
         let mut wrapper = TimeLimitGym::new(
             TestGym {
-                done: false,
+                terminated: false,
                 truncated: false,
             },
             1,

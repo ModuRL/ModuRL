@@ -349,7 +349,7 @@ where
                 break;
             }
         }
-        let done = self.ale.is_game_over();
+        let terminated = self.ale.is_game_over();
         self.lives = self.ale.lives() as u32;
         let observation = observation.unwrap_or_else(|| self.observation());
         #[cfg(feature = "rendering")]
@@ -362,7 +362,7 @@ where
         Ok(StepInfo {
             observation,
             reward,
-            done,
+            terminated,
             truncated: false,
             info: self.info(),
         })

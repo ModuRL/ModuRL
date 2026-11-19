@@ -693,20 +693,20 @@ impl Gym for BipedalWalkerV3 {
             ))?
             .borrow()
             .game_over;
-        let mut done = false;
+        let mut terminated = false;
         if game_over || position.x < 0.0 {
             reward = -100.0;
-            done = true;
+            terminated = true;
         }
         if position.x > (TERRAIN_LENGTH - TERRAIN_GRASS) as f32 * TERRAIN_STEP {
-            done = true;
+            terminated = true;
         }
         #[cfg(feature = "rendering")]
         self.render()?;
         Ok(StepInfo {
             observation: Tensor::from_data(TensorData::new(state, [24]), &Device::flex()),
             reward,
-            done,
+            terminated,
             truncated: false,
             info: (),
         })
@@ -833,7 +833,7 @@ mod tests {
                 );
             }
             assert!((f64::from(actual.reward) - fixture.sequential_rewards[index]).abs() <= 5e-3);
-            assert_eq!(actual.done, fixture.sequential_terminated[index]);
+            assert_eq!(actual.terminated, fixture.sequential_terminated[index]);
             assert!(!actual.truncated);
         }
     }
@@ -884,7 +884,7 @@ mod tests {
                 );
             }
             assert!((f64::from(actual.reward) - fixture.rewards[index]).abs() <= 1e-3);
-            assert_eq!(actual.done, fixture.terminated[index]);
+            assert_eq!(actual.terminated, fixture.terminated[index]);
             assert!(!actual.truncated);
         }
     }
@@ -917,7 +917,7 @@ mod tests {
                 .step(Tensor::zeros([4], (&Device::flex(), DType::F32)))
                 .unwrap();
             assert_eq!(transition.observation.dims(), [24]);
-            if transition.done {
+            if transition.terminated {
                 terminal_reward = Some(transition.reward);
                 break;
             }
@@ -957,7 +957,7 @@ mod tests {
         let transition = environment
             .step(Tensor::zeros([4], (&Device::flex(), DType::F32)))
             .unwrap();
-        assert!(transition.done);
+        assert!(transition.terminated);
         assert!(!transition.truncated);
         assert_ne!(transition.reward, -100.0);
     }

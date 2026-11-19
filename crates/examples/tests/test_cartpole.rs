@@ -58,7 +58,7 @@ where
         let step = env
             .step(agent.act(&observations, &mut ()).unwrap())
             .unwrap();
-        episodes += usize::from(step.dones[0] || step.truncateds[0]);
+        episodes += usize::from(step.terminated[0] || step.truncated[0]);
         total_steps += 1;
         observations = step.observations;
     }
@@ -284,7 +284,7 @@ fn dqn_cartpole() {
         let actions = agent.act(&observations, &mut ()).unwrap();
         let step = env.step(actions).unwrap();
         total_steps += 1;
-        episode_count += usize::from(step.dones[0] || step.truncateds[0]);
+        episode_count += usize::from(step.terminated[0] || step.truncated[0]);
         observations = step.observations;
     }
     let average_steps = total_steps as f64 / 100.0;
@@ -342,7 +342,7 @@ fn ddqn_cartpole() {
         let actions = agent.act(&observations, &mut ()).unwrap();
         let step = env.step(actions).unwrap();
         total_steps += 1;
-        episode_count += usize::from(step.dones[0] || step.truncateds[0]);
+        episode_count += usize::from(step.terminated[0] || step.truncated[0]);
         observations = step.observations;
     }
     let average_steps = total_steps as f64 / 100.0;

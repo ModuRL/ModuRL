@@ -131,7 +131,7 @@ impl Gym for HopperV5 {
         Ok(StepInfo {
             observation: self.observation()?,
             reward: reward as f32,
-            done: !healthy && self.terminate_when_unhealthy,
+            terminated: !healthy && self.terminate_when_unhealthy,
             truncated: false,
             info: (),
         })

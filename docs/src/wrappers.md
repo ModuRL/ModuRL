@@ -48,7 +48,7 @@ standard Atari preprocessing steps.
 | Wrapper | What it does |
 | --- | --- |
 | `NoopResetGym` | Takes a random number of action `0` no-ops after reset; the default range is 1 through 30. |
-| `EpisodicLifeGym` | Reports a lost life as `done` while continuing the same game on reset. |
+| `EpisodicLifeGym` | Reports a lost life as `terminated` while continuing the same game on reset. |
 | `FireResetGym` | Takes actions `1` and `2` after reset to start games that require FIRE. |
 | `WarpGym` | Converts Atari observations to grayscale and resizes them to 84 by 84 pixels. |
 

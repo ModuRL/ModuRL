@@ -32,7 +32,7 @@ impl Drop for RomFixture {
 struct StepSample {
     ram: Vec<u8>,
     reward: f32,
-    done: bool,
+    terminated: bool,
     frame_number: u32,
 }
 
@@ -89,7 +89,7 @@ fn trajectory(env: &mut AtariGym<Ram>) -> Vec<StepSample> {
             StepSample {
                 ram: step.observation.into_data().try_to_vec::<u8>().unwrap(),
                 reward: step.reward,
-                done: step.done,
+                terminated: step.terminated,
                 frame_number: step.info.frame_number,
             }
         })

@@ -390,8 +390,8 @@ struct CollectedTransitions<'a, const O: usize, const A: usize, K: Autodiff> {
     next_observations: &'a Tensor<O, K>,
     actions: &'a Tensor<A>,
     rewards: &'a Tensor<2>,
-    dones: &'a [bool],
-    truncateds: &'a [bool],
+    terminated: &'a [bool],
+    truncated: &'a [bool],
     first_timestep: usize,
 }
 
@@ -1028,7 +1028,7 @@ where
         Vec<DeterministicActorCriticEpisodeLogEntry>,
         DeterministicActorCriticError<AE, GE, SE, CE>,
     > {
-        let count = transitions.dones.len();
+        let count = transitions.terminated.len();
         let reward_values = transitions
             .rewards
             .clone()
@@ -1064,10 +1064,10 @@ where
             actions: transitions.actions.clone(),
             rewards: transitions.rewards.clone(),
             terminated: Tensor::from_data(
-                TensorData::new(transitions.dones.to_vec(), [count, 1]),
+                TensorData::new(transitions.terminated.to_vec(), [count, 1]),
                 &self.replay_storage_config.storage_device(),
             ),
-            truncateds: transitions.truncateds.to_vec(),
+            truncated: transitions.truncated.to_vec(),
         })?;
         self.observation_dtype = Some(transitions.observations.dtype());
         let mut completed = Vec::new();
@@ -1075,8 +1075,8 @@ where
             if let Some(entry) = episodes.record(
                 index,
                 reward,
-                transitions.dones[index],
-                transitions.truncateds[index],
+                transitions.terminated[index],
+                transitions.truncated[index],
                 transitions.first_timestep + index + 1,
             ) {
                 completed.push(entry);
@@ -1095,11 +1095,11 @@ where
     where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
-        let count = step.dones.len();
+        let count = step.terminated.len();
         for (field, actual) in [
             ("observations", observations.dims()[0]),
             ("actions", actions.dims()[0]),
-            ("truncation flags", step.truncateds.len()),
+            ("truncation flags", step.truncated.len()),
             ("terminal observations", step.terminal_observations.len()),
             ("environment infos", step.infos.len()),
             ("environment observations", step.observations.dims()[0]),
@@ -1189,7 +1189,7 @@ where
     where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
-        let count = step.dones.len();
+        let count = step.terminated.len();
         let first_timestep = self.schedule_progress.elapsed_steps();
         let next_observations = step.transition_next_observations();
         let completed_episodes = self.store_transitions(
@@ -1198,8 +1198,8 @@ where
                 next_observations: &next_observations,
                 actions: &actions.without_autodiff(),
                 rewards: &step.rewards,
-                dones: &step.dones,
-                truncateds: &step.truncateds,
+                terminated: &step.terminated,
+                truncated: &step.truncated,
                 first_timestep,
             },
             episodes,
@@ -1292,7 +1292,7 @@ where
     where
         Tensor<U, OS::Kind>: NextRank<Next = Tensor<O, OS::Kind>>,
     {
-        let count = step.dones.len();
+        let count = step.terminated.len();
         self.validate_environment_count(count)?;
         let validated_count = self.validate_timestep(observations, &actions, &step)?;
         self.environment_count = Some(validated_count);

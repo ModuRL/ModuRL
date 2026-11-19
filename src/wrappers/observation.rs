@@ -129,7 +129,7 @@ where
                 self.gym.action_space().get_possible_values(),
             )?,
             reward: step.reward,
-            done: step.done,
+            terminated: step.terminated,
             truncated: step.truncated,
             info: step.info,
         })
@@ -284,7 +284,7 @@ where
         Ok(StepInfo {
             observation: self.stacked_observation(),
             reward: step.reward,
-            done: step.done,
+            terminated: step.terminated,
             truncated: step.truncated,
             info: step.info,
         })
@@ -400,7 +400,7 @@ where
         total_reward += step.reward;
         let mut second_last_observation = None;
         for _ in 1..self.skip {
-            if step.done || step.truncated {
+            if step.terminated || step.truncated {
                 break;
             }
             second_last_observation = Some(step.observation);

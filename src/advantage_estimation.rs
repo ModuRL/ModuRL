@@ -12,7 +12,7 @@ pub struct AdvantageEstimate {
 /// Computes advantages and critic value targets for an on-policy rollout.
 pub trait AdvantageEstimator {
     /// Returns advantages and value targets shaped `[time, env_count, 1]` from `rewards`,
-    /// `values`, `next_dones`, and `next_truncateds` shaped `[time, env_count, 1]`, and
+    /// `values`, `next_terminated`, and `next_truncated` shaped `[time, env_count, 1]`, and
     /// `bootstrapped_values` shaped `[env_count, 1]` (critic values of the final next observations).
     ///
     /// Float inputs share the environment reward dtype and device. Both outputs must have shape
@@ -23,8 +23,8 @@ pub trait AdvantageEstimator {
         &self,
         rewards: &Tensor<3>,
         values: &Tensor<3>,
-        next_dones: &Tensor<3, Bool>,
-        next_truncateds: &Tensor<3, Bool>,
+        next_terminated: &Tensor<3, Bool>,
+        next_truncated: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f64,
     ) -> AdvantageEstimate;
@@ -36,16 +36,16 @@ impl AdvantageEstimator for Box<dyn AdvantageEstimator> {
         &self,
         rewards: &Tensor<3>,
         values: &Tensor<3>,
-        next_dones: &Tensor<3, Bool>,
-        next_truncateds: &Tensor<3, Bool>,
+        next_terminated: &Tensor<3, Bool>,
+        next_truncated: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f64,
     ) -> AdvantageEstimate {
         (**self).estimate(
             rewards,
             values,
-            next_dones,
-            next_truncateds,
+            next_terminated,
+            next_truncated,
             bootstrapped_values,
             gamma,
         )
@@ -104,18 +104,18 @@ impl AdvantageEstimator for GAE {
         &self,
         rewards: &Tensor<3>,
         values: &Tensor<3>,
-        next_dones: &Tensor<3, Bool>,
-        next_truncateds: &Tensor<3, Bool>,
+        next_terminated: &Tensor<3, Bool>,
+        next_truncated: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f64,
     ) -> AdvantageEstimate {
         let dtype = values.dtype();
         let rewards = rewards.clone();
-        let next_dones = next_dones.clone().float().cast(dtype);
-        let next_truncateds = next_truncateds.clone().float().cast(dtype);
+        let next_terminated = next_terminated.clone().float().cast(dtype);
+        let next_truncated = next_truncated.clone().float().cast(dtype);
         let bootstrapped_values = bootstrapped_values.clone().detach();
         let values = values.clone().detach();
-        let masks = (1.0f64 - next_dones) * (1.0f64 - next_truncateds);
+        let masks = (1.0f64 - next_terminated) * (1.0f64 - next_truncated);
         let time_steps = rewards.dims()[0];
         let next_values = if time_steps == 1 {
             bootstrapped_values.unsqueeze_dim::<3>(0)
@@ -201,8 +201,8 @@ impl AdvantageEstimator for NStep {
         &self,
         rewards: &Tensor<3>,
         values: &Tensor<3>,
-        next_dones: &Tensor<3, Bool>,
-        next_truncateds: &Tensor<3, Bool>,
+        next_terminated: &Tensor<3, Bool>,
+        next_truncated: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f64,
     ) -> AdvantageEstimate {
@@ -210,10 +210,10 @@ impl AdvantageEstimator for NStep {
         let dtype = values.dtype();
         let rewards = rewards.clone();
         let values = values.clone().detach();
-        let next_dones = next_dones.clone().float().cast(dtype);
-        let next_truncateds = next_truncateds.clone().float().cast(dtype);
+        let next_terminated = next_terminated.clone().float().cast(dtype);
+        let next_truncated = next_truncated.clone().float().cast(dtype);
         let bootstrapped_values = bootstrapped_values.clone().detach();
-        let masks = (1.0f64 - next_dones) * (1.0f64 - next_truncateds);
+        let masks = (1.0f64 - next_terminated) * (1.0f64 - next_truncated);
         let time_steps = rewards.dims()[0];
         let mut advantages = Vec::with_capacity(time_steps);
         let mut value_targets = Vec::with_capacity(time_steps);
@@ -286,8 +286,8 @@ impl<V: AdvantageEstimator> AdvantageEstimator for UPGO<V> {
         &self,
         rewards: &Tensor<3>,
         values: &Tensor<3>,
-        next_dones: &Tensor<3, Bool>,
-        next_truncateds: &Tensor<3, Bool>,
+        next_terminated: &Tensor<3, Bool>,
+        next_truncated: &Tensor<3, Bool>,
         bootstrapped_values: &Tensor<2>,
         gamma: f64,
     ) -> AdvantageEstimate {
@@ -296,8 +296,8 @@ impl<V: AdvantageEstimator> AdvantageEstimator for UPGO<V> {
             .estimate(
                 rewards,
                 values,
-                next_dones,
-                next_truncateds,
+                next_terminated,
+                next_truncated,
                 bootstrapped_values,
                 gamma,
             )
@@ -305,10 +305,10 @@ impl<V: AdvantageEstimator> AdvantageEstimator for UPGO<V> {
         let dtype = values.dtype();
         let rewards = rewards.clone();
         let values = values.clone().detach();
-        let next_dones = next_dones.clone().float().cast(dtype);
-        let next_truncateds = next_truncateds.clone().float().cast(dtype);
+        let next_terminated = next_terminated.clone().float().cast(dtype);
+        let next_truncated = next_truncated.clone().float().cast(dtype);
         let bootstrapped_values = bootstrapped_values.clone().detach();
-        let masks = (1.0f64 - next_dones) * (1.0f64 - next_truncateds);
+        let masks = (1.0f64 - next_terminated) * (1.0f64 - next_truncated);
         let mut next_return = bootstrapped_values.clone();
         let mut next_q = bootstrapped_values.clone();
         let mut next_value = bootstrapped_values;
@@ -359,8 +359,8 @@ mod tests {
         envs: usize,
         rewards: Vec<f32>,
         values: Vec<f32>,
-        dones: Vec<bool>,
-        truncateds: Vec<bool>,
+        terminated: Vec<bool>,
+        truncated: Vec<bool>,
         bootstrap: Vec<f32>,
     }
 
@@ -374,7 +374,7 @@ mod tests {
         }
 
         fn mask(&self, i: usize) -> f64 {
-            f64::from(u8::from(!(self.dones[i] || self.truncateds[i])))
+            f64::from(u8::from(!(self.terminated[i] || self.truncated[i])))
         }
 
         fn next_value(&self, i: usize) -> f64 {
@@ -404,8 +404,8 @@ mod tests {
             let estimate = estimator.estimate(
                 &float(&self.rewards),
                 &float(&self.values),
-                &flags(&self.dones),
-                &flags(&self.truncateds),
+                &flags(&self.terminated),
+                &flags(&self.truncated),
                 &Tensor::from_data(bootstrap, (&device, dtype)),
                 gamma,
             );
@@ -528,16 +528,16 @@ mod tests {
                 flags(),
                 vec(-10.0f32..10.0, envs),
             )
-                .prop_map(move |(rewards, values, dones, truncateds, bootstrap)| {
-                    Rollout {
+                .prop_map(
+                    move |(rewards, values, terminated, truncated, bootstrap)| Rollout {
                         envs,
                         rewards,
                         values,
-                        dones,
-                        truncateds,
+                        terminated,
+                        truncated,
                         bootstrap,
-                    }
-                })
+                    },
+                )
         })
     }
 

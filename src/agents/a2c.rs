@@ -59,8 +59,10 @@ where
     SpaceError(#[source] SE),
     #[error("invalid A2C configuration: {0}")]
     ConfigurationError(#[source] PPOConfigurationError),
-    #[error("termination batches differ in length: {dones} dones and {truncateds} truncations")]
-    MismatchedTerminationBatch { dones: usize, truncateds: usize },
+    #[error(
+        "termination batches differ in length: {terminated} termination flags and {truncated} truncation flags"
+    )]
+    MismatchedTerminationBatch { terminated: usize, truncated: usize },
     #[error("batch length mismatch for {field}: expected {expected}, got {actual}")]
     BatchLengthMismatch {
         field: &'static str,
@@ -91,9 +93,13 @@ impl<AE: std::fmt::Debug, GE: std::fmt::Debug, SE: std::fmt::Debug> From<PPOErro
             PPOError::Sampling(error) => Self::Sampling(error),
             PPOError::SpaceError(error) => Self::SpaceError(error),
             PPOError::ConfigurationError(error) => Self::ConfigurationError(error),
-            PPOError::MismatchedTerminationBatch { dones, truncateds } => {
-                Self::MismatchedTerminationBatch { dones, truncateds }
-            }
+            PPOError::MismatchedTerminationBatch {
+                terminated,
+                truncated,
+            } => Self::MismatchedTerminationBatch {
+                terminated,
+                truncated,
+            },
             PPOError::BatchLengthMismatch {
                 field,
                 expected,

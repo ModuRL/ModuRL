@@ -90,7 +90,7 @@ def generate_discrete_rollout(
             output = {
                 "observation": observation.tolist(),
                 "reward": float(reward),
-                "done": bool(terminated),
+                "terminated": bool(terminated),
                 "truncated": bool(truncated),
             }
             if extract_info is not None:
@@ -361,10 +361,10 @@ def generate_bipedal_walker() -> None:
             reset_observation, _ = environment.reset()
             if initial_observation is None:
                 initial_observation = reset_observation
-            observation, reward, done, _, _ = environment.step(action)
+            observation, reward, step_terminated, _, _ = environment.step(action)
             observations.append(observation.tolist())
             rewards.append(float(reward))
-            terminated.append(bool(done))
+            terminated.append(bool(step_terminated))
         finally:
             environment.close()
 
@@ -387,10 +387,10 @@ def generate_bipedal_walker() -> None:
         environment.np_random = DeterministicRng(np)
         environment.reset()
         for action in sequential_actions:
-            observation, reward, done, _, _ = environment.step(action)
+            observation, reward, step_terminated, _, _ = environment.step(action)
             sequential_observations.append(observation.tolist())
             sequential_rewards.append(float(reward))
-            sequential_terminated.append(bool(done))
+            sequential_terminated.append(bool(step_terminated))
     finally:
         environment.close()
 

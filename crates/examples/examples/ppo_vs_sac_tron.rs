@@ -139,7 +139,7 @@ impl MultiAgentGym for Tron {
         }
         let mut rewards = [Vec::new(), Vec::new()];
         let mut terminals = [Vec::new(), Vec::new()];
-        let mut dones = Vec::new();
+        let mut termination_flags = Vec::new();
         for index in 0..self.num_envs() {
             let slot = &mut self.slots[index];
             let next = std::array::from_fn::<_, 2, _>(|agent| {
@@ -149,7 +149,7 @@ impl MultiAgentGym for Tron {
             let crash = next.map(|head| {
                 Self::cell(head).is_none_or(|cell| slot.occupied[cell]) || next[0] == next[1]
             });
-            let done = crash[0] || crash[1];
+            let terminated = crash[0] || crash[1];
             let reward = if crash[0] == crash[1] {
                 0.0
             } else if crash[0] {
@@ -165,16 +165,16 @@ impl MultiAgentGym for Tron {
                     slot.occupied[cell] = true;
                 }
             }
-            dones.push(done);
+            termination_flags.push(terminated);
             for (agent, terminal) in terminals.iter_mut().enumerate() {
-                terminal.push(done.then(|| {
+                terminal.push(terminated.then(|| {
                     Tensor::from_data(
                         TensorData::new(self.observation(index, agent), [192]),
                         &self.device,
                     )
                 }));
             }
-            if done {
+            if terminated {
                 self.reset_slot(index);
             }
         }
@@ -190,8 +190,8 @@ impl MultiAgentGym for Tron {
                         &self.device,
                     ),
                     infos: vec![(); self.num_envs()],
-                    dones: dones.clone(),
-                    truncateds: vec![false; self.num_envs()],
+                    terminated: termination_flags.clone(),
+                    truncated: vec![false; self.num_envs()],
                     terminal_observations,
                 },
             )
@@ -298,7 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rewards = ppo_step.rewards.to_data().try_to_vec::<f32>()?;
         for (slot, length) in lengths.iter_mut().enumerate() {
             *length += 1;
-            if ppo_step.dones[slot] || ppo_step.truncateds[slot] {
+            if ppo_step.terminated[slot] || ppo_step.truncated[slot] {
                 episodes += 1;
                 ppo_wins += usize::from(rewards[slot] > 0.0);
                 sac_wins += usize::from(rewards[slot] < 0.0);
@@ -349,7 +349,7 @@ mod tests {
     fn trails_and_perspective() {
         let mut env = env([[1, 1], [6, 6]]);
         let steps = step(&mut env, [3, 2]);
-        assert_eq!(steps[0].dones, vec![false]);
+        assert_eq!(steps[0].terminated, vec![false]);
         assert!(steps[0].terminal_observations[0].is_none());
         let a = env.observation(0, 0);
         let b = env.observation(0, 1);
@@ -371,9 +371,9 @@ mod tests {
                 env.slots[0].occupied[9] = true;
             }
             let steps = step(&mut env, [if trail { 3 } else { 2 }, 0]);
-            assert_eq!(steps[0].dones, vec![true]);
-            assert_eq!(steps[0].dones, steps[1].dones);
-            assert_eq!(steps[0].truncateds, steps[1].truncateds);
+            assert_eq!(steps[0].terminated, vec![true]);
+            assert_eq!(steps[0].terminated, steps[1].terminated);
+            assert_eq!(steps[0].truncated, steps[1].truncated);
             assert_eq!(
                 steps[0].rewards.to_data().try_to_vec::<f32>().unwrap(),
                 vec![-1.0]
@@ -391,7 +391,7 @@ mod tests {
         for heads in [[[2, 2], [4, 2]], [[2, 2], [3, 2]]] {
             let mut env = env(heads);
             for step in step(&mut env, [3, 2]) {
-                assert_eq!(step.dones, vec![true]);
+                assert_eq!(step.terminated, vec![true]);
                 assert_eq!(
                     step.rewards.to_data().try_to_vec::<f32>().unwrap(),
                     vec![0.0]

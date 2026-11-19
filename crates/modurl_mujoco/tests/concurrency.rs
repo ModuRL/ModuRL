@@ -65,7 +65,7 @@ impl MujocoTask for SlideTask {
     fn transition(&mut self, previous: &MujocoState, next: &MujocoState, _: &[f64]) -> TaskStep {
         TaskStep {
             reward: (next.qpos[0] - previous.qpos[0]) as f32,
-            done: false,
+            terminated: false,
             truncated: false,
         }
     }
@@ -75,7 +75,7 @@ impl MujocoTask for SlideTask {
 struct Transition {
     observation: Vec<f32>,
     reward: f32,
-    done: bool,
+    terminated: bool,
     truncated: bool,
 }
 
@@ -90,7 +90,7 @@ where
     result.push(Transition {
         observation: reset.observation.into_data().try_to_vec::<f32>().unwrap(),
         reward: 0.0,
-        done: false,
+        terminated: false,
         truncated: false,
     });
     for step in 0..STEPS {
@@ -102,7 +102,7 @@ where
         result.push(Transition {
             observation: outcome.observation.into_data().try_to_vec::<f32>().unwrap(),
             reward: outcome.reward,
-            done: outcome.done,
+            terminated: outcome.terminated,
             truncated: outcome.truncated,
         });
     }

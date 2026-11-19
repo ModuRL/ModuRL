@@ -60,7 +60,7 @@ where
                 .gym
                 .step(noop_action)
                 .map_err(NoopResetGymError::GymError)?;
-            reset = if step.done || step.truncated {
+            reset = if step.terminated || step.truncated {
                 self.gym.reset().map_err(NoopResetGymError::GymError)?
             } else {
                 ResetInfo {
@@ -117,7 +117,7 @@ where
 pub struct EpisodicLifeGym<G> {
     gym: G,
     last_lives: u32,
-    was_real_done: bool,
+    inner_episode_ended: bool,
     device: Device,
 }
 
@@ -126,7 +126,7 @@ impl<G> EpisodicLifeGym<G> {
         Self {
             gym,
             last_lives: 0,
-            was_real_done: true,
+            inner_episode_ended: true,
             device: device.clone(),
         }
     }
@@ -144,12 +144,12 @@ where
     fn reset(
         &mut self,
     ) -> Result<ResetInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
-        let reset = if self.was_real_done {
+        let reset = if self.inner_episode_ended {
             self.gym.reset()?
         } else {
             let noop_action = Tensor::from_data([0i32], &self.device);
             let step = self.gym.step(noop_action)?;
-            if step.done || step.truncated {
+            if step.terminated || step.truncated {
                 self.gym.reset()?
             } else {
                 ResetInfo {
@@ -171,10 +171,10 @@ where
         let mut step = self.gym.step(action)?;
         let current_lives = step.info.lives();
 
-        self.was_real_done = step.done || step.truncated;
+        self.inner_episode_ended = step.terminated || step.truncated;
 
         if current_lives < self.last_lives {
-            step.done = true;
+            step.terminated = true;
         }
 
         self.last_lives = current_lives;
@@ -227,14 +227,14 @@ where
             .gym
             .step(Tensor::from_data([1i32], &Device::flex()))
             .map_err(FireResetGymError::GymError)?;
-        if first.done || first.truncated {
+        if first.terminated || first.truncated {
             self.gym.reset().map_err(FireResetGymError::GymError)?;
         }
         let second = self
             .gym
             .step(Tensor::from_data([2i32], &Device::flex()))
             .map_err(FireResetGymError::GymError)?;
-        if second.done || second.truncated {
+        if second.terminated || second.truncated {
             self.gym.reset().map_err(FireResetGymError::GymError)
         } else {
             Ok(ResetInfo {
@@ -544,7 +544,7 @@ where
         Ok(StepInfo {
             observation: self.preprocess_observation(step.observation)?,
             reward: step.reward,
-            done: step.done,
+            terminated: step.terminated,
             truncated: step.truncated,
             info: step.info,
         })
@@ -573,7 +573,7 @@ mod tests {
     struct ScriptStep {
         observation: f32,
         reward: f32,
-        done: bool,
+        terminated: bool,
         truncated: bool,
         lives: u32,
     }
@@ -602,14 +602,14 @@ mod tests {
         fn step(
             observation: f32,
             reward: f32,
-            done: bool,
+            terminated: bool,
             truncated: bool,
             lives: u32,
         ) -> ScriptStep {
             ScriptStep {
                 observation,
                 reward,
-                done,
+                terminated,
                 truncated,
                 lives,
             }
@@ -642,7 +642,7 @@ mod tests {
             Ok(StepInfo {
                 observation: self.tensor(step.observation),
                 reward: step.reward,
-                done: step.done,
+                terminated: step.terminated,
                 truncated: step.truncated,
                 info: AtariInfo {
                     lives: self.lives,
@@ -707,7 +707,7 @@ mod tests {
             Ok(StepInfo {
                 observation: Tensor::full([210, 160, 3], 37, (&Device::flex(), DType::U8)),
                 reward: 2.0,
-                done: true,
+                terminated: true,
                 truncated: false,
                 info: AtariInfo {
                     lives: 0,
@@ -737,8 +737,8 @@ mod tests {
         let step = env
             .step(Tensor::from_data([[0i32]], &Device::flex()))
             .unwrap();
-        assert_eq!(step.dones, [true]);
-        assert_eq!(step.truncateds, [false]);
+        assert_eq!(step.terminated, [true]);
+        assert_eq!(step.truncated, [false]);
         assert_eq!(step.observations.dtype(), DType::U8);
         let terminal = step.transition_next_observations();
         assert_eq!(terminal.dims(), [1, 84, 84]);
@@ -879,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn fire_reset_resets_after_first_reset_action_done() {
+    fn fire_reset_resets_after_first_reset_action_ends_episode() {
         let gym = ScriptGym::new(vec![
             ScriptGym::step(11.0, 0.0, true, false, 0),
             ScriptGym::step(22.0, 0.0, false, false, 3),
@@ -894,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn fire_reset_returns_the_new_reset_observation_after_second_action_done() {
+    fn fire_reset_returns_the_new_reset_observation_after_second_action_ends_episode() {
         let gym = ScriptGym::new(vec![
             ScriptGym::step(11.0, 0.0, false, false, 3),
             ScriptGym::step(12.0, 0.0, true, false, 0),
@@ -909,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn episodic_life_marks_life_loss_done_without_real_reset() {
+    fn episodic_life_marks_life_loss_terminated_without_real_reset() {
         let gym = ScriptGym::new(vec![
             ScriptGym::step(11.0, 0.0, false, false, 2),
             ScriptGym::step(12.0, 0.0, false, false, 2),
@@ -922,7 +922,7 @@ mod tests {
             .unwrap();
         let reset_obs = wrapper.reset().unwrap();
 
-        assert!(step.done);
+        assert!(step.terminated);
         assert_eq!(wrapper.gym.actions, vec![1, 0]);
         assert_eq!(wrapper.gym.reset_count, 1);
         assert_eq!(scalar(&reset_obs.observation), 12.0);
@@ -942,14 +942,14 @@ mod tests {
         let life_loss = wrapper
             .step(Tensor::from_data([1i32], &Device::flex()))
             .unwrap();
-        assert!(life_loss.done);
+        assert!(life_loss.terminated);
         assert!(life_loss.info.completed_episode.is_none());
 
         wrapper.reset().unwrap();
         let game_over = wrapper
             .step(Tensor::from_data([1i32], &Device::flex()))
             .unwrap();
-        assert!(game_over.done);
+        assert!(game_over.terminated);
         assert_eq!(
             game_over.info.completed_episode,
             Some(EpisodeStatistics {
@@ -973,14 +973,14 @@ mod tests {
             .unwrap();
         let reset_obs = wrapper.reset().unwrap();
 
-        assert!(step.done);
+        assert!(step.terminated);
         assert_eq!(wrapper.gym.actions, vec![1, 0]);
         assert_eq!(wrapper.gym.reset_count, 2);
         assert_eq!(scalar(&reset_obs.observation), 200.0);
     }
 
     #[test]
-    fn episodic_life_treats_truncation_as_real_done_for_reset() {
+    fn episodic_life_treats_truncation_as_episode_end_for_reset() {
         let gym = ScriptGym::new(vec![
             ScriptGym::step(11.0, 0.0, false, true, 3),
             ScriptGym::step(12.0, 0.0, false, false, 3),
@@ -993,7 +993,7 @@ mod tests {
             .unwrap();
         let reset_obs = wrapper.reset().unwrap();
 
-        assert!(!step.done);
+        assert!(!step.terminated);
         assert!(step.truncated);
         assert_eq!(wrapper.gym.actions, vec![1]);
         assert_eq!(wrapper.gym.reset_count, 2);

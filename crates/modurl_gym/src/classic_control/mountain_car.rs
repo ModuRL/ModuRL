@@ -365,7 +365,7 @@ impl Gym for MountainCarV0 {
         Ok(StepInfo {
             observation: self.state.clone(),
             reward,
-            done: terminated,
+            terminated,
             truncated: false,
             info: (),
         })
@@ -413,7 +413,7 @@ mod tests {
         let StepInfo {
             observation: next_state,
             reward,
-            done,
+            terminated,
             truncated: _truncated,
             ..
         } = env
@@ -424,7 +424,7 @@ mod tests {
             .expect("Failed to step environment.");
         assert_eq!(next_state.dims()[0], 2);
         assert!(reward == -1.0);
-        assert!(!done);
+        assert!(!terminated);
     }
 
     #[test]
@@ -459,12 +459,12 @@ mod tests {
         let StepInfo {
             observation: _state,
             reward,
-            done,
+            terminated,
             truncated: _truncated,
             ..
         } = env.step(action).unwrap();
         assert_eq!(reward, -1.0);
-        assert!(!done);
+        assert!(!terminated);
     }
 
     impl MountainCarV0 {
@@ -506,11 +506,11 @@ mod tests {
             let StepInfo {
                 observation: _,
                 reward: _,
-                done,
+                terminated,
                 ..
             } = env.step(action).unwrap();
             env.render().unwrap();
-            if done {
+            if terminated {
                 break;
             }
         }

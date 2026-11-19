@@ -352,8 +352,8 @@ mod tests {
             [1.0, 1.0]
         );
         assert_eq!(step.rewards.dims(), [2, 1]);
-        assert_eq!(step.dones, [true, true]);
-        assert_eq!(step.truncateds, [false, false]);
+        assert_eq!(step.terminated, [true, true]);
+        assert_eq!(step.truncated, [false, false]);
         for (terminal, expected) in step.terminal_observations.into_iter().zip([10.0, 20.0]) {
             let terminal = terminal.unwrap();
             assert_eq!(terminal.dims(), [1]);
@@ -391,7 +391,7 @@ mod tests {
                 .unwrap(),
             vec![0.0, 1.0, 2.0, 3.0, 4.0]
         );
-        assert_eq!(step.dones, vec![false, true, false, false, true]);
+        assert_eq!(step.terminated, vec![false, true, false, false, true]);
         assert_eq!(
             step.infos[2],
             SlotInfo {
