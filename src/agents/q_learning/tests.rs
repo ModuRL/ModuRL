@@ -169,6 +169,7 @@ fn counting_envs(
 #[derive(Default)]
 struct Logger {
     updates: Vec<usize>,
+    learning_rates: Vec<f64>,
     rewards: Vec<Vec<f32>>,
     episodes: Vec<QEpisodeLogEntry>,
 }
@@ -181,6 +182,7 @@ impl QLearningLogger for Logger {
         assert_eq!(entry.loss.dtype(), entry.q_values.dtype());
         assert_eq!(entry.update_index, self.updates.len());
         self.updates.push(entry.collection_timestep);
+        self.learning_rates.push(entry.learning_rate);
     }
 
     fn log_collection(&mut self, entry: &QCollectionLogEntry) {
@@ -609,6 +611,15 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
     ])
     .unwrap();
     let mut agent = float_agent(&device);
+    agent.learning_rate = LearningRateSchedule::from(|progress: f64| {
+        if progress < 0.4 {
+            0.01
+        } else if progress < 0.6 {
+            0.02
+        } else {
+            0.03
+        }
+    });
     assert!(!agent.target_q_network.values.val().is_require_grad());
     let initial_target = agent.target_q_network.values.val().into_data();
     let mut logger = Logger::default();
@@ -662,6 +673,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
     agent.learn(&mut env, 2, &mut logger).unwrap();
     assert_eq!(agent.schedule_progress.elapsed_steps(), 6);
     assert_eq!(logger.updates, [4, 6]);
+    assert_eq!(logger.learning_rates, [0.02, 0.03]);
     assert_ne!(
         agent.online_q_network.values.val().into_data(),
         agent.target_q_network.values.val().into_data()

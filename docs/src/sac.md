@@ -216,6 +216,10 @@ agent.learn(&mut env, total_timesteps)?;
 `training_horizon` defines how many collected transitions parameter schedules
 take to reach their final values. Schedule progress continues across `learn`
 calls and stops at the end of the horizon.
+The actor, each critic, and the automatic temperature optimizer accept either
+a constant `f64` or a `ParameterSchedule` as their learning rate. Each rate
+is evaluated at the optimizer update's collection timestep and must stay finite
+and positive.
 
 Important defaults and constraints are:
 

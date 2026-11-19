@@ -12,7 +12,9 @@ use std::{marker::PhantomData, sync::Arc};
 use super::PPOConfigurationError;
 use crate::{
     models::{Forward, probabilistic_model::ProbabilisticPolicy},
-    parameter_schedule::{ParameterSchedule, ScheduleProgress},
+    parameter_schedule::{
+        ParameterSchedule, ScheduleProgress, checked_learning_rate as positive_learning_rate,
+    },
     tensor_rank::{NextRank, PrevRank},
 };
 
@@ -231,10 +233,7 @@ fn initial_learning_rate(schedule: &dyn ParameterSchedule) -> Result<f64, PPOCon
 }
 
 fn checked_learning_rate(learning_rate: f64) -> Result<f64, PPOConfigurationError> {
-    if !learning_rate.is_finite() || learning_rate <= 0.0 {
-        return Err(PPOConfigurationError::InvalidLearningRate);
-    }
-    Ok(learning_rate)
+    positive_learning_rate(learning_rate).ok_or(PPOConfigurationError::InvalidLearningRate)
 }
 
 /// Executes an owned PPO network configuration with native tensor kinds and explicit batch ranks.

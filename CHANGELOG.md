@@ -54,6 +54,9 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Environments and agents
 
+- All agent optimizers accept constant `f64` learning rates or a `ParameterSchedule`.
+  Off-policy updates evaluate the rate at their collection timestep; invalid rates return an error.
+
 - `Gym`, `MultiGym`, and `Agent` gain observation and action rank parameters:
   `Gym<I = (), O = 2, A = 2>`, `MultiGym<I = (), O = 2, A = 2>`, and `Agent<I = (), O = 2, A = 2>`.
   These const parameters count batch axes even for `Gym`, whose step and reset values are unbatched.

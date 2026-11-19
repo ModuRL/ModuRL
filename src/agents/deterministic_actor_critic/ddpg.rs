@@ -17,6 +17,7 @@ use crate::{
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
+    parameter_schedule::{LearningRateSchedule, ParameterSchedule},
     spaces::{ActionMap, ObservationSpace},
     tensor_rank::{NextRank, TensorBatchTypes},
 };
@@ -125,7 +126,8 @@ impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
     pub fn new<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
         online_actor: M,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
-        actor_learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| LearningRateSchedule::from(schedule))]
+        actor_learning_rate: LearningRateSchedule,
         critic: ActionValueCritic<N>,
         action_space: AS,
         observation_space: OS,

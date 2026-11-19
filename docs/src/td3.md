@@ -102,6 +102,11 @@ replay optimization, but updates the actor and all target networks only on
 every second optimization. On skipped actor updates, logger fields such as
 `actor_loss` are `None`.
 
+The actor and each critic accept a constant `f64` learning rate or a
+`ParameterSchedule`. Each optimizer evaluates its rate at its update's
+collection timestep, so the delayed actor uses the rate for the step on which
+it actually updates.
+
 Important defaults and constraints are:
 
 | Setting | Default | Constraint or effect |

@@ -250,6 +250,7 @@ fn numbers<const D: usize>(values: Tensor<D>) -> Vec<f64> {
 struct Logger {
     updates: Vec<usize>,
     actor_updated: Vec<bool>,
+    actor_learning_rates: Vec<f64>,
     rewards: Vec<Vec<f64>>,
     episodes: Vec<(f32, usize, bool, bool, usize)>,
     replay_lengths: Vec<usize>,
@@ -274,7 +275,7 @@ impl DeterministicActorCriticLogger for Logger {
         assert_eq!(entry.actor_loss.is_some(), entry.actor_updated);
         assert_eq!(entry.policy_q_values.is_some(), entry.actor_updated);
         assert_eq!(entry.policy_actions.is_some(), entry.actor_updated);
-        assert_eq!(entry.actor_learning_rate, 0.01);
+        self.actor_learning_rates.push(entry.actor_learning_rate);
         assert_eq!(entry.critic_learning_rates, [0.01, 0.01]);
         assert_eq!(entry.exploration_noise_standard_deviation, 0.0);
         assert_eq!(entry.update_index + 1, self.updates.len());
@@ -370,7 +371,8 @@ fn full_mse_targets_and_actor_gradient_boundaries_are_preserved() {
                 .online_replay_values::<2, 2, 3>(&batch.observations, &batch.actions)
                 .unwrap(),
         );
-        let critic_update = agent.optimize_critics(&batch, &targets).unwrap();
+        let progress = ScheduleProgress::new(None);
+        let critic_update = agent.optimize_critics(&batch, &targets, &progress).unwrap();
         let expected_loss =
             ((critic_before[0] - 2.35).powi(2) + (critic_before[1] - 2.0).powi(2)) / 2.0;
         assert!((numbers(critic_update.losses[0].clone())[0] - expected_loss).abs() < 1e-6);
@@ -380,7 +382,9 @@ fn full_mse_targets_and_actor_gradient_boundaries_are_preserved() {
                 .online_replay_values::<2, 2, 3>(&batch.observations, &batch.actions)
                 .unwrap(),
         );
-        let actor_update = agent.optimize_actor(&batch.observations).unwrap();
+        let actor_update = agent
+            .optimize_actor(&batch.observations, &progress)
+            .unwrap();
         assert_eq!(actor_update.loss.dims(), [1]);
         assert_ne!(agent.online_actor.weight.val().into_data(), actor_before);
         assert_eq!(
@@ -405,6 +409,8 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
     let mut agent = agent(&device, DType::F64, 2);
+    agent.actor_learning_rate_schedule =
+        LearningRateSchedule::from(|progress: f64| if progress >= 0.2 { 0.02 } else { 0.01 });
     let env_device = device.clone().without_autodiff();
     let mut env = VectorizedGymWrapper::new(vec![
         EpisodeEnv {
@@ -425,6 +431,7 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
     assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
     assert_eq!(logger.updates, [2, 4]);
     assert_eq!(logger.actor_updated, [false, true]);
+    assert_eq!(logger.actor_learning_rates, [0.01, 0.02]);
     assert_eq!(logger.rewards, [vec![2.0, 2.0], vec![2.0, 2.0]]);
     assert_eq!(
         logger.episodes,
@@ -452,6 +459,7 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
     );
     agent.learn(&mut env, 2, &mut logger).unwrap();
     assert_eq!(logger.updates, [2, 4, 6]);
+    assert_eq!(logger.actor_learning_rates, [0.01, 0.02, 0.02]);
     assert_eq!(logger.actor_updated, [false, true, false]);
     assert_eq!(agent.schedule_progress.elapsed_steps(), 6);
     let len = agent.replay.as_ref().unwrap().len();

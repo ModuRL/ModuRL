@@ -19,7 +19,9 @@ use crate::{
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
-    parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
+    parameter_schedule::{
+        LearningRateSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
+    },
     spaces::{ActionSpace, Discrete, ObservationSpace, SpaceError},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
@@ -139,7 +141,7 @@ pub struct QLogEntry {
     /// Float loss `[1]` in the compute dtype on the optimization device.
     pub loss: Tensor<1>,
     pub epsilon: f64,
-    pub learning_rate: f32,
+    pub learning_rate: f64,
     /// Selected Float Q values `[batch_size, 1]` in the compute dtype.
     pub q_values: Tensor<2>,
     /// Sampled Float rewards `[batch_size, 1]` in the compute dtype.
@@ -406,7 +408,7 @@ where
     target_q_network: M,
     target_update_interval: usize,
     optimizer: ModuleOptimizer,
-    learning_rate: f64,
+    learning_rate: LearningRateSchedule,
     current_epsilon: f64,
     epsilon_schedule: Box<dyn ParameterSchedule>,
     schedule_progress: ScheduleProgress,
@@ -446,7 +448,7 @@ where
         observation_space: S,
         online_q_network: M,
         #[builder(into)] optimizer: ModuleOptimizer,
-        learning_rate: f64,
+        #[builder(into)] learning_rate: LearningRateSchedule,
         #[builder(default = 1000)] target_update_interval: usize,
         #[builder(default = Box::new(LinearSchedule::new(1.0, 0.1)), with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         epsilon_schedule: Box<dyn ParameterSchedule>,
@@ -466,7 +468,7 @@ where
         if !dtype.is_float() {
             return Err(QLearningConfigurationError::InvalidDType(dtype).into());
         }
-        if !learning_rate.is_finite() || learning_rate <= 0.0 {
+        if learning_rate.initial_rate().is_none() {
             return Err(QLearningConfigurationError::InvalidLearningRate.into());
         }
         let observation_shape = observation_space.shape();
@@ -620,6 +622,10 @@ where
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(());
         }
+        let learning_rate = self
+            .learning_rate
+            .rate(&self.schedule_progress.at_step(collection_timestep))
+            .ok_or(QLearningConfigurationError::InvalidLearningRate)?;
         let optimization_device = self.replay_storage_config.optimization_device();
         let batch = self.experience_replay.sample()?;
         let observations = self.model_observations(batch.observations);
@@ -657,7 +663,7 @@ where
         logger.log_update(&QLogEntry {
             loss: loss.clone(),
             epsilon: self.current_epsilon,
-            learning_rate: self.learning_rate as f32,
+            learning_rate,
             q_values: selected_q_values,
             replay_rewards: rewards,
             update_index: self.optimization_steps,
@@ -667,7 +673,7 @@ where
         let gradients = GradientsParams::from_grads(loss.backward(), &self.online_q_network);
         self.online_q_network =
             self.optimizer
-                .step(self.learning_rate, self.online_q_network.clone(), gradients);
+                .step(learning_rate, self.online_q_network.clone(), gradients);
         Ok(())
     }
 

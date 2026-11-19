@@ -15,7 +15,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     objectives::bellman_targets,
-    parameter_schedule::{LinearSchedule, ParameterSchedule},
+    parameter_schedule::{LearningRateSchedule, LinearSchedule, ParameterSchedule},
     spaces::{Discrete, ObservationSpace},
     tensor_rank::NextRank,
 };
@@ -103,7 +103,8 @@ where
         observation_space: S,
         online_q_network: M,
         #[builder(into)] optimizer: ModuleOptimizer,
-        learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| LearningRateSchedule::from(schedule))]
+        learning_rate: LearningRateSchedule,
         #[builder(default = 1000)] target_update_interval: usize,
         #[builder(
             default = Box::new(LinearSchedule::new(1.0, 0.1)),
