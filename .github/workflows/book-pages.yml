@@ -154,8 +154,11 @@ jobs:
           root = Path("_site")
           base = "https://docs.modurl.dev"
           excluded = {"404.html", "print.html", "toc.html"}
+          def canonical_path(relative):
+              return "/dev/" if relative in {"index.html", "introduction.html"} else f"/dev/{quote(relative)}"
+
           dev_pages = {
-              path.relative_to(root / "dev").as_posix()
+              canonical_path(path.relative_to(root / "dev").as_posix())
               for path in (root / "dev").rglob("*.html")
               if path.name not in excluded
           }
@@ -164,12 +167,17 @@ jobs:
                   continue
               for page in version.rglob("*.html"):
                   relative = page.relative_to(version).as_posix()
-                  target = f"/dev/{quote(relative)}" if (root / "dev" / relative).is_file() else "/dev/"
+                  target = canonical_path(relative) if (root / "dev" / relative).is_file() else "/dev/"
                   canonical = f'<link rel="canonical" href="{base}{target}">'
                   html = page.read_text()
                   html = re.sub(
                       r'<link\b(?=[^>]*\brel=["\x27]canonical["\x27])[^>]*>\s*',
                       "", html, flags=re.IGNORECASE,
+                  )
+                  html = re.sub(
+                      r'(<meta\b[^>]*property="og:url"[^>]*content=")[^"]*(")',
+                      lambda match: f"{match[1]}{base}{target}{match[2]}",
+                      html,
                   )
                   if "</head>" not in html:
                       raise ValueError(f"Missing head in {page}")
@@ -178,9 +186,9 @@ jobs:
           namespace = "http://www.sitemaps.org/schemas/sitemap/0.9"
           ET.register_namespace("", namespace)
           sitemap = ET.Element(f"{{{namespace}}}urlset")
-          for relative in sorted(dev_pages):
+          for target in sorted(dev_pages):
               entry = ET.SubElement(sitemap, f"{{{namespace}}}url")
-              ET.SubElement(entry, f"{{{namespace}}}loc").text = f"{base}/dev/{quote(relative)}"
+              ET.SubElement(entry, f"{{{namespace}}}loc").text = f"{base}{target}"
           ET.indent(sitemap)
           ET.ElementTree(sitemap).write(root / "sitemap.xml", encoding="utf-8", xml_declaration=True)
           (root / "robots.txt").write_text(
