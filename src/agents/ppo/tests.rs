@@ -516,7 +516,7 @@ mod schedule_tests {
                 _next_dones: &Tensor<3, Bool>,
                 _next_truncateds: &Tensor<3, Bool>,
                 _bootstrapped_values: &Tensor<2>,
-                _gamma: f32,
+                _gamma: f64,
             ) -> AdvantageEstimate {
                 AdvantageEstimate {
                     advantages: rewards.clone() - values.clone(),
@@ -570,7 +570,7 @@ mod schedule_tests {
                 _next_dones: &Tensor<3, Bool>,
                 _next_truncateds: &Tensor<3, Bool>,
                 _bootstrapped_values: &Tensor<2>,
-                _gamma: f32,
+                _gamma: f64,
             ) -> AdvantageEstimate {
                 let advantages = rewards.clone() - values.clone();
                 AdvantageEstimate {
@@ -972,7 +972,7 @@ mod schedule_tests {
         );
         assert_eq!(transition.rewards.dtype(), DType::F64);
         assert_eq!(transition.training_rewards.dtype(), DType::F64);
-        let expected = 0.25 + 1.0000000001 * f64::from(agent.gamma);
+        let expected = 0.25 + 1.0000000001 * agent.gamma;
         assert!(
             (transition.training_rewards.clone().into_scalar::<f64>() - expected).abs() < 1e-12
         );
@@ -1876,7 +1876,7 @@ mod schedule_tests {
             _next_dones: &Tensor<3, Bool>,
             _next_truncateds: &Tensor<3, Bool>,
             _bootstrapped_values: &Tensor<2>,
-            _gamma: f32,
+            _gamma: f64,
         ) -> AdvantageEstimate {
             self.time_steps.lock().unwrap().push(rewards.dims()[0]);
             let advantages = rewards.clone() - values.clone();

@@ -32,7 +32,7 @@ const MAX_EPISODE_FRAMES: u32 = 108_000;
 // Separate state and next-state storage at this capacity uses about 53 GiB.
 const REPLAY_CAPACITY: usize = 1_000_000;
 const BATCH_SIZE: usize = 32;
-const GAMMA: f32 = 0.99;
+const GAMMA: f64 = 0.99;
 const TRAINING_START: usize = 80_000;
 const TARGET_UPDATE_INTERVAL: usize = 1_000;
 const EPSILON_ANNEALING_STEPS: usize = 1_000_000;
