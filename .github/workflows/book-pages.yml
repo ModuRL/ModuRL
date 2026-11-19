@@ -81,13 +81,40 @@ jobs:
               continue
             fi
 
-            # Release tags retain the source configuration they were created
-            # with, so set the canonical URL for this versioned build.
-            sed -i \
-              "s|^site-url = .*|site-url = \"/ModuRL/$series/\"|" \
-              "$worktree/docs/book.toml"
-            mdbook build "$worktree/docs" \
-              --dest-dir "$GITHUB_WORKSPACE/_site/$series"
+            # Keep release content, but share master's theme and navigation.
+            rm -rf "$worktree/docs/theme"
+            cp -a docs/theme "$worktree/docs/theme"
+            python3 - "$worktree/docs" "$series" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          book_dir, series = sys.argv[1:]
+          theme_config = tomllib.loads(Path("docs/book.toml").read_text())["output"]["html"]
+          theme_keys = (
+              "additional-css",
+              "additional-js",
+              "default-theme",
+              "preferred-dark-theme",
+          )
+          build_env = os.environ.copy()
+          book_config = tomllib.loads(Path("docs/book.toml").read_text())["book"]
+          build_env["MDBOOK_BOOK__DESCRIPTION"] = json.dumps(book_config["description"])
+          for key in theme_keys:
+              if key in theme_config:
+                  name = "MDBOOK_OUTPUT__HTML__" + key.upper().replace("-", "_")
+                  build_env[name] = json.dumps(theme_config[key])
+          build_env["MDBOOK_OUTPUT__HTML__SITE_URL"] = f"/{series}/"
+          destination = Path(os.environ["GITHUB_WORKSPACE"]) / "_site" / series
+          subprocess.run(
+              ["mdbook", "build", book_dir, "--dest-dir", str(destination)],
+              check=True,
+              env=build_env,
+          )
+          PY
             git worktree remove --force "$worktree"
 
             built_series[$series]=1
@@ -101,12 +128,7 @@ jobs:
           )
 
           cp docs/site/index.html _site/index.html
-          if [[ -n "$latest_series" ]]; then
-            sed -i \
-              -e "s|\./dev/|./$latest_series/|g" \
-              -e "s|development version|latest stable version ($latest_series)|g" \
-              _site/index.html
-          else
+          if [[ -z "$latest_series" ]]; then
             latest_series="dev"
           fi
 
@@ -118,6 +140,54 @@ jobs:
             printf ']}\n'
           } > _site/versions.json
           touch _site/.nojekyll
+          printf '%s\n' 'docs.modurl.dev' > _site/CNAME
+
+      - name: Generate search metadata
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          from urllib.parse import quote
+
+          root = Path("_site")
+          base = "https://docs.modurl.dev"
+          excluded = {"404.html", "print.html", "toc.html"}
+          dev_pages = {
+              path.relative_to(root / "dev").as_posix()
+              for path in (root / "dev").rglob("*.html")
+              if path.name not in excluded
+          }
+          for version in root.iterdir():
+              if not version.is_dir():
+                  continue
+              for page in version.rglob("*.html"):
+                  relative = page.relative_to(version).as_posix()
+                  target = f"/dev/{quote(relative)}" if (root / "dev" / relative).is_file() else "/dev/"
+                  canonical = f'<link rel="canonical" href="{base}{target}">'
+                  html = page.read_text()
+                  html = re.sub(
+                      r'<link\b(?=[^>]*\brel=["\x27]canonical["\x27])[^>]*>\s*',
+                      "", html, flags=re.IGNORECASE,
+                  )
+                  if "</head>" not in html:
+                      raise ValueError(f"Missing head in {page}")
+                  page.write_text(html.replace("</head>", f"    {canonical}\n</head>", 1))
+
+          namespace = "http://www.sitemaps.org/schemas/sitemap/0.9"
+          ET.register_namespace("", namespace)
+          sitemap = ET.Element(f"{{{namespace}}}urlset")
+          for relative in sorted(dev_pages):
+              entry = ET.SubElement(sitemap, f"{{{namespace}}}url")
+              ET.SubElement(entry, f"{{{namespace}}}loc").text = f"{base}/dev/{quote(relative)}"
+          ET.indent(sitemap)
+          ET.ElementTree(sitemap).write(root / "sitemap.xml", encoding="utf-8", xml_declaration=True)
+          (root / "robots.txt").write_text(
+              f"User-agent: *\nAllow: /\n\nSitemap: {base}/sitemap.xml\n"
+          )
+          print(f"Sitemap: {len(dev_pages)} development pages")
+          PY
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v5

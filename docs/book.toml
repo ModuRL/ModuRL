@@ -1,10 +1,14 @@
 [book]
 title = "ModuRL Guide"
+description = "Learn to build and train reinforcement learning agents in Rust with ModuRL, from your first environment to composable agents powered by Burn."
 authors = ["ModuRL Contributors"]
 language = "en"
 src = "src"
 
 [output.html]
 git-repository-url = "https://github.com/ModuRL/ModuRL"
-site-url = "/ModuRL/dev/"
-additional-js = ["theme/version-switcher.js"]
+site-url = "/dev/"
+additional-js = ["theme/version-switcher.js", "theme/code-blocks.js", "theme/search-modal.js"]
+additional-css = ["theme/modurl.css"]
+default-theme = "coal"
+preferred-dark-theme = "coal"

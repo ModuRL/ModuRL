@@ -586,7 +586,7 @@ mod schedule_tests {
 
         impl AdvantageEstimator for RewardMinusValue {
             /// Returns reward-minus-value advantages and reward targets [rows, 1].
-            fn estimate(&self, input: AdvantageInput<'_>, _gamma: f32) -> AdvantageEstimate {
+            fn estimate(&self, input: AdvantageInput<'_>, _gamma: f64) -> AdvantageEstimate {
                 let (rewards, values) = input.rewards_and_values();
                 AdvantageEstimate {
                     advantages: rewards.clone() - values.clone(),
@@ -633,7 +633,7 @@ mod schedule_tests {
 
         impl AdvantageEstimator for MismatchedEstimator {
             /// Returns invalid advantages [rows, 2] and value targets [rows, 1].
-            fn estimate(&self, input: AdvantageInput<'_>, _gamma: f32) -> AdvantageEstimate {
+            fn estimate(&self, input: AdvantageInput<'_>, _gamma: f64) -> AdvantageEstimate {
                 let (rewards, values) = input.rewards_and_values();
                 let advantages = rewards.clone() - values.clone();
                 AdvantageEstimate {
@@ -1035,7 +1035,7 @@ mod schedule_tests {
         );
         assert_eq!(transition.rewards.dtype(), DType::F64);
         assert_eq!(transition.training_rewards.dtype(), DType::F64);
-        let expected = 0.25 + 1.0000000001 * f64::from(agent.gamma);
+        let expected = 0.25 + 1.0000000001 * agent.gamma;
         let explained_variance = agent
             .add_advantages_and_returns(&agent.network_info.valid())
             .unwrap();
@@ -1969,7 +1969,7 @@ mod schedule_tests {
 
     impl AdvantageEstimator for FailOnceEstimator {
         /// Records rollout lengths and returns mismatched advantages [rows, 2] once.
-        fn estimate(&self, input: AdvantageInput<'_>, _gamma: f32) -> AdvantageEstimate {
+        fn estimate(&self, input: AdvantageInput<'_>, _gamma: f64) -> AdvantageEstimate {
             let step_count = input.step_count();
             let (rewards, values) = input.rewards_and_values();
             self.time_steps.lock().unwrap().push(step_count);

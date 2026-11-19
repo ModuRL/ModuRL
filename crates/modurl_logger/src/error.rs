@@ -1,7 +1,7 @@
 /// An error produced while accepting or aggregating metrics.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A metric tensor did not have shape [1].
+    /// A metric tensor did not have shape `[1]`.
     #[error("metric {metric:?} must have shape [1], but has shape {shape:?}")]
     NonScalar { metric: String, shape: Vec<usize> },
     /// A metric was logged before the currently open timestep.

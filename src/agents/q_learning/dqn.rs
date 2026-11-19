@@ -59,13 +59,13 @@ impl QLearningTarget for DQNTarget {
         next_dones: &Tensor<2, Bool>,
         _online_next_q_values: Option<&Tensor<2>>,
         target_next_q_values: &Tensor<2>,
-        gamma: f32,
+        gamma: f64,
     ) -> Tensor<2> {
         bellman_targets(
             rewards.clone(),
             next_dones.clone(),
             target_next_q_values.clone().max_dim(1),
-            f64::from(gamma),
+            gamma,
         )
     }
 }
@@ -112,7 +112,7 @@ where
         epsilon_schedule: Box<dyn ParameterSchedule>,
         #[builder(default = 10000)] replay_capacity: usize,
         #[builder(default = 32)] batch_size: usize,
-        #[builder(default = 0.99)] gamma: f32,
+        #[builder(default = 0.99)] gamma: f64,
         #[builder(default = 4)] update_frequency: usize,
         #[builder(default = 1000)] training_start: usize,
         training_horizon: Option<usize>,

@@ -495,7 +495,7 @@ fn compute_explained_variance<const D: usize>(
 pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2> {
     clipped: bool,
     clip_value_loss: bool,
-    gamma: f32,
+    gamma: f64,
     advantage_estimator: Box<dyn AdvantageEstimator>,
     clip_range: Box<dyn ParameterSchedule>,
     normalize_advantage: bool,
@@ -554,7 +554,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
         // its usefulness is task- and reward-scale-dependent.
         // research has shown it's often harmful
         #[builder(default = false)] clip_value_loss: bool,
-        #[builder(default = 0.99)] gamma: f32,
+        #[builder(default = 0.99)] gamma: f64,
         #[builder(
             default = Box::new(GAE::new(0.95).unwrap()),
             with = |estimator: impl AdvantageEstimator + 'static| Box::new(estimator)
@@ -900,7 +900,7 @@ where
         if rows.is_empty() {
             return rewards;
         }
-        let corrections = bootstrap.select(indices) * f64::from(self.gamma);
+        let corrections = bootstrap.select(indices) * self.gamma;
         rewards.select_assign(
             0,
             bootstrap.indices(rows),

@@ -7,10 +7,13 @@
 
 ## Add the dependencies
 
+These docs track the `master` branch, which is ahead of the last crates.io
+release, so install ModuRL from git.
+
 ```toml
 [dependencies]
 burn = { version = "=0.22.0", default-features = false, features = ["std", "flex"] }
-modurl_logger = "0.1.0"
+modurl_logger = { git = "https://github.com/ModuRL/ModuRL" }
 ```
 
 ## Example

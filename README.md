@@ -3,9 +3,9 @@
 [![Workspace CI](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml/badge.svg)](https://github.com/ModuRL/ModuRL/actions/workflows/rust.yml)
 [![crates.io](https://img.shields.io/crates/v/modurl.svg)](https://crates.io/crates/modurl)
 [![docs.rs](https://docs.rs/modurl/badge.svg)](https://docs.rs/modurl)
-[![book](https://img.shields.io/github/actions/workflow/status/ModuRL/ModuRL/book-pages.yml?branch=master&label=book)](https://modurl.github.io/ModuRL/)
+[![book](https://img.shields.io/github/actions/workflow/status/ModuRL/ModuRL/book-pages.yml?branch=master&label=book)](https://docs.modurl.dev/)
 
-`ModuRL` is a deep reinforcement learning framework for Rust.
+`ModuRL` is a deep reinforcement learning framework for Rust. Learn more at [modurl.dev](https://modurl.dev).
 
 It provides training algorithms, environments, models, policy distributions, storage, schedules, and logging. Tensor shapes, devices, networks, and optimizer configuration remain explicit.
 
@@ -22,15 +22,14 @@ cd ModuRL
 cargo run --release -p examples --example ppo_cartpole
 ```
 
-The same `Gym` and `Space` traits used by training agents also support direct environment interaction:
+The same `Gym`, `ObservationSpace`, and `ActionSpace` traits used by training agents also support direct environment interaction:
 
 ```rust
 use burn::tensor::Device;
 use modurl::prelude::*;
 use modurl_gym::classic_control::cartpole::CartPoleV1;
-use modurl_gym::EnvironmentError;
 
-fn main() -> Result<(), EnvironmentError> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::flex();
     let mut env = CartPoleV1::builder().seed(7).build()?;
 
@@ -64,7 +63,7 @@ The suite measures throughput, not final reward or sample efficiency. Emulator v
 
 - Training algorithms: PPO, A2C, SAC, DDPG, TD3, DQN, and Double DQN.
 - Models and policies: MLPs, shared or separate actor-critic networks, categorical and Gaussian policies, transformed distributions, and user-supplied models.
-- Experience: rollout buffers, replay buffers, configurable replay devices, and parameter schedules.
+- Experience: on-policy rollout batching, replay buffers, configurable replay devices, and parameter schedules.
 - Environments: single and vectorized interfaces, classic control, Box2D, MuJoCo, and Atari integrations.
 - Wrappers: time limits, observation and reward normalization, reward clipping, frame stacking, max-and-skip, and raw reward recording.
 - Logging: algorithm-specific hooks, terminal graphs, and TensorBoard event output.
@@ -104,13 +103,13 @@ The public boundaries make each part replaceable:
 
 | Decision | Available choices |
 | --- | --- |
-| Environment execution | Implement `Gym` for one environment or `MultiGym` for a batch. Collect `Gym` implementations with `VectorizedGymWrapper::from(envs)`, or enable `multithreading` and use `MultithreadedVectorizedGymWrapper`. |
+| Environment execution | Implement `Gym` for one environment or `MultiGym` for a batch. Collect `Gym` implementations with `VectorizedGymWrapper::new(envs)` (or `::from(env)` for one environment), or enable `multithreading` and use `MultithreadedVectorizedGymWrapper`. |
 | Network topology | Use `SeparatePPONetwork` for independent actor and critic modules, or `SharedPPONetwork` for one trunk with policy and value heads. |
 | Policy representation | Wrap a model in `ProbabilisticPolicyModel`. Choose a categorical, Gaussian, transformed, or application-defined `Distribution`. |
 | Training state and devices | On-policy agents use rollout storage. Replay agents optimize on the model device and store replay there or on an optional `.replay_device(..)`; observations retain their native dtype. |
 | Schedules and logging | Use constant, linear, exponential, or application-defined `ParameterSchedule` values. Pass a logger implementation to the agent builder, or omit logging. |
 
-Agents train against these contracts instead of concrete environment, network, or logger types. See [Core Concepts](https://modurl.github.io/ModuRL/dev/core-concepts.html) for how the parts interact.
+Agents train against these contracts instead of concrete environment, network, or logger types. See [Core Concepts](https://docs.modurl.dev/dev/core-concepts.html) for how the parts interact.
 
 ## Workspace crates
 
@@ -134,7 +133,7 @@ support.
 
 ## Documentation
 
-The [ModuRL Guide](https://modurl.github.io/ModuRL/dev/) covers the training algorithms, environment interfaces, models, policies, distributions, and device configuration.
+The [ModuRL Guide](https://docs.modurl.dev/dev/) covers the training algorithms, environment interfaces, models, policies, distributions, and device configuration.
 
 Build the core API documentation locally:
 

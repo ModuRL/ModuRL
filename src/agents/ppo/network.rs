@@ -281,7 +281,7 @@ pub trait PPONetwork<const O: usize, const H: usize, const L: usize>: Module {
         actions: Tensor<L>,
     ) -> Result<(Tensor<2>, Tensor<2>), Self::Error>;
 
-    /// Updates owned parameters from actor and critic losses [1], preserving the configuration's clipping and optimizer behavior.
+    /// Updates owned parameters from actor and critic losses `[1]`, preserving the configuration's clipping and optimizer behavior.
     /// Losses must come from the owned models on their device.
     fn backpropagate_loss(
         &mut self,
@@ -360,7 +360,7 @@ where
             .map_err(PPONetworkError::Policy)
     }
 
-    /// Updates the shared model and both heads from losses [1], clipping one global norm before a single optimizer step.
+    /// Updates the shared model and both heads from losses `[1]`, clipping one global norm before a single optimizer step.
     fn backpropagate_loss(
         &mut self,
         actor_loss: Tensor<1>,
@@ -449,7 +449,7 @@ where
             .map_err(PPONetworkError::Policy)
     }
 
-    /// Updates separate models from losses [1], using the configured combined or independent clipping norms.
+    /// Updates separate models from losses `[1]`, using the configured combined or independent clipping norms.
     fn backpropagate_loss(
         &mut self,
         actor_loss: Tensor<1>,

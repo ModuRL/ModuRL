@@ -233,11 +233,11 @@ impl<'a> AdvantageInput<'a> {
 /// Computes advantages and critic targets [rows, 1] in collection order.
 /// Outputs must preserve the input dtype and device.
 pub trait AdvantageEstimator {
-    fn estimate(&self, rollout: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate;
+    fn estimate(&self, rollout: AdvantageInput<'_>, gamma: f64) -> AdvantageEstimate;
 }
 
 impl AdvantageEstimator for Box<dyn AdvantageEstimator> {
-    fn estimate(&self, rollout: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate {
+    fn estimate(&self, rollout: AdvantageInput<'_>, gamma: f64) -> AdvantageEstimate {
         (**self).estimate(rollout, gamma)
     }
 }
@@ -372,25 +372,25 @@ impl AdvantageInput<'_> {
             value_targets: self.values.clone().detach(),
         }
     }
-    fn gae(&self, gamma: f32, lambda: f32, value_lambda: f32) -> AdvantageEstimate {
+    fn gae(&self, gamma: f64, lambda: f64, value_lambda: f64) -> AdvantageEstimate {
         let n = self.layout.successor.len();
         if n == 0 {
             return self.empty();
         }
         let masks = self.masks();
-        let deltas = self.rewards.clone() + self.next_values() * masks.clone() * f64::from(gamma)
+        let deltas = self.rewards.clone() + self.next_values() * masks.clone() * gamma
             - self.values.clone().detach();
         let columns = if lambda == value_lambda { 1 } else { 2 };
         let mut accumulators =
             Tensor::<2>::zeros([n, columns], (&self.values.device(), self.values.dtype()));
         let discounts = if columns == 1 {
-            masks * (f64::from(gamma) * f64::from(lambda))
+            masks * (gamma * lambda)
         } else {
             masks
-                * (Tensor::from_data(
-                    [[lambda, value_lambda]],
+                * Tensor::from_data(
+                    [[gamma * lambda, gamma * value_lambda]],
                     (&self.values.device(), self.values.dtype()),
-                ) * f64::from(gamma))
+                )
         };
         let deltas = if columns == 1 {
             deltas
@@ -421,13 +421,13 @@ impl AdvantageInput<'_> {
                 + accumulators.slice_dim(1, columns - 1..columns),
         }
     }
-    fn n_step(&self, gamma: f32, n_steps: usize) -> AdvantageEstimate {
+    fn n_step(&self, gamma: f64, n_steps: usize) -> AdvantageEstimate {
         let n = self.layout.successor.len();
         if n == 0 {
             return self.empty();
         }
         let successor_indices = self.next_value_indices();
-        let discounts = self.masks() * f64::from(gamma);
+        let discounts = self.masks() * gamma;
         let mut targets = self.values.clone().detach();
         for _ in 0..n_steps.min(self.step_count()) {
             targets = self.rewards.clone()
@@ -439,13 +439,13 @@ impl AdvantageInput<'_> {
         }
     }
     /// Computes compact upgoing advantages with critic targets [rows, 1].
-    fn upgo(&self, gamma: f32, value_targets: Tensor<2>) -> AdvantageEstimate {
+    fn upgo(&self, gamma: f64, value_targets: Tensor<2>) -> AdvantageEstimate {
         let n = self.layout.successor.len();
         if n == 0 {
             return self.empty();
         }
         let next_values = self.next_values();
-        let discounts = self.masks() * f64::from(gamma);
+        let discounts = self.masks() * gamma;
         let q = self.rewards.clone() + next_values.clone() * discounts.clone();
         let mut accumulators =
             Tensor::<2>::zeros([n, 1], (&self.values.device(), self.values.dtype()));
@@ -515,13 +515,13 @@ pub enum GAEError {
 /// Generalized advantage estimation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GAE {
-    lambda: f32,
-    value_lambda: f32,
+    lambda: f64,
+    value_lambda: f64,
 }
 
 impl GAE {
     /// Rejects a non-finite `lambda` or one outside `0..=1`.
-    pub fn new(lambda: f32) -> Result<Self, GAEError> {
+    pub fn new(lambda: f64) -> Result<Self, GAEError> {
         if !lambda.is_finite() || !(0.0..=1.0).contains(&lambda) {
             return Err(GAEError::InvalidLambda);
         }
@@ -533,7 +533,7 @@ impl GAE {
 
     /// Uses `value_lambda` for the value targets' λ-returns; rejects a non-finite value or one
     /// outside `0..=1`.
-    pub fn with_value_lambda(mut self, value_lambda: f32) -> Result<Self, GAEError> {
+    pub fn with_value_lambda(mut self, value_lambda: f64) -> Result<Self, GAEError> {
         if !value_lambda.is_finite() || !(0.0..=1.0).contains(&value_lambda) {
             return Err(GAEError::InvalidLambda);
         }
@@ -541,12 +541,12 @@ impl GAE {
         Ok(self)
     }
 
-    pub fn lambda(&self) -> f32 {
+    pub fn lambda(&self) -> f64 {
         self.lambda
     }
 
     /// Returns the lambda used for value-target λ-returns.
-    pub fn value_lambda(&self) -> f32 {
+    pub fn value_lambda(&self) -> f64 {
         self.value_lambda
     }
 }
@@ -598,17 +598,17 @@ impl<V> UPGO<V> {
 }
 
 impl AdvantageEstimator for GAE {
-    fn estimate(&self, input: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate {
+    fn estimate(&self, input: AdvantageInput<'_>, gamma: f64) -> AdvantageEstimate {
         input.gae(gamma, self.lambda, self.value_lambda)
     }
 }
 impl AdvantageEstimator for NStep {
-    fn estimate(&self, input: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate {
+    fn estimate(&self, input: AdvantageInput<'_>, gamma: f64) -> AdvantageEstimate {
         input.n_step(gamma, self.n)
     }
 }
 impl<V: AdvantageEstimator> AdvantageEstimator for UPGO<V> {
-    fn estimate(&self, input: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate {
+    fn estimate(&self, input: AdvantageInput<'_>, gamma: f64) -> AdvantageEstimate {
         input.upgo(
             gamma,
             self.value_estimator.estimate(input, gamma).value_targets,
@@ -661,7 +661,7 @@ mod tests {
         fn estimate(
             &self,
             estimator: &impl AdvantageEstimator,
-            gamma: f32,
+            gamma: f64,
             dtype: DType,
         ) -> Estimate {
             let device = Device::flex().autodiff();
@@ -711,11 +711,10 @@ mod tests {
             sums
         }
 
-        fn gae(&self, gamma: f32, lambda: f32, value_lambda: f32) -> Estimate {
-            let gamma = f64::from(gamma);
-            let targets = self.discounted_deltas(gamma, gamma * f64::from(value_lambda));
+        fn gae(&self, gamma: f64, lambda: f64, value_lambda: f64) -> Estimate {
+            let targets = self.discounted_deltas(gamma, gamma * value_lambda);
             (
-                self.discounted_deltas(gamma, gamma * f64::from(lambda)),
+                self.discounted_deltas(gamma, gamma * lambda),
                 targets
                     .iter()
                     .enumerate()
@@ -724,7 +723,7 @@ mod tests {
             )
         }
 
-        fn n_step(&self, gamma: f32, n: usize) -> Estimate {
+        fn n_step(&self, gamma: f64, n: usize) -> Estimate {
             let targets: Vec<f64> = (0..self.rewards.len())
                 .map(|i| {
                     let steps: Vec<_> =
@@ -733,7 +732,7 @@ mod tests {
                         steps.iter().fold((0.0, 1.0), |(target, discount), &j| {
                             (
                                 target + discount * self.reward(j),
-                                discount * self.mask(j) * f64::from(gamma),
+                                discount * self.mask(j) * gamma,
                             )
                         });
                     target + discount * self.next_value(*steps.last().unwrap())
@@ -743,7 +742,7 @@ mod tests {
         }
 
         /// Returns UPGO advantages; value targets come from the wrapped estimator.
-        fn upgo_advantages(&self, gamma: f32) -> Vec<f64> {
+        fn upgo_advantages(&self, gamma: f64) -> Vec<f64> {
             let mut returns = vec![0.0; self.rewards.len()];
             let mut q_values = returns.clone();
             for i in (0..returns.len()).rev() {
@@ -756,7 +755,7 @@ mod tests {
                 } else {
                     next_value
                 };
-                let discount = self.mask(i) * f64::from(gamma);
+                let discount = self.mask(i) * gamma;
                 returns[i] = self.reward(i) + discount * continuation;
                 q_values[i] = self.reward(i) + discount * next_value;
             }
@@ -791,8 +790,8 @@ mod tests {
         assert_close(&actual.1, &expected.1, dtype);
     }
 
-    fn unit_interval() -> impl Strategy<Value = f32> {
-        prop_oneof![Just(0.0f32), Just(0.5), Just(1.0), 0.0f32..=1.0]
+    fn unit_interval() -> impl Strategy<Value = f64> {
+        prop_oneof![Just(0.0f64), Just(0.5), Just(1.0), 0.0f64..=1.0]
     }
 
     /// Rollouts of 1..=12 steps over 1..=4 environments; episode ends are sparse so multi-step
@@ -1064,10 +1063,10 @@ mod tests {
             ]
         );
         let slots: Vec<_> = steps.into_iter().flatten().collect();
-        let gamma = 0.91f32;
+        let gamma = 0.91f64;
         let mut rewards = vec![1.0, -2.0, 3.5, 2.0, -4.0, 7.0, 1.0, 2.5, 4.0, -1.0];
-        rewards[3] += gamma * 5.5;
-        rewards[8] += gamma * 3.75;
+        rewards[3] += (gamma * 5.5) as f32;
+        rewards[8] += (gamma * 3.75) as f32;
         let values = vec![0.2, 1.0, -2.5, 3.0, 0.7, -1.0, 5.0, 1.5, -0.4, 2.0];
         let dones = vec![
             false, false, true, false, true, false, false, false, false, false,
@@ -1173,7 +1172,7 @@ mod tests {
 
     #[test]
     fn gae_rejects_invalid_lambda() {
-        for lambda in [-0.1, 1.1, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        for lambda in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert_eq!(GAE::new(lambda), Err(GAEError::InvalidLambda));
             assert_eq!(
                 GAE::new(0.9).unwrap().with_value_lambda(lambda),

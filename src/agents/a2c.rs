@@ -233,7 +233,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
         observation_space: OS,
         action_space: AS,
         network_info: A2CNetworkInfo<N>,
-        #[builder(default = 0.99)] gamma: f32,
+        #[builder(default = 0.99)] gamma: f64,
         #[builder(
             default = Box::new(GAE::new(1.0).unwrap()),
             with = |estimator: impl AdvantageEstimator + 'static| Box::new(estimator)

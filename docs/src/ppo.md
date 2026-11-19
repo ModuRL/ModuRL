@@ -23,7 +23,7 @@ PPO estimates advantages with `GAE` (lambda `0.95`) by default. Pass any
 `AdvantageEstimate` with the advantages and the critic's value targets; `GAE`
 uses `values + advantages` as those targets.
 
-The trait method is `estimate(&self, rollout: AdvantageInput<'_>, gamma: f32) -> AdvantageEstimate`.
+The trait method is `estimate(&self, rollout: AdvantageInput<'_>, gamma: f64) -> AdvantageEstimate`.
 Inputs and outputs are flat `[rows, 1]` tensors in collection order.
 `AdvantageInput` carries validated flat rewards and values,
 termination flags, a `RolloutLayout`, and values for live tails in flat row order.

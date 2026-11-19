@@ -78,10 +78,13 @@ Gymnasium-compatible environments; apply it in an environment wrapper.
 
 ## Rendering
 
+These docs track the `master` branch, which is ahead of the last crates.io
+release, so install ModuRL from git.
+
 Enable the optional interactive MuJoCo viewer in your dependency:
 
 ```toml
-modurl_mujoco = { version = "0.1", features = ["rendering"] }
+modurl_mujoco = { git = "https://github.com/ModuRL/ModuRL", features = ["rendering"] }
 ```
 
 Then opt an environment into rendering through its builder:

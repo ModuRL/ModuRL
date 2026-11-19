@@ -21,6 +21,9 @@ cargo new modurl-hello
 cd modurl-hello
 ```
 
+These docs track the `master` branch, which is ahead of the last crates.io
+release, so install ModuRL from git.
+
 Start by adding the libraries used by this example:
 
 ```toml
@@ -30,8 +33,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-modurl = "0.1"
-modurl_gym = "0.1"
+modurl = { git = "https://github.com/ModuRL/ModuRL" }
+modurl_gym = { git = "https://github.com/ModuRL/ModuRL" }
 burn = { version = "=0.22.0", default-features = false, features = ["std", "optim", "flex", "autodiff"] }
 ```
 

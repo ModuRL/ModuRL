@@ -30,7 +30,8 @@ four parts:
 
 1. An owned actor model.
 2. One `ActionValueCritic` with an owned online network and optimizer.
-3. A bounded continuous action space and replay-device strategy.
+3. A bounded continuous action space and replay settings. Replay is stored on the
+   model device unless the builder sets `.replay_device(..)`.
 4. A `DDPGAgent` that owns collection and optimization.
 
 ## Build the Actor and Critic

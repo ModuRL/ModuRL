@@ -5,19 +5,21 @@ This file tracks public API and caller-visible changes by release.
 ## 0.2.0 — Unreleased
 
 Changes below are relative to the `v0.1.0` tag and include the current working tree.
-The Burn migration is incomplete. Entries describe APIs already changed in source;
-they do not imply that all workspace packages build together. See [Remaining migration work](#remaining-migration-work).
+The workspace has fully migrated from Candle to Burn: the core crate, every agent, the environment crates, the logger, and the examples use Burn.
 
 ### Rust and tensor backend
 
+- Discount `gamma` and advantage-estimation `lambda` parameters now consistently use `f64`,
+  including PPO, A2C, DQN/DDQN, GAE, NStep, and UPGO. Callers with `f32` variables must
+  convert them to `f64`; custom advantage estimators must update their method signatures.
 - The minimum Rust version increases from 1.88 to 1.95. The Rust edition remains 2024.
-- Migrated core APIs use Burn 0.22.0 instead of Candle tensors, devices, dtypes, and model parameters.
+- All public APIs use Burn 0.22.0 instead of Candle tensors, devices, dtypes, and model parameters.
   Burn tensors include rank and kind in their type: `Tensor<R>`, `Tensor<R, Int>`, and `Tensor<R, Bool>`.
   Candle tensors cannot be passed directly to these APIs.
 - Many tensor inputs now take owned tensors instead of references. Clone a tensor when the caller must retain it.
   Fallible component operations still return `Result`; ordinary Burn tensor operations often return tensors directly.
   Do not assume every backend shape or device failure is represented by a ModuRL error.
-- Seed migrated tensor sampling with Burn's `Device::seed` instead of Candle's device seeding API.
+- Seed tensor sampling with Burn's `Device::seed` instead of Candle's device seeding API.
   Seeded sample sequences can differ between backends, and some backends share RNG state across devices.
 - Added `modurl::tensor_rank::{NextRank, PrevRank}` to infer tensor types with one more or one fewer axis.
   These traits preserve kind without converting values. `NextRank` covers ranks 1–1024; `PrevRank` covers ranks 2–1025.
@@ -35,7 +37,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
 - Moved `tensor_from_neurons` to `ActionMap`. Added `policy_shape()` to distinguish policy output shape from environment action shape.
   Continuous mapping still clamps values; discrete mapping selects the largest category score.
 - Scalars now have item shape `[1]`, batch shape `[batch_size, 1]`, and frame-stack shape `[stack_size, 1]`.
-  The old scalar layouts `[]` and `[batch_size]` are no longer accepted at migrated environment boundaries.
+  The old scalar layouts `[]` and `[batch_size]` are no longer accepted at environment boundaries.
   Rewards, values, log probabilities, entropy, and termination masks also use `[batch_size, 1]`.
   Rollout scalars use flat `[rows, 1]`; candidate scalars use `[batch_size, candidate_count, 1]`.
   Reductions over action components retain a trailing scalar axis. Overall scalar losses remain `[1]`.
@@ -129,6 +131,10 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Migrate loops to act on those next rows and pass the acting slots to `learn_from_timesteps`; do not pad inactive agents.
 - Agents may end independently; a dead agent produces its final done transition, then no rows until the slot resets.
   Slots auto-reset after all agents end, retaining terminal observations. Invalid agent or action-row counts must return recoverable errors.
+
+- Added `MultiAgentGym` in `modurl::multi_agent` and the prelude: an ordered group of agents sharing a fixed batch of slots,
+  with per-agent spaces, one observation and action batch per agent, joint episode ends, and auto-reset.
+  The `ppo_vs_sac_tron` example trains PPO and SAC with caller-owned loops in a shared light-cycle arena.
 
 ### Environment wrappers and device placement
 
@@ -245,9 +251,8 @@ they do not imply that all workspace packages build together. See [Remaining mig
 - Removed `ReplayDeviceStrategy` and `ReplayStorageConfig`. SAC, DDPG, TD3, DQN and DDQN optimize on the device of their model parameters,
   which must share one device (`ModelDevice` otherwise, now also on `QLearningConfigurationError`).
   Replay is stored on that device unless the builder sets `.replay_device(..)`.
-  Migrated Q-learning replay preserves incoming observation kind and the first batch's dtype, rejecting later dtype changes.
+  Replay preserves incoming observation kind and the first batch's dtype, rejecting later dtype changes.
   Environment output mapping, model input conversion, or another explicit caller composition can select the representation.
-  The unmigrated SAC and deterministic actor-critic storage paths retain their former default F32 observation storage.
 - Public Q-learning logs now use Burn tensors: loss `[1]`, selected Q values `[batch_size, 1]`,
   replay rewards `[batch_size, 1]`, and collection rewards `[num_envs, 1]`.
   `QAgentError<GE, ME>` replaces the generic space-error parameter with a model-error parameter;
@@ -268,7 +273,7 @@ they do not imply that all workspace packages build together. See [Remaining mig
   Rewards, termination masks, and targets remain `[batch_size, 1]`; only termination suppresses bootstrapping.
 - The CartPole executable and Q-learning documentation examples use Burn models, optimizers, and devices.
   The Q grapher accumulates Burn scalars and converts averaged metrics to the existing logger representation.
-  CUDA and Metal features enable the corresponding Burn backends. CartPole requires the remaining environment migration.
+  CUDA and Metal features enable the corresponding Burn backends.
 
 ### Custom MuJoCo environments
 
@@ -296,11 +301,3 @@ they do not imply that all workspace packages build together. See [Remaining mig
   `MultiAgentResetResult`, `MultiAgentStepInfo`, and `SlotError`.
 - Removed exports for `Space`, `TensorMapMultiGymWrapper`, and the three removed MLP initializer types.
   Buffer and sampling errors remain available through their defining modules.
-
-### Remaining migration work
-
-- A2C, PPO, SAC, DDPG, TD3, concrete environment integrations, loggers, and other runnable examples still contain Candle APIs.
-  The updated core traits do not provide automatic Candle compatibility.
-- Atari output mapping to U8 and the forward wrapper for CNN input conversion are deferred.
-  Removing the replay dtype setter does not complete that example's migration.
-- Update this section and the relevant entries as the remaining public APIs migrate; 0.2 is not yet released.
