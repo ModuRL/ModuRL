@@ -29,7 +29,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     models::probabilistic_model::ExpectationPolicy,
     objectives::{bellman_targets, clipped_value_loss},
-    parameter_schedule::{ParameterSchedule, ScheduleProgress},
+    parameter_schedule::{ParameterSchedule, ScheduleProgress, ScheduleProgressError},
     spaces::{ActionMap, ObservationSpace},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
@@ -70,7 +70,7 @@ pub enum SACConfigurationError {
     ZeroTrainingHorizon,
     #[error("compute dtype must be floating-point, got {0:?}")]
     InvalidDType(DType),
-    #[error("space {field} has {actual} event axes, expected {expected}")]
+    #[error("{field} space has {actual} item axes, expected {expected}")]
     SpaceRank {
         field: &'static str,
         expected: usize,
@@ -602,10 +602,10 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
             }
         }
 
-        space_storage_shape::<O>("observations", observation_space.shape(), replay_capacity)?;
-        space_storage_shape::<A>("actions", action_space.shape(), replay_capacity)?;
+        space_storage_shape::<O>("observation", observation_space.shape(), replay_capacity)?;
+        space_storage_shape::<A>("action", action_space.shape(), replay_capacity)?;
         space_storage_shape::<L>(
-            "policy actions",
+            "policy action",
             action_space.policy_shape(),
             replay_capacity,
         )?;
@@ -628,7 +628,11 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
             samples,
             entropy_change_penalty,
             q_value_clip,
-            schedule_progress: ScheduleProgress::new(training_horizon),
+            schedule_progress: ScheduleProgress::new(training_horizon).map_err(
+                |ScheduleProgressError::ZeroTrainingHorizon| {
+                    SACConfigurationError::ZeroTrainingHorizon
+                },
+            )?,
             replay_storage_config,
             optimization_steps: 0,
             logger,
@@ -1361,12 +1365,12 @@ where
         if self.replay.is_none() {
             let storage = SACReplayStorage::builder()
                 .observation_shape(space_storage_shape::<O>(
-                    "observations",
+                    "observation",
                     self.observation_space.shape(),
                     self.replay_capacity,
                 )?)
                 .action_shape(space_storage_shape::<A>(
-                    "actions",
+                    "action",
                     self.action_space.shape(),
                     self.replay_capacity,
                 )?)
@@ -1398,7 +1402,10 @@ where
                     entropy.change_weight,
                     (&storage_device, self.dtype),
                 ),
-                truncated: truncated.clone(),
+                truncated: Tensor::from_data(
+                    TensorData::new(truncated.clone(), [count, 1]),
+                    &storage_device,
+                ),
             })?;
 
         let mut completed_episodes = Vec::new();

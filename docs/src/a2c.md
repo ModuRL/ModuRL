@@ -18,7 +18,10 @@ building the agent. A2C also provides typed errors, log entries, and the
 `A2CLogger` trait. Pass an A2C logger directly to the agent's `logger`
 builder field.
 
-Both network builders return `Result` and own concrete Burn models.
+The agent and network builders and `set_learning_rate` return `A2CConfigurationError`
+on invalid configuration. During training, invalid environment counts are reported as
+`A2CError::ConfigurationError`.
+Both network builders own concrete Burn models.
 The separate builder requires `actor_learning_rate` and `critic_learning_rate`;
 the shared builder requires `learning_rate`.
 Learning-rate schedules must implement `Send + Sync`.

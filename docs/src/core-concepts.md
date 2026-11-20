@@ -140,6 +140,11 @@ A schedule is a value that changes during training. For example,
 `ConstantSchedule` keeps the PPO clip range fixed. `LinearSchedule` can move a
 value from one number to another over training progress.
 
+`ScheduleProgress::new(Some(horizon))` returns a `Result` and rejects a zero
+horizon with `ScheduleProgressError::ZeroTrainingHorizon`. Use `?` or `.expect(...)`
+to handle construction. `ScheduleProgress::new(None)` also returns a `Result`;
+it defers the horizon to the first nonzero `default_horizon` call.
+
 ## In the CartPole Example
 
 The CartPole PPO example configures a probabilistic policy that wraps a model

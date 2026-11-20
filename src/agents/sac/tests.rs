@@ -322,7 +322,7 @@ fn categorical_bellman_targets_and_half_mse_preserve_f64() {
     assert_eq!(values[1], 1.0);
     batch.observations = Tensor::ones([2, 1], (&device, DType::F64));
     let targets = Tensor::full([2, 1], 3.0, (&device, DType::F64));
-    let progress = ScheduleProgress::new(None);
+    let progress = ScheduleProgress::new(None).unwrap();
     let losses = agent.optimize_critics(&batch, &targets, &progress).unwrap();
     assert_eq!(numbers(losses[0].clone()), [2.0]);
     assert_eq!(
@@ -440,7 +440,7 @@ fn mismatched_critic_dtype_is_rejected_before_training_arithmetic() {
     batch.observations = batch.observations.cast(DType::F64);
     let targets = Tensor::ones([2, 1], &device);
     assert!(matches!(
-        agent.optimize_critics(&batch, &targets, &ScheduleProgress::new(None)),
+        agent.optimize_critics(&batch, &targets, &ScheduleProgress::new(None).unwrap()),
         Err(SACError::DType {
             field: "critic values",
             expected: DType::F32,
@@ -479,7 +479,7 @@ fn actor_update_changes_policy_without_updating_critics_or_targets() {
             .unwrap(),
     );
     let update = agent
-        .optimize_actor(&batch, &ScheduleProgress::new(None))
+        .optimize_actor(&batch, &ScheduleProgress::new(None).unwrap())
         .unwrap();
     assert!(!update.loss.is_require_grad());
     assert_ne!(numbers(agent.policy.module().weight.val()), before);
@@ -660,7 +660,7 @@ fn continuous_policy_uses_reparameterized_actions_and_detached_targets() {
     assert!(!targets.is_require_grad());
     assert_eq!(numbers(targets)[1], 1.0);
     agent
-        .optimize_actor(&batch, &ScheduleProgress::new(None))
+        .optimize_actor(&batch, &ScheduleProgress::new(None).unwrap())
         .unwrap();
     assert_ne!(numbers(agent.policy.module().weight.val()), before);
     assert_eq!(
@@ -1037,7 +1037,7 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         entropy_change_weights: Tensor::zeros([2, 1], (&device, DType::F64)),
     };
     agent
-        .optimize_actor(&batch, &ScheduleProgress::new(None))
+        .optimize_actor(&batch, &ScheduleProgress::new(None).unwrap())
         .unwrap();
     assert_eq!(
         agent.compute_bellman_targets(&batch).unwrap().dtype(),

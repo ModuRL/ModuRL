@@ -372,7 +372,7 @@ fn full_mse_targets_and_actor_gradient_boundaries_are_preserved() {
                 .online_replay_values::<2, 2, 3>(&batch.observations, &batch.actions)
                 .unwrap(),
         );
-        let progress = ScheduleProgress::new(None);
+        let progress = ScheduleProgress::new(None).unwrap();
         let critic_update = agent.optimize_critics(&batch, &targets, &progress).unwrap();
         let expected_loss =
             ((critic_before[0] - 2.35).powi(2) + (critic_before[1] - 2.0).powi(2)) / 2.0;
@@ -866,7 +866,7 @@ fn builder_and_actions_reject_invalid_contracts() {
         ))
     ));
     assert!(matches!(
-        space_storage_shape::<3>("observations", vec![1], 8),
+        space_storage_shape::<3>("observation", vec![1], 8),
         Err(DeterministicActorCriticConfigurationError::SpaceRank {
             expected: 2,
             actual: 1,
@@ -874,7 +874,7 @@ fn builder_and_actions_reject_invalid_contracts() {
         })
     ));
     assert!(matches!(
-        space_storage_shape::<2>("actions", vec![0], 8),
+        space_storage_shape::<2>("action", vec![0], 8),
         Err(DeterministicActorCriticConfigurationError::ZeroItemDimension { .. })
     ));
     let agent = agent(&device, DType::F32, 1);

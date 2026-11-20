@@ -33,6 +33,8 @@ These structs expose Gymnasium's unwrapped dynamics. Registry time limits are
 applied explicitly with `TimeLimitGym`: use 500 steps for `AcrobotV1`, 200 for
 `PendulumV1`, and the registry horizon appropriate to the other environment.
 Keeping the limit in a wrapper makes truncation visible and composable.
+`TimeLimitGym::new` returns `Result`; a zero limit returns
+`TimeLimitGymConfigurationError::ZeroMaxEpisodeSteps`.
 
 `modurl_mujoco` provides the Gymnasium v5 `AntV5`, `HalfCheetahV5`, `HopperV5`,
 `HumanoidV5`, and `Walker2dV5` environments. See that crate's README for model,

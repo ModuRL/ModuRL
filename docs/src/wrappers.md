@@ -24,10 +24,39 @@ Wrapper order determines which values a wrapper sees. For example, placing
 `RecordEpisodeStatisticsGym` inside `ClipRewardGym` records the underlying return
 while the agent receives clipped rewards.
 
+### Configuration errors
+
+The following constructors and clipping methods return `Result` instead of
+panicking on invalid configuration. Handle the result with `?` or `.expect(...)`
+before using the wrapper.
+
+| Method | Error type and rejected configuration |
+| --- | --- |
+| `TimeLimitGym::new` | `TimeLimitGymConfigurationError::ZeroMaxEpisodeSteps` for a zero step limit. |
+| `MaxAndSkipGym::new` | `MaxAndSkipGymConfigurationError::ZeroSkip` for zero action repeats. |
+| `FrameStackGym::new` | `FrameStackGymConfigurationError::ZeroStackSize` for a zero stack size, or `InvalidObservationSpace` when the leading item axis is missing or differs from the stack size. |
+| `NormalizeRewardGym::new` | `NormalizeRewardGymConfigurationError::InvalidGamma` for a non-finite discount or one outside `0..=1`. |
+| `NormalizeRewardGym::with_clip` | `NormalizeRewardGymConfigurationError::InvalidClip` for a non-finite or nonpositive limit. |
+| `NormalizeObservationGym::with_clip` | `NormalizeObservationGymConfigurationError::InvalidClip` for a non-finite or nonpositive limit. |
+
+`NormalizeObservationGym::new` remains infallible. For example, clipping requires
+handling a result even though creating the observation normalizer does not:
+
+```rust,ignore
+let gym = TimeLimitGym::new(gym, 500).expect("nonzero episode limit");
+let gym = NormalizeObservationGym::new(gym)
+    .with_clip(10.0)
+    .expect("finite positive observation clip");
+let gym = NormalizeRewardGym::new(gym, 0.99)
+    .expect("discount in 0..=1")
+    .with_clip(10.0)
+    .expect("finite positive reward clip");
+```
+
 `FrameStackGym<G, BF, S>` uses native Burn tensors. `BF` is the stacked batch
 rank. Two `PrevRank` mappings determine the inner observation's single rank. The defaults
 stack vectors `[features]` into `[stack_size, features]`. Scalar observations use
-`FrameStackGym::<_, 3>::new(...)` and produce `[stack_size, 1]`.
+`FrameStackGym::<_, 3>::new(...).expect("valid frame stack")` and produce `[stack_size, 1]`.
 The supplied space `S` must use the inner observation kind. For `BoxSpace`,
 bounds include a size-one batch axis. Invalid rank relationships fail during compilation.
 

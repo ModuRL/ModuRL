@@ -56,7 +56,7 @@ pub(super) struct DeterministicReplayInsert<const O: usize, const A: usize, K: A
     pub(super) actions: Tensor<A>,
     pub(super) rewards: Tensor<2>,
     pub(super) terminated: Tensor<2, Bool>,
-    pub(super) truncated: Vec<bool>,
+    pub(super) truncated: Tensor<2, Bool>,
 }
 
 /// Owns aligned replay for native rank-O observations, Float rank-A actions, and scalar rewards and Bool flags.
@@ -208,14 +208,7 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
         self.rewards
             .validate_dtype("rewards", &transitions.rewards)?;
         validate_shape("termination", &transitions.terminated, [count, 1])?;
-        if transitions.truncated.len() != count {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "truncations",
-                expected: count,
-                actual: transitions.truncated.len(),
-            }
-            .into());
-        }
+        validate_shape("truncation", &transitions.truncated, [count, 1])?;
         Ok(count)
     }
 }
@@ -327,7 +320,7 @@ mod tests {
             actions: Tensor::from_data([[0.25f32], [-0.5]], device),
             rewards: Tensor::from_data([[1.0 + f64::EPSILON], [2.0]], (device, DType::F64)),
             terminated: Tensor::from_data([[false], [true]], device),
-            truncated: vec![true, false],
+            truncated: Tensor::from_data([[true], [false]], device),
         }
     }
 
@@ -395,7 +388,7 @@ mod tests {
         assert_eq!(storage.sampleable_len(4), 4);
         let mut wrapped = integer_transitions(&device);
         wrapped.observations = Tensor::from_data([[5u64], [6]], (&device, DType::U64));
-        wrapped.truncated = vec![false, false];
+        wrapped.truncated = Tensor::from_data([[false], [false]], &device);
         storage.insert(0, wrapped).unwrap();
         assert_eq!(storage.sampleable_len(4), 2);
         assert_eq!(storage.sample_index(0, 4), 0);
@@ -435,7 +428,7 @@ mod tests {
                         actions: Tensor::ones([2, 1, 1], &device),
                         rewards: Tensor::ones([2, 1], &device),
                         terminated: Tensor::from_data([[false], [true]], &device),
-                        truncated: vec![true, false],
+                        truncated: Tensor::from_data([[true], [false]], &device),
                     },
                 )
                 .unwrap();
@@ -481,7 +474,7 @@ mod tests {
                     actions: Tensor::ones([2, 1], &device).require_grad(),
                     rewards: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     terminated: Tensor::from_data([[false], [true]], &device),
-                    truncated: vec![true, false],
+                    truncated: Tensor::from_data([[true], [false]], &device),
                 },
             )
             .unwrap();
@@ -583,15 +576,13 @@ mod tests {
             ))
         ));
         let mut truncated = integer_transitions(&device);
-        truncated.truncated.pop();
+        truncated.truncated = Tensor::from_data([[false]], &device);
         assert!(matches!(
             storage.insert(0, truncated),
-            Err(DeterministicReplayError::Storage(
-                ReplayStorageError::BatchLengthMismatch {
-                    field: "truncations",
-                    ..
-                }
-            ))
+            Err(DeterministicReplayError::Shape {
+                field: "truncation",
+                ..
+            })
         ));
         assert!(matches!(
             storage.validate_environment_count(1),

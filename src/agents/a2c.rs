@@ -32,6 +32,52 @@ pub use super::ppo::{
     PPOLogEntry as A2CLogEntry, PPOLogger as A2CLogger,
 };
 
+/// Invalid A2C agent, network, or rollout configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum A2CConfigurationError {
+    #[error("batch size must be nonzero")]
+    ZeroBatchSize,
+    #[error("training horizon must be nonzero")]
+    ZeroTrainingHorizon,
+    #[error("gamma must be finite and in 0..=1")]
+    InvalidGamma,
+    #[error("value coefficient must be finite and nonnegative")]
+    InvalidValueCoefficient,
+    #[error("entropy coefficient must be finite and nonnegative")]
+    InvalidEntropyCoefficient,
+    #[error("gradient clip must be finite and positive")]
+    InvalidGradientClip,
+    #[error("learning rate must be finite and positive")]
+    InvalidLearningRate,
+    #[error("the environment count must be nonzero")]
+    ZeroEnvironments,
+    #[error("batch size must be divisible by the environment count")]
+    BatchNotDivisibleByEnvironmentCount,
+}
+
+impl A2CConfigurationError {
+    fn from_ppo(error: PPOConfigurationError) -> Self {
+        match error {
+            PPOConfigurationError::ZeroBatchSize => Self::ZeroBatchSize,
+            PPOConfigurationError::ZeroTrainingHorizon => Self::ZeroTrainingHorizon,
+            PPOConfigurationError::InvalidGamma => Self::InvalidGamma,
+            PPOConfigurationError::InvalidValueCoefficient => Self::InvalidValueCoefficient,
+            PPOConfigurationError::InvalidEntropyCoefficient => Self::InvalidEntropyCoefficient,
+            PPOConfigurationError::InvalidGradientClip => Self::InvalidGradientClip,
+            PPOConfigurationError::InvalidLearningRate => Self::InvalidLearningRate,
+            PPOConfigurationError::ZeroEnvironments => Self::ZeroEnvironments,
+            PPOConfigurationError::BatchNotDivisibleByEnvironmentCount => {
+                Self::BatchNotDivisibleByEnvironmentCount
+            }
+            PPOConfigurationError::ZeroMiniBatchSize | PPOConfigurationError::ZeroEpochs => {
+                unreachable!(
+                    "A2C uses one epoch and PPO validates batch size before minibatch size"
+                )
+            }
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum A2CError<AE, GE, SE>
 where
@@ -58,7 +104,7 @@ where
     #[error("space operation failed: {0}")]
     SpaceError(#[source] SE),
     #[error("invalid A2C configuration: {0}")]
-    ConfigurationError(#[source] PPOConfigurationError),
+    ConfigurationError(#[from] A2CConfigurationError),
     #[error(
         "termination batches differ in length: {terminated} termination flags and {truncated} truncation flags"
     )]
@@ -75,10 +121,8 @@ where
     MissingOldValues,
 }
 
-impl<AE: std::fmt::Debug, GE: std::fmt::Debug, SE: std::fmt::Debug> From<PPOError<AE, GE, SE>>
-    for A2CError<AE, GE, SE>
-{
-    fn from(error: PPOError<AE, GE, SE>) -> Self {
+impl<AE: std::fmt::Debug, GE: std::fmt::Debug, SE: std::fmt::Debug> A2CError<AE, GE, SE> {
+    fn from_ppo(error: PPOError<AE, GE, SE>) -> Self {
         match error {
             PPOError::CriticRewardDTypeMismatch { critic, reward } => {
                 Self::CriticRewardDTypeMismatch { critic, reward }
@@ -92,7 +136,7 @@ impl<AE: std::fmt::Debug, GE: std::fmt::Debug, SE: std::fmt::Debug> From<PPOErro
             PPOError::ExperienceBatch(error) => Self::ExperienceBatch(error),
             PPOError::Sampling(error) => Self::Sampling(error),
             PPOError::SpaceError(error) => Self::SpaceError(error),
-            PPOError::ConfigurationError(error) => Self::ConfigurationError(error),
+            PPOError::ConfigurationError(error) => A2CConfigurationError::from_ppo(error).into(),
             PPOError::MismatchedTerminationBatch {
                 terminated,
                 truncated,
@@ -132,7 +176,7 @@ impl<T: Module, A: Module, C: Module> SharedA2CNetwork<T, A, C> {
         shared_network: T,
         critic_head: C,
         actor_head: A,
-    ) -> Result<Self, PPOConfigurationError> {
+    ) -> Result<Self, A2CConfigurationError> {
         Ok(Self {
             inner: SharedPPONetwork::builder()
                 .optimizer(optimizer)
@@ -140,7 +184,8 @@ impl<T: Module, A: Module, C: Module> SharedA2CNetwork<T, A, C> {
                 .shared_network(shared_network)
                 .critic_head(critic_head)
                 .actor_head(actor_head)
-                .build()?,
+                .build()
+                .map_err(A2CConfigurationError::from_ppo)?,
         })
     }
 }
@@ -165,7 +210,7 @@ impl<A: Module, C: Module> SeparateA2CNetwork<A, C> {
         actor_network: A,
         critic_network: C,
         #[builder(default = false)] combined_loss: bool,
-    ) -> Result<Self, PPOConfigurationError> {
+    ) -> Result<Self, A2CConfigurationError> {
         Ok(Self {
             inner: SeparatePPONetwork::builder()
                 .actor_optimizer(actor_optimizer)
@@ -175,7 +220,8 @@ impl<A: Module, C: Module> SeparateA2CNetwork<A, C> {
                 .actor_network(actor_network)
                 .critic_network(critic_network)
                 .combined_loss(combined_loss)
-                .build()?,
+                .build()
+                .map_err(A2CConfigurationError::from_ppo)?,
         })
     }
 }
@@ -247,7 +293,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
         #[builder(default = 0.5)] gradient_clip: f64,
         training_horizon: Option<usize>,
         logger: Option<&'a mut dyn A2CLogger<I>>,
-    ) -> Result<Self, PPOConfigurationError>
+    ) -> Result<Self, A2CConfigurationError>
     where
         N: PPONetwork<O, H, L, InputKind = OS::Kind, ModelGroup = G>,
         G: PPOModelTypes<Network = N, Observation = OS::Batch, Action = Tensor<L>>,
@@ -276,7 +322,8 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
             .gradient_clip(gradient_clip)
             .maybe_training_horizon(training_horizon)
             .maybe_logger(logger)
-            .build()?;
+            .build()
+            .map_err(A2CConfigurationError::from_ppo)?;
         Ok(Self { inner })
     }
 }
@@ -306,8 +353,10 @@ where
     pub fn set_learning_rate(
         &mut self,
         learning_rate: impl ParameterSchedule + Send + Sync + 'static,
-    ) -> Result<(), PPOConfigurationError> {
-        self.inner.set_learning_rate(learning_rate)
+    ) -> Result<(), A2CConfigurationError> {
+        self.inner
+            .set_learning_rate(learning_rate)
+            .map_err(A2CConfigurationError::from_ppo)
     }
 
     /// Maps rank-O observation batches to rank-A deterministic environment actions, preserving the batch axis.
@@ -318,7 +367,7 @@ where
     ) -> Result<AS::Batch, A2CError<N::Error, GE, AS::Error>> {
         self.inner
             .act_deterministic(observations)
-            .map_err(A2CError::from)
+            .map_err(A2CError::from_ppo)
     }
 
     pub fn reset_current_observations(&mut self) {
@@ -378,7 +427,7 @@ where
         Ok(self
             .inner
             .act_for_training(observations, context)
-            .map_err(A2CError::from)?
+            .map_err(A2CError::from_ppo)?
             .with_error(A2CError::SpaceError))
     }
 
@@ -394,7 +443,9 @@ where
     /// Trains with rank-O observation batches `[num_envs, ...observation_shape]`.
     /// Terminal observations omit the batch axis and preserve the environment observation kind, dtype, and device.
     fn learn(&mut self, env: &mut Self::Env<'_>, num_timesteps: usize) -> Result<(), Self::Error> {
-        self.inner.learn(env, num_timesteps).map_err(A2CError::from)
+        self.inner
+            .learn(env, num_timesteps)
+            .map_err(A2CError::from_ppo)
     }
 
     /// Stores a caller-collected batch with observation shape `[num_envs, ...observation_shape]`.
@@ -410,7 +461,7 @@ where
                 training_actions.with_error(PPOError::SpaceError),
                 step,
             )
-            .map_err(A2CError::from)
+            .map_err(A2CError::from_ppo)
     }
 }
 
@@ -422,6 +473,7 @@ mod tests {
         distributions::CategoricalDistribution,
         gym::{VectorizedGymError, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
+        prelude::A2CConfigurationError,
     };
     use burn::{
         module::{Module, ModuleVisitor, Param},
@@ -458,6 +510,59 @@ mod tests {
             .options((device, DType::F32))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn configuration_errors_are_a2c_specific() {
+        let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+        let device = Device::flex().autodiff();
+        let mut env = VectorizedGymWrapper::new(vec![
+            FixedEnv::new(device.clone()),
+            FixedEnv::new(device.clone()),
+        ])
+        .unwrap();
+        let build_network = |learning_rate| {
+            SeparateA2CNetwork::builder()
+                .actor_network(ProbabilisticPolicyModel::new(
+                    model(2, &device),
+                    CategoricalDistribution,
+                ))
+                .critic_network(model(1, &device))
+                .actor_optimizer(SgdConfig::new().init())
+                .critic_optimizer(SgdConfig::new().init())
+                .actor_learning_rate(learning_rate)
+                .critic_learning_rate(1e-3)
+                .build()
+        };
+        assert!(matches!(
+            build_network(f64::NAN),
+            Err(A2CConfigurationError::InvalidLearningRate)
+        ));
+
+        let build_agent = |batch_size| {
+            A2CAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
+                .action_space(env.action_space())
+                .observation_space(env.observation_space())
+                .network_info(build_network(1e-3).unwrap().into())
+                .batch_size(batch_size)
+                .build()
+        };
+        assert!(matches!(
+            build_agent(0),
+            Err(A2CConfigurationError::ZeroBatchSize)
+        ));
+
+        let mut agent = build_agent(3).unwrap();
+        assert_eq!(
+            agent.set_learning_rate(0.0),
+            Err(A2CConfigurationError::InvalidLearningRate)
+        );
+        assert!(matches!(
+            agent.learn(&mut env, 1),
+            Err(A2CError::ConfigurationError(
+                A2CConfigurationError::BatchNotDivisibleByEnvironmentCount
+            ))
+        ));
     }
 
     #[test]
@@ -588,7 +693,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        let mut progress = crate::parameter_schedule::ScheduleProgress::new(Some(8));
+        let mut progress = crate::parameter_schedule::ScheduleProgress::new(Some(8)).unwrap();
         progress.advance_steps(2);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut shared.inner, &progress);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut separate.inner, &progress);

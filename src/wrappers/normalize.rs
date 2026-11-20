@@ -56,6 +56,12 @@ pub enum NormalizeObservationGymError<E> {
     TensorRead(#[source] TensorReadError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NormalizeObservationGymConfigurationError {
+    #[error("clip must be finite and positive")]
+    InvalidClip,
+}
+
 /// Normalizes each observation component using its running mean and variance.
 pub struct NormalizeObservationGym<G> {
     gym: G,
@@ -72,11 +78,16 @@ impl<G> NormalizeObservationGym<G> {
         }
     }
 
-    /// Clips normalized observations to `[-limit, limit]`.
-    pub fn with_clip(mut self, limit: f64) -> Self {
-        assert!(limit.is_finite() && limit > 0.0);
+    /// Clips normalized observations to `[-limit, limit]`; rejects a non-finite or nonpositive `limit`.
+    pub fn with_clip(
+        mut self,
+        limit: f64,
+    ) -> Result<Self, NormalizeObservationGymConfigurationError> {
+        if !limit.is_finite() || limit <= 0.0 {
+            return Err(NormalizeObservationGymConfigurationError::InvalidClip);
+        }
         self.clip = Some(limit);
-        self
+        Ok(self)
     }
 
     /// Normalizes an unbatched rank-`O` observation, preserving its shape, kind, dtype, and device.
@@ -210,6 +221,14 @@ where
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NormalizeRewardGymConfigurationError {
+    #[error("gamma must be finite and in 0..=1")]
+    InvalidGamma,
+    #[error("clip must be finite and positive")]
+    InvalidClip,
+}
+
 /// Scales immediate rewards by the running standard deviation of discounted rewards.
 pub struct NormalizeRewardGym<G> {
     gym: G,
@@ -220,22 +239,27 @@ pub struct NormalizeRewardGym<G> {
 }
 
 impl<G> NormalizeRewardGym<G> {
-    pub fn new(gym: G, gamma: f64) -> Self {
-        assert!((0.0..=1.0).contains(&gamma));
-        Self {
+    /// Rejects a non-finite `gamma` or one outside `0..=1`.
+    pub fn new(gym: G, gamma: f64) -> Result<Self, NormalizeRewardGymConfigurationError> {
+        if !gamma.is_finite() || !(0.0..=1.0).contains(&gamma) {
+            return Err(NormalizeRewardGymConfigurationError::InvalidGamma);
+        }
+        Ok(Self {
             gym,
             statistics: RunningMeanStd::new(1),
             discounted_reward: 0.0,
             gamma,
             clip: None,
-        }
+        })
     }
 
-    /// Clips normalized rewards to `[-limit, limit]`.
-    pub fn with_clip(mut self, limit: f64) -> Self {
-        assert!(limit.is_finite() && limit > 0.0);
+    /// Clips normalized rewards to `[-limit, limit]`; rejects a non-finite or nonpositive `limit`.
+    pub fn with_clip(mut self, limit: f64) -> Result<Self, NormalizeRewardGymConfigurationError> {
+        if !limit.is_finite() || limit <= 0.0 {
+            return Err(NormalizeRewardGymConfigurationError::InvalidClip);
+        }
         self.clip = Some(limit);
-        self
+        Ok(self)
     }
 }
 
@@ -342,7 +366,30 @@ mod tests {
     };
     use burn::tensor::{DType, Device, Tensor};
 
-    use super::{NormalizeObservationGym, NormalizeRewardGym};
+    use super::{
+        NormalizeObservationGym, NormalizeObservationGymConfigurationError, NormalizeRewardGym,
+        NormalizeRewardGymConfigurationError,
+    };
+
+    #[test]
+    fn rejects_invalid_normalization_settings() {
+        for limit in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                NormalizeObservationGym::new(()).with_clip(limit),
+                Err(NormalizeObservationGymConfigurationError::InvalidClip)
+            ));
+            assert!(matches!(
+                NormalizeRewardGym::new((), 0.99).unwrap().with_clip(limit),
+                Err(NormalizeRewardGymConfigurationError::InvalidClip)
+            ));
+        }
+        for gamma in [-0.1, 1.1, f64::NAN] {
+            assert!(matches!(
+                NormalizeRewardGym::new((), gamma),
+                Err(NormalizeRewardGymConfigurationError::InvalidGamma)
+            ));
+        }
+    }
 
     #[test]
     fn observation_normalization_preserves_rank_dtype_and_device() {
@@ -367,7 +414,7 @@ mod tests {
     #[test]
     fn normalizes_observations_and_preserves_metadata() {
         let gym = TestGym::new([TestGym::step(1.0, 0.0, false, false, 7)]);
-        let mut wrapper = NormalizeObservationGym::new(gym).with_clip(10.0);
+        let mut wrapper = NormalizeObservationGym::new(gym).with_clip(10.0).unwrap();
 
         let reset = wrapper.reset().unwrap();
         let step = wrapper.step(action()).unwrap();
@@ -383,7 +430,10 @@ mod tests {
             TestGym::step(1.0, 1.0, false, false, 1),
             TestGym::step(2.0, 1.0, false, false, 2),
         ]);
-        let mut wrapper = NormalizeRewardGym::new(gym, 0.99).with_clip(10.0);
+        let mut wrapper = NormalizeRewardGym::new(gym, 0.99)
+            .unwrap()
+            .with_clip(10.0)
+            .unwrap();
 
         let first = wrapper.step(action()).unwrap();
         assert_eq!(first.reward, 10.0);
@@ -400,7 +450,7 @@ mod tests {
             TestGym::step(2.0, 2.0, false, true, 2),
             TestGym::step(3.0, 3.0, false, false, 3),
         ]);
-        let mut wrapper = NormalizeRewardGym::new(gym, 0.99);
+        let mut wrapper = NormalizeRewardGym::new(gym, 0.99).unwrap();
 
         wrapper.step(action()).unwrap();
         wrapper.step(action()).unwrap();
@@ -425,7 +475,7 @@ mod tests {
     #[test]
     fn reward_normalization_restores_running_statistics_and_inner_state() {
         assert_state_round_trip(
-            NormalizeRewardGym::new(StateTestGym::new(41), 0.9),
+            NormalizeRewardGym::new(StateTestGym::new(41), 0.9).unwrap(),
             state_action(),
             1,
             2,

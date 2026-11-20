@@ -15,7 +15,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     objectives::bellman_targets,
-    parameter_schedule::{ParameterSchedule, ScheduleProgress},
+    parameter_schedule::{ParameterSchedule, ScheduleProgress, ScheduleProgressError},
     spaces::{ActionMap, ObservationSpace},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
@@ -561,10 +561,10 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             .update_frequency(update_frequency)
             .maybe_training_horizon(training_horizon)
             .call()?;
-        space_storage_shape::<O>("observations", observation_space.shape(), replay_capacity)?;
-        space_storage_shape::<A>("actions", action_space.shape(), replay_capacity)?;
+        space_storage_shape::<O>("observation", observation_space.shape(), replay_capacity)?;
+        space_storage_shape::<A>("action", action_space.shape(), replay_capacity)?;
         space_storage_shape::<A>(
-            "policy actions",
+            "policy action",
             action_space.policy_shape(),
             replay_capacity,
         )?;
@@ -598,7 +598,11 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             exploration_noise,
             training_start,
             update_frequency,
-            schedule_progress: ScheduleProgress::new(training_horizon),
+            schedule_progress: ScheduleProgress::new(training_horizon).map_err(
+                |ScheduleProgressError::ZeroTrainingHorizon| {
+                    DeterministicActorCriticConfigurationError::ZeroTrainingHorizon
+                },
+            )?,
             replay_storage_config,
             optimization_steps: 0,
             dtype,
@@ -666,7 +670,7 @@ where
             return Err(DeterministicActorCriticError::EmptyBatch);
         }
         let expected =
-            space_storage_shape::<O>("observations", self.observation_space.shape(), count)?;
+            space_storage_shape::<O>("observation", self.observation_space.shape(), count)?;
         if observations.dims() != expected {
             return Err(DeterministicActorCriticError::Shape {
                 field: "observations",
@@ -721,13 +725,13 @@ where
         count: usize,
     ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
         let expected =
-            space_storage_shape::<A>("policy actions", self.action_space.policy_shape(), count)?;
+            space_storage_shape::<A>("policy action", self.action_space.policy_shape(), count)?;
         self.validate_float_tensor("policy actions", &latent, expected)?;
         let actions = self
             .action_space
             .tensor_from_neurons(latent)
             .map_err(DeterministicActorCriticError::SpaceError)?;
-        let expected = space_storage_shape::<A>("actions", self.action_space.shape(), count)?;
+        let expected = space_storage_shape::<A>("action", self.action_space.shape(), count)?;
         self.validate_float_tensor("actions", &actions, expected)?;
         Ok(actions)
     }
@@ -795,7 +799,7 @@ where
             .sample_batch(count, &self.replay_storage_config.optimization_device())
             .map_err(DeterministicActorCriticError::SpaceError)?
             .cast(self.dtype);
-        let expected = space_storage_shape::<A>("actions", self.action_space.shape(), count)?;
+        let expected = space_storage_shape::<A>("action", self.action_space.shape(), count)?;
         self.validate_float_tensor("random actions", &actions, expected)?;
         Ok(actions)
     }
@@ -1052,12 +1056,12 @@ where
         if self.replay.is_none() {
             let storage = DeterministicReplayStorage::builder()
                 .observation_shape(space_storage_shape::<O>(
-                    "observations",
+                    "observation",
                     self.observation_space.shape(),
                     self.replay_capacity,
                 )?)
                 .action_shape(space_storage_shape::<A>(
-                    "actions",
+                    "action",
                     self.action_space.shape(),
                     self.replay_capacity,
                 )?)
@@ -1081,7 +1085,10 @@ where
                 TensorData::new(transitions.terminated.to_vec(), [count, 1]),
                 &self.replay_storage_config.storage_device(),
             ),
-            truncated: transitions.truncated.to_vec(),
+            truncated: Tensor::from_data(
+                TensorData::new(transitions.truncated.to_vec(), [count, 1]),
+                &self.replay_storage_config.storage_device(),
+            ),
         })?;
         self.observation_dtype = Some(transitions.observations.dtype());
         let mut completed = Vec::new();

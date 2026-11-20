@@ -27,6 +27,12 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - Added `modurl::tensor_rank::{NextRank, PrevRank}` to infer tensor types with one more or one fewer axis.
   These traits preserve kind without converting values. `NextRank` covers ranks 1–1024; `PrevRank` covers ranks 2–1025.
 
+- Replay insertion now represents truncation as a Bool tensor `[count, 1]`, matching
+  termination. Truncation is consumed during aligned next-observation handling, not
+  stored as a replay column or included in sampled batches. Insert fields are named
+  `truncated` (SAC and DDPG/TD3) or `next_truncated` (DQN/DDQN).
+  Truncation still bootstraps; only termination masks Bellman targets.
+
 ### Tensor shapes and space traits
 
 - Removed the combined `Space` trait. Implement `ActionSpace<A>` for action checks and sampling,
@@ -59,6 +65,11 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 - SAC's `samples` builder parameter now takes `usize` (default `1`) instead of
   `NonZeroUsize`; zero returns `SACConfigurationError::ZeroSamples`.
+- DQN and DDQN builders now return `QLearningConfigurationError` directly instead of
+  `QAgentError`. Configuration-time tensor reads use its `Tensor` variant;
+  runtime failures continue to use `QAgentError`. `QLearningConfigurationError`
+  no longer implements `Clone`, `Copy`, `PartialEq`, or `Eq` because it can contain
+  a tensor read error.
 - PPO and A2C use `.logger(...)` instead of `.logging_info(...)` to match the other agents.
 - All agent optimizers accept constant `f64` learning rates or a `ParameterSchedule`.
   Off-policy updates evaluate the rate at their collection timestep; invalid rates return an error.
@@ -111,8 +122,15 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - PPO and A2C network builders merge `lr_scheduler`, `actor_lr_scheduler` and `critic_lr_scheduler` into
   `learning_rate`, `actor_learning_rate` and `critic_learning_rate`, which take an `f64` or any `ParameterSchedule`.
   `f64` implements `ParameterSchedule` as a constant. PPO and A2C `set_learning_rate` take the same input,
-  replace the schedule from the current training progress, and return `PPOConfigurationError::InvalidLearningRate` for a nonpositive or non-finite rate.
+  replace the schedule from the current training progress, and return
+  `PPOConfigurationError::InvalidLearningRate` or `A2CConfigurationError::InvalidLearningRate`,
+  respectively, for a nonpositive or non-finite rate.
+- A2C builders return `A2CConfigurationError` instead of `PPOConfigurationError`.
+  `A2CError::ConfigurationError` wraps the A2C-specific error, and
+  `A2CError` no longer converts arbitrary `PPOError` values.
 - Agent builders make `.training_horizon(...)` optional. Without it, schedules span the first `learn` call's `num_timesteps`; set it explicitly for chunked training.
+- `ScheduleProgress::new` now returns `Result` with `ScheduleProgressError::ZeroTrainingHorizon`
+  for `Some(0)` instead of panicking. `None` still defers the horizon (#192).
 - PPO and A2C builders replace `gae_lambda` with `advantage_estimator`, which accepts any `AdvantageEstimator`.
   `GAE::new(lambda)` returns `GAEError::InvalidLambda` for invalid lambdas instead of
   `PPOConfigurationError::InvalidGaeLambda`; defaults remain 0.95 for PPO and 1.0 for A2C.
@@ -130,7 +148,15 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Environment wrappers and device placement
 
+- `TimeLimitGym::new`, `MaxAndSkipGym::new`, and `FrameStackGym::new` now return `Result`
+  with `TimeLimitGymConfigurationError`, `MaxAndSkipGymConfigurationError`, and
+  `FrameStackGymConfigurationError` instead of panicking on zero limits or an invalid frame-stack space.
+  `NormalizeRewardGym::new` and `with_clip` return `NormalizeRewardGymConfigurationError`
+  for invalid discounts or clipping limits; `NormalizeObservationGym::with_clip` returns
+  `NormalizeObservationGymConfigurationError` for invalid clipping limits. Handle these results
+  before using the wrappers (#192).
 - Added `PerfectStateGym` with `save_state` and `set_state`; core wrappers implement it when their inner gym does.
+- `TimeLimitGym::new` takes a `usize` step limit, and its saved state stores the elapsed step count as `usize`.
 - Added `PerfectStateMultiGym` with per-slot `save_state` and `set_state`; `VectorizedGymWrapper`, `StackedMultiGym`, and the input, output, and device wrappers implement it when their inner gyms do.
 - Added `LegalActionsGym` and `LegalActionsMultiGym`, which report legal discrete action indices per gym or slot; vectorized, stacked, map, device, and single-gym wrappers forward them.
 - Added `LegalActionMaskGym`, which appends a legal-action mask to flat observations, and `MaskedLogits`, which applies it to policy or Q-network outputs; DQN and DDQN gain `legal_action_mask` so epsilon-random actions stay legal. `Discrete::sample_batch_masked` samples masked random actions using the backend device RNG. DQN and DDQN epsilon-random actions now sample through the action space on-device, so seeded exploration sequences differ from earlier releases.
