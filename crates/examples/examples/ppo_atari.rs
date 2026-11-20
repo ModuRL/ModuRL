@@ -48,7 +48,7 @@ const MAX_GRADIENT_NORM: f64 = 0.5;
 
 // This wrapper is inside the action-repeat wrapper, so the limit is measured
 // in emulator frames rather than agent steps.
-const MAX_EPISODE_FRAMES: u32 = 400_000;
+const MAX_EPISODE_FRAMES: usize = 400_000;
 
 fn main() {
     let rom_path = env::args_os().nth(1).map(PathBuf::from).unwrap_or_else(|| {

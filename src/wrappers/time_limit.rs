@@ -17,13 +17,13 @@ pub enum TimeLimitGymConfigurationError {
 /// Truncates an episode after a fixed number of environment steps.
 pub struct TimeLimitGym<G> {
     gym: G,
-    max_episode_steps: u32,
-    elapsed_steps: u32,
+    max_episode_steps: usize,
+    elapsed_steps: usize,
 }
 
 impl<G> TimeLimitGym<G> {
     /// Rejects a zero `max_episode_steps`.
-    pub fn new(gym: G, max_episode_steps: u32) -> Result<Self, TimeLimitGymConfigurationError> {
+    pub fn new(gym: G, max_episode_steps: usize) -> Result<Self, TimeLimitGymConfigurationError> {
         if max_episode_steps == 0 {
             return Err(TimeLimitGymConfigurationError::ZeroMaxEpisodeSteps);
         }
@@ -85,7 +85,7 @@ where
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
-    type State = (G::State, u32);
+    type State = (G::State, usize);
 
     fn save_state(&self) -> Result<Self::State, Self::Error> {
         Ok((self.gym.save_state()?, self.elapsed_steps))
@@ -112,7 +112,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        gym::{Gym, LegalActionsGym, ResetInfo, StepInfo},
+        gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo},
         spaces::{BoxSpace, Discrete},
     };
     use burn::tensor::{DType, Device, Int, Tensor};
@@ -247,6 +247,16 @@ mod tests {
             |observation| observation.into_data(),
             |_: &()| (),
         );
+    }
+
+    #[test]
+    fn truncates_at_usize_step_limit_from_saved_state() {
+        let mut wrapper = TimeLimitGym::new(StateTestGym::new(13), usize::MAX).unwrap();
+        let (inner_state, _) = wrapper.save_state().unwrap();
+        wrapper.set_state(&(inner_state, usize::MAX - 1)).unwrap();
+
+        assert!(wrapper.step(state_action()).unwrap().truncated);
+        assert_eq!(wrapper.save_state().unwrap().1, usize::MAX);
     }
 
     #[test]
