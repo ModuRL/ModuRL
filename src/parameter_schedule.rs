@@ -3,6 +3,12 @@ pub trait ParameterSchedule {
     fn value(&self, t: f64) -> f64;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScheduleProgressError {
+    #[error("training horizon must be nonzero")]
+    ZeroTrainingHorizon,
+}
+
 /// Tracks progress through a fixed training horizon for parameter schedules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScheduleProgress {
@@ -12,15 +18,15 @@ pub struct ScheduleProgress {
 
 impl ScheduleProgress {
     /// `None` defers the horizon to the first nonzero [`Self::default_horizon`] call.
-    pub fn new(training_horizon: Option<usize>) -> Self {
-        assert!(
-            training_horizon != Some(0),
-            "training horizon must be greater than zero"
-        );
-        Self {
+    /// Rejects a zero horizon.
+    pub fn new(training_horizon: Option<usize>) -> Result<Self, ScheduleProgressError> {
+        if training_horizon == Some(0) {
+            return Err(ScheduleProgressError::ZeroTrainingHorizon);
+        }
+        Ok(Self {
             training_horizon,
             elapsed_steps: 0,
-        }
+        })
     }
 
     /// Sets the horizon to `num_timesteps` if none was configured.
@@ -141,7 +147,10 @@ impl ParameterSchedule for ExponentialSchedule {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress};
+    use super::{
+        ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
+        ScheduleProgressError,
+    };
 
     fn assert_close(actual: f64, expected: f64) {
         assert!(
@@ -192,7 +201,7 @@ mod tests {
 
     #[test]
     fn schedule_progress_tracks_and_clamps_elapsed_fraction() {
-        let mut progress = ScheduleProgress::new(Some(100));
+        let mut progress = ScheduleProgress::new(Some(100)).unwrap();
         assert_close(progress.get_elapsed_fraction(), 0.0);
 
         progress.set_elapsed_steps(25);
@@ -209,8 +218,16 @@ mod tests {
     }
 
     #[test]
+    fn schedule_progress_rejects_zero_horizon() {
+        assert_eq!(
+            ScheduleProgress::new(Some(0)),
+            Err(ScheduleProgressError::ZeroTrainingHorizon)
+        );
+    }
+
+    #[test]
     fn deferred_horizon_uses_first_nonzero_default() {
-        let mut progress = ScheduleProgress::new(None);
+        let mut progress = ScheduleProgress::new(None).unwrap();
         progress.set_elapsed_steps(10);
         assert_close(progress.get_elapsed_fraction(), 0.0);
 
@@ -220,7 +237,7 @@ mod tests {
         progress.default_horizon(1000);
         assert_close(progress.get_elapsed_fraction(), 0.25);
 
-        let mut configured = ScheduleProgress::new(Some(20));
+        let mut configured = ScheduleProgress::new(Some(20)).unwrap();
         configured.default_horizon(40);
         configured.set_elapsed_steps(10);
         assert_close(configured.get_elapsed_fraction(), 0.5);

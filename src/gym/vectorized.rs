@@ -640,8 +640,10 @@ mod tests {
         use crate::wrappers::FrameStackGym;
 
         let device = Device::flex();
-        let make_env =
-            || FrameStackGym::<_>::new(ScalarEnv, 3, BoxSpace::new_unbounded([1, 3, 1], &device));
+        let make_env = || {
+            FrameStackGym::<_>::new(ScalarEnv, 3, BoxSpace::new_unbounded([1, 3, 1], &device))
+                .unwrap()
+        };
         let mut env = VectorizedGymWrapper::new(vec![make_env(), make_env()]).unwrap();
         assert_eq!(env.reset().unwrap().dims(), [2, 3, 1]);
         let step = env

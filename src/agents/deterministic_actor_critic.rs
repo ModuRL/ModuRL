@@ -15,7 +15,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     objectives::bellman_targets,
-    parameter_schedule::{ParameterSchedule, ScheduleProgress},
+    parameter_schedule::{ParameterSchedule, ScheduleProgress, ScheduleProgressError},
     spaces::{ActionMap, ObservationSpace},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
@@ -598,7 +598,11 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             exploration_noise,
             training_start,
             update_frequency,
-            schedule_progress: ScheduleProgress::new(training_horizon),
+            schedule_progress: ScheduleProgress::new(training_horizon).map_err(
+                |ScheduleProgressError::ZeroTrainingHorizon| {
+                    DeterministicActorCriticConfigurationError::ZeroTrainingHorizon
+                },
+            )?,
             replay_storage_config,
             optimization_steps: 0,
             dtype,

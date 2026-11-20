@@ -53,15 +53,14 @@ fn main() {
     println!("Environment: {ENVIRONMENT_NAME}");
     println!("Using device: {device:?}");
 
-    let env = NormalizeRewardGym::new(
-        NormalizeObservationGym::new(RecordRawRewardGym::new(TimeLimitGym::new(
-            mujoco::build_environment(),
-            1_000,
-        )))
-        .with_clip(10.0),
-        0.99,
-    )
-    .with_clip(10.0);
+    let env = TimeLimitGym::new(mujoco::build_environment(), 1_000).unwrap();
+    let env = NormalizeObservationGym::new(RecordRawRewardGym::new(env))
+        .with_clip(10.0)
+        .unwrap();
+    let env = NormalizeRewardGym::new(env, 0.99)
+        .unwrap()
+        .with_clip(10.0)
+        .unwrap();
     let env = VectorizedGymWrapper::new(vec![env]).unwrap();
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let action_space = env.action_space();

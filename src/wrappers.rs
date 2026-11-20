@@ -438,16 +438,17 @@ pub use info::{
     RecordRawRewardGym,
 };
 pub use normalize::{
-    NormalizeObservationGym, NormalizeObservationGymError, NormalizeObservationGymState,
-    NormalizeRewardGym, NormalizeRewardGymState,
+    NormalizeObservationGym, NormalizeObservationGymConfigurationError,
+    NormalizeObservationGymError, NormalizeObservationGymState, NormalizeRewardGym,
+    NormalizeRewardGymConfigurationError, NormalizeRewardGymState,
 };
 pub(crate) use observation::split_legal_action_mask;
 pub use observation::{
-    FrameStackGym, FrameStackGymError, LegalActionMaskGym, LegalActionMaskGymError, MaxAndSkipGym,
-    MaxAndSkipGymError,
+    FrameStackGym, FrameStackGymConfigurationError, FrameStackGymError, LegalActionMaskGym,
+    LegalActionMaskGymError, MaxAndSkipGym, MaxAndSkipGymConfigurationError, MaxAndSkipGymError,
 };
 pub use reward::{ClipRewardGym, ClipRewardGymError};
-pub use time_limit::TimeLimitGym;
+pub use time_limit::{TimeLimitGym, TimeLimitGymConfigurationError};
 
 #[cfg(test)]
 mod tests {

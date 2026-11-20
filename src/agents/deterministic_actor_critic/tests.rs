@@ -372,7 +372,7 @@ fn full_mse_targets_and_actor_gradient_boundaries_are_preserved() {
                 .online_replay_values::<2, 2, 3>(&batch.observations, &batch.actions)
                 .unwrap(),
         );
-        let progress = ScheduleProgress::new(None);
+        let progress = ScheduleProgress::new(None).unwrap();
         let critic_update = agent.optimize_critics(&batch, &targets, &progress).unwrap();
         let expected_loss =
             ((critic_before[0] - 2.35).powi(2) + (critic_before[1] - 2.0).powi(2)) / 2.0;

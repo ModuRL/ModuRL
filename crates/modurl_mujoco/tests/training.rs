@@ -12,7 +12,7 @@ fn environments() -> VectorizedGymWrapper<TimeLimitGym<HalfCheetahV5>> {
             .map(|index| {
                 let mut environment = HalfCheetahV5::builder().build().unwrap();
                 environment.seed(index);
-                TimeLimitGym::new(environment, 2)
+                TimeLimitGym::new(environment, 2).unwrap()
             })
             .collect(),
     )
