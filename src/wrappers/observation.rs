@@ -191,6 +191,19 @@ pub enum FrameStackGymError<E> {
     GymError(#[source] E),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FrameStackGymConfigurationError {
+    #[error("stack size must be nonzero")]
+    ZeroStackSize,
+    #[error(
+        "observation space must start with the stack size axis {stack_size}, got {leading_axis:?}"
+    )]
+    InvalidObservationSpace {
+        stack_size: usize,
+        leading_axis: Option<usize>,
+    },
+}
+
 /// Stacks recent observations along a leading frame axis, preserving kind, dtype, and device.
 /// `BF` is the stacked batch rank. Two `PrevRank` mappings determine the inner single rank `O`.
 /// The intermediate rank `F` is shared by inner batches and stacked single observations.
@@ -216,19 +229,28 @@ where
 {
     /// Creates a frame stack with a declared space shaped `[stack_size, ...inner_observation_shape]` per item.
     /// Scalars use `[stack_size, 1]`. `BoxSpace` bounds include a separate size-one batch axis.
-    pub fn new(gym: G, stack_size: usize, observation_space: S) -> Self {
-        assert!(stack_size > 0, "stack_size must be at least 1");
-        assert_eq!(
-            observation_space.shape().first().copied(),
-            Some(stack_size),
-            "the pre-stacked observation space must start with stack_size"
-        );
-        Self {
+    /// Rejects a zero `stack_size` or a space whose leading item axis is not `stack_size`.
+    pub fn new(
+        gym: G,
+        stack_size: usize,
+        observation_space: S,
+    ) -> Result<Self, FrameStackGymConfigurationError> {
+        if stack_size == 0 {
+            return Err(FrameStackGymConfigurationError::ZeroStackSize);
+        }
+        let leading_axis = observation_space.shape().first().copied();
+        if leading_axis != Some(stack_size) {
+            return Err(FrameStackGymConfigurationError::InvalidObservationSpace {
+                stack_size,
+                leading_axis,
+            });
+        }
+        Ok(Self {
             gym,
             stack_size,
             frames: VecDeque::with_capacity(stack_size),
             observation_space,
-        }
+        })
     }
 
     /// Adds a frame axis to rank-`O` observations, returning rank `F` with `[frame_count, ...observation_shape]`.
@@ -354,6 +376,12 @@ pub enum MaxAndSkipGymError<E> {
     GymError(#[source] E),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MaxAndSkipGymConfigurationError {
+    #[error("skip must be nonzero")]
+    ZeroSkip,
+}
+
 /// Repeats each action, sums its rewards, and max-pools the final two observations.
 pub struct MaxAndSkipGym<G> {
     gym: G,
@@ -361,9 +389,12 @@ pub struct MaxAndSkipGym<G> {
 }
 
 impl<G> MaxAndSkipGym<G> {
-    pub fn new(gym: G, skip: usize) -> Self {
-        assert!(skip > 0, "skip must be at least 1");
-        Self { gym, skip }
+    /// Rejects a zero `skip`.
+    pub fn new(gym: G, skip: usize) -> Result<Self, MaxAndSkipGymConfigurationError> {
+        if skip == 0 {
+            return Err(MaxAndSkipGymConfigurationError::ZeroSkip);
+        }
+        Ok(Self { gym, skip })
     }
 }
 
@@ -480,7 +511,10 @@ mod tests {
     use burn::tensor::{Bool, DType, Device, Int, Tensor, kind::Basic};
     use std::marker::PhantomData;
 
-    use super::{FrameStackGym, LegalActionMaskGym, LegalActionMaskGymError, MaxAndSkipGym};
+    use super::{
+        FrameStackGym, FrameStackGymConfigurationError, LegalActionMaskGym,
+        LegalActionMaskGymError, MaxAndSkipGym, MaxAndSkipGymConfigurationError,
+    };
 
     struct InvalidLegalActionsGym(StateTestGym);
 
@@ -600,11 +634,31 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_frame_stack_and_skip_settings() {
+        let device = Device::flex();
+        assert!(matches!(
+            FrameStackGym::<_, 3, _>::new((), 0, BoxSpace::new_unbounded([1, 0, 4], &device)),
+            Err(FrameStackGymConfigurationError::ZeroStackSize)
+        ));
+        assert!(matches!(
+            FrameStackGym::<_, 3, _>::new((), 2, BoxSpace::new_unbounded([1, 3, 4], &device)),
+            Err(FrameStackGymConfigurationError::InvalidObservationSpace {
+                stack_size: 2,
+                leading_axis: Some(3),
+            })
+        ));
+        assert!(matches!(
+            MaxAndSkipGym::new((), 0),
+            Err(MaxAndSkipGymConfigurationError::ZeroSkip)
+        ));
+    }
+
+    #[test]
     fn frame_stack_adds_an_axis_to_vector_observations() {
         let device = Device::flex();
         let gym = crate::agents::test_support::FixedEnv::new(device.clone());
         let space = BoxSpace::new_unbounded([1, 2, 4], &device);
-        let mut wrapper: FrameStackGym<_> = FrameStackGym::new(gym, 2, space);
+        let mut wrapper: FrameStackGym<_> = FrameStackGym::new(gym, 2, space).unwrap();
         let reset = wrapper.reset().unwrap();
         assert_eq!(reset.observation.dims(), [2, 4]);
         assert_eq!(wrapper.step(action()).unwrap().observation.dims(), [2, 4]);
@@ -621,7 +675,8 @@ mod tests {
                 shape: [1, 2, 1, 2],
                 kind: PhantomData,
             },
-        );
+        )
+        .unwrap();
         integers
             .frames
             .push_back(Tensor::from_data([[1i32, 2]], (&device, DType::I64)));
@@ -643,7 +698,8 @@ mod tests {
                 shape: [1, 2, 1],
                 kind: PhantomData,
             },
-        );
+        )
+        .unwrap();
         booleans
             .frames
             .push_back(Tensor::from_data([true], &device));
@@ -667,7 +723,7 @@ mod tests {
             100.0,
             &burn::tensor::Device::flex(),
         );
-        let mut wrapper = FrameStackGym::<_, 3>::new(gym, 4, observation_space);
+        let mut wrapper = FrameStackGym::<_, 3>::new(gym, 4, observation_space).unwrap();
 
         let reset = wrapper.reset().unwrap();
         let step = wrapper.step(action()).unwrap();
@@ -694,7 +750,7 @@ mod tests {
             TestGym::step(3.0, 0.25, false, false, 3),
             TestGym::step(2.0, 0.25, false, false, 4),
         ]);
-        let mut wrapper = MaxAndSkipGym::new(gym, 4);
+        let mut wrapper = MaxAndSkipGym::new(gym, 4).unwrap();
 
         let step = wrapper.step(action()).unwrap();
 
@@ -710,7 +766,7 @@ mod tests {
             TestGym::step(2.0, 0.25, false, true, 2),
             TestGym::step(3.0, 0.25, false, false, 3),
         ]);
-        let mut wrapper = MaxAndSkipGym::new(gym, 4);
+        let mut wrapper = MaxAndSkipGym::new(gym, 4).unwrap();
 
         let step = wrapper.step(action()).unwrap();
 
@@ -725,7 +781,7 @@ mod tests {
         let device = Device::flex();
         let observation_space = BoxSpace::new_unbounded([1, 2, 1], &device);
         assert_state_round_trip(
-            FrameStackGym::<_, 3>::new(StateTestGym::new(29), 2, observation_space),
+            FrameStackGym::<_, 3>::new(StateTestGym::new(29), 2, observation_space).unwrap(),
             state_action(),
             1,
             1,
@@ -737,7 +793,7 @@ mod tests {
     #[test]
     fn max_and_skip_restores_inner_state() {
         assert_state_round_trip(
-            MaxAndSkipGym::new(StateTestGym::new(31), 2),
+            MaxAndSkipGym::new(StateTestGym::new(31), 2).unwrap(),
             state_action(),
             1,
             2,

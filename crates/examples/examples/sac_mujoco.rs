@@ -70,7 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = Device::metal(burn::tensor::DeviceKind::DefaultDevice);
     let device = device.autodiff();
     println!("Environment: {ENVIRONMENT_NAME}");
-    let env = VectorizedGymWrapper::from(TimeLimitGym::new(mujoco::build_environment(), 1_000));
+    let env =
+        VectorizedGymWrapper::from(TimeLimitGym::new(mujoco::build_environment(), 1_000).unwrap());
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let action_space = env.action_space();
     let observation_space = env.observation_space();

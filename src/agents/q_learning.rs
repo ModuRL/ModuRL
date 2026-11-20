@@ -19,7 +19,9 @@ use crate::{
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
-    parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
+    parameter_schedule::{
+        LinearSchedule, ParameterSchedule, ScheduleProgress, ScheduleProgressError,
+    },
     spaces::{ActionSpace, Discrete, ObservationSpace, SpaceError},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
@@ -535,7 +537,11 @@ where
             learning_rate,
             current_epsilon: initial_epsilon,
             epsilon_schedule,
-            schedule_progress: ScheduleProgress::new(training_horizon),
+            schedule_progress: ScheduleProgress::new(training_horizon).map_err(
+                |ScheduleProgressError::ZeroTrainingHorizon| {
+                    QLearningConfigurationError::ZeroTrainingHorizon
+                },
+            )?,
             action_space,
             observation_space,
             experience_replay: ExperienceReplay::with_storage(replay_storage, batch_size),

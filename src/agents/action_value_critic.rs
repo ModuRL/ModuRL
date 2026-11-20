@@ -865,7 +865,7 @@ mod tests {
             .unwrap()
             .sum();
         critic
-            .backward_step(&loss, &ScheduleProgress::new(None))
+            .backward_step(&loss, &ScheduleProgress::new(None).unwrap())
             .unwrap();
         assert_eq!(observations.dtype(), DType::I64);
 
@@ -1069,7 +1069,7 @@ mod tests {
                 .unwrap()
                 .sum();
             critic
-                .backward_step(&loss, &ScheduleProgress::new(None))
+                .backward_step(&loss, &ScheduleProgress::new(None).unwrap())
                 .unwrap();
             assert_eq!(critic.online_network.module.weight.id, id);
             assert_eq!(numbers(critic.online_network.module.weight.val()), [0.5; 3]);
@@ -1108,7 +1108,10 @@ mod tests {
                 [0.5; 2]
             );
             assert!(matches!(
-                critic.backward_step(&Tensor::ones([2], &device), &ScheduleProgress::new(None)),
+                critic.backward_step(
+                    &Tensor::ones([2], &device),
+                    &ScheduleProgress::new(None).unwrap()
+                ),
                 Err(ActionValueCriticError::ShapeMismatch { .. })
             ));
             for tau in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
@@ -1135,7 +1138,7 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(critic.learning_rate(), 2.5);
-        let mut progress = ScheduleProgress::new(Some(10));
+        let mut progress = ScheduleProgress::new(Some(10)).unwrap();
         progress.set_elapsed_steps(5);
         let loss = critic.online_network().weight.val().sum();
         critic.backward_step(&loss, &progress).unwrap();
@@ -1234,7 +1237,7 @@ mod tests {
             .unwrap();
         assert_eq!(numbers(online.clone()), initial_target);
         critic
-            .backward_step(&online.sum(), &ScheduleProgress::new(None))
+            .backward_step(&online.sum(), &ScheduleProgress::new(None).unwrap())
             .unwrap();
         assert_eq!(
             numbers(

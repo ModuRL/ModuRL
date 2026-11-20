@@ -18,7 +18,9 @@ use crate::{
     buffers::experience::{self, Experience, ExperienceBatchError},
     gym::{MultiGym, MultiGymStepInfo},
     objectives::clipped_value_loss,
-    parameter_schedule::{ConstantSchedule, ParameterSchedule, ScheduleProgress},
+    parameter_schedule::{
+        ConstantSchedule, ParameterSchedule, ScheduleProgress, ScheduleProgressError,
+    },
     sampling::{SamplingError, shuffle_with_device_rng},
     spaces::{ActionMap, ActionSpace, ObservationSpace},
     tensor_operations::{clamp_with_boundary_gradients, normalize_tensor},
@@ -601,7 +603,11 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
             rollout_buffer: Vec::new(),
             num_epochs,
             batch_size,
-            schedule_progress: ScheduleProgress::new(training_horizon),
+            schedule_progress: ScheduleProgress::new(training_horizon).map_err(
+                |ScheduleProgressError::ZeroTrainingHorizon| {
+                    PPOConfigurationError::ZeroTrainingHorizon
+                },
+            )?,
             mini_batch_size,
             logging_info: logger.map(PPOLoggingInfo::new),
             gradient_clip,

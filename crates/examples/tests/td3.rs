@@ -21,8 +21,9 @@ impl TD3Logger for RecordingLogger {
 #[allow(deprecated)]
 fn td3_trains_with_cpu_environment_and_separate_replay_device() {
     let device = Device::flex().autodiff();
-    let mut env =
-        VectorizedGymWrapper::from(TimeLimitGym::new(PendulumV1::builder().build().unwrap(), 2));
+    let mut env = VectorizedGymWrapper::from(
+        TimeLimitGym::new(PendulumV1::builder().build().unwrap(), 2).unwrap(),
+    );
     let actor = MLP::builder()
         .input_size(3)
         .output_size(1)
