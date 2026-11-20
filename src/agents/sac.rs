@@ -43,6 +43,9 @@ pub enum SACConfigurationError {
     ZeroReplayCapacity,
     #[error("batch size must be nonzero")]
     ZeroBatchSize,
+    /// The number of policy expectation samples must be nonzero.
+    #[error("samples must be nonzero")]
+    ZeroSamples,
     #[error("replay capacity must be at least the batch size")]
     ReplayCapacityBelowBatchSize,
     #[error("gamma must be finite and in 0..=1")]
@@ -466,7 +469,7 @@ pub struct SACAgent<'a, G: SACModelTypes, OS, AS, GE, I = (), const A: usize = 2
     gamma: f64,
     tau: f64,
     training_start: usize,
-    samples: NonZeroUsize,
+    samples: usize,
     entropy_change_penalty: Option<f64>,
     q_value_clip: Option<f64>,
     schedule_progress: ScheduleProgress,
@@ -513,7 +516,7 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
         #[builder(default = 1_000_000)] replay_capacity: usize,
         #[builder(default = 256)] batch_size: usize,
         #[builder(default = 1_000)] training_start: usize,
-        #[builder(default = NonZeroUsize::MIN)] samples: NonZeroUsize,
+        #[builder(default = 1)] samples: usize,
         training_horizon: Option<usize>,
         #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, SACConfigurationError>
@@ -563,6 +566,7 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
             .critic_count(critics.len())
             .replay_capacity(replay_capacity)
             .batch_size(batch_size)
+            .samples(samples)
             .gamma(gamma)
             .tau(tau)
             .actor_learning_rate(actor_learning_rate.value(0.0))
@@ -834,7 +838,10 @@ where
     ) -> Result<Tensor<2>, SACError<PE, GE, SE, CE>> {
         let terms = self
             .policy
-            .expectation(batch.next_observations.clone(), self.samples)
+            .expectation(
+                batch.next_observations.clone(),
+                NonZeroUsize::new(self.samples).expect("samples validated at construction"),
+            )
             .map_err(SACError::PolicyError)?;
         let actions = terms.actions().clone().without_autodiff();
         let logs = terms.log_probabilities().clone().detach().cast(self.dtype);
@@ -939,7 +946,10 @@ where
                 .ok_or(SACConfigurationError::InvalidLearningRate)?;
         let terms = self
             .policy
-            .expectation(batch.observations.clone(), self.samples)
+            .expectation(
+                batch.observations.clone(),
+                NonZeroUsize::new(self.samples).expect("samples validated at construction"),
+            )
             .map_err(SACError::PolicyError)?;
 
         let values = self
@@ -1144,7 +1154,7 @@ where
                 observations
                     .clone()
                     .to_device(&self.replay_storage_config.optimization_device()),
-                self.samples,
+                NonZeroUsize::new(self.samples).expect("samples validated at construction"),
             )
             .map_err(SACError::PolicyError)?;
         let values = -(terms.log_probabilities().clone().cast(self.dtype)
@@ -1576,6 +1586,7 @@ fn validate_sac_configuration(
     critic_count: usize,
     replay_capacity: usize,
     batch_size: usize,
+    samples: usize,
     gamma: f64,
     tau: f64,
     actor_learning_rate: f64,
@@ -1594,6 +1605,10 @@ fn validate_sac_configuration(
 
     if batch_size == 0 {
         return Err(SACConfigurationError::ZeroBatchSize);
+    }
+
+    if samples == 0 {
+        return Err(SACConfigurationError::ZeroSamples);
     }
 
     if replay_capacity < batch_size {

@@ -57,6 +57,8 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Environments and agents
 
+- SAC's `samples` builder parameter now takes `usize` (default `1`) instead of
+  `NonZeroUsize`; zero returns `SACConfigurationError::ZeroSamples`.
 - PPO and A2C use `.logger(...)` instead of `.logging_info(...)` to match the other agents.
 - All agent optimizers accept constant `f64` learning rates or a `ParameterSchedule`.
   Off-policy updates evaluate the rate at their collection timestep; invalid rates return an error.
