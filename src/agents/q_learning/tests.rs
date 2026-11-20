@@ -1,4 +1,5 @@
 use super::*;
+use super::{ddqn::DDQNAgent, dqn::DQNAgent};
 use crate::sampling::tests::RNG_LOCK;
 use crate::tensor_rank::{PrevRank, TensorBatchTypes};
 use crate::{
@@ -828,15 +829,44 @@ fn builder_rejects_invalid_learning_rates() {
     };
     assert!(matches!(
         build(f64::NAN),
-        Err(QAgentError::ConfigurationError(
-            QLearningConfigurationError::InvalidLearningRate
-        ))
+        Err(QLearningConfigurationError::InvalidLearningRate)
     ));
 }
 
 #[test]
+fn public_builders_return_configuration_errors() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex().autodiff();
+    macro_rules! check_builder {
+        ($agent:ident) => {
+            for (batch_size, rate, expected) in [
+                (0, 0.01, QLearningConfigurationError::ZeroBatchSize),
+                (
+                    32,
+                    f64::NAN,
+                    QLearningConfigurationError::InvalidLearningRate,
+                ),
+            ] {
+                let result: Result<_, QLearningConfigurationError> =
+                    $agent::<_, _, Infallible>::builder()
+                        .action_space(Discrete::new(2).unwrap())
+                        .observation_space(BoxSpace::new_unbounded([1, 1], &device))
+                        .online_q_network(network(&device, DType::F32))
+                        .optimizer(SgdConfig::new().init())
+                        .learning_rate(rate)
+                        .batch_size(batch_size)
+                        .build();
+                assert_eq!(result.err().unwrap().to_string(), expected.to_string());
+            }
+        };
+    }
+    check_builder!(DQNAgent);
+    check_builder!(DDQNAgent);
+}
+
+#[test]
 fn accepts_valid_configuration() {
-    assert_eq!(
+    assert!(matches!(
         QLearningConfigurationValidator::validate_configuration()
             .replay_capacity(1_000)
             .batch_size(32)
@@ -848,12 +878,12 @@ fn accepts_valid_configuration() {
             .training_horizon(10_000)
             .call(),
         Ok(())
-    );
+    ));
 }
 
 #[test]
 fn rejects_invalid_configuration_values() {
-    assert_eq!(
+    assert!(matches!(
         QLearningConfigurationValidator::validate_configuration()
             .replay_capacity(0)
             .batch_size(32)
@@ -865,8 +895,8 @@ fn rejects_invalid_configuration_values() {
             .training_horizon(10_000)
             .call(),
         Err(QLearningConfigurationError::ZeroReplayCapacity)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         QLearningConfigurationValidator::validate_configuration()
             .replay_capacity(1_000)
             .batch_size(0)
@@ -878,8 +908,8 @@ fn rejects_invalid_configuration_values() {
             .training_horizon(10_000)
             .call(),
         Err(QLearningConfigurationError::ZeroBatchSize)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         QLearningConfigurationValidator::validate_configuration()
             .replay_capacity(1_000)
             .batch_size(32)
@@ -891,8 +921,8 @@ fn rejects_invalid_configuration_values() {
             .training_horizon(10_000)
             .call(),
         Err(QLearningConfigurationError::ZeroTargetUpdateInterval)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         QLearningConfigurationValidator::validate_configuration()
             .replay_capacity(1_000)
             .batch_size(32)
@@ -904,8 +934,8 @@ fn rejects_invalid_configuration_values() {
             .training_horizon(10_000)
             .call(),
         Err(QLearningConfigurationError::ZeroUpdateFrequency)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         QLearningConfigurationValidator::validate_configuration()
             .replay_capacity(31)
             .batch_size(32)
@@ -917,8 +947,8 @@ fn rejects_invalid_configuration_values() {
             .training_horizon(10_000)
             .call(),
         Err(QLearningConfigurationError::ReplayCapacityBelowBatchSize)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         QLearningConfigurationValidator::validate_configuration()
             .replay_capacity(1_000)
             .batch_size(32)
@@ -930,8 +960,8 @@ fn rejects_invalid_configuration_values() {
             .training_horizon(10_000)
             .call(),
         Err(QLearningConfigurationError::InvalidGamma)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         QLearningConfigurationValidator::validate_configuration()
             .replay_capacity(1_000)
             .batch_size(32)
@@ -943,9 +973,9 @@ fn rejects_invalid_configuration_values() {
             .training_horizon(0)
             .call(),
         Err(QLearningConfigurationError::ZeroTrainingHorizon)
-    );
-    assert_eq!(
+    ));
+    assert!(matches!(
         validate_epsilon(1.01),
         Err(QLearningConfigurationError::InvalidEpsilon)
-    );
+    ));
 }

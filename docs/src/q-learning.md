@@ -9,6 +9,10 @@ when you want DDQN's target calculation instead.
 
 ## Choose DQN or DDQN
 
+Both builders return `Result<_, QLearningConfigurationError>`. This error is
+available in `modurl::prelude` and describes invalid configuration and tensor
+reads during construction. Runtime operations continue to return `QAgentError`.
+
 Both agents train an online Q-network and periodically copy its parameters to a
 target Q-network. They differ only in how they form the next-state training
 target:
