@@ -11,6 +11,7 @@ use std::{marker::PhantomData, sync::Arc};
 
 use super::PPOConfigurationError;
 use crate::{
+    agents::checked_learning_rate,
     models::{Forward, probabilistic_model::ProbabilisticPolicy},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     tensor_rank::{NextRank, PrevRank},
@@ -227,14 +228,7 @@ impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
 }
 
 fn initial_learning_rate(schedule: &dyn ParameterSchedule) -> Result<f64, PPOConfigurationError> {
-    checked_learning_rate(schedule.value(0.0))
-}
-
-fn checked_learning_rate(learning_rate: f64) -> Result<f64, PPOConfigurationError> {
-    if !learning_rate.is_finite() || learning_rate <= 0.0 {
-        return Err(PPOConfigurationError::InvalidLearningRate);
-    }
-    Ok(learning_rate)
+    checked_learning_rate(schedule.value(0.0)).ok_or(PPOConfigurationError::InvalidLearningRate)
 }
 
 /// Executes an owned PPO network configuration with native tensor kinds and explicit batch ranks.
@@ -287,7 +281,7 @@ pub trait PPONetwork<const O: usize, const H: usize, const L: usize>: Module {
         &mut self,
         actor_loss: Tensor<1>,
         critic_loss: Tensor<1>,
-        gradient_clip: f32,
+        gradient_clip: f64,
     ) -> Result<(), TensorReadError>;
 
     /// Updates each learning rate from its schedule at the current training progress.
@@ -365,7 +359,7 @@ where
         &mut self,
         actor_loss: Tensor<1>,
         critic_loss: Tensor<1>,
-        gradient_clip: f32,
+        gradient_clip: f64,
     ) -> Result<(), TensorReadError> {
         let total_loss = actor_loss + critic_loss;
         let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &self.model);
@@ -385,7 +379,8 @@ where
         learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         progress: &ScheduleProgress,
     ) -> Result<(), PPOConfigurationError> {
-        self.learning_rate = checked_learning_rate(progress.parameter(&*learning_rate))?;
+        self.learning_rate = checked_learning_rate(progress.parameter(&*learning_rate))
+            .ok_or(PPOConfigurationError::InvalidLearningRate)?;
         self.learning_rate_schedule = learning_rate;
         Ok(())
     }
@@ -454,7 +449,7 @@ where
         &mut self,
         actor_loss: Tensor<1>,
         critic_loss: Tensor<1>,
-        gradient_clip: f32,
+        gradient_clip: f64,
     ) -> Result<(), TensorReadError> {
         match self.combined_loss {
             true => {
@@ -519,7 +514,8 @@ where
         learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         progress: &ScheduleProgress,
     ) -> Result<(), PPOConfigurationError> {
-        let rate = checked_learning_rate(progress.parameter(&*learning_rate))?;
+        let rate = checked_learning_rate(progress.parameter(&*learning_rate))
+            .ok_or(PPOConfigurationError::InvalidLearningRate)?;
         self.actor_learning_rate = rate;
         self.critic_learning_rate = rate;
         self.actor_learning_rate_schedule = learning_rate.clone();
@@ -1110,7 +1106,7 @@ mod tests {
             .mini_batch_size(2)
             .num_epochs(1)
             .training_horizon(10)
-            .logging_info(&mut logger)
+            .logger(&mut logger)
             .build()
             .unwrap();
         agent.learn(&mut env, 2).unwrap();
@@ -1168,7 +1164,7 @@ mod tests {
             .num_epochs(1)
             .clip_range(LinearSchedule::new(0.2, 0.1))
             .training_horizon(10)
-            .logging_info(&mut logger)
+            .logger(&mut logger)
             .build()
             .unwrap();
         for (steps, rate, clip) in [(2, 0.00082, 0.18), (4, 0.00064, 0.16)] {

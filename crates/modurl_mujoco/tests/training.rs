@@ -107,7 +107,7 @@ fn a2c_trains_with_mujoco_and_time_limit_truncations() {
         .network_info(networks.into())
         .batch_size(4)
         .training_horizon(8)
-        .logging_info(&mut logger)
+        .logger(&mut logger)
         .build()
         .unwrap();
     agent.learn(&mut environments, 8).unwrap();
@@ -141,7 +141,7 @@ fn ppo_trains_with_mujoco_and_time_limit_truncations() {
         .mini_batch_size(4)
         .num_epochs(1)
         .training_horizon(8)
-        .logging_info(&mut logger)
+        .logger(&mut logger)
         .build()
         .unwrap();
     agent.learn(&mut environments, 8).unwrap();

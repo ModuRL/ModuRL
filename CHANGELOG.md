@@ -12,6 +12,9 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - Discount `gamma` and advantage-estimation `lambda` parameters now consistently use `f64`,
   including PPO, A2C, DQN/DDQN, GAE, NStep, and UPGO. Callers with `f32` variables must
   convert them to `f64`; custom advantage estimators must update their method signatures.
+- PPO and A2C value and entropy loss coefficients and gradient clipping thresholds
+  now take `f64`. Q-learning and DDPG/TD3 update logs report learning rates as
+  `f64` without rounding them to `f32`. Tensor dtypes are unchanged.
 - The minimum Rust version increases from 1.88 to 1.95. The Rust edition remains 2024.
 - All public APIs use Burn 0.22.0 instead of Candle tensors, devices, dtypes, and model parameters.
   Burn tensors include rank and kind in their type: `Tensor<R>`, `Tensor<R, Int>`, and `Tensor<R, Bool>`.
@@ -53,6 +56,11 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   Sampling and action mapping retain the bounds or policy dtype as documented, including supported F64 paths.
 
 ### Environments and agents
+
+- PPO and A2C use `.logger(...)` instead of `.logging_info(...)` to match the other agents.
+- All agent optimizers accept constant `f64` learning rates or a `ParameterSchedule`.
+  Off-policy updates evaluate the rate at their collection timestep; invalid rates return an error.
+  The DDPG/TD3 log entry's `actor_learning_rate` is now optional and is `None` when the actor does not update.
 
 - `Gym`, `MultiGym`, and `Agent` gain observation and action rank parameters:
   `Gym<I = (), O = 2, A = 2>`, `MultiGym<I = (), O = 2, A = 2>`, and `Agent<I = (), O = 2, A = 2>`.
@@ -227,11 +235,13 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   Replay is stored on that device unless the builder sets `.replay_device(..)`.
   Replay preserves incoming observation kind and the first batch's dtype, rejecting later dtype changes.
   Environment output mapping, model input conversion, or another explicit caller composition can select the representation.
+- Replay no longer casts rewards for SAC, DDPG, or TD3. Environment rewards must match the configured
+  training dtype and critic outputs; use environment output mapping if the environment needs to emit a different dtype.
 - Public Q-learning logs now use Burn tensors: loss `[1]`, selected Q values `[batch_size, 1]`,
   replay rewards `[batch_size, 1]`, and collection rewards `[num_envs, 1]`.
   `QAgentError<GE, ME>` replaces the generic space-error parameter with a model-error parameter;
   space errors use concrete `SpaceError`, and tensor errors use `TensorReadError`.
-  Added `QLearningReplayError` and configuration errors for compute dtype, learning rate, and observation rank.
+  Added `QLearningReplayError` and configuration errors for learning rate and observation rank.
 
 ### DQN and DDQN
 
@@ -239,6 +249,8 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   and observation space `S`. `R` includes the batch axis; native observation kinds and dtypes are preserved.
 - Constructors use `Type::builder()`. Supply `.online_q_network(model)`, a Burn optimizer through `.optimizer(...)`,
   and an explicit `.learning_rate(...)`. Removed `.target_q_network(...)`, `.online_vars(...)`, and `.target_vars(...)`.
+- DQN and DDQN have no `.dtype(...)` setting. Replay preserves the environment reward dtype, and learning
+  returns an error if the online or target Q-network output uses a different dtype.
   The engine creates a detached target copy and replaces it at each hard-update interval.
 - `get_observation_space()` returns `&S`. Both agents implement the rank-aware `Agent<I, R, 2>` contract
   with concrete `Discrete` actions and `QAgentError<GE, M::Error>`.

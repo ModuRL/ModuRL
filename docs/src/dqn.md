@@ -16,6 +16,8 @@ CartPole has four observation values and two discrete actions, so the network re
 two Q-values.
 
 `DQNAgent` needs a `Discrete` action space. `CartPoleV1` supplies that concrete type through `env.action_space()`.
+The Q-network's output dtype must match the environment reward dtype. Replay stores rewards without casting them.
+For an F64 Q-network, use an environment with F64 rewards or explicitly convert its reward tensor with an output wrapper.
 
 ## Complete Program
 
@@ -44,7 +46,6 @@ fn main() {
     let optimizer = AdamWConfig::new().init();
 
     let mut agent = DQNAgent::builder()
-        .dtype(DType::F32)
         .action_space(env.action_space())
         .observation_space(observation_space)
         .online_q_network(online_q_network)
@@ -70,6 +71,11 @@ fn main() {
 
 The Burn optimizer updates the owned online model. The target model has no gradient graph.
 The agent copies the online model at construction and every 500 transitions.
+
+DQN and DDQN accept a constant `f64` or a `ParameterSchedule` in
+`.learning_rate(...)`. For example, use `LinearSchedule::new(2.5e-4, 1e-5)`
+to decay the rate over `training_horizon`. Each optimizer update uses its
+collection timestep; rates must stay finite and positive.
 
 The epsilon schedule decreases exploration from `1.0` to `0.05` during the
 first half of the 500,000-transition horizon. The agent collects 10,000

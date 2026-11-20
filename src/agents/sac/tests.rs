@@ -322,7 +322,8 @@ fn categorical_bellman_targets_and_half_mse_preserve_f64() {
     assert_eq!(values[1], 1.0);
     batch.observations = Tensor::ones([2, 1], (&device, DType::F64));
     let targets = Tensor::full([2, 1], 3.0, (&device, DType::F64));
-    let losses = agent.optimize_critics(&batch, &targets).unwrap();
+    let progress = ScheduleProgress::new(None);
+    let losses = agent.optimize_critics(&batch, &targets, &progress).unwrap();
     assert_eq!(numbers(losses[0].clone()), [2.0]);
     assert_eq!(
         numbers(
@@ -341,7 +342,7 @@ fn categorical_bellman_targets_and_half_mse_preserve_f64() {
         [1.0; 2]
     );
     agent.q_value_clip = Some(0.05);
-    let losses = agent.optimize_critics(&batch, &targets).unwrap();
+    let losses = agent.optimize_critics(&batch, &targets, &progress).unwrap();
     assert!((numbers(losses[0].clone())[0] - 1.90125).abs() < 1e-12);
     assert_eq!(
         numbers(
@@ -437,7 +438,7 @@ fn mismatched_critic_dtype_is_rejected_before_training_arithmetic() {
     batch.observations = batch.observations.cast(DType::F64);
     let targets = Tensor::ones([2, 1], &device);
     assert!(matches!(
-        agent.optimize_critics(&batch, &targets),
+        agent.optimize_critics(&batch, &targets, &ScheduleProgress::new(None)),
         Err(SACError::DType {
             field: "critic values",
             expected: DType::F32,
@@ -475,7 +476,9 @@ fn actor_update_changes_policy_without_updating_critics_or_targets() {
             .online_replay_values::<2, 2, 3>(&batch.observations, &batch.actions)
             .unwrap(),
     );
-    let update = agent.optimize_actor(&batch).unwrap();
+    let update = agent
+        .optimize_actor(&batch, &ScheduleProgress::new(None))
+        .unwrap();
     assert!(!update.loss.is_require_grad());
     assert_ne!(numbers(agent.policy.module().weight.val()), before);
     assert_eq!(
@@ -515,10 +518,19 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
         },
     ])
     .unwrap();
+    let actor_progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let temperature_progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record_rate = |record: &std::sync::Arc<std::sync::Mutex<Vec<f64>>>| {
+        let record = record.clone();
+        move |progress: f64| {
+            record.lock().unwrap().push(progress);
+            0.01 * (1.0 + progress)
+        }
+    };
     let entropy = SACEntropyConfiguration::automatic_with_target_schedule(
         Param::from_tensor(Tensor::zeros([1], &device)),
         SgdConfig::new().init(),
-        0.01,
+        record_rate(&temperature_progress),
         |progress| 1.0 - progress,
     )
     .unwrap();
@@ -529,7 +541,7 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
             CategoricalDistribution,
         ))
         .actor_optimizer(SgdConfig::new().init())
-        .actor_learning_rate(0.01)
+        .actor_learning_rate(record_rate(&actor_progress))
         .critics(vec![
             discrete_critic(&device, DType::F32),
             discrete_critic(&device, DType::F32),
@@ -575,6 +587,8 @@ fn vector_collection_preserves_terminal_targets_warmup_schedules_and_logging() {
     ));
     assert_eq!(agent.optimization_steps, 3);
     assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
+    assert_eq!(*actor_progress.lock().unwrap(), [0.0, 0.5, 0.75, 1.0]);
+    assert_eq!(*temperature_progress.lock().unwrap(), [0.0, 0.5, 0.75, 1.0]);
     assert_eq!(logger.updates, [2, 3, 4]);
     assert_eq!(logger.temperature_updates, 3);
     assert_eq!(logger.entropy_penalties, 3);
@@ -643,7 +657,9 @@ fn continuous_policy_uses_reparameterized_actions_and_detached_targets() {
     let targets = agent.compute_bellman_targets(&batch).unwrap();
     assert!(!targets.is_require_grad());
     assert_eq!(numbers(targets)[1], 1.0);
-    agent.optimize_actor(&batch).unwrap();
+    agent
+        .optimize_actor(&batch, &ScheduleProgress::new(None))
+        .unwrap();
     assert_ne!(numbers(agent.policy.module().weight.val()), before);
     assert_eq!(
         numbers(
@@ -1018,7 +1034,9 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         collection_policy_entropies: Tensor::zeros([2, 1], (&device, DType::F64)),
         entropy_change_weights: Tensor::zeros([2, 1], (&device, DType::F64)),
     };
-    agent.optimize_actor(&batch).unwrap();
+    agent
+        .optimize_actor(&batch, &ScheduleProgress::new(None))
+        .unwrap();
     assert_eq!(
         agent.compute_bellman_targets(&batch).unwrap().dtype(),
         DType::F64

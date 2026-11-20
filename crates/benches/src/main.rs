@@ -328,7 +328,6 @@ fn dqn(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
         .init();
     let mut agent = debug_result(
         DQNAgent::builder()
-            .dtype(DType::F32)
             .action_space(envs.action_space())
             .observation_space(envs.observation_space())
             .online_q_network(online)

@@ -16,6 +16,10 @@ pub mod sac;
 
 pub(crate) use replay_device_strategy::ReplayStorageConfig;
 
+fn checked_learning_rate(rate: f64) -> Option<f64> {
+    (rate.is_finite() && rate > 0.0).then_some(rate)
+}
+
 /// Training actions selected by [`Agent::act_for_training`] and converted for the environment on demand.
 pub trait ToEnvironmentActions {
     type Actions;

@@ -108,7 +108,7 @@ pub(super) struct SACReplayStorage<const O: usize, const A: usize, K: Autodiff, 
 #[bon::bon]
 impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<O, A, K, L> {
     /// Allocates observations `[capacity, ...observation_shape]`, actions `[capacity, ...action_shape]`, and statistics `[capacity, 1]`.
-    /// Observation and action dtypes come from collection tensors. Statistics use dtype; storage is detached on device.
+    /// Observation and action dtypes come from collection tensors. Rewards must match dtype; storage is detached on device.
     #[builder]
     pub(super) fn new(
         observation_shape: [usize; O],
@@ -160,6 +160,8 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
 
         validate_shape("actions", &transitions.actions, action_shape)?;
         validate_shape("rewards", &transitions.rewards, [count, 1])?;
+        self.rewards
+            .validate_dtype("rewards", &transitions.rewards)?;
         validate_shape("termination", &transitions.terminated, [count, 1])?;
         validate_shape(
             "collection entropy",
@@ -221,7 +223,7 @@ where
     }
 
     /// Inserts observations `[num_envs, ...observation_shape]`, actions `[num_envs, ...action_shape]`, and statistics `[num_envs, 1]`.
-    /// Preserves observation kind and first-batch dtype. Explicitly casts actions to their storage dtype and statistics to compute dtype.
+    /// Preserves observation kind and first-batch dtype and requires rewards to match the compute dtype.
     /// Validates non-observation fields before writing; aligned storage validates and transfers observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = self.validate_insert(&transitions)?;
@@ -240,13 +242,8 @@ where
             <DType as Cast<A, L>>::cast(transitions.actions.to_device(&device), action_dtype),
         )?;
 
-        self.rewards.write(
-            start,
-            transitions
-                .rewards
-                .to_device(&device)
-                .cast(statistics_dtype),
-        )?;
+        self.rewards
+            .write(start, transitions.rewards.to_device(&device))?;
         self.terminated
             .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
 
@@ -305,7 +302,7 @@ mod tests {
             observations: Tensor::from_data([[1i64], [2]], (device, dtype)),
             next_observations: Tensor::from_data([[10i64], [20]], (device, dtype)),
             actions: Tensor::from_data([[0i64], [1]], device),
-            rewards: Tensor::ones([2, 1], device),
+            rewards: Tensor::full([2, 1], 1.0 + f64::EPSILON, (device, DType::F64)),
             terminated: Tensor::from_data([[false], [true]], device),
             collection_policy_entropies: Tensor::zeros([2, 1], device),
             entropy_change_weights: Tensor::zeros([2, 1], device),
@@ -373,6 +370,10 @@ mod tests {
         assert_eq!(batch.observations.dtype(), DType::I64);
         assert_eq!(batch.rewards.dtype(), DType::F64);
         assert_eq!(
+            batch.rewards.into_data().try_to_vec::<f64>().unwrap(),
+            [1.0 + f64::EPSILON; 2]
+        );
+        assert_eq!(
             batch
                 .terminated
                 .into_data()
@@ -395,6 +396,16 @@ mod tests {
                 field: "observations",
                 expected: DType::I64,
                 actual: DType::I32
+            }))
+        ));
+        let mut invalid = integer_transitions(&device, DType::I64);
+        invalid.rewards = Tensor::zeros([2, 1], (&device, DType::F32));
+        assert!(matches!(
+            storage.insert(0, invalid),
+            Err(SACReplayError::Storage(ReplayStorageError::DTypeMismatch {
+                field: "rewards",
+                expected: DType::F64,
+                actual: DType::F32,
             }))
         ));
         assert_eq!(
@@ -526,7 +537,7 @@ mod tests {
                     observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     actions: Tensor::zeros([2, 1], &device),
-                    rewards: Tensor::ones([2, 1], &device).require_grad(),
+                    rewards: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     terminated: Tensor::from_data([[false], [false]], &device),
                     collection_policy_entropies: Tensor::zeros([2, 1], &device),
                     entropy_change_weights: Tensor::zeros([2, 1], &device),

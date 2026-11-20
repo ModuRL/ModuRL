@@ -6,6 +6,7 @@ use super::{
         ActionValueCritic, ActionValueCriticError, ActionValueCriticNetwork,
         interpolate_target_model,
     },
+    checked_learning_rate,
 };
 use crate::{
     buffers::experience_replay::{
@@ -14,7 +15,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     objectives::bellman_targets,
-    parameter_schedule::ScheduleProgress,
+    parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::{ActionMap, ObservationSpace},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
@@ -27,7 +28,7 @@ use burn::{
         DType, Device, Distribution, Float, Tensor, TensorData, TensorReadError, kind::Autodiff,
     },
 };
-use std::{fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
 pub mod ddpg;
 mod replay;
@@ -196,10 +197,10 @@ pub struct DeterministicActorCriticLogEntry<const A: usize = 2> {
     pub bellman_targets: Tensor<2>,
     /// Rewards from the sampled replay batch, shaped `[batch_size, 1]`.
     pub replay_rewards: Tensor<2>,
-    /// Current actor optimizer learning rate.
-    pub actor_learning_rate: f32,
+    /// Learning rate applied to the actor on this update, or `None` if skipped.
+    pub actor_learning_rate: Option<f64>,
     /// Current learning rate for each critic optimizer.
-    pub critic_learning_rates: Vec<f32>,
+    pub critic_learning_rates: Vec<f64>,
     /// Standard deviation of the Gaussian collection-action noise.
     pub exploration_noise_standard_deviation: f64,
     /// Whether this replay update changed the actor and target networks.
@@ -339,7 +340,7 @@ impl DeterministicActorCriticConfigurationValidator {
         update_frequency: usize,
         training_horizon: Option<usize>,
     ) -> Result<(), DeterministicActorCriticConfigurationError> {
-        let error = if !actor_learning_rate.is_finite() || actor_learning_rate <= 0.0 {
+        let error = if checked_learning_rate(actor_learning_rate).is_none() {
             Some(DeterministicActorCriticConfigurationError::InvalidActorLearningRate)
         } else if !dtype.is_float() {
             Some(DeterministicActorCriticConfigurationError::InvalidDType(
@@ -404,6 +405,7 @@ struct ActorUpdate<const A: usize> {
     loss: Tensor<1>,
     q_values: Tensor<2>,
     actions: Tensor<A>,
+    learning_rate: f64,
 }
 
 /// Owns deterministic actor and critic models for native rank-O observation batches and Float rank-A action batches.
@@ -460,7 +462,7 @@ pub(crate) struct DeterministicActorCriticAgent<
     online_actor: G::Actor,
     target_actor: G::Actor,
     actor_optimizer: ModuleOptimizer,
-    actor_learning_rate: f64,
+    actor_learning_rate_schedule: Arc<dyn ParameterSchedule + Send + Sync>,
     critics: Vec<ActionValueCritic<G::Critic>>,
     strategy: S,
     action_space: AS,
@@ -496,7 +498,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
     pub(crate) fn new<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
         online_actor: M,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
-        actor_learning_rate: f64,
+        actor_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         critics: Vec<ActionValueCritic<N>>,
         strategy: S,
         action_space: AS,
@@ -544,7 +546,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             );
         }
         DeterministicActorCriticConfigurationValidator::validate_configuration()
-            .actor_learning_rate(actor_learning_rate)
+            .actor_learning_rate(actor_learning_rate.value(0.0))
             .dtype(dtype)
             .critic_count_requirement(strategy.critic_count_requirement())
             .actual_critic_count(critics.len())
@@ -581,7 +583,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             online_actor,
             target_actor,
             actor_optimizer,
-            actor_learning_rate,
+            actor_learning_rate_schedule: actor_learning_rate,
             critics,
             strategy,
             action_space,
@@ -879,6 +881,7 @@ where
         &mut self,
         batch: &DeterministicBatch<O, A, OS::Kind>,
         targets: &Tensor<2>,
+        progress: &ScheduleProgress,
     ) -> Result<CriticUpdate, DeterministicActorCriticError<AE, GE, SE, CE>> {
         let mut predictions = Vec::with_capacity(self.critics.len());
         for critic in &self.critics {
@@ -894,7 +897,7 @@ where
             let loss = (predicted.clone() - targets.clone().detach())
                 .square()
                 .mean();
-            critic.backward_step(&loss)?;
+            critic.backward_step(&loss, progress)?;
             losses.push(loss.detach());
             q_values.push(predicted.detach());
         }
@@ -916,7 +919,11 @@ where
     fn optimize_actor(
         &mut self,
         observations: &Tensor<O, OS::Kind>,
+        progress: &ScheduleProgress,
     ) -> Result<ActorUpdate<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
+        let learning_rate =
+            checked_learning_rate(progress.parameter(self.actor_learning_rate_schedule.as_ref()))
+                .ok_or(DeterministicActorCriticConfigurationError::InvalidActorLearningRate)?;
         let count = observations.dims()[0];
         let latent = self
             .online_actor
@@ -936,15 +943,14 @@ where
         self.validate_float_tensor("aggregated actor values", &values, [count, 1])?;
         let loss = -values.clone().mean();
         let gradients = GradientsParams::from_grads(loss.clone().backward(), &self.online_actor);
-        self.online_actor = self.actor_optimizer.step(
-            self.actor_learning_rate,
-            self.online_actor.clone(),
-            gradients,
-        );
+        self.online_actor =
+            self.actor_optimizer
+                .step(learning_rate, self.online_actor.clone(), gradients);
         Ok(ActorUpdate {
             loss: loss.detach(),
             q_values: values.detach(),
             actions: actions.detach(),
+            learning_rate,
         })
     }
 
@@ -980,18 +986,26 @@ where
         }
         let batch = self.sample_batch()?;
         let targets = self.bellman_targets(&batch)?;
-        let critic_update = self.optimize_critics(&batch, &targets)?;
+        let mut progress = self.schedule_progress;
+        progress.set_elapsed_steps(collection_timestep);
+        let critic_update = self.optimize_critics(&batch, &targets, &progress)?;
         let actor_updated =
             (self.optimization_steps + 1).is_multiple_of(self.strategy.actor_update_interval());
         let actor_update = actor_updated
-            .then(|| self.optimize_actor(&batch.observations))
+            .then(|| self.optimize_actor(&batch.observations, &progress))
             .transpose()?;
         if actor_updated {
             self.update_targets()?;
         }
-        let (actor_loss, policy_q_values, policy_actions) = match actor_update {
-            Some(actor) => (Some(actor.loss), Some(actor.q_values), Some(actor.actions)),
-            None => (None, None, None),
+        let (actor_loss, policy_q_values, policy_actions, actor_learning_rate) = match actor_update
+        {
+            Some(actor) => (
+                Some(actor.loss),
+                Some(actor.q_values),
+                Some(actor.actions),
+                Some(actor.learning_rate),
+            ),
+            None => (None, None, None, None),
         };
         logger.log_update(&DeterministicActorCriticLogEntry {
             critic_losses: critic_update.losses,
@@ -1002,11 +1016,11 @@ where
             replay_actions: batch.actions,
             bellman_targets: targets,
             replay_rewards: batch.rewards,
-            actor_learning_rate: self.actor_learning_rate as f32,
+            actor_learning_rate,
             critic_learning_rates: self
                 .critics
                 .iter()
-                .map(|critic| critic.learning_rate() as f32)
+                .map(ActionValueCritic::learning_rate)
                 .collect(),
             exploration_noise_standard_deviation: self.exploration_noise,
             actor_updated,
@@ -1018,8 +1032,8 @@ where
     }
 
     /// Stores native observations [num_envs, ...observation_shape], Float actions [num_envs, ...action_shape], and rewards [num_envs, 1].
-    /// Establishes replay dtype from the first batch, detaches experience, and keeps termination distinct from truncation.
-    /// Reads rewards to the host for episode summaries after successful replay insertion.
+    /// Preserves the first observation dtype, requires rewards to match the compute dtype, and detaches experience.
+    /// Keeps termination distinct from truncation and reads rewards to the host for episode summaries.
     fn store_transitions(
         &mut self,
         transitions: CollectedTransitions<'_, O, A, OS::Kind>,

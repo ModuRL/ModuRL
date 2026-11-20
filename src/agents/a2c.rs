@@ -241,12 +241,12 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
         advantage_estimator: Box<dyn AdvantageEstimator>,
         #[builder(default = false)] normalize_advantage: bool,
         #[builder(default = false)] normalize_returns: bool,
-        #[builder(default = 0.5)] vf_coef: f32,
-        #[builder(default = 0.0)] ent_coef: f32,
+        #[builder(default = 0.5)] vf_coef: f64,
+        #[builder(default = 0.0)] ent_coef: f64,
         #[builder(default = 1024)] batch_size: usize,
-        #[builder(default = 0.5)] gradient_clip: f32,
+        #[builder(default = 0.5)] gradient_clip: f64,
         training_horizon: Option<usize>,
-        logging_info: Option<&'a mut dyn A2CLogger<I>>,
+        logger: Option<&'a mut dyn A2CLogger<I>>,
     ) -> Result<Self, PPOConfigurationError>
     where
         N: PPONetwork<O, H, L, InputKind = OS::Kind, ModelGroup = G>,
@@ -275,7 +275,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
             .num_epochs(1)
             .gradient_clip(gradient_clip)
             .maybe_training_horizon(training_horizon)
-            .maybe_logging_info(logging_info)
+            .maybe_logger(logger)
             .build()?;
         Ok(Self { inner })
     }
@@ -489,7 +489,7 @@ mod tests {
                 .network_info(network.into())
                 .batch_size(2)
                 .training_horizon(4)
-                .logging_info(&mut logger)
+                .logger(&mut logger)
                 .build()
                 .unwrap();
         agent.learn(&mut env, 2).unwrap();
@@ -533,7 +533,7 @@ mod tests {
             .network_info(A2CNetworkInfo::shared(network))
             .batch_size(2)
             .training_horizon(4)
-            .logging_info(&mut logger)
+            .logger(&mut logger)
             .build()
             .unwrap();
         agent.learn(&mut env, 2).unwrap();

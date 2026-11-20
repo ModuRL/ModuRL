@@ -131,7 +131,7 @@ pub(super) struct DeterministicReplayStorage<const O: usize, const A: usize, K: 
 impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, A, K> {
     /// Allocates observations [capacity, ...observation_shape], Float actions [capacity, ...action_shape], and scalars [capacity, 1].
     /// Ranks O and A include capacity and require at least one item axis.
-    /// Preserves observation dtype; actions and rewards use dtype. All storage is detached on device.
+    /// Preserves observation dtype; actions use dtype and rewards must match it. All storage is detached on device.
     /// Returns an error for invalid dtypes, zero item dimensions, mismatched capacities, or invalid environment alignment.
     #[builder]
     pub(super) fn new(
@@ -205,6 +205,8 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
         action_shape[0] = count;
         validate_shape("actions", &transitions.actions, action_shape)?;
         validate_shape("rewards", &transitions.rewards, [count, 1])?;
+        self.rewards
+            .validate_dtype("rewards", &transitions.rewards)?;
         validate_shape("termination", &transitions.terminated, [count, 1])?;
         if transitions.truncated.len() != count {
             return Err(ReplayStorageError::BatchLengthMismatch {
@@ -267,7 +269,7 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
     }
 
     /// Stores native observations [num_envs, ...observation_shape], Float actions [num_envs, ...action_shape], and scalars [num_envs, 1].
-    /// Validates non-observation fields before writing. Preserves observation dtype and casts actions and rewards to the configured floating dtype.
+    /// Preserves observation dtype and requires rewards to match the configured floating dtype before writing.
     /// Aligned storage validates and transfers observations; truncations preserve terminal next observations.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = self.validate_insert(start, &transitions)?;
@@ -282,7 +284,7 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
         self.actions
             .write(start, transitions.actions.to_device(&device).cast(dtype))?;
         self.rewards
-            .write(start, transitions.rewards.to_device(&device).cast(dtype))?;
+            .write(start, transitions.rewards.to_device(&device))?;
         self.terminated
             .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
         Ok(count)
@@ -323,7 +325,7 @@ mod tests {
             observations: Tensor::from_data([[u64::MAX - 1], [u64::MAX - 2]], (device, DType::U64)),
             next_observations: Tensor::from_data([[7u64], [8]], (device, DType::U64)),
             actions: Tensor::from_data([[0.25f32], [-0.5]], device),
-            rewards: Tensor::from_data([[1.0f32], [2.0]], device),
+            rewards: Tensor::from_data([[1.0 + f64::EPSILON], [2.0]], (device, DType::F64)),
             terminated: Tensor::from_data([[false], [true]], device),
             truncated: vec![true, false],
         }
@@ -367,7 +369,7 @@ mod tests {
         assert_eq!(before.rewards.dtype(), DType::F64);
         assert_eq!(
             before.rewards.into_data().try_to_vec::<f64>().unwrap(),
-            [1.0, 2.0]
+            [1.0 + f64::EPSILON, 2.0]
         );
         assert_eq!(
             before
@@ -477,7 +479,7 @@ mod tests {
                     observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     next_observations: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     actions: Tensor::ones([2, 1], &device).require_grad(),
-                    rewards: Tensor::ones([2, 1], &device).require_grad(),
+                    rewards: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     terminated: Tensor::from_data([[false], [true]], &device),
                     truncated: vec![true, false],
                 },
@@ -568,6 +570,18 @@ mod tests {
                 )) if actual == field
             ));
         }
+        let mut rewards = integer_transitions(&device);
+        rewards.rewards = Tensor::zeros([2, 1], (&device, DType::F32));
+        assert!(matches!(
+            storage.insert(0, rewards),
+            Err(DeterministicReplayError::Storage(
+                ReplayStorageError::DTypeMismatch {
+                    field: "rewards",
+                    expected: DType::F64,
+                    actual: DType::F32,
+                }
+            ))
+        ));
         let mut truncated = integer_transitions(&device);
         truncated.truncated.pop();
         assert!(matches!(

@@ -102,7 +102,6 @@ mod dqn {
         let optimizer = AdamWConfig::new().init();
 
         let mut agent = DQNAgent::builder()
-            .dtype(DType::F32)
             .action_space(env.action_space())
             .observation_space(observation_space)
             .online_q_network(online_q_network)
