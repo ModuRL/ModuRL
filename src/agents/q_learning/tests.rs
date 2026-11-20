@@ -169,6 +169,7 @@ fn counting_envs(
 #[derive(Default)]
 struct Logger {
     updates: Vec<usize>,
+    learning_rates: Vec<f64>,
     rewards: Vec<Vec<f32>>,
     episodes: Vec<QEpisodeLogEntry>,
 }
@@ -181,6 +182,7 @@ impl QLearningLogger for Logger {
         assert_eq!(entry.loss.dtype(), entry.q_values.dtype());
         assert_eq!(entry.update_index, self.updates.len());
         self.updates.push(entry.collection_timestep);
+        self.learning_rates.push(entry.learning_rate);
     }
 
     fn log_collection(&mut self, entry: &QCollectionLogEntry) {
@@ -679,6 +681,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
     assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
     assert_eq!(agent.current_epsilon, 0.6);
     assert_eq!(logger.updates, [4]);
+    assert_eq!(logger.learning_rates, [0.01]);
     assert_eq!(logger.rewards, [vec![2.0, 2.0], vec![2.0, 2.0]]);
     assert_eq!(logger.episodes.len(), 2);
     assert_eq!(

@@ -280,7 +280,7 @@ struct SACTemperatureUpdate {
 
 struct SACCollectionEntropy {
     values: Tensor<2>,
-    change_weight: f32,
+    change_weight: f64,
 }
 
 struct SACStoredTimestep<I, const O: usize, K: Basic> {

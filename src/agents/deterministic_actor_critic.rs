@@ -197,9 +197,9 @@ pub struct DeterministicActorCriticLogEntry<const A: usize = 2> {
     /// Rewards from the sampled replay batch, shaped `[batch_size, 1]`.
     pub replay_rewards: Tensor<2>,
     /// Current actor optimizer learning rate.
-    pub actor_learning_rate: f32,
+    pub actor_learning_rate: f64,
     /// Current learning rate for each critic optimizer.
-    pub critic_learning_rates: Vec<f32>,
+    pub critic_learning_rates: Vec<f64>,
     /// Standard deviation of the Gaussian collection-action noise.
     pub exploration_noise_standard_deviation: f64,
     /// Whether this replay update changed the actor and target networks.
@@ -1002,11 +1002,11 @@ where
             replay_actions: batch.actions,
             bellman_targets: targets,
             replay_rewards: batch.rewards,
-            actor_learning_rate: self.actor_learning_rate as f32,
+            actor_learning_rate: self.actor_learning_rate,
             critic_learning_rates: self
                 .critics
                 .iter()
-                .map(|critic| critic.learning_rate() as f32)
+                .map(|critic| critic.learning_rate())
                 .collect(),
             exploration_noise_standard_deviation: self.exploration_noise,
             actor_updated,
