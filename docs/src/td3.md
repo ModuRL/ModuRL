@@ -143,6 +143,9 @@ the actor optimize the selected aggregate instead of the first critic.
 These choices define algorithm variants. Omit them when reproducing canonical
 TD3 with two critics.
 
+As with DDPG, actions, Q values, and environment rewards must match the configured `dtype`.
+Replay stores rewards without casting them and rejects mismatches.
+
 ## Evaluate the Deterministic Actor
 
 As with DDPG, `Agent::act` adds collection exploration noise. Evaluate the

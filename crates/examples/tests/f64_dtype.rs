@@ -43,13 +43,18 @@ fn cartpole() -> VectorizedGymWrapper<CartPoleV1> {
     VectorizedGymWrapper::from(CartPoleV1::builder().build().unwrap())
 }
 
+fn f64_rewards(mut step: MultiGymStepInfo) -> Result<MultiGymStepInfo, std::convert::Infallible> {
+    step.rewards = step.rewards.cast(DType::F64);
+    Ok(step)
+}
+
 #[test]
 fn dqn_updates_f64_networks_from_native_f32_observations() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    let mut env = cartpole();
+    let mut env =
+        OutputMapMultiGymWrapper::new(cartpole(), Ok::<_, std::convert::Infallible>, f64_rewards);
     let mut agent = DQNAgent::builder()
-        .dtype(DType::F64)
         .online_q_network(model(4, 2, &device))
         .optimizer(SgdConfig::new().init())
         .learning_rate(0.01)
@@ -72,9 +77,9 @@ fn dqn_updates_f64_networks_from_native_f32_observations() {
 fn ddqn_updates_f64_networks_from_native_f32_observations() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    let mut env = cartpole();
+    let mut env =
+        OutputMapMultiGymWrapper::new(cartpole(), Ok::<_, std::convert::Infallible>, f64_rewards);
     let mut agent = DDQNAgent::builder()
-        .dtype(DType::F64)
         .online_q_network(model(4, 2, &device))
         .optimizer(SgdConfig::new().init())
         .learning_rate(0.01)
@@ -97,14 +102,8 @@ fn ddqn_updates_f64_networks_from_native_f32_observations() {
 fn ppo_updates_f64_networks_from_native_f32_observations() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    let mut env = OutputMapMultiGymWrapper::new(
-        cartpole(),
-        Ok::<_, std::convert::Infallible>,
-        |mut step: MultiGymStepInfo| {
-            step.rewards = step.rewards.cast(DType::F64);
-            Ok::<_, std::convert::Infallible>(step)
-        },
-    );
+    let mut env =
+        OutputMapMultiGymWrapper::new(cartpole(), Ok::<_, std::convert::Infallible>, f64_rewards);
     let networks = SeparatePPONetwork::builder()
         .actor_network(ProbabilisticPolicyModel::new(
             model(4, 2, &device),
@@ -135,14 +134,8 @@ fn ppo_updates_f64_networks_from_native_f32_observations() {
 fn a2c_updates_f64_networks_from_native_f32_observations() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    let mut env = OutputMapMultiGymWrapper::new(
-        cartpole(),
-        Ok::<_, std::convert::Infallible>,
-        |mut step: MultiGymStepInfo| {
-            step.rewards = step.rewards.cast(DType::F64);
-            Ok::<_, std::convert::Infallible>(step)
-        },
-    );
+    let mut env =
+        OutputMapMultiGymWrapper::new(cartpole(), Ok::<_, std::convert::Infallible>, f64_rewards);
     let networks = SeparateA2CNetwork::builder()
         .actor_network(ProbabilisticPolicyModel::new(
             model(4, 2, &device),
@@ -171,7 +164,14 @@ fn a2c_updates_f64_networks_from_native_f32_observations() {
 fn sac_updates_f64_networks_from_native_f32_observations() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    let mut env = cartpole();
+    let cast_rewards = std::cell::Cell::new(false);
+    let mut env = OutputMapMultiGymWrapper::new(cartpole(), Ok, |step| {
+        if cast_rewards.get() {
+            f64_rewards(step)
+        } else {
+            Ok(step)
+        }
+    });
     let critic = ActionValueCritic::builder()
         .online_network(DiscreteVectorHeadCritic::new(model(4, 2, &device)))
         .optimizer(SgdConfig::new().init())
@@ -196,6 +196,17 @@ fn sac_updates_f64_networks_from_native_f32_observations() {
         .training_horizon(4)
         .build()
         .unwrap();
+    assert!(matches!(
+        agent.learn(&mut env, 4),
+        Err(SACError::ReplayStorageError(SACReplayError::Storage(
+            modurl::buffers::experience_replay::ReplayStorageError::DTypeMismatch {
+                field: "rewards",
+                expected: DType::F64,
+                actual: DType::F32,
+            }
+        )))
+    ));
+    cast_rewards.set(true);
     agent.learn(&mut env, 4).unwrap();
     assert_eq!(env.reset().unwrap().dtype(), DType::F32);
 }
@@ -256,11 +267,13 @@ fn continuous_critic(device: &Device) -> ActionValueCritic<Float64ContinuousCrit
 fn ddpg_updates_f64_networks_from_native_f32_observations() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    let mut env = VectorizedGymWrapper::from(
+    let env = VectorizedGymWrapper::from(
         modurl_gym::classic_control::pendulum::PendulumV1::builder()
             .build()
             .unwrap(),
     );
+    let mut env =
+        OutputMapMultiGymWrapper::new(env, Ok::<_, std::convert::Infallible>, f64_rewards);
     let mut agent = DDPGAgent::builder()
         .dtype(DType::F64)
         .online_actor(model(3, 1, &device))
@@ -288,11 +301,13 @@ fn ddpg_updates_f64_networks_from_native_f32_observations() {
 fn td3_updates_f64_networks_from_native_f32_observations() {
     let _guard = RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    let mut env = VectorizedGymWrapper::from(
+    let env = VectorizedGymWrapper::from(
         modurl_gym::classic_control::pendulum::PendulumV1::builder()
             .build()
             .unwrap(),
     );
+    let mut env =
+        OutputMapMultiGymWrapper::new(env, Ok::<_, std::convert::Infallible>, f64_rewards);
     let mut agent = TD3Agent::builder()
         .dtype(DType::F64)
         .online_actor(model(3, 1, &device))

@@ -16,6 +16,8 @@ CartPole has four observation values and two discrete actions, so the network re
 two Q-values.
 
 `DQNAgent` needs a `Discrete` action space. `CartPoleV1` supplies that concrete type through `env.action_space()`.
+The Q-network's output dtype must match the environment reward dtype. Replay stores rewards without casting them.
+For an F64 Q-network, use an environment with F64 rewards or explicitly convert its reward tensor with an output wrapper.
 
 ## Complete Program
 
@@ -44,7 +46,6 @@ fn main() {
     let optimizer = AdamWConfig::new().init();
 
     let mut agent = DQNAgent::builder()
-        .dtype(DType::F32)
         .action_space(env.action_space())
         .observation_space(observation_space)
         .online_q_network(online_q_network)

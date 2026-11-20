@@ -1018,8 +1018,8 @@ where
     }
 
     /// Stores native observations [num_envs, ...observation_shape], Float actions [num_envs, ...action_shape], and rewards [num_envs, 1].
-    /// Establishes replay dtype from the first batch, detaches experience, and keeps termination distinct from truncation.
-    /// Reads rewards to the host for episode summaries after successful replay insertion.
+    /// Preserves the first observation dtype, requires rewards to match the compute dtype, and detaches experience.
+    /// Keeps termination distinct from truncation and reads rewards to the host for episode summaries.
     fn store_transitions(
         &mut self,
         transitions: CollectedTransitions<'_, O, A, OS::Kind>,

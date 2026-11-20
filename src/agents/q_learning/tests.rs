@@ -489,7 +489,6 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
         .replay_capacity(8)
         .batch_size(2)
         .training_horizon(10)
-        .dtype(DType::F64)
         .build()
         .unwrap();
     let observations = Tensor::<3, Bool>::from_data([[[true]], [[false]]], &device);
@@ -559,6 +558,70 @@ fn matching_replay_rejects_dtype_changes_without_overwriting_existing_rows() {
             .unwrap(),
         [1.0, 2.0]
     );
+}
+
+#[test]
+fn replay_preserves_reward_precision_and_rejects_reward_dtype_changes() {
+    let device = Device::flex();
+    let mut storage = QLearningReplayStorage::<2, Float>::new([4, 1], device.clone());
+    let mut first = replay_insert(&[1.0, 2.0], &device);
+    let reward = 1.0 + f64::EPSILON;
+    first.rewards = Tensor::from_data([[reward], [2.0]], (&device, DType::F64));
+    storage.insert(0, first).unwrap();
+
+    let mut changed = replay_insert(&[3.0, 4.0], &device);
+    changed.rewards = changed.rewards.cast(DType::F32);
+    assert!(matches!(
+        storage.insert(0, changed),
+        Err(QLearningReplayError::Storage(
+            ReplayStorageError::DTypeMismatch {
+                field: "rewards",
+                expected: DType::F64,
+                actual: DType::F32,
+            }
+        ))
+    ));
+    let retained = storage.gather(&[0, 1]).unwrap();
+    assert_eq!(retained.rewards.dtype(), DType::F64);
+    assert_eq!(
+        retained.rewards.into_data().try_to_vec::<f64>().unwrap(),
+        [reward, 2.0]
+    );
+    assert_eq!(
+        retained
+            .observations
+            .into_data()
+            .try_to_vec::<f64>()
+            .unwrap(),
+        [1.0, 2.0]
+    );
+}
+
+#[test]
+fn optimize_rejects_online_and_target_q_dtype_mismatches() {
+    let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
+    let device = Device::flex();
+    for mismatch_target in [true, false] {
+        let mut agent = float_agent(&device);
+        let autodiff_device = device.clone().autodiff();
+        if mismatch_target {
+            agent.target_q_network = network(&autodiff_device, DType::F64).valid();
+        } else {
+            agent.online_q_network = network(&autodiff_device, DType::F64).train();
+        }
+        let mut transitions = replay_insert(&[1.0, 2.0], &device);
+        transitions.rewards = transitions.rewards.cast(DType::F32);
+        agent.experience_replay.add(transitions).unwrap();
+
+        assert!(matches!(
+            agent.optimize(2, &mut Logger::default()),
+            Err(QAgentError::QRewardDTypeMismatch {
+                q_values: DType::F64,
+                reward: DType::F32,
+            })
+        ));
+        assert_eq!(agent.optimization_steps, 0);
+    }
 }
 
 #[test]
@@ -740,10 +803,10 @@ fn learn_reuses_matching_count_and_rejects_a_new_count_before_reset() {
 }
 
 #[test]
-fn builder_rejects_invalid_learning_rates_and_compute_dtypes() {
+fn builder_rejects_invalid_learning_rates() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    let build = |rate, dtype| {
+    let build = |rate| {
         QLearningAgent::<_, _, Infallible, TestTarget>::builder()
             .action_space(Discrete::new(2).unwrap())
             .observation_space(BoxSpace::new_unbounded([1, 1], &device))
@@ -751,19 +814,12 @@ fn builder_rejects_invalid_learning_rates_and_compute_dtypes() {
             .optimizer(SgdConfig::new().init())
             .learning_rate(rate)
             .training_horizon(10)
-            .dtype(dtype)
             .build()
     };
     assert!(matches!(
-        build(f64::NAN, DType::F32),
+        build(f64::NAN),
         Err(QAgentError::ConfigurationError(
             QLearningConfigurationError::InvalidLearningRate
-        ))
-    ));
-    assert!(matches!(
-        build(0.01, DType::U32),
-        Err(QAgentError::ConfigurationError(
-            QLearningConfigurationError::InvalidDType(DType::U32)
         ))
     ));
 }
