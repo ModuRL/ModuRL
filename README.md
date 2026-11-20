@@ -95,7 +95,7 @@ let mut agent = PPOAgent::builder()
     .mini_batch_size(64)
     .clip_range(ConstantSchedule::new(0.2))
     .training_horizon(100_000)
-    .logging_info(&mut logger)
+    .logger(&mut logger)
     .build()?;
 ```
 

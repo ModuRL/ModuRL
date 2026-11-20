@@ -57,6 +57,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Environments and agents
 
+- PPO and A2C use `.logger(...)` instead of `.logging_info(...)` to match the other agents.
 - All agent optimizers accept constant `f64` learning rates or a `ParameterSchedule`.
   Off-policy updates evaluate the rate at their collection timestep; invalid rates return an error.
   The DDPG/TD3 log entry's `actor_learning_rate` is now optional and is `None` when the actor does not update.

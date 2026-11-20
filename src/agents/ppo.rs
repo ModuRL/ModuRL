@@ -540,7 +540,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
         #[builder(default = 4)] num_epochs: usize,
         #[builder(default = 0.5)] gradient_clip: f64,
         training_horizon: Option<usize>,
-        logging_info: Option<&'a mut dyn PPOLogger<I>>,
+        logger: Option<&'a mut dyn PPOLogger<I>>,
     ) -> Result<Self, PPOConfigurationError>
     where
         N: PPONetwork<O, H, L, InputKind = OS::Kind, ModelGroup = G>,
@@ -601,7 +601,7 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
             batch_size,
             schedule_progress: ScheduleProgress::new(training_horizon),
             mini_batch_size,
-            logging_info: logging_info.map(PPOLoggingInfo::new),
+            logging_info: logger.map(PPOLoggingInfo::new),
             gradient_clip,
             current_observations: None,
             episode_tracker: PPOEpisodeTracker::new(0),

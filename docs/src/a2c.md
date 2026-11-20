@@ -15,7 +15,7 @@ Use `SharedA2CNetwork` when the actor and critic share a model, or
 `SeparateA2CNetwork` when they have independent models and optimizers. Wrap the
 successful build result with `A2CNetworkInfo::shared` or `A2CNetworkInfo::separate` before
 building the agent. A2C also provides typed errors, log entries, and the
-`A2CLogger` trait. Pass an A2C logger directly to the agent's `logging_info`
+`A2CLogger` trait. Pass an A2C logger directly to the agent's `logger`
 builder field.
 
 Both network builders return `Result` and own concrete Burn models.
