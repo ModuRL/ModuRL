@@ -131,6 +131,7 @@ impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
     /// Builds an agent with detached target copies of the online actor and each critic.
     /// Observations use [batch_size, ...observation_shape]; Float actions use [batch_size, ...action_shape].
     /// Models must use the optimization device. Models perform any observation dtype conversion explicitly.
+    /// Environment rewards must match the critic output dtype and are never cast by replay.
     /// Returns typed errors for invalid configuration, space shapes, or model devices.
     #[builder]
     pub fn new<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
@@ -676,7 +677,7 @@ mod tests {
                     .build()
                     .unwrap()
             };
-            let mut env = VectorizedGymWrapper::new(vec![
+            let env = VectorizedGymWrapper::new(vec![
                 DTypeEnv {
                     inner: FixedContinuousEnv::new(device.clone()),
                     dtype,
@@ -687,6 +688,14 @@ mod tests {
                 },
             ])
             .unwrap();
+            let mut env = crate::wrappers::OutputMapMultiGymWrapper::new(
+                env,
+                Ok::<_, std::convert::Infallible>,
+                |mut step| {
+                    step.rewards = step.rewards.cast(dtype);
+                    Ok(step)
+                },
+            );
             let mut logger = Logger::default();
             let mut agent = TD3Agent::builder()
                 .online_actor(actor)

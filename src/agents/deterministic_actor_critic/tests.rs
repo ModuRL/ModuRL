@@ -6,6 +6,7 @@ use crate::{
     buffers::experience_replay::ReplayStorage,
     gym::{Gym, ResetInfo, StepInfo, VectorizedGymWrapper},
     spaces::BoxSpace,
+    wrappers::{OutputMapMultiGymWrapper, TensorMapMultiGymError},
 };
 use burn::{
     module::Param,
@@ -205,7 +206,7 @@ fn agent(
     BoxSpace<2>,
     BoxSpace<2>,
     TestStrategy,
-    crate::gym::VectorizedGymError<Infallible>,
+    TensorMapMultiGymError<crate::gym::VectorizedGymError<Infallible>, Infallible>,
 > {
     DeterministicActorCriticAgent::builder()
         .online_actor(linear_model(&[0.25], device, dtype))
@@ -412,7 +413,7 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
     agent.actor_learning_rate_schedule =
         Arc::new(|progress: f64| if progress >= 0.2 { 0.02 } else { 0.01 });
     let env_device = device.clone().without_autodiff();
-    let mut env = VectorizedGymWrapper::new(vec![
+    let env = VectorizedGymWrapper::new(vec![
         EpisodeEnv {
             device: env_device.clone(),
             truncate: false,
@@ -425,6 +426,7 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
         },
     ])
     .unwrap();
+    let mut env = OutputMapMultiGymWrapper::new(env, Ok, f64_rewards);
     let initial = agent.target_actor.weight.val().into_data();
     let mut logger = Logger::default();
     agent.learn(&mut env, 4, &mut logger).unwrap();
@@ -463,11 +465,12 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
     assert_eq!(logger.actor_updated, [false, true, false]);
     assert_eq!(agent.schedule_progress.elapsed_steps(), 6);
     let len = agent.replay.as_ref().unwrap().len();
-    let mut single = VectorizedGymWrapper::from(EpisodeEnv {
+    let single = VectorizedGymWrapper::from(EpisodeEnv {
         device: env_device,
         truncate: false,
         steps: 0,
     });
+    let mut single = OutputMapMultiGymWrapper::new(single, Ok, f64_rewards);
     assert!(matches!(
         agent.learn(&mut single, 1, &mut logger),
         Err(DeterministicActorCriticError::ReplayStorageError(
@@ -514,10 +517,31 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     let observations = env.reset().unwrap();
     let actions = agent.act(&observations).unwrap().without_autodiff();
     let step = env.step(actions.clone()).unwrap();
+    assert!(matches!(
+        agent.learn_from_timesteps(&observations, actions.clone(), step.clone(), &mut logger),
+        Err(DeterministicActorCriticError::ReplayStorageError(
+            DeterministicReplayError::Storage(ReplayStorageError::DTypeMismatch {
+                field: "rewards",
+                expected: DType::F64,
+                actual: DType::F32,
+            })
+        ))
+    ));
+    assert_eq!(agent.schedule_progress.elapsed_steps(), 0);
     agent
-        .learn_from_timesteps(&observations, actions, step, &mut logger)
+        .learn_from_timesteps(
+            &observations,
+            actions,
+            f64_rewards(step).unwrap(),
+            &mut logger,
+        )
         .unwrap();
     assert_eq!(agent.schedule_progress.elapsed_steps(), 2);
+}
+
+fn f64_rewards(mut step: MultiGymStepInfo) -> Result<MultiGymStepInfo, Infallible> {
+    step.rewards = step.rewards.cast(DType::F64);
+    Ok(step)
 }
 
 #[test]
@@ -674,7 +698,7 @@ impl MultiGym<(), 3, 2> for BooleanEnv {
         };
         Ok(MultiGymStepInfo {
             observations: Tensor::from_data([[[false]], [[true]]], &self.device),
-            rewards: Tensor::ones([2, 1], &self.device),
+            rewards: Tensor::ones([2, 1], (&self.device, DType::F64)),
             infos: vec![(), ()],
             dones: vec![false, true],
             truncateds: vec![true, false],

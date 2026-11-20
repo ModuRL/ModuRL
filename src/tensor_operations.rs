@@ -43,7 +43,7 @@ pub(crate) fn clamp_with_boundary_gradients<const D: usize>(
 /// A tuple of models shares one norm. Gradients outside those models remain unchanged.
 /// Computes the norm and clipping factor with tensors, without reading values to the host.
 /// For models on multiple devices, scalar contributions move to the first gradient's device.
-pub(crate) fn clip_gradients<M: Module>(model: &M, gradients: &mut GradientsParams, max_norm: f32) {
+pub(crate) fn clip_gradients<M: Module>(model: &M, gradients: &mut GradientsParams, max_norm: f64) {
     let mut norms = GradientNorms {
         gradients,
         visited: HashSet::new(),
@@ -68,7 +68,7 @@ pub(crate) fn clip_gradients<M: Module>(model: &M, gradients: &mut GradientsPara
     // Sort contributions so parameter traversal order does not change the reduction.
     let total_norm = Tensor::<1>::cat(contributions, 0).sort(0).sum().sqrt();
     let scale = total_norm.ones_like();
-    let clipped_scale = scale.clone() * f64::from(max_norm) / (total_norm.clone() + 1e-6);
+    let clipped_scale = scale.clone() * max_norm / (total_norm.clone() + 1e-6);
     let scale = scale.mask_where(total_norm.greater_elem(max_norm), clipped_scale);
     let scales = devices
         .iter()
@@ -272,7 +272,12 @@ mod tests {
             let loss = variable.val().square().sum();
             let mut gradients = GradientsParams::from_grads(loss.backward(), &variable);
             let gradient_device = gradients.get::<1>(variable.id).unwrap().device();
-            clip_gradients(&variable, &mut gradients, 5.0);
+            let (max_norm, tolerance) = if dtype == DType::F64 {
+                (5.000_000_2, 1e-12)
+            } else {
+                (5.0, 1e-6)
+            };
+            clip_gradients(&variable, &mut gradients, max_norm);
             let clipped = gradients.get::<1>(variable.id).unwrap();
             assert_eq!(clipped.dims(), [2]);
             assert_eq!(clipped.dtype(), dtype);
@@ -282,9 +287,9 @@ mod tests {
                 .into_data()
                 .try_to_vec::<f64>()
                 .unwrap();
-            let expected_scale = 5.0 / (10.0 + 1e-6);
-            assert!((clipped[0] - 6.0 * expected_scale).abs() < 1e-6);
-            assert!((clipped[1] - 8.0 * expected_scale).abs() < 1e-6);
+            let expected_scale = max_norm / (10.0 + 1e-6);
+            assert!((clipped[0] - 6.0 * expected_scale).abs() < tolerance);
+            assert!((clipped[1] - 8.0 * expected_scale).abs() < tolerance);
         }
     }
 

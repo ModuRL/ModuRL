@@ -102,9 +102,9 @@ MuJoCo environments use one-dimensional action vectors bounded by
 
 Observations keep their native kind and dtype in inputs and replay.
 Models must perform any required conversion explicitly.
-The `dtype` setting controls actions, rewards, and Q values, including F64 where supported.
-Actions and Q values must share the configured dtype; mismatches return an error.
-Replay rewards are converted to that dtype.
+Actions, Q values, and environment rewards must match the configured `dtype`.
+Replay stores rewards without casting them and rejects mismatches. For F64 critics,
+configure the environment to emit F64 rewards or map them explicitly before passing them to the agent.
 Model parameters must use the optimization device.
 Replay stores detached transitions and uses terminal observations for truncation targets.
 

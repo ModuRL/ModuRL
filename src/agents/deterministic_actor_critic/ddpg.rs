@@ -99,7 +99,7 @@ impl DeterministicActorCriticStrategy for DDPGStrategy {
 }
 
 /// Trains one deterministic actor and one critic with bounded continuous actions.
-/// Native observations keep their kind and dtype. Actions and training statistics use the configured floating-point dtype.
+/// Native observations keep their kind and dtype. Actions, critic outputs, and environment rewards must match the configured floating-point dtype.
 /// Rank O includes observation batch and event axes; rank A includes action batch and event axes.
 pub struct DDPGAgent<
     'a,
@@ -461,7 +461,7 @@ mod tests {
                 .learning_rate(0.01)
                 .build()
                 .unwrap();
-            let mut env = VectorizedGymWrapper::new(vec![
+            let env = VectorizedGymWrapper::new(vec![
                 DTypeEnv {
                     inner: FixedContinuousEnv::new(device.clone()),
                     dtype,
@@ -472,6 +472,14 @@ mod tests {
                 },
             ])
             .unwrap();
+            let mut env = crate::wrappers::OutputMapMultiGymWrapper::new(
+                env,
+                Ok::<_, std::convert::Infallible>,
+                |mut step| {
+                    step.rewards = step.rewards.cast(dtype);
+                    Ok(step)
+                },
+            );
             let mut logger = Logger::default();
             let mut agent = DDPGAgent::builder()
                 .online_actor(actor)

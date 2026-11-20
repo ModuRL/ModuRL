@@ -49,8 +49,6 @@ pub enum QLearningConfigurationError {
     InvalidGamma,
     #[error("epsilon schedule values must be finite and in 0..=1")]
     InvalidEpsilon,
-    #[error("Q-learning compute dtype must be floating-point, got {0:?}")]
-    InvalidDType(DType),
     #[error("learning rate must be finite and positive")]
     InvalidLearningRate,
     #[error("observation space has {actual} item axes, expected {expected}")]
@@ -76,6 +74,8 @@ where
     TensorError(#[from] TensorReadError),
     #[error("Q-learning model failed: {0}")]
     ModelError(#[source] ME),
+    #[error("Q-network output dtype {q_values:?} must match environment reward dtype {reward:?}")]
+    QRewardDTypeMismatch { q_values: DType, reward: DType },
     #[error("replay storage failed: {0}")]
     ReplayStorageError(#[source] QLearningReplayError),
     #[error("invalid Q-learning configuration: {0}")]
@@ -136,13 +136,13 @@ where
 }
 
 pub struct QLogEntry {
-    /// Float loss `[1]` in the compute dtype on the optimization device.
+    /// Float loss `[1]` in the environment reward dtype on the optimization device.
     pub loss: Tensor<1>,
     pub epsilon: f64,
     pub learning_rate: f64,
-    /// Selected Float Q values `[batch_size, 1]` in the compute dtype.
+    /// Selected Float Q values `[batch_size, 1]` matching the environment reward dtype.
     pub q_values: Tensor<2>,
-    /// Sampled Float rewards `[batch_size, 1]` in the compute dtype.
+    /// Sampled Float rewards `[batch_size, 1]` in the environment reward dtype.
     pub replay_rewards: Tensor<2>,
     pub update_index: usize,
     pub collection_timestep: usize,
@@ -248,7 +248,7 @@ struct QLearningInsert<const R: usize, K: Autodiff> {
 struct QLearningReplayStorage<const R: usize, K: Autodiff> {
     observations: Option<AlignedObservationReplay<R, K>>,
     actions: TensorReplayColumn<2, Int>,
-    rewards: TensorReplayColumn<2>,
+    rewards: Option<TensorReplayColumn<2>>,
     next_dones: TensorReplayColumn<2, Bool>,
     observation_storage_shape: [usize; R],
     device: Device,
@@ -256,7 +256,7 @@ struct QLearningReplayStorage<const R: usize, K: Autodiff> {
 
 impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
     /// Configures observation storage [capacity, ...observation_shape], Int actions [capacity, 1], and scalar statistics [capacity, 1].
-    /// The first observation batch selects the observation dtype. All stored experience has no autodiff graph.
+    /// The first batch selects the observation and reward dtypes. All stored experience has no autodiff graph.
     fn new(observation_storage_shape: [usize; R], device: Device) -> Self {
         const {
             assert!(R >= 2, "observations require batch and item axes");
@@ -267,10 +267,7 @@ impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
                 [observation_storage_shape[0], 1],
                 (&device, DType::U32),
             ),
-            rewards: TensorReplayColumn::new(
-                [observation_storage_shape[0], 1],
-                (&device, DType::F32),
-            ),
+            rewards: None,
             next_dones: TensorReplayColumn::new([observation_storage_shape[0], 1], &device),
             observation_storage_shape,
             device,
@@ -300,7 +297,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
     }
 
     /// Inserts native rank-R observations [num_envs, ...observation_shape], Int actions [num_envs, 1], and statistics [num_envs, 1].
-    /// Observations retain their kind and first-batch dtype. Transfers to storage device and detaches every column.
+    /// Observations and rewards retain their kind and first-batch dtype. Transfers to storage device and detaches every column.
     fn insert(&mut self, start: usize, transitions: Self::Insert) -> Result<usize, Self::Error> {
         let count = transitions.observations.dims()[0];
         for (field, actual) in [
@@ -316,6 +313,10 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 }
                 .into());
             }
+        }
+        let reward_dtype = transitions.rewards.dtype();
+        if let Some(rewards) = &self.rewards {
+            rewards.validate_dtype("rewards", &transitions.rewards)?;
         }
         let dtype = transitions.observations.dtype();
         let mut new_observations = if self.observations.is_none() {
@@ -345,10 +346,14 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             start,
             transitions.actions.to_device(&self.device).cast(DType::U32),
         )?;
-        self.rewards.write(
-            start,
-            transitions.rewards.to_device(&self.device).cast(DType::F32),
-        )?;
+        self.rewards
+            .get_or_insert_with(|| {
+                TensorReplayColumn::new(
+                    [self.observation_storage_shape[0], 1],
+                    (&self.device, reward_dtype),
+                )
+            })
+            .write(start, transitions.rewards.to_device(&self.device))?;
         self.next_dones.write(
             start,
             transfer_bool_tensor(transitions.next_dones, &self.device),
@@ -357,10 +362,14 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
     }
 
     /// Samples detached native rank-R observations [sample_count, ...observation_shape], actions [sample_count, 1], and statistics [sample_count, 1].
-    /// Observation kind, dtype, and item axes remain unchanged on the storage device.
+    /// Observation kind, item axes, and observation and reward dtypes remain unchanged on the storage device.
     fn gather(&self, indices: &[usize]) -> Result<Self::Batch, Self::Error> {
         let observations = self
             .observations
+            .as_ref()
+            .ok_or(ReplayStorageError::EnvironmentCountNotSet)?;
+        let rewards = self
+            .rewards
             .as_ref()
             .ok_or(ReplayStorageError::EnvironmentCountNotSet)?;
         let (observations, next_observations) = observations.gather(indices)?;
@@ -369,7 +378,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             observations,
             next_observations,
             actions: self.actions.gather(rows.clone()),
-            rewards: self.rewards.gather(rows.clone()),
+            rewards: rewards.gather(rows.clone()),
             next_dones: self.next_dones.gather(rows),
         })
     }
@@ -418,7 +427,6 @@ where
     update_frequency: usize,
     training_start: usize,
     replay_storage_config: ReplayStorageConfig,
-    dtype: DType,
     optimization_steps: usize,
     action_rng: StdRng,
     timestep_episodes: Option<QEpisodeTracker>,
@@ -437,8 +445,8 @@ where
 {
     /// Creates a trainable Q model for rank-R observations [batch_size, ...observation_shape] and Q outputs [batch_size, action_count].
     /// The target starts from the online model and remains detached between hard updates.
-    /// Observations retain native kind and dtype. Model Q outputs must use the configured compute dtype.
-    /// Model parameters must use the optimization device. Replay matches the first observation dtype on its storage device.
+    /// Observations retain native kind and dtype. Model Q outputs must match the environment reward dtype.
+    /// Model parameters must use the optimization device. Replay preserves observation and reward dtypes.
     /// Replay storage configuration selects the storage and optimization devices.
     #[builder]
     pub(crate) fn new(
@@ -457,14 +465,10 @@ where
         #[builder(default = 1000)] training_start: usize,
         training_horizon: Option<usize>,
         replay_device: Option<Device>,
-        #[builder(default = DType::F32)] dtype: DType,
         #[builder(default)] legal_action_mask: bool,
     ) -> Result<Self, QAgentError<GE, ME>> {
         const {
             assert!(R >= 2, "observations require batch and item axes");
-        }
-        if !dtype.is_float() {
-            return Err(QLearningConfigurationError::InvalidDType(dtype).into());
         }
         if checked_learning_rate(learning_rate.value(0.0)).is_none() {
             return Err(QLearningConfigurationError::InvalidLearningRate.into());
@@ -531,7 +535,6 @@ where
             update_frequency,
             training_start,
             replay_storage_config,
-            dtype,
             optimization_steps: 0,
             action_rng: StdRng::seed_from_u64(u64::from(action_seed)),
             timestep_episodes: None,
@@ -602,7 +605,7 @@ where
     }
 
     /// Samples detached rank-R observations, Int actions [batch_size, 1], and statistics [batch_size, 1].
-    /// Computes a Float loss [1] in compute dtype on the optimization device and updates only the online model.
+    /// Computes a Float loss [1] in the environment reward dtype on the optimization device and updates only the online model.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
@@ -629,19 +632,21 @@ where
         let observations = self.model_observations(batch.observations);
         let next_observations = self.model_observations(batch.next_observations);
         let actions = batch.actions.to_device(&optimization_device);
-        let rewards = batch
-            .rewards
-            .to_device(&optimization_device)
-            .cast(self.dtype);
+        let rewards = batch.rewards.to_device(&optimization_device);
+        let reward_dtype = rewards.dtype();
         let next_dones = transfer_bool_tensor(batch.next_dones, &optimization_device);
         let target_next_q_values = self
             .target_q_network
             .forward(next_observations.clone())
             .map_err(QAgentError::ModelError)?;
+        Self::check_q_dtype(&target_next_q_values, reward_dtype)?;
         let online_next_q_values = T::requires_online_next_q_values()
             .then(|| self.online_q_network.forward(next_observations))
             .transpose()
             .map_err(QAgentError::ModelError)?;
+        if let Some(values) = &online_next_q_values {
+            Self::check_q_dtype(values, reward_dtype)?;
+        }
         let target_q_values = T::target_q_values(
             &rewards,
             &next_dones,
@@ -654,6 +659,7 @@ where
             .online_q_network
             .forward(observations)
             .map_err(QAgentError::ModelError)?;
+        Self::check_q_dtype(&q_values, reward_dtype)?;
         let selected_q_values = selected_action_q_values(&q_values, &actions);
         let loss = (selected_q_values.clone() - target_q_values)
             .square()
@@ -672,6 +678,15 @@ where
         self.online_q_network =
             self.optimizer
                 .step(learning_rate, self.online_q_network.clone(), gradients);
+        Ok(())
+    }
+
+    /// Checks Q outputs [batch_size, action_count] without changing their dtype.
+    fn check_q_dtype(values: &Tensor<2>, reward: DType) -> Result<(), QAgentError<GE, ME>> {
+        let q_values = values.dtype();
+        if q_values != reward {
+            return Err(QAgentError::QRewardDTypeMismatch { q_values, reward });
+        }
         Ok(())
     }
 
