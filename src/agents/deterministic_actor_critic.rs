@@ -900,7 +900,7 @@ where
             let loss = (predicted.clone() - targets.clone().detach())
                 .square()
                 .mean();
-            critic.backward_step_at(&loss, progress)?;
+            critic.backward_step(&loss, progress)?;
             losses.push(loss.detach());
             q_values.push(predicted.detach());
         }

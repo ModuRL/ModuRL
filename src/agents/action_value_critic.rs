@@ -469,31 +469,12 @@ impl<N: Module> ActionValueCritic<N> {
         })
     }
 
-    /// Backpropagates Float loss `[1]` and updates online parameters, preserving their shapes, dtypes, devices, and IDs.
-    /// Uses the current learning rate. Loss must come from this online model; the target snapshot is unchanged.
-    pub fn backward_step(&mut self, loss: &Tensor<1>) -> Result<(), ActionValueCriticError> {
-        self.backward_step_with_rate(loss, self.learning_rate)
-    }
-
-    /// Updates the online critic using its scheduled rate at the supplied training progress.
-    /// Loss must be a Float tensor [1] from this online model. An invalid rate leaves the critic unchanged.
-    pub fn backward_step_at(
+    /// Backpropagates Float loss `[1]` from the online model and updates it at the scheduled rate.
+    /// Preserves parameter shapes, dtypes, devices, and IDs. The target snapshot is unchanged.
+    pub fn backward_step(
         &mut self,
         loss: &Tensor<1>,
         progress: &ScheduleProgress,
-    ) -> Result<(), ActionValueCriticError> {
-        let learning_rate = self
-            .learning_rate_schedule
-            .rate(progress)
-            .ok_or(ActionValueCriticError::InvalidLearningRate)?;
-        self.backward_step_with_rate(loss, learning_rate)
-    }
-
-    /// Updates the online critic with a validated rate and a Float loss [1].
-    fn backward_step_with_rate(
-        &mut self,
-        loss: &Tensor<1>,
-        learning_rate: f64,
     ) -> Result<(), ActionValueCriticError> {
         if loss.dims() != [1] {
             return Err(ActionValueCriticError::ShapeMismatch {
@@ -502,6 +483,10 @@ impl<N: Module> ActionValueCritic<N> {
             });
         }
 
+        let learning_rate = self
+            .learning_rate_schedule
+            .rate(progress)
+            .ok_or(ActionValueCriticError::InvalidLearningRate)?;
         let gradients = GradientsParams::from_grads(loss.clone().backward(), &self.online_network);
         self.online_network =
             self.optimizer
@@ -879,7 +864,9 @@ mod tests {
             .online_replay_values::<2, 2, 3>(&observations, &actions)
             .unwrap()
             .sum();
-        critic.backward_step(&loss).unwrap();
+        critic
+            .backward_step(&loss, &ScheduleProgress::new(None))
+            .unwrap();
         assert_eq!(observations.dtype(), DType::I64);
 
         let failing = ActionValueCritic::builder()
@@ -1081,7 +1068,9 @@ mod tests {
                 .online_replay_values::<2, 2, 3>(&observations, &actions)
                 .unwrap()
                 .sum();
-            critic.backward_step(&loss).unwrap();
+            critic
+                .backward_step(&loss, &ScheduleProgress::new(None))
+                .unwrap();
             assert_eq!(critic.online_network.module.weight.id, id);
             assert_eq!(numbers(critic.online_network.module.weight.val()), [0.5; 3]);
             assert_eq!(numbers(critic.target_network.module.weight.val()), [1.0; 3]);
@@ -1119,7 +1108,7 @@ mod tests {
                 [0.5; 2]
             );
             assert!(matches!(
-                critic.backward_step(&Tensor::ones([2], &device)),
+                critic.backward_step(&Tensor::ones([2], &device), &ScheduleProgress::new(None)),
                 Err(ActionValueCriticError::ShapeMismatch { .. })
             ));
             for tau in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
@@ -1148,14 +1137,12 @@ mod tests {
         assert_eq!(critic.learning_rate(), 0.25);
         let progress = ScheduleProgress::new(Some(10));
         let loss = critic.online_network().weight.val().sum();
-        critic
-            .backward_step_at(&loss, &progress.at_step(5))
-            .unwrap();
+        critic.backward_step(&loss, &progress.at_step(5)).unwrap();
         assert_eq!(critic.learning_rate(), 0.125);
         assert_eq!(numbers(critic.online_network().weight.val()), [0.875; 3]);
         let loss = critic.online_network().weight.val().sum();
         assert!(matches!(
-            critic.backward_step_at(&loss, &progress.at_step(10)),
+            critic.backward_step(&loss, &progress.at_step(10)),
             Err(ActionValueCriticError::InvalidLearningRate)
         ));
         assert_eq!(critic.learning_rate(), 0.125);
@@ -1244,7 +1231,9 @@ mod tests {
             .online_replay_values::<2, 2, 3>(&observations, &actions)
             .unwrap();
         assert_eq!(numbers(online.clone()), initial_target);
-        critic.backward_step(&online.sum()).unwrap();
+        critic
+            .backward_step(&online.sum(), &ScheduleProgress::new(None))
+            .unwrap();
         assert_eq!(
             numbers(
                 critic
