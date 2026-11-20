@@ -359,6 +359,7 @@ fn full_mse_targets_and_actor_gradient_boundaries_are_preserved() {
             actions: Tensor::from_data([[0.1f64], [0.2]], (&device, dtype)),
             rewards: Tensor::from_data([[1.0f64], [2.0]], (&device, dtype)),
             terminated: Tensor::from_data([[false], [true]], &device),
+            truncated: Tensor::from_data([[false], [true]], &device),
         };
         let targets = agent.bellman_targets(&batch).unwrap();
         assert_eq!(targets.dtype(), dtype);

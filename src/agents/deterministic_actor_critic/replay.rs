@@ -46,6 +46,7 @@ pub(super) struct DeterministicBatch<const O: usize, const A: usize, K: Autodiff
     pub(super) actions: Tensor<A>,
     pub(super) rewards: Tensor<2>,
     pub(super) terminated: Tensor<2, Bool>,
+    pub(super) truncated: Tensor<2, Bool>,
 }
 
 /// Native observations [num_envs, ...observation_shape] and Float actions [num_envs, ...action_shape].
@@ -56,7 +57,7 @@ pub(super) struct DeterministicReplayInsert<const O: usize, const A: usize, K: A
     pub(super) actions: Tensor<A>,
     pub(super) rewards: Tensor<2>,
     pub(super) terminated: Tensor<2, Bool>,
-    pub(super) truncated: Vec<bool>,
+    pub(super) truncated: Tensor<2, Bool>,
 }
 
 /// Owns aligned replay for native rank-O observations, Float rank-A actions, and scalar rewards and Bool flags.
@@ -124,6 +125,7 @@ pub(super) struct DeterministicReplayStorage<const O: usize, const A: usize, K: 
     actions: TensorReplayColumn<A>,
     rewards: TensorReplayColumn<2>,
     terminated: TensorReplayColumn<2, Bool>,
+    truncated: TensorReplayColumn<2, Bool>,
     environment_count: usize,
 }
 
@@ -173,6 +175,7 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
             actions: TensorReplayColumn::new(action_shape, (&device, dtype)),
             rewards: TensorReplayColumn::new([capacity, 1], (&device, dtype)),
             terminated: TensorReplayColumn::new([capacity, 1], &device),
+            truncated: TensorReplayColumn::new([capacity, 1], &device),
             environment_count,
         })
     }
@@ -208,14 +211,7 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
         self.rewards
             .validate_dtype("rewards", &transitions.rewards)?;
         validate_shape("termination", &transitions.terminated, [count, 1])?;
-        if transitions.truncated.len() != count {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "truncations",
-                expected: count,
-                actual: transitions.truncated.len(),
-            }
-            .into());
-        }
+        validate_shape("truncation", &transitions.truncated, [count, 1])?;
         Ok(count)
     }
 }
@@ -287,6 +283,8 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
             .write(start, transitions.rewards.to_device(&device))?;
         self.terminated
             .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
+        self.truncated
+            .write(start, transfer_bool_tensor(transitions.truncated, &device))?;
         Ok(count)
     }
 
@@ -301,7 +299,8 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
             next_observations,
             actions: self.actions.gather(rows.clone()),
             rewards: self.rewards.gather(rows.clone()),
-            terminated: self.terminated.gather(rows),
+            terminated: self.terminated.gather(rows.clone()),
+            truncated: self.truncated.gather(rows.clone()),
         })
     }
 
@@ -327,7 +326,7 @@ mod tests {
             actions: Tensor::from_data([[0.25f32], [-0.5]], device),
             rewards: Tensor::from_data([[1.0 + f64::EPSILON], [2.0]], (device, DType::F64)),
             terminated: Tensor::from_data([[false], [true]], device),
-            truncated: vec![true, false],
+            truncated: Tensor::from_data([[true], [false]], device),
         }
     }
 
@@ -395,7 +394,7 @@ mod tests {
         assert_eq!(storage.sampleable_len(4), 4);
         let mut wrapped = integer_transitions(&device);
         wrapped.observations = Tensor::from_data([[5u64], [6]], (&device, DType::U64));
-        wrapped.truncated = vec![false, false];
+        wrapped.truncated = Tensor::from_data([[false], [false]], &device);
         storage.insert(0, wrapped).unwrap();
         assert_eq!(storage.sampleable_len(4), 2);
         assert_eq!(storage.sample_index(0, 4), 0);
@@ -435,7 +434,7 @@ mod tests {
                         actions: Tensor::ones([2, 1, 1], &device),
                         rewards: Tensor::ones([2, 1], &device),
                         terminated: Tensor::from_data([[false], [true]], &device),
-                        truncated: vec![true, false],
+                        truncated: Tensor::from_data([[true], [false]], &device),
                     },
                 )
                 .unwrap();
@@ -445,6 +444,7 @@ mod tests {
         assert_eq!(batch.actions.dims(), [2, 1, 1]);
         assert_eq!(batch.rewards.dims(), [2, 1]);
         assert_eq!(batch.terminated.dims(), [2, 1]);
+        assert_eq!(batch.truncated.dims(), [2, 1]);
         assert_eq!(
             batch
                 .next_observations
@@ -456,6 +456,7 @@ mod tests {
         let empty = storage.gather(&[]).unwrap();
         assert_eq!(empty.observations.dims(), [0, 1, 2]);
         assert_eq!(empty.actions.dims(), [0, 1, 1]);
+        assert_eq!(empty.truncated.dims(), [0, 1]);
     }
 
     #[test]
@@ -481,11 +482,24 @@ mod tests {
                     actions: Tensor::ones([2, 1], &device).require_grad(),
                     rewards: Tensor::ones([2, 1], (&device, DType::F64)).require_grad(),
                     terminated: Tensor::from_data([[false], [true]], &device),
-                    truncated: vec![true, false],
+                    truncated: Tensor::from_data([[true], [false]], &device),
                 },
             )
             .unwrap();
         let batch = storage.gather(&[0, 1]).unwrap();
+        assert_eq!(batch.truncated.dims(), [2, 1]);
+        assert_eq!(batch.truncated.device(), batch.terminated.device());
+        assert!(!batch.truncated.is_autodiff());
+        assert_eq!(
+            batch
+                .truncated
+                .clone()
+                .into_data()
+                .iter::<bool>()
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(storage.gather(&[]).unwrap().truncated.dims(), [0, 1]);
         for tensor in [
             batch.observations,
             batch.next_observations,
@@ -583,15 +597,13 @@ mod tests {
             ))
         ));
         let mut truncated = integer_transitions(&device);
-        truncated.truncated.pop();
+        truncated.truncated = Tensor::from_data([[false]], &device);
         assert!(matches!(
             storage.insert(0, truncated),
-            Err(DeterministicReplayError::Storage(
-                ReplayStorageError::BatchLengthMismatch {
-                    field: "truncations",
-                    ..
-                }
-            ))
+            Err(DeterministicReplayError::Shape {
+                field: "truncation",
+                ..
+            })
         ));
         assert!(matches!(
             storage.validate_environment_count(1),

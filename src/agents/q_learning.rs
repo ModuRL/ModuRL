@@ -234,6 +234,7 @@ struct QLearningBatch<const R: usize, K: Autodiff> {
     actions: Tensor<2, Int>,
     rewards: Tensor<2>,
     next_terminated: Tensor<2, Bool>,
+    next_truncated: Tensor<2, Bool>,
 }
 
 struct QLearningInsert<const R: usize, K: Autodiff> {
@@ -242,7 +243,7 @@ struct QLearningInsert<const R: usize, K: Autodiff> {
     actions: Tensor<2, Int>,
     rewards: Tensor<2>,
     next_terminated: Tensor<2, Bool>,
-    truncated: Vec<bool>,
+    next_truncated: Tensor<2, Bool>,
 }
 
 struct QLearningReplayStorage<const R: usize, K: Autodiff> {
@@ -250,6 +251,7 @@ struct QLearningReplayStorage<const R: usize, K: Autodiff> {
     actions: TensorReplayColumn<2, Int>,
     rewards: Option<TensorReplayColumn<2>>,
     next_terminated: TensorReplayColumn<2, Bool>,
+    next_truncated: TensorReplayColumn<2, Bool>,
     observation_storage_shape: [usize; R],
     device: Device,
 }
@@ -269,6 +271,7 @@ impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
             ),
             rewards: None,
             next_terminated: TensorReplayColumn::new([observation_storage_shape[0], 1], &device),
+            next_truncated: TensorReplayColumn::new([observation_storage_shape[0], 1], &device),
             observation_storage_shape,
             device,
         }
@@ -317,6 +320,11 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 .into());
             }
         }
+        crate::buffers::experience_replay::validate_replay_shape(
+            "next truncation flags",
+            &transitions.next_truncated,
+            [count, 1],
+        )?;
         let reward_dtype = transitions.rewards.dtype();
         if let Some(rewards) = &self.rewards {
             rewards.validate_dtype("rewards", &transitions.rewards)?;
@@ -340,7 +348,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             start,
             transitions.observations,
             transitions.next_observations,
-            &transitions.truncated,
+            &transitions.next_truncated,
         )?;
         if let Some(observations) = new_observations {
             self.observations = Some(observations);
@@ -360,6 +368,10 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
         self.next_terminated.write(
             start,
             transfer_bool_tensor(transitions.next_terminated, &self.device),
+        )?;
+        self.next_truncated.write(
+            start,
+            transfer_bool_tensor(transitions.next_truncated, &self.device),
         )?;
         Ok(count)
     }
@@ -382,7 +394,8 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             next_observations,
             actions: self.actions.gather(rows.clone()),
             rewards: rewards.gather(rows.clone()),
-            next_terminated: self.next_terminated.gather(rows),
+            next_terminated: self.next_terminated.gather(rows.clone()),
+            next_truncated: self.next_truncated.gather(rows),
         })
     }
 
@@ -638,6 +651,7 @@ where
         let rewards = batch.rewards.to_device(&optimization_device);
         let reward_dtype = rewards.dtype();
         let next_terminated = transfer_bool_tensor(batch.next_terminated, &optimization_device);
+        let _next_truncated = transfer_bool_tensor(batch.next_truncated, &optimization_device);
         let target_next_q_values = self
             .target_q_network
             .forward(next_observations.clone())
@@ -721,7 +735,10 @@ where
             actions: transitions.actions.clone(),
             rewards: transitions.rewards.clone(),
             next_terminated,
-            truncated: transitions.truncated.to_vec(),
+            next_truncated: Tensor::from_data(
+                TensorData::new(transitions.truncated.to_vec(), [environment_count, 1]),
+                &self.replay_storage_config.storage_device(),
+            ),
         })?;
         let mut completed_episodes = Vec::new();
         for (environment_index, reward) in reward_values.into_iter().enumerate() {

@@ -818,6 +818,7 @@ where
             actions: batch.actions.to_device(&device),
             rewards: batch.rewards.to_device(&device),
             terminated: transfer_bool_tensor(batch.terminated, &device),
+            truncated: transfer_bool_tensor(batch.truncated, &device),
         })
     }
 
@@ -1081,7 +1082,10 @@ where
                 TensorData::new(transitions.terminated.to_vec(), [count, 1]),
                 &self.replay_storage_config.storage_device(),
             ),
-            truncated: transitions.truncated.to_vec(),
+            truncated: Tensor::from_data(
+                TensorData::new(transitions.truncated.to_vec(), [count, 1]),
+                &self.replay_storage_config.storage_device(),
+            ),
         })?;
         self.observation_dtype = Some(transitions.observations.dtype());
         let mut completed = Vec::new();

@@ -1076,6 +1076,7 @@ where
         batch.next_observations = batch.next_observations.to_device(&device);
         batch.actions = batch.actions.to_device(&device);
         batch.terminated = transfer_bool_tensor(batch.terminated, &device);
+        batch.truncated = transfer_bool_tensor(batch.truncated, &device);
         batch.rewards = batch.rewards.to_device(&device);
         batch.collection_policy_entropies = batch.collection_policy_entropies.to_device(&device);
         batch.entropy_change_weights = batch.entropy_change_weights.to_device(&device);
@@ -1393,7 +1394,10 @@ where
                     entropy.change_weight,
                     (&storage_device, self.dtype),
                 ),
-                truncated: truncated.clone(),
+                truncated: Tensor::from_data(
+                    TensorData::new(truncated.clone(), [count, 1]),
+                    &storage_device,
+                ),
             })?;
 
         let mut completed_episodes = Vec::new();
