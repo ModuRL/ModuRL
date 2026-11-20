@@ -128,6 +128,7 @@ jobs:
           )
 
           cp docs/site/index.html _site/index.html
+          cp docs/theme/favicon.ico _site/favicon.ico
           if [[ -z "$latest_series" ]]; then
             latest_series="dev"
           fi

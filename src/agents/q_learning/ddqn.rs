@@ -3,8 +3,9 @@ use bon::bon;
 use burn::{
     module::Module,
     optim::ModuleOptimizer,
-    tensor::{Bool, Cast, DType, Device, Float, FloatDType, Int, Tensor, kind::Autodiff},
+    tensor::{Bool, Cast, Device, Float, FloatDType, Int, Tensor, kind::Autodiff},
 };
+use std::sync::Arc;
 
 use super::{
     QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
@@ -92,9 +93,9 @@ where
 {
     /// Creates an agent for native observations [batch_size, ...observation_shape] and Int actions [batch_size, 1].
     /// The target model starts as a detached copy of the online model and receives periodic hard updates.
-    /// Model parameters and Q outputs must use the optimization device and compute dtype.
-    /// Replay stores detached observations in their native kind and first-batch dtype.
-    /// Construction returns an error for invalid sizes, schedules, learning rate, dtype, or observation rank.
+    /// Model parameters and Q outputs must use the optimization device. Q outputs must match the environment reward dtype.
+    /// Replay preserves native observations and rewards in their first-batch dtypes.
+    /// Construction returns an error for invalid sizes, schedules, learning rate, or observation rank.
     /// `legal_action_mask(true)` requires flat rank-2 observations whose last `action_count` columns are the mask.
     /// Random actions use the backend device RNG (seeded with `Device::seed`); `action_rng` only decides which rows explore.
     #[builder]
@@ -103,7 +104,8 @@ where
         observation_space: S,
         online_q_network: M,
         #[builder(into)] optimizer: ModuleOptimizer,
-        learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         #[builder(default = 1000)] target_update_interval: usize,
         #[builder(
             default = Box::new(LinearSchedule::new(1.0, 0.1)),
@@ -119,7 +121,6 @@ where
         #[builder(default)] legal_action_mask: bool,
         logger: Option<&'a mut dyn DDQNLogger<I>>,
         replay_device: Option<Device>,
-        #[builder(default = DType::F32)] dtype: DType,
     ) -> Result<Self, QAgentError<GE, ME>> {
         let inner = QLearningAgent::<M, S, GE, DDQNTarget, R>::builder()
             .action_space(action_space)
@@ -137,7 +138,6 @@ where
             .maybe_training_horizon(training_horizon)
             .legal_action_mask(legal_action_mask)
             .maybe_replay_device(replay_device)
-            .dtype(dtype)
             .build()?;
         Ok(Self {
             inner,
@@ -221,8 +221,12 @@ mod tests {
         models::MaskedLogits,
         parameter_schedule::ConstantSchedule,
         spaces::BoxSpace,
+        wrappers::OutputMapMultiGymWrapper,
     };
-    use burn::{optim::SgdConfig, tensor::Device};
+    use burn::{
+        optim::SgdConfig,
+        tensor::{DType, Device},
+    };
     use std::{convert::Infallible, marker::PhantomData};
 
     #[derive(Default)]
@@ -235,6 +239,7 @@ mod tests {
         fn log(&mut self, entry: &QLogEntry) {
             assert_eq!(entry.q_values.dims(), [1, 1]);
             assert_eq!(entry.replay_rewards.dims(), [1, 1]);
+            assert_eq!(entry.q_values.dtype(), entry.replay_rewards.dtype());
             self.update_timesteps.push(entry.collection_timestep);
         }
 
@@ -249,11 +254,19 @@ mod tests {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
         for dtype in [DType::F32, DType::F64] {
             let device = Device::flex().autodiff();
-            let mut env = VectorizedGymWrapper::new(vec![
+            let env = VectorizedGymWrapper::new(vec![
                 FixedEnv::new(device.clone().without_autodiff()),
                 FixedEnv::new(device.clone().without_autodiff()),
             ])
             .unwrap();
+            let mut env = OutputMapMultiGymWrapper::new(
+                env,
+                Ok::<_, Infallible>,
+                move |mut step: MultiGymStepInfo| {
+                    step.rewards = step.rewards.cast(dtype);
+                    Ok::<_, Infallible>(step)
+                },
+            );
             let mut logger = RecordingLogger::default();
             let mut agent = DDQNAgent::builder()
                 .action_space(Discrete::new(2).unwrap())
@@ -261,7 +274,6 @@ mod tests {
                 .online_q_network(network(&device, dtype))
                 .optimizer(SgdConfig::new().init())
                 .learning_rate(0.01)
-                .dtype(dtype)
                 .epsilon_schedule(ConstantSchedule::new(0.0))
                 .replay_capacity(4)
                 .batch_size(1)
@@ -282,7 +294,6 @@ mod tests {
             assert_eq!(agent.inner.optimization_steps, 2);
             let updated_parameters = agent.inner.online_q_network.values.val().into_data();
             assert_ne!(initial_parameters, updated_parameters);
-            assert_eq!(agent.inner.dtype, dtype);
 
             let observations = env.reset().unwrap();
             let actions = agent.act_for_training(&observations, &mut ()).unwrap();
@@ -322,7 +333,6 @@ mod tests {
             .online_q_network(network(&device, DType::F64))
             .optimizer(SgdConfig::new().init())
             .learning_rate(0.01)
-            .dtype(DType::F64)
             .epsilon_schedule(ConstantSchedule::new(0.0))
             .replay_capacity(4)
             .batch_size(1)

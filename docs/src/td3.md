@@ -100,7 +100,12 @@ bootstrap value shared by both critic losses.
 `actor_update_interval` defaults to `2`. The agent updates every critic on each
 replay optimization, but updates the actor and all target networks only on
 every second optimization. On skipped actor updates, logger fields such as
-`actor_loss` are `None`.
+`actor_loss` and `actor_learning_rate` are `None`.
+
+The actor and each critic accept a constant `f64` learning rate or a
+`ParameterSchedule`. Each optimizer evaluates its rate at its update's
+collection timestep, so the delayed actor uses the rate for the step on which
+it actually updates.
 
 Important defaults and constraints are:
 
@@ -142,6 +147,9 @@ the actor optimize the selected aggregate instead of the first critic.
 
 These choices define algorithm variants. Omit them when reproducing canonical
 TD3 with two critics.
+
+As with DDPG, actions, Q values, and environment rewards must match the configured `dtype`.
+Replay stores rewards without casting them and rejects mismatches.
 
 ## Evaluate the Deterministic Actor
 

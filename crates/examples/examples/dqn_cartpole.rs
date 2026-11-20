@@ -37,7 +37,6 @@ fn main() {
 
     let mut grapher = DQNGrapher::new();
     let mut agent = DQNAgent::builder()
-        .dtype(DTYPE)
         .action_space(env.action_space())
         .observation_space(observation_space)
         .online_q_network(online_q_network)

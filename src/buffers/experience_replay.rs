@@ -94,6 +94,24 @@ impl<const R: usize, K: Autodiff> TensorReplayColumn<R, K> {
         &self.tensor
     }
 
+    /// Checks that a tensor [batch_size, ...item_shape] can be stored without changing its dtype.
+    pub(crate) fn validate_dtype(
+        &self,
+        field: &'static str,
+        source: &Tensor<R, K>,
+    ) -> Result<(), ReplayStorageError> {
+        let expected = self.tensor.dtype();
+        let actual = source.dtype();
+        if actual != expected {
+            return Err(ReplayStorageError::DTypeMismatch {
+                field,
+                expected,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
     /// Allocates `[capacity, ...item_shape]` of rank `R >= 1` without autodiff.
     /// The first axis is the ring capacity. The selected dtype must belong to kind `K`.
     pub(crate) fn new(shape: [usize; R], options: impl Into<TensorCreationOptions>) -> Self {

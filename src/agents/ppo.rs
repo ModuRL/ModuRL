@@ -467,8 +467,8 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     clip_range: Box<dyn ParameterSchedule>,
     normalize_advantage: bool,
     normalize_returns: bool,
-    vf_coef: f32,
-    ent_coef: f32,
+    vf_coef: f64,
+    ent_coef: f64,
     observation_space: OS,
     action_space: AS,
     network_info: G::Network,
@@ -478,7 +478,7 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     batch_size: usize,
     schedule_progress: ScheduleProgress,
     logging_info: Option<PPOLoggingInfo<'a, I>>,
-    gradient_clip: f32,
+    gradient_clip: f64,
     current_observations: Option<G::Observation>,
     episode_tracker: PPOEpisodeTracker,
     _phantom: PhantomData<GE>,
@@ -533,12 +533,12 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
         clip_range: Box<dyn ParameterSchedule>,
         #[builder(default = true)] normalize_advantage: bool,
         #[builder(default = false)] normalize_returns: bool,
-        #[builder(default = 0.5)] vf_coef: f32,
-        #[builder(default = 0.01)] ent_coef: f32,
+        #[builder(default = 0.5)] vf_coef: f64,
+        #[builder(default = 0.01)] ent_coef: f64,
         #[builder(default = 1024)] batch_size: usize,
         #[builder(default = 128)] mini_batch_size: usize,
         #[builder(default = 4)] num_epochs: usize,
-        #[builder(default = 0.5)] gradient_clip: f32,
+        #[builder(default = 0.5)] gradient_clip: f64,
         training_horizon: Option<usize>,
         logger: Option<&'a mut dyn PPOLogger<I>>,
     ) -> Result<Self, PPOConfigurationError>
@@ -659,7 +659,7 @@ where
 
         let total_samples = all_observations.dims()[0];
         let device = all_observations.device();
-        let clip_range = self.schedule_progress.parameter(&*self.clip_range) as f32;
+        let clip_range = self.schedule_progress.parameter(&*self.clip_range);
 
         for epoch in 0..self.num_epochs {
             if let Some(logging_info) = &mut self.logging_info {
@@ -939,7 +939,7 @@ where
         rewards: Tensor<2>,
         old_values: Option<Tensor<2>>,
         explained_variance: Tensor<1>,
-        clip_range: f32,
+        clip_range: f64,
     ) -> Result<PPOLosses, PPOError<N::Error, GE, AS::Error>> {
         let advantages = if self.normalize_advantage {
             normalize_tensor(&advantages)
@@ -965,8 +965,8 @@ where
             true => {
                 let clipped_ratio = clamp_with_boundary_gradients(
                     ratio.clone(),
-                    1.0 - f64::from(clip_range),
-                    1.0 + f64::from(clip_range),
+                    1.0 - clip_range,
+                    1.0 + clip_range,
                 );
 
                 let surrogate1 = ratio.clone() * policy_advantages.clone();
@@ -990,7 +990,7 @@ where
 
         let entropy_loss = entropy.mean();
 
-        let final_actor_loss = actor_loss - entropy_loss.clone() * f64::from(self.ent_coef);
+        let final_actor_loss = actor_loss - entropy_loss.clone() * self.ent_coef;
 
         let returns = returns.detach();
         let returns = if self.normalize_returns {
@@ -1004,17 +1004,12 @@ where
             // PPO2/CleanRL value-loss clipping: bound how far the value estimate
             // may move from its rollout-time value within one update.
             let old_values = old_values.ok_or(PPOError::MissingOldValues)?;
-            clipped_value_loss(
-                values,
-                returns.clone(),
-                old_values.detach(),
-                f64::from(clip_range),
-            )
+            clipped_value_loss(values, returns.clone(), old_values.detach(), clip_range)
         } else {
             (values - returns.clone()).square().mean()
         };
         // Match SB3 PPO: value_loss = vf_coef * mean_squared_error.
-        let final_critic_loss = critic_loss * f64::from(self.vf_coef);
+        let final_critic_loss = critic_loss * self.vf_coef;
 
         if let Some(logging_info) = &mut self.logging_info {
             let log_entry = PPOLogEntry {
