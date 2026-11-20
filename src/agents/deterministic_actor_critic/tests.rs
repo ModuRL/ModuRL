@@ -250,7 +250,7 @@ fn numbers<const D: usize>(values: Tensor<D>) -> Vec<f64> {
 struct Logger {
     updates: Vec<usize>,
     actor_updated: Vec<bool>,
-    actor_learning_rates: Vec<f64>,
+    actor_learning_rates: Vec<Option<f64>>,
     rewards: Vec<Vec<f64>>,
     episodes: Vec<(f32, usize, bool, bool, usize)>,
     replay_lengths: Vec<usize>,
@@ -431,7 +431,7 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
     assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
     assert_eq!(logger.updates, [2, 4]);
     assert_eq!(logger.actor_updated, [false, true]);
-    assert_eq!(logger.actor_learning_rates, [0.01, 0.02]);
+    assert_eq!(logger.actor_learning_rates, [None, Some(0.02)]);
     assert_eq!(logger.rewards, [vec![2.0, 2.0], vec![2.0, 2.0]]);
     assert_eq!(
         logger.episodes,
@@ -459,7 +459,7 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
     );
     agent.learn(&mut env, 2, &mut logger).unwrap();
     assert_eq!(logger.updates, [2, 4, 6]);
-    assert_eq!(logger.actor_learning_rates, [0.01, 0.02, 0.02]);
+    assert_eq!(logger.actor_learning_rates, [None, Some(0.02), None]);
     assert_eq!(logger.actor_updated, [false, true, false]);
     assert_eq!(agent.schedule_progress.elapsed_steps(), 6);
     let len = agent.replay.as_ref().unwrap().len();

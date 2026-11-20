@@ -425,7 +425,7 @@ mod tests {
             assert_eq!(entry.bellman_targets.dims(), [1, 1]);
             assert_eq!(entry.policy_actions.as_ref().unwrap().dims(), [1, 1]);
             assert!(!entry.actor_loss.as_ref().unwrap().is_require_grad());
-            assert_eq!(entry.actor_learning_rate, 0.01);
+            assert_eq!(entry.actor_learning_rate, Some(0.01));
         }
 
         fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry) {

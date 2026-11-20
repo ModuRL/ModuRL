@@ -197,8 +197,8 @@ pub struct DeterministicActorCriticLogEntry<const A: usize = 2> {
     pub bellman_targets: Tensor<2>,
     /// Rewards from the sampled replay batch, shaped `[batch_size, 1]`.
     pub replay_rewards: Tensor<2>,
-    /// Last applied actor learning rate, or its initial rate before the first actor update.
-    pub actor_learning_rate: f64,
+    /// Learning rate applied to the actor on this update, or `None` if skipped.
+    pub actor_learning_rate: Option<f64>,
     /// Current learning rate for each critic optimizer.
     pub critic_learning_rates: Vec<f64>,
     /// Standard deviation of the Gaussian collection-action noise.
@@ -405,6 +405,7 @@ struct ActorUpdate<const A: usize> {
     loss: Tensor<1>,
     q_values: Tensor<2>,
     actions: Tensor<A>,
+    learning_rate: f64,
 }
 
 /// Owns deterministic actor and critic models for native rank-O observation batches and Float rank-A action batches.
@@ -461,7 +462,6 @@ pub(crate) struct DeterministicActorCriticAgent<
     online_actor: G::Actor,
     target_actor: G::Actor,
     actor_optimizer: ModuleOptimizer,
-    actor_learning_rate: f64,
     actor_learning_rate_schedule: Arc<dyn ParameterSchedule + Send + Sync>,
     critics: Vec<ActionValueCritic<G::Critic>>,
     strategy: S,
@@ -545,9 +545,8 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
                 "observations and actions require batch and item axes; candidates add one action axis"
             );
         }
-        let initial_actor_learning_rate = actor_learning_rate.value(0.0);
         DeterministicActorCriticConfigurationValidator::validate_configuration()
-            .actor_learning_rate(initial_actor_learning_rate)
+            .actor_learning_rate(actor_learning_rate.value(0.0))
             .dtype(dtype)
             .critic_count_requirement(strategy.critic_count_requirement())
             .actual_critic_count(critics.len())
@@ -584,7 +583,6 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
             online_actor,
             target_actor,
             actor_optimizer,
-            actor_learning_rate: initial_actor_learning_rate,
             actor_learning_rate_schedule: actor_learning_rate,
             critics,
             strategy,
@@ -948,11 +946,11 @@ where
         self.online_actor =
             self.actor_optimizer
                 .step(learning_rate, self.online_actor.clone(), gradients);
-        self.actor_learning_rate = learning_rate;
         Ok(ActorUpdate {
             loss: loss.detach(),
             q_values: values.detach(),
             actions: actions.detach(),
+            learning_rate,
         })
     }
 
@@ -998,9 +996,15 @@ where
         if actor_updated {
             self.update_targets()?;
         }
-        let (actor_loss, policy_q_values, policy_actions) = match actor_update {
-            Some(actor) => (Some(actor.loss), Some(actor.q_values), Some(actor.actions)),
-            None => (None, None, None),
+        let (actor_loss, policy_q_values, policy_actions, actor_learning_rate) = match actor_update
+        {
+            Some(actor) => (
+                Some(actor.loss),
+                Some(actor.q_values),
+                Some(actor.actions),
+                Some(actor.learning_rate),
+            ),
+            None => (None, None, None, None),
         };
         logger.log_update(&DeterministicActorCriticLogEntry {
             critic_losses: critic_update.losses,
@@ -1011,7 +1015,7 @@ where
             replay_actions: batch.actions,
             bellman_targets: targets,
             replay_rewards: batch.rewards,
-            actor_learning_rate: self.actor_learning_rate,
+            actor_learning_rate,
             critic_learning_rates: self
                 .critics
                 .iter()

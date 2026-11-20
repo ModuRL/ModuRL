@@ -444,7 +444,10 @@ mod tests {
             assert_eq!(entry.policy_actions.is_some(), entry.actor_updated);
             assert_eq!(entry.actor_loss.is_some(), entry.actor_updated);
             assert_eq!(entry.policy_q_values.is_some(), entry.actor_updated);
-            assert_eq!(entry.actor_learning_rate, 0.01);
+            assert_eq!(
+                entry.actor_learning_rate,
+                entry.actor_updated.then_some(0.01)
+            );
         }
 
         fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry) {
