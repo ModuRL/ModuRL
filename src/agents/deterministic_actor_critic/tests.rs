@@ -866,7 +866,7 @@ fn builder_and_actions_reject_invalid_contracts() {
         ))
     ));
     assert!(matches!(
-        space_storage_shape::<3>("observations", vec![1], 8),
+        space_storage_shape::<3>("observation", vec![1], 8),
         Err(DeterministicActorCriticConfigurationError::SpaceRank {
             expected: 2,
             actual: 1,
@@ -874,7 +874,7 @@ fn builder_and_actions_reject_invalid_contracts() {
         })
     ));
     assert!(matches!(
-        space_storage_shape::<2>("actions", vec![0], 8),
+        space_storage_shape::<2>("action", vec![0], 8),
         Err(DeterministicActorCriticConfigurationError::ZeroItemDimension { .. })
     ));
     let agent = agent(&device, DType::F32, 1);

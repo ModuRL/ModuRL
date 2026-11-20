@@ -67,7 +67,7 @@ pub enum SACConfigurationError {
     ZeroTrainingHorizon,
     #[error("compute dtype must be floating-point, got {0:?}")]
     InvalidDType(DType),
-    #[error("space {field} has {actual} event axes, expected {expected}")]
+    #[error("{field} space has {actual} item axes, expected {expected}")]
     SpaceRank {
         field: &'static str,
         expected: usize,
@@ -597,10 +597,10 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
             }
         }
 
-        space_storage_shape::<O>("observations", observation_space.shape(), replay_capacity)?;
-        space_storage_shape::<A>("actions", action_space.shape(), replay_capacity)?;
+        space_storage_shape::<O>("observation", observation_space.shape(), replay_capacity)?;
+        space_storage_shape::<A>("action", action_space.shape(), replay_capacity)?;
         space_storage_shape::<L>(
-            "policy actions",
+            "policy action",
             action_space.policy_shape(),
             replay_capacity,
         )?;
@@ -1356,12 +1356,12 @@ where
         if self.replay.is_none() {
             let storage = SACReplayStorage::builder()
                 .observation_shape(space_storage_shape::<O>(
-                    "observations",
+                    "observation",
                     self.observation_space.shape(),
                     self.replay_capacity,
                 )?)
                 .action_shape(space_storage_shape::<A>(
-                    "actions",
+                    "action",
                     self.action_space.shape(),
                     self.replay_capacity,
                 )?)
