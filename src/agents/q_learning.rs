@@ -31,8 +31,10 @@ use crate::{
 pub mod ddqn;
 pub mod dqn;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum QLearningConfigurationError {
+    #[error("reading Q-learning configuration failed: {0}")]
+    Tensor(#[from] TensorReadError),
     #[error("Q-network parameters must share one device")]
     ModelDevice,
     #[error("replay capacity must be nonzero")]
@@ -476,18 +478,16 @@ where
         training_horizon: Option<usize>,
         replay_device: Option<Device>,
         #[builder(default)] legal_action_mask: bool,
-    ) -> Result<Self, QAgentError<GE, ME>> {
+    ) -> Result<Self, QLearningConfigurationError> {
         const {
             assert!(R >= 2, "observations require batch and item axes");
         }
         if checked_learning_rate(learning_rate.value(0.0)).is_none() {
-            return Err(QLearningConfigurationError::InvalidLearningRate.into());
+            return Err(QLearningConfigurationError::InvalidLearningRate);
         }
         let observation_shape = observation_space.shape();
         if legal_action_mask && R != 2 {
-            return Err(
-                QLearningConfigurationError::LegalActionMaskRequiresRank2 { actual: R }.into(),
-            );
+            return Err(QLearningConfigurationError::LegalActionMaskRequiresRank2 { actual: R });
         }
         let initial_epsilon = epsilon_schedule.value(0.0);
         QLearningConfigurationValidator::validate_configuration()

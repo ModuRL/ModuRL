@@ -63,6 +63,11 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Environments and agents
 
+- DQN and DDQN builders now return `QLearningConfigurationError` directly instead of
+  `QAgentError`. Configuration-time tensor reads use its `Tensor` variant;
+  runtime failures continue to use `QAgentError`. `QLearningConfigurationError`
+  no longer implements `Clone`, `Copy`, `PartialEq`, or `Eq` because it can contain
+  a tensor read error.
 - PPO and A2C use `.logger(...)` instead of `.logging_info(...)` to match the other agents.
 - All agent optimizers accept constant `f64` learning rates or a `ParameterSchedule`.
   Off-policy updates evaluate the rate at their collection timestep; invalid rates return an error.

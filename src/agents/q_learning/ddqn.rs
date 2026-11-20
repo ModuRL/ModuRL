@@ -8,8 +8,8 @@ use burn::{
 use std::sync::Arc;
 
 use super::{
-    QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
-    selected_action_q_values,
+    QAgentError, QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningLogger,
+    QLearningTarget, QLogEntry, selected_action_q_values,
 };
 use crate::{
     agents::Agent,
@@ -126,7 +126,7 @@ where
         #[builder(default)] legal_action_mask: bool,
         logger: Option<&'a mut dyn DDQNLogger<I>>,
         replay_device: Option<Device>,
-    ) -> Result<Self, QAgentError<GE, ME>> {
+    ) -> Result<Self, QLearningConfigurationError> {
         let inner = QLearningAgent::<M, S, GE, DDQNTarget, R>::builder()
             .action_space(action_space)
             .observation_space(observation_space)
