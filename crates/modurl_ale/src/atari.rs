@@ -123,8 +123,8 @@ pub struct AtariGym<M: AtariObservationMode = RgbScreen> {
     _not_send_sync: PhantomData<*const ()>,
     mode: PhantomData<M>,
     ale: Ale,
-    observation_space: M::Space,
     action_space: Discrete,
+    observation_space: M::Space,
     frame_skip: usize,
     lives: u32,
     buffer_bytes: Vec<u8>,
@@ -241,8 +241,8 @@ impl<M: AtariObservationMode> AtariGym<M> {
                 None
             },
             ale,
-            observation_space: AtariObservationSpace::new(shape),
             action_space,
+            observation_space: AtariObservationSpace::new(shape),
             frame_skip: 1,
             buffer_bytes: vec![0; observation_len],
             #[cfg(feature = "rendering")]
@@ -380,8 +380,8 @@ where
     Tensor<B, Int>: PrevRank<Prev = Tensor<D, Int>>,
 {
     type Error = AtariGymError;
-    type ObservationSpace = AtariObservationSpace<B>;
     type ActionSpace = Discrete;
+    type ObservationSpace = AtariObservationSpace<B>;
 
     /// Returns CPU U8 observations with mode-specific rank D and item shape after a real game reset.
     fn reset(&mut self) -> Result<ResetInfo<AtariInfo, Tensor<D, Int>>, Self::Error> {

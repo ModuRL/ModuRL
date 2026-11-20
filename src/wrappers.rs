@@ -60,8 +60,8 @@ where
     ) -> Result<<G::ActionSpace as TensorBatchTypes>::Batch, E>,
 {
     type Error = TensorMapMultiGymError<G::Error, E>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Maps rank-`A` actions `[num_envs, ...action_shape]` and returns rank-`O` observations `[num_envs, ...observation_shape]`.
     /// Terminal observations omit the batch axis; rewards keep `[num_envs, 1]`. Output kinds, dtypes, and devices remain unchanged.
@@ -79,12 +79,12 @@ where
         self.gym.reset().map_err(TensorMapMultiGymError::Gym)
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.gym.observation_space()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.gym.observation_space()
     }
 
     fn num_envs(&self) -> usize {
@@ -191,8 +191,8 @@ where
         -> Result<MultiGymStepInfo<I, <G::ObservationSpace as TensorBatchTypes>::Item>, E>,
 {
     type Error = TensorMapMultiGymError<G::Error, E>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Forwards rank-`A` actions `[num_envs, ...action_shape]` and maps the complete step result.
     /// Observations retain rank `O`, rewards retain `[num_envs, 1]`, and terminal observations omit the batch axis.
@@ -211,12 +211,12 @@ where
         (self.map_reset)(observations).map_err(TensorMapMultiGymError::Mapping)
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.gym.observation_space()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.gym.observation_space()
     }
 
     fn num_envs(&self) -> usize {
@@ -343,8 +343,8 @@ where
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
 {
     type Error = TensorMapMultiGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Transfers rank-`A` actions `[num_envs, ...action_shape]` to the environment device.
     /// Returns rank-`O` observations, rewards `[num_envs, 1]`, and unbatched rank-`U` terminal observations on the agent device.
@@ -375,12 +375,12 @@ where
         self.gym.num_envs()
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.gym.observation_space()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.gym.action_space()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.gym.observation_space()
     }
 }
 
@@ -522,8 +522,8 @@ mod tests {
 
     impl MultiGym for TensorMapTestGym {
         type Error = Infallible;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = BoxSpace<2>;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Returns Float observations `[2, 3]`, rewards `[2, 1]`, and one terminal observation `[3]` from scalar actions `[2, 1]`.
         fn step(&mut self, action: Tensor<2>) -> Result<MultiGymStepInfo, Self::Error> {
@@ -545,12 +545,12 @@ mod tests {
             })
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
-            BoxSpace::new_unbounded([1, 3], &Device::flex())
-        }
-
         fn action_space(&self) -> Self::ActionSpace {
             BoxSpace::new_unbounded([1, 1], &Device::flex())
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            BoxSpace::new_unbounded([1, 3], &Device::flex())
         }
 
         fn num_envs(&self) -> usize {
@@ -800,8 +800,8 @@ mod test_support {
 
     impl Gym<TestInfo> for TestGym {
         type Error = Infallible;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Accepts one scalar Int action `[1]` and returns a scalar Float observation `[1]` on the fixture device.
         fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo<TestInfo>, Self::Error> {
@@ -817,15 +817,15 @@ mod test_support {
             })
         }
 
+        fn action_space(&self) -> Self::ActionSpace {
+            Discrete::new(4).unwrap()
+        }
+
         fn observation_space(&self) -> Self::ObservationSpace {
             BoxSpace::new(
                 Tensor::from_data([[-10_000.0f32]], &self.device),
                 Tensor::from_data([[10_000.0f32]], &self.device),
             )
-        }
-
-        fn action_space(&self) -> Self::ActionSpace {
-            Discrete::new(4).unwrap()
         }
     }
 

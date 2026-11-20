@@ -7,8 +7,8 @@ import benchmark
 
 
 class ByteGym(gym.Env):
-    observation_space = gym.spaces.Box(0, 255, (4, 84, 84), dtype=np.uint8)
     action_space = gym.spaces.Discrete(4)
+    observation_space = gym.spaces.Box(0, 255, (4, 84, 84), dtype=np.uint8)
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -26,7 +26,7 @@ class BenchmarkTests(unittest.TestCase):
         torch.set_num_threads(1)
 
     def test_replay_preserves_truncated_terminal_observations_after_reset(self):
-        replay = benchmark.AlignedReplayBuffer(8, ByteGym.observation_space, ByteGym.action_space, device="cpu")
+        replay = benchmark.AlignedReplayBuffer(8, action_space=ByteGym.action_space, observation_space=ByteGym.observation_space, device="cpu")
         shape = (1, 4, 84, 84)
         replay.add(np.full(shape, 10, np.uint8), np.full(shape, 200, np.uint8),
                    np.array([1]), np.array([1.0]), np.array([True]), [{"TimeLimit.truncated": True}])
@@ -41,7 +41,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertFalse(hasattr(replay, "next_observations"))
 
     def test_full_replay_samples_unique_rows_and_excludes_frontier(self):
-        replay = benchmark.AlignedReplayBuffer(8, ByteGym.observation_space, ByteGym.action_space, device="cpu")
+        replay = benchmark.AlignedReplayBuffer(8, action_space=ByteGym.action_space, observation_space=ByteGym.observation_space, device="cpu")
         shape = (1, 4, 84, 84)
         for index in range(10):
             replay.add(np.full(shape, index, np.uint8), np.full(shape, index + 1, np.uint8),
@@ -109,7 +109,7 @@ class BenchmarkTests(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
     def test_cpu_replay_transfers_bytes_to_cuda_models(self):
-        replay = benchmark.AlignedReplayBuffer(8, ByteGym.observation_space, ByteGym.action_space, device="cuda")
+        replay = benchmark.AlignedReplayBuffer(8, action_space=ByteGym.action_space, observation_space=ByteGym.observation_space, device="cuda")
         shape = (1, 4, 84, 84)
         for index in range(4):
             replay.add(np.full(shape, index, np.uint8), np.full(shape, index + 1, np.uint8),

@@ -27,8 +27,8 @@ impl StateTestGym {
 
 impl Gym for StateTestGym {
     type Error = Infallible;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = Discrete;
+    type ObservationSpace = BoxSpace<2>;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.step_count = 0;
@@ -50,12 +50,12 @@ impl Gym for StateTestGym {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        BoxSpace::new_unbounded([1, 1], &self.device)
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         Discrete::new(2).unwrap()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, 1], &self.device)
     }
 }
 

@@ -857,7 +857,7 @@ where
     /// Each call resets environments; schedule and replay progress persist.
     pub(crate) fn learn<I, const U: usize>(
         &mut self,
-        env: &mut dyn MultiGym<I, R, 2, Error = GE, ObservationSpace = S, ActionSpace = Discrete>,
+        env: &mut dyn MultiGym<I, R, 2, Error = GE, ActionSpace = Discrete, ObservationSpace = S>,
         num_timesteps: usize,
         logger: &mut dyn QLearningLogger<I>,
     ) -> Result<(), QAgentError<GE, ME>>

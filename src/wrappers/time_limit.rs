@@ -36,8 +36,8 @@ where
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
     type Error = G::Error;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Resets the step count and returns the inner gym's unbatched rank-`BO - 1` observation and metadata.
     /// Preserves the observation kind, dtype, device, and item axes; scalar observations use `[1]`.
@@ -124,8 +124,8 @@ mod tests {
 
     impl Gym<u32> for TestGym {
         type Error = Infallible;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Returns unbatched F64 observations `[2]` on the fixture device and reset metadata.
         fn reset(&mut self) -> Result<ResetInfo<u32>, Self::Error> {

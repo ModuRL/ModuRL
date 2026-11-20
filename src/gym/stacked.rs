@@ -147,8 +147,8 @@ where
     G: MultiGym<I, O, A>,
 {
     type Error = StackedMultiGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Splits rank-`A` actions `[total_size, ...action_shape]` across groups without removing the batch axis.
     /// Concatenates rank-`O` observations `[group_size, ...observation_shape]` and rewards `[group_size, 1]` in group order.
@@ -183,12 +183,12 @@ where
         >(steps, &self.group_offsets, &self.observation_shape)
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.gyms[0].observation_space()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.gyms[0].action_space()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.gyms[0].observation_space()
     }
 
     fn num_envs(&self) -> usize {

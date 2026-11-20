@@ -459,7 +459,7 @@ fn compute_explained_variance<const D: usize>(
     explained_variance.mask_fill(return_variance.equal_elem(0.0), f64::NAN)
 }
 
-/// PPO with owned Burn models and explicit observation and action spaces.
+/// PPO with owned Burn models and explicit action and observation spaces.
 /// The model group contains native observation, latent, and policy-action tensor types, each including the batch axis.
 pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2> {
     clipped: bool,
@@ -471,8 +471,8 @@ pub struct PPOAgent<'a, G: PPOModelTypes, OS, AS, GE, I = (), const A: usize = 2
     normalize_returns: bool,
     vf_coef: f64,
     ent_coef: f64,
-    observation_space: OS,
     action_space: AS,
+    observation_space: OS,
     network_info: G::Network,
     rollout_buffer: Vec<PPOExperience<G::Observation, G::Action>>,
     mini_batch_size: usize,
@@ -492,12 +492,12 @@ impl<G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'_, G, OS, AS, GE
         &self.network_info
     }
 
-    pub fn get_observation_space(&self) -> &OS {
-        &self.observation_space
-    }
-
     pub fn get_action_space(&self) -> &AS {
         &self.action_space
+    }
+
+    pub fn get_observation_space(&self) -> &OS {
+        &self.observation_space
     }
 
     pub fn reset_current_observations(&mut self) {
@@ -514,8 +514,8 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
     /// Models own input conversions and must share a device. Critic outputs must match reward dtype; tensor kinds must agree at compile time.
     #[builder]
     pub fn new<N, const O: usize, const H: usize, const L: usize>(
-        observation_space: OS,
         action_space: AS,
+        observation_space: OS,
         network_info: N,
         #[builder(default = true)] clipped: bool,
         // PPO2/CleanRL-style value-loss clipping. Disabled by default because
@@ -596,8 +596,8 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> PPOAgent<'a, G, OS, AS
             vf_coef,
             ent_coef,
             network_info,
-            observation_space,
             action_space,
+            observation_space,
             rollout_buffer: Vec::new(),
             num_epochs,
             batch_size,
@@ -1192,7 +1192,7 @@ where
     /// which collection should resume.
     fn prepare_rollout_collection(
         &mut self,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
+        env: &mut dyn MultiGym<I, O, A, Error = GE, ActionSpace = AS, ObservationSpace = OS>,
     ) -> Result<OS::Batch, PPOError<N::Error, GE, AS::Error>> {
         let observations = if let Some(observations) = self.current_observations.take() {
             observations
@@ -1243,7 +1243,7 @@ where
     fn collect_rollout<const U: usize>(
         &mut self,
         validation: &N,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
+        env: &mut dyn MultiGym<I, O, A, Error = GE, ActionSpace = AS, ObservationSpace = OS>,
         next_observations: &mut OS::Batch,
     ) -> Result<usize, PPOError<N::Error, GE, AS::Error>>
     where
@@ -1441,9 +1441,9 @@ where
     GE: std::fmt::Debug,
 {
     type Error = PPOError<N::Error, GE, AS::Error>;
-    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
-    type ObservationSpace = OS;
+    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ActionSpace = AS, ObservationSpace = OS> + 'e;
     type ActionSpace = AS;
+    type ObservationSpace = OS;
     type ActContext<'c> = ();
     type TrainingActions = PolicySamples<AS, PPOError<N::Error, GE, AS::Error>, L, A>;
 

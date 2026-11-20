@@ -50,12 +50,12 @@ pub trait Agent<I = (), const O: usize = 2, const A: usize = 2> {
             I,
             O,
             A,
-            ObservationSpace = Self::ObservationSpace,
             ActionSpace = Self::ActionSpace,
+            ObservationSpace = Self::ObservationSpace,
         >;
 
-    type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
+    type ObservationSpace: ObservationSpace<O>;
 
     /// Extra input `act_for_training` and `act` need beyond observations, such as an environment to search; `()` when observations suffice.
     type ActContext<'c>: ?Sized;
@@ -121,8 +121,8 @@ pub(crate) mod test_support {
 
     impl Gym for FixedEnv {
         type Error = Infallible;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Accepts one scalar Int action `[1]` and returns unbatched F32 observations `[4]` on the fixture device.
         fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
@@ -143,15 +143,15 @@ pub(crate) mod test_support {
             })
         }
 
+        fn action_space(&self) -> Self::ActionSpace {
+            Discrete::new(2).unwrap()
+        }
+
         fn observation_space(&self) -> Self::ObservationSpace {
             BoxSpace::new(
                 Tensor::zeros([1, 4], (&self.device, DType::F32)),
                 Tensor::ones([1, 4], (&self.device, DType::F32)),
             )
-        }
-
-        fn action_space(&self) -> Self::ActionSpace {
-            Discrete::new(2).unwrap()
         }
     }
 
@@ -171,8 +171,8 @@ pub(crate) mod test_support {
 
     impl Gym for BorrowingFixedEnv<'_> {
         type Error = Infallible;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Accepts one scalar Int action `[1]` and returns unbatched F32 observations `[4]` on the fixture device.
         fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
@@ -185,12 +185,12 @@ pub(crate) mod test_support {
             self.inner.reset()
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
-            self.inner.observation_space()
-        }
-
         fn action_space(&self) -> Self::ActionSpace {
             self.inner.action_space()
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            self.inner.observation_space()
         }
     }
 
@@ -206,8 +206,8 @@ pub(crate) mod test_support {
 
     impl Gym<(), 2, 2> for FixedContinuousEnv {
         type Error = Infallible;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = BoxSpace<2>;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Accepts one Float action vector `[1]` and returns unbatched F32 observations `[4]` on the fixture device.
         fn step(&mut self, _action: Tensor<1>) -> Result<StepInfo, Self::Error> {
@@ -228,12 +228,12 @@ pub(crate) mod test_support {
             })
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
-            BoxSpace::new_with_universal_bounds([1, 4], -1.0, 1.0, &self.device)
-        }
-
         fn action_space(&self) -> Self::ActionSpace {
             BoxSpace::new_with_universal_bounds([1, 1], -1.0, 1.0, &self.device)
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            BoxSpace::new_with_universal_bounds([1, 4], -1.0, 1.0, &self.device)
         }
     }
 }
@@ -258,11 +258,11 @@ mod tests {
                 2,
                 2,
                 Error = VectorizedGymError<Infallible>,
-                ObservationSpace = BoxSpace<2>,
                 ActionSpace = Discrete,
+                ObservationSpace = BoxSpace<2>,
             > + 'e;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<2>;
         type ActContext<'c> = ();
         type TrainingActions = Tensor<2, Int>;
 
@@ -339,11 +339,11 @@ mod tests {
                 2,
                 2,
                 Error = Infallible,
-                ObservationSpace = BoxSpace<2>,
                 ActionSpace = Discrete,
+                ObservationSpace = BoxSpace<2>,
             > + 'e;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<2>;
         type ActContext<'c> = [i64];
         type TrainingActions = Tensor<2, Int>;
 

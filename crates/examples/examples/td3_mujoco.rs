@@ -27,8 +27,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Using device: {device:?}");
     let env = VectorizedGymWrapper::from(TimeLimitGym::new(mujoco::build_environment(), 1_000));
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
-    let observation_space = env.observation_space();
     let action_space = env.action_space();
+    let observation_space = env.observation_space();
     let observation_size = observation_space.shape().iter().product();
     let action_size = action_space.shape().iter().product();
     let online_actor = MLP::builder()

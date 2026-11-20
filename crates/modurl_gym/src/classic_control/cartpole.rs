@@ -245,8 +245,8 @@ impl CartPoleV1 {
 
 impl Gym for CartPoleV1 {
     type Error = EnvironmentError;
-    type ObservationSpace = spaces::BoxSpace;
     type ActionSpace = spaces::Discrete;
+    type ObservationSpace = spaces::BoxSpace;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.steps_beyond_terminated = None;
@@ -384,12 +384,12 @@ impl Gym for CartPoleV1 {
         }
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.observation_space.clone()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.action_space.clone()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 }
 

@@ -298,8 +298,8 @@ struct CarDrawParams {
 
 impl Gym for MountainCarV0 {
     type Error = EnvironmentError;
-    type ObservationSpace = spaces::BoxSpace;
     type ActionSpace = spaces::Discrete;
+    type ObservationSpace = spaces::BoxSpace;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         // Initialize position uniformly between -0.6 and -0.4
@@ -371,12 +371,12 @@ impl Gym for MountainCarV0 {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.observation_space.clone()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.action_space.clone()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 }
 

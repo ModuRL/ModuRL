@@ -110,7 +110,7 @@ fn batch_wrapper_preserves_observation_and_action_axes() {
 /// Checks discrete Int actions `[1]` and rejects incorrect item lengths or indices before changing observations.
 fn check_discrete_actions<G>(mut env: G)
 where
-    G: Gym<Error = EnvironmentError, ObservationSpace = BoxSpace<2>, ActionSpace = Discrete>,
+    G: Gym<Error = EnvironmentError, ActionSpace = Discrete, ObservationSpace = BoxSpace<2>>,
 {
     env.reset().unwrap();
     let device = Device::flex();

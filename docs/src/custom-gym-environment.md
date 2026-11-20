@@ -41,8 +41,8 @@ impl CounterEnv {
 
 impl Gym for CounterEnv {
     type Error = CounterEnvError;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = Discrete;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Returns the initial position as unbatched `[1]` on the environment device.
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
@@ -72,6 +72,10 @@ impl Gym for CounterEnv {
         })
     }
 
+    fn action_space(&self) -> Self::ActionSpace {
+        Discrete::new(2).unwrap()
+    }
+
     fn observation_space(&self) -> Self::ObservationSpace {
         BoxSpace::new_with_universal_bounds(
             [1, 1],
@@ -79,10 +83,6 @@ impl Gym for CounterEnv {
             4.0,
             &self.device,
         )
-    }
-
-    fn action_space(&self) -> Self::ActionSpace {
-        Discrete::new(2).unwrap()
     }
 }
 ```
@@ -149,9 +149,8 @@ mod counter_env;
 use counter_env::CounterEnv;
 ```
 
-The observation and action spaces are part of the contract. The observation space must match
-the tensors returned by `reset` and `step`. The action space must accept the
-actions that `step` understands.
+The action space must accept the actions that `step` understands. The observation
+space must match the tensors returned by `reset` and `step`.
 
 ## Vectorize the Environment
 

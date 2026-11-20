@@ -44,7 +44,7 @@ let transition = environment.step(action)?;
 
 Single observations and actions use `Tensor<1>` with shapes `[observation_size]`
 and `[action_size]`. Vectorized environments add one leading batch axis.
-Observation and action spaces use `BoxSpace<2>`; `shape()` excludes the batch axis.
+Action and observation spaces use `BoxSpace<2>`; `shape()` excludes the batch axis.
 Actions must use CPU Flex and a Float dtype. F32 and F64 actions are read in F64
 for physics; observations and rewards remain F32. Invalid actions are rejected before simulation advances.
 

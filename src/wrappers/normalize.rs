@@ -124,8 +124,8 @@ where
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
 {
     type Error = NormalizeObservationGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Normalizes the reset observation without changing its unbatched rank-`O` shape, kind, dtype, or device.
     fn reset(&mut self) -> Result<ResetInfo<I, Tensor<O, K>>, Self::Error> {
@@ -255,8 +255,8 @@ where
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
     type Error = G::Error;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Returns the inner gym's unbatched rank-`BO - 1` observation, preserving its kind, dtype, device, and item axes.
     fn reset(

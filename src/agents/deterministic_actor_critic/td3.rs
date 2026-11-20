@@ -334,9 +334,9 @@ where
     GE: Debug,
 {
     type Error = DeterministicActorCriticError<AE, GE, SE, CE>;
-    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
-    type ObservationSpace = OS;
+    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ActionSpace = AS, ObservationSpace = OS> + 'e;
     type ActionSpace = AS;
+    type ObservationSpace = OS;
     type ActContext<'c> = ();
     type TrainingActions = Tensor<A>;
 
@@ -402,8 +402,8 @@ mod tests {
 
     impl crate::gym::Gym for DTypeEnv {
         type Error = std::convert::Infallible;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = BoxSpace<2>;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Accepts Float actions [1] and returns observations [4] in the fixture dtype; rewards remain F32.
         fn step(&mut self, action: Tensor<1>) -> Result<crate::gym::StepInfo, Self::Error> {
@@ -419,12 +419,12 @@ mod tests {
             Ok(reset)
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
-            self.inner.observation_space()
-        }
-
         fn action_space(&self) -> Self::ActionSpace {
             self.inner.action_space()
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            self.inner.observation_space()
         }
     }
 

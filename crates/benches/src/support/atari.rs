@@ -37,8 +37,8 @@ where
     G: Gym<I, O, 2, ActionSpace = Discrete>,
 {
     type Error = FireResetGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = Discrete;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Resets native observations with the wrapped item shape and kind; FIRE games receive startup actions.
     fn reset(
@@ -61,17 +61,17 @@ where
         }
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        match self {
-            Self::Plain(gym) => gym.observation_space(),
-            Self::Fire(gym) => gym.observation_space(),
-        }
-    }
-
     fn action_space(&self) -> Discrete {
         match self {
             Self::Plain(gym) => gym.action_space(),
             Self::Fire(gym) => gym.action_space(),
+        }
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        match self {
+            Self::Plain(gym) => gym.observation_space(),
+            Self::Fire(gym) => gym.observation_space(),
         }
     }
 }
@@ -86,8 +86,8 @@ pub fn make_atari_env(
 ) -> impl Gym<
     RawRewardInfo<EpisodeStatisticsInfo<AtariInfo>>,
     4,
-    ObservationSpace = FrameObservationSpace,
     ActionSpace = Discrete,
+    ObservationSpace = FrameObservationSpace,
     Error: Send + Sync + std::fmt::Debug,
 > {
     let builder = AtariGym::<RgbScreen>::builder()

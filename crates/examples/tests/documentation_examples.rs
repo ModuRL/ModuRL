@@ -19,8 +19,8 @@ mod getting_started {
             device.clone(),
         );
 
-        let observation_space = env.observation_space();
         let action_space = env.action_space();
+        let observation_space = env.observation_space();
 
         let actor_network = MLP::builder()
             .input_size(observation_space.shape()[0])
@@ -57,8 +57,8 @@ mod getting_started {
             .unwrap();
 
         let mut agent = PPOAgent::builder()
-            .observation_space(observation_space)
             .action_space(action_space)
+            .observation_space(observation_space)
             .network_info(network_info)
             .batch_size(1024)
             .mini_batch_size(64)
@@ -211,8 +211,8 @@ mod counter_env {
 
     impl Gym for CounterEnv {
         type Error = CounterEnvError;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Returns the initial position as unbatched `[1]` on the environment device.
         fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
@@ -242,12 +242,12 @@ mod counter_env {
             })
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
-            BoxSpace::new_with_universal_bounds([1, 1], -4.0, 4.0, &self.device)
-        }
-
         fn action_space(&self) -> Self::ActionSpace {
             Discrete::new(2).unwrap()
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            BoxSpace::new_with_universal_bounds([1, 1], -4.0, 4.0, &self.device)
         }
     }
 }
@@ -335,8 +335,8 @@ mod ppo_configuration {
             device.clone(),
         );
 
-        let observation_space = env.observation_space();
         let action_space = env.action_space();
+        let observation_space = env.observation_space();
 
         let actor_network = MLP::builder()
             .input_size(observation_space.shape()[0])
@@ -373,8 +373,8 @@ mod ppo_configuration {
             .unwrap();
 
         let mut agent = PPOAgent::builder()
-            .observation_space(observation_space)
             .action_space(action_space)
+            .observation_space(observation_space)
             .network_info(network_info)
             .batch_size(2048)
             .mini_batch_size(64)

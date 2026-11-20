@@ -89,8 +89,8 @@ where
     Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
 {
     type Error = VectorizedGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Removes the batch axis from rank-`BA` actions `[num_envs, ...action_shape]` before each Gym step, producing rank `A`.
     /// Stacks unbatched rank-`O` observations into rank `BO` and produces F32 rewards `[num_envs, 1]` on the observation device.
@@ -146,12 +146,12 @@ where
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.envs[0].observation_space()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.envs[0].action_space()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.envs[0].observation_space()
     }
 
     fn num_envs(&self) -> usize {
@@ -452,8 +452,8 @@ mod tests {
 
     impl Gym<(), 2, 2> for IntegerEnv {
         type Error = TestError;
-        type ObservationSpace = Discrete;
         type ActionSpace = Discrete;
+        type ObservationSpace = Discrete;
 
         /// Returns U64 observations `[1]` from Int actions `[1]` on the fixture CPU device.
         fn step(
@@ -477,11 +477,11 @@ mod tests {
             })
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
+        fn action_space(&self) -> Self::ActionSpace {
             Discrete::new(10).unwrap()
         }
 
-        fn action_space(&self) -> Self::ActionSpace {
+        fn observation_space(&self) -> Self::ObservationSpace {
             Discrete::new(10).unwrap()
         }
     }
@@ -505,8 +505,8 @@ mod tests {
 
     impl Gym<(), 4, 2> for ImageEnv {
         type Error = TestError;
-        type ObservationSpace = BoxSpace<4>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<4>;
 
         /// Accepts scalar Int actions `[1]` and returns unbatched F64 image observations `[1, 2, 2]`.
         fn step(
@@ -530,12 +530,12 @@ mod tests {
             })
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
-            BoxSpace::new_unbounded([1, 1, 2, 2], &Device::flex())
-        }
-
         fn action_space(&self) -> Self::ActionSpace {
             Discrete::new(2).unwrap()
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            BoxSpace::new_unbounded([1, 1, 2, 2], &Device::flex())
         }
     }
 

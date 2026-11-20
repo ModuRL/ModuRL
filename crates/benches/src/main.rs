@@ -271,8 +271,8 @@ fn ppo(args: &Args, device: &Device) -> Result<f64, Box<dyn Error>> {
         .build()?;
     let mut agent = debug_result(
         PPOAgent::builder()
-            .observation_space(envs.observation_space())
             .action_space(action_space)
+            .observation_space(envs.observation_space())
             .network_info(networks)
             .batch_size(PPO_ROLLOUT_SIZE)
             .mini_batch_size(PPO_ROLLOUT_SIZE / 4)
@@ -482,8 +482,8 @@ mod tests {
     #[cfg(feature = "cuda")]
     impl Gym<(), 4, 2> for ByteGym {
         type Error = std::convert::Infallible;
-        type ObservationSpace = atari::FrameObservationSpace;
         type ActionSpace = Discrete;
+        type ObservationSpace = atari::FrameObservationSpace;
 
         /// Returns a CPU U8 item [4, 84, 84].
         fn reset(&mut self) -> Result<ResetInfo<(), Tensor<3, Int>>, Self::Error> {
@@ -508,12 +508,12 @@ mod tests {
             })
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
-            atari::FrameObservationSpace
-        }
-
         fn action_space(&self) -> Discrete {
             Discrete::new(4).unwrap()
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            atari::FrameObservationSpace
         }
     }
 

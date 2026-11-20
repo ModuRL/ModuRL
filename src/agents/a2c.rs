@@ -230,8 +230,8 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
     /// Batch size must be divisible by the environment count.
     #[builder]
     pub fn new<N, const O: usize, const H: usize, const L: usize>(
-        observation_space: OS,
         action_space: AS,
+        observation_space: OS,
         network_info: A2CNetworkInfo<N>,
         #[builder(default = 0.99)] gamma: f64,
         #[builder(
@@ -259,8 +259,8 @@ impl<'a, G: PPOModelTypes, OS, AS, GE, I, const A: usize> A2CAgent<'a, G, OS, AS
         GE: std::fmt::Debug,
     {
         let inner = PPOAgent::builder()
-            .observation_space(observation_space)
             .action_space(action_space)
+            .observation_space(observation_space)
             .network_info(network_info.inner)
             .clipped(false)
             .clip_value_loss(false)
@@ -363,9 +363,9 @@ where
     GE: std::fmt::Debug,
 {
     type Error = A2CError<N::Error, GE, AS::Error>;
-    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
-    type ObservationSpace = OS;
+    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ActionSpace = AS, ObservationSpace = OS> + 'e;
     type ActionSpace = AS;
+    type ObservationSpace = OS;
     type ActContext<'c> = ();
     type TrainingActions = PolicySamples<AS, A2CError<N::Error, GE, AS::Error>, L, A>;
 
@@ -484,8 +484,8 @@ mod tests {
         let mut logger = RecordingLogger::default();
         let mut agent =
             A2CAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
-                .observation_space(env.observation_space())
                 .action_space(env.action_space())
+                .observation_space(env.observation_space())
                 .network_info(network.into())
                 .batch_size(2)
                 .training_horizon(4)
@@ -528,8 +528,8 @@ mod tests {
             .unwrap();
         let mut logger = RecordingLogger::default();
         let mut agent = A2CAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(A2CNetworkInfo::shared(network))
             .batch_size(2)
             .training_horizon(4)
@@ -620,8 +620,8 @@ mod tests {
             .unwrap();
         let mut agent =
             A2CAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
-                .observation_space(env.observation_space())
                 .action_space(env.action_space())
+                .observation_space(env.observation_space())
                 .network_info(network.into())
                 .batch_size(4)
                 .training_horizon(8)
@@ -698,7 +698,7 @@ mod tests {
             ])
             .unwrap()
         };
-        let build_agent = |observation_space, action_space| {
+        let build_agent = |action_space, observation_space| {
             let network = SeparateA2CNetwork::builder()
                 .actor_network(ProbabilisticPolicyModel::new(
                     model(2, &device),
@@ -712,8 +712,8 @@ mod tests {
                 .build()
                 .unwrap();
             A2CAgent::<_, _, _, VectorizedGymError<std::convert::Infallible>>::builder()
-                .observation_space(observation_space)
                 .action_space(action_space)
+                .observation_space(observation_space)
                 .network_info(network.into())
                 .batch_size(4)
                 .training_horizon(8)
@@ -724,13 +724,13 @@ mod tests {
         device.seed(153);
         let mut learned_env = build_env();
         let mut learned_agent =
-            build_agent(learned_env.observation_space(), learned_env.action_space());
+            build_agent(learned_env.action_space(), learned_env.observation_space());
         learned_agent.learn(&mut learned_env, 4).unwrap();
 
         device.seed(153);
         let mut caller_env = build_env();
         let mut caller_agent =
-            build_agent(caller_env.observation_space(), caller_env.action_space());
+            build_agent(caller_env.action_space(), caller_env.observation_space());
         let mut observations = caller_env.reset().unwrap();
         for _ in 0..2 {
             let actions = caller_agent

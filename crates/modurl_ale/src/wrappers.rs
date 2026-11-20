@@ -45,8 +45,8 @@ where
     G: Gym<I, O, 2, ActionSpace = Discrete>,
 {
     type Error = NoopResetGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = Discrete;
+    type ObservationSpace = G::ObservationSpace;
 
     fn reset(
         &mut self,
@@ -138,8 +138,8 @@ where
     I: AtariLives,
 {
     type Error = G::Error;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = Discrete;
+    type ObservationSpace = G::ObservationSpace;
 
     fn reset(
         &mut self,
@@ -216,8 +216,8 @@ where
     G: Gym<I, O, 2, ActionSpace = Discrete>,
 {
     type Error = FireResetGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = Discrete;
+    type ObservationSpace = G::ObservationSpace;
 
     fn reset(
         &mut self,
@@ -526,8 +526,8 @@ where
     Tensor<O, K>: PrevRank<Prev = Tensor<D, K>>,
 {
     type Error = WarpGymError<G::Error>;
-    type ObservationSpace = WarpObservationSpace<K>;
     type ActionSpace = Discrete;
+    type ObservationSpace = WarpObservationSpace<K>;
 
     /// Warps rank-D CPU RGB/grayscale reset observations to rank 2 [84, 84], preserving native dtype and metadata.
     fn reset(&mut self) -> Result<ResetInfo<I, Tensor<2, K>>, Self::Error> {
@@ -622,8 +622,8 @@ mod tests {
 
     impl Gym<AtariInfo> for ScriptGym {
         type Error = TensorReadError;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Steps with one scalar discrete action shaped `[1]`.
         fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo<AtariInfo>, Self::Error> {
@@ -665,12 +665,12 @@ mod tests {
             })
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
-            BoxSpace::new_with_universal_bounds([1, 1], 0.0, 10_000.0, &self.device)
-        }
-
         fn action_space(&self) -> Discrete {
             Discrete::new(4).unwrap()
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            BoxSpace::new_with_universal_bounds([1, 1], 0.0, 10_000.0, &self.device)
         }
     }
 
@@ -683,8 +683,8 @@ mod tests {
 
     impl Gym<AtariInfo, 4, 2> for ImageGym {
         type Error = std::convert::Infallible;
-        type ObservationSpace = crate::AtariObservationSpace<4>;
         type ActionSpace = Discrete;
+        type ObservationSpace = crate::AtariObservationSpace<4>;
 
         /// Returns CPU U8 RGB observations [210, 160, 3] without a batch axis.
         fn reset(&mut self) -> Result<ResetInfo<AtariInfo, Tensor<3, Int>>, Self::Error> {

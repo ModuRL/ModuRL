@@ -54,7 +54,7 @@ use modurl_gym::classic_control::cartpole::CartPoleV1;
 
 `modurl::prelude::*` brings the common ModuRL traits and training types into
 scope. `Agent` and `MultiGym` are traits that make `.learn()`,
-`.observation_space()`, and `.action_space()` available.
+`.action_space()`, and `.observation_space()` available.
 
 ### A Few Terms
 
@@ -105,16 +105,16 @@ them so PPO can collect multiple transitions per step.
 
 ### Read the Spaces
 
-Ask the environment for its observation and action spaces before building the
+Ask the environment for its action and observation spaces before building the
 networks:
 
 ```rust,ignore
-    let observation_space = env.observation_space();
     let action_space = env.action_space();
+    let observation_space = env.observation_space();
 ```
 
-The observation space determines the input size for both networks. The action
-space determines how many action logits the actor network must produce.
+The action space determines how many action logits the actor network must
+produce. The observation space determines the input size for both networks.
 
 ### Build the Actor Network
 
@@ -196,8 +196,8 @@ Finally, build the `PPOAgent` and run learning:
 
 ```rust,ignore
     let mut agent = PPOAgent::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
+        .observation_space(observation_space)
         .network_info(network_info)
         .batch_size(1024)
         .mini_batch_size(64)
@@ -251,8 +251,8 @@ fn main() {
         device.clone(),
     );
 
-    let observation_space = env.observation_space();
     let action_space = env.action_space();
+    let observation_space = env.observation_space();
 
     let actor_network = MLP::builder()
         .input_size(observation_space.shape()[0])
@@ -289,8 +289,8 @@ fn main() {
         .unwrap();
 
     let mut agent = PPOAgent::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
+        .observation_space(observation_space)
         .network_info(network_info)
         .batch_size(1024)
         .mini_batch_size(64)

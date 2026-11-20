@@ -93,8 +93,8 @@ impl Walker2dV5 {
 
 impl Gym for Walker2dV5 {
     type Error = MujocoError;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = BoxSpace<2>;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Returns unbatched F32 observations `[observation_size]` on CPU Flex with reset metadata.
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
@@ -127,11 +127,11 @@ impl Gym for Walker2dV5 {
         })
     }
 
-    fn observation_space(&self) -> BoxSpace<2> {
-        self.core.observation_space(self.exclude_x)
-    }
-
     fn action_space(&self) -> BoxSpace<2> {
         self.core.action_space()
+    }
+
+    fn observation_space(&self) -> BoxSpace<2> {
+        self.core.observation_space(self.exclude_x)
     }
 }

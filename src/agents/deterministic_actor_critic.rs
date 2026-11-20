@@ -1249,7 +1249,7 @@ where
     )]
     pub(crate) fn learn<I, const U: usize>(
         &mut self,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
+        env: &mut dyn MultiGym<I, O, A, Error = GE, ActionSpace = AS, ObservationSpace = OS>,
         num_timesteps: usize,
         logger: &mut dyn DeterministicActorCriticLogger<I, A>,
     ) -> Result<(), DeterministicActorCriticError<AE, GE, SE, CE>>

@@ -139,8 +139,8 @@ impl PendulumV1 {
 
 impl Gym for PendulumV1 {
     type Error = EnvironmentError;
-    type ObservationSpace = BoxSpace;
     type ActionSpace = BoxSpace;
+    type ObservationSpace = BoxSpace;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.state = [
@@ -191,12 +191,12 @@ impl Gym for PendulumV1 {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.observation_space.clone()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.action_space.clone()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 }
 

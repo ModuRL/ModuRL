@@ -90,9 +90,9 @@ where
         >,
     >,
     group_offsets: Vec<usize>,
+    action_space: G::ActionSpace,
     observation_space: G::ObservationSpace,
     observation_shape: Vec<usize>,
-    action_space: G::ActionSpace,
 }
 
 impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic + 'static, AK: Basic + 'static>
@@ -137,9 +137,9 @@ where
         Ok(Self {
             groups,
             group_offsets,
+            action_space,
             observation_space,
             observation_shape,
-            action_space,
         })
     }
 
@@ -166,8 +166,8 @@ where
     I: Send + 'static,
 {
     type Error = StackedMultiGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Splits rank-`A` actions `[total_size, ...action_shape]` into rank-`A` group batches and steps them concurrently.
     /// Returns concatenated rank-`O` observations `[total_size, ...observation_shape]` and rewards `[total_size, 1]`.
@@ -226,12 +226,12 @@ where
         )
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.observation_space.clone()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.action_space.clone()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 
     fn num_envs(&self) -> usize {
@@ -292,8 +292,8 @@ where
             <G::ActionSpace as TensorBatchTypes>::Kind,
         >,
     >,
-    observation_space: G::ObservationSpace,
     action_space: G::ActionSpace,
+    observation_space: G::ObservationSpace,
 }
 
 impl<
@@ -343,8 +343,8 @@ where
         }
         Ok(Self {
             envs,
-            observation_space,
             action_space,
+            observation_space,
         })
     }
 }
@@ -373,8 +373,8 @@ where
     I: Send + 'static,
 {
     type Error = VectorizedGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Sends rank-`BA` action slices `[1, ...action_shape]` to each worker's vectorizer, which removes the batch axis before Gym execution.
     /// Concatenates rank-`BO` observations `[1, ...observation_shape]` and F32 rewards `[1]` in environment order.
@@ -425,12 +425,12 @@ where
         Ok(combine_step_outputs::<I, Tensor<O, K>, BO, K>(steps))
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        self.observation_space.clone()
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         self.action_space.clone()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        self.observation_space.clone()
     }
 
     fn num_envs(&self) -> usize {

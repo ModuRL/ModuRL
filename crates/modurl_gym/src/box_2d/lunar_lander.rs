@@ -722,8 +722,8 @@ impl LunarLanderV3 {
 
 impl Gym for LunarLanderV3 {
     type Error = EnvironmentError;
-    type ObservationSpace = spaces::BoxSpace;
     type ActionSpace = spaces::Discrete;
+    type ObservationSpace = spaces::BoxSpace;
 
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
         self.destroy();
@@ -1215,6 +1215,11 @@ impl Gym for LunarLanderV3 {
         })
     }
 
+    fn action_space(&self) -> Self::ActionSpace {
+        // Discrete action space: 0=nop, 1=left engine, 2=main engine, 3=right engine
+        spaces::Discrete::new(4).expect("4 is a valid action count")
+    }
+
     fn observation_space(&self) -> Self::ObservationSpace {
         let low = vec![
             -2.5,
@@ -1239,11 +1244,6 @@ impl Gym for LunarLanderV3 {
         let low_tensor: Tensor<1> = Tensor::from_data(TensorData::new(low, [8]), &Device::flex());
         let high_tensor: Tensor<1> = Tensor::from_data(TensorData::new(high, [8]), &Device::flex());
         spaces::BoxSpace::new(low_tensor.unsqueeze::<2>(), high_tensor.unsqueeze::<2>())
-    }
-
-    fn action_space(&self) -> Self::ActionSpace {
-        // Discrete action space: 0=nop, 1=left engine, 2=main engine, 3=right engine
-        spaces::Discrete::new(4).expect("4 is a valid action count")
     }
 }
 
