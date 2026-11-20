@@ -1,5 +1,6 @@
 use burn::tensor::{
-    DType, Device, Float, IndexingUpdateOp, Int, Slice, Tensor, TensorCreationOptions, TensorData,
+    Bool, DType, Device, Float, IndexingUpdateOp, Int, Slice, Tensor, TensorCreationOptions,
+    TensorData, TensorReadError,
     kind::{Autodiff, Kind},
 };
 use rand::RngExt;
@@ -16,6 +17,8 @@ pub enum ExperienceReplayError<E> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayStorageError {
+    #[error(transparent)]
+    TensorRead(#[from] TensorReadError),
     #[error("replay field {field} has length {actual}, expected {expected}")]
     BatchLengthMismatch {
         field: &'static str,
@@ -229,14 +232,14 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
 
     /// Validates and stores `states` and `next_states` shaped `[environment_count, ...item_shape]` of rank `R`.
     /// Both tensors must match storage shape, kind, and dtype; they are transferred to the storage device.
-    /// Start must be a multiple of `environment_count` below capacity; `truncateds` has one flag per environment.
+    /// Start must be a multiple of `environment_count` below capacity; `truncated` is Bool `[environment_count, 1]`.
     /// Removes autodiff associations. Later state batches overwrite shared next-state rows.
     pub(crate) fn insert(
         &mut self,
         start: usize,
         states: Tensor<R, K>,
         next_states: Tensor<R, K>,
-        truncateds: &[bool],
+        truncated: &Tensor<2, Bool>,
     ) -> Result<usize, ReplayStorageError> {
         let capacity = self.shape()[0];
         let count = states.dims()[0];
@@ -258,18 +261,18 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
                 });
             }
         }
-        if truncateds.len() != count {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "truncateds",
-                expected: count,
-                actual: truncateds.len(),
-            });
-        }
+        validate_replay_shape("truncation", truncated, [count, 1])?;
+        let truncated = truncated
+            .clone()
+            .try_into_data()
+            .map_err(TensorReadError::from)?
+            .try_to_vec::<bool>()
+            .map_err(TensorReadError::from)?;
         self.validate_environment_count(count)?;
         let device = self.observations.device();
         let states = states.to_device(&device).without_autodiff();
         let next_states = next_states.to_device(&device).without_autodiff();
-        let offsets: Vec<_> = truncateds
+        let offsets: Vec<_> = truncated
             .iter()
             .enumerate()
             .filter_map(|(offset, &truncated)| truncated.then_some(offset))
@@ -369,7 +372,7 @@ impl<const R: usize, K: Autodiff> AlignedObservationReplay<R, K> {
 }
 
 /// Validates a replay tensor's shape against the expected shape.
-fn validate_replay_shape<const R: usize, K: Autodiff>(
+pub(crate) fn validate_replay_shape<const R: usize, K: Autodiff>(
     field: &'static str,
     tensor: &Tensor<R, K>,
     expected: [usize; R],
@@ -539,6 +542,13 @@ mod tests {
         }
     }
 
+    fn flags(values: &[bool]) -> Tensor<2, Bool> {
+        Tensor::from_data(
+            TensorData::new(values.to_vec(), [values.len(), 1]),
+            &Device::flex(),
+        )
+    }
+
     #[test]
     fn terminal_patches_preserve_bytes_duplicates_and_overwrites() {
         let device = Device::flex();
@@ -550,16 +560,20 @@ mod tests {
             (&device, DType::U8),
         );
         replay
-            .insert(0, batch(1), terminals, &[true, false, true])
+            .insert(0, batch(1), terminals, &flags(&[true, false, true]))
             .unwrap();
-        replay.insert(3, batch(2), batch(3), &[false; 3]).unwrap();
+        replay
+            .insert(3, batch(2), batch(3), &flags(&[false; 3]))
+            .unwrap();
         let (_, next) = replay.gather(&[2, 0, 2, 1]).unwrap();
         assert_eq!(next.dtype(), DType::U8);
         assert_eq!(
             next.clone().into_data().try_to_vec::<u8>().unwrap(),
             vec![28, 29, 30, 31, 20, 21, 22, 23, 28, 29, 30, 31, 2, 2, 2, 2]
         );
-        replay.insert(0, batch(4), batch(5), &[false; 3]).unwrap();
+        replay
+            .insert(0, batch(4), batch(5), &flags(&[false; 3]))
+            .unwrap();
         let (_, overwritten) = replay.gather(&[0, 2]).unwrap();
         assert_eq!(
             overwritten.into_data().try_to_vec::<u8>().unwrap(),
@@ -602,7 +616,7 @@ mod tests {
                 0,
                 Tensor::from_data([[false, false]], &device),
                 Tensor::from_data([[false, false]], &device),
-                &[true],
+                &flags(&[true]),
             )
             .unwrap();
         replay
@@ -610,7 +624,7 @@ mod tests {
                 1,
                 Tensor::from_data([[true, true]], &device),
                 Tensor::from_data([[true, true]], &device),
-                &[false],
+                &flags(&[false]),
             )
             .unwrap();
         let (states, next) = replay.gather(&[0, 0, 1]).unwrap();
@@ -638,7 +652,7 @@ mod tests {
         );
         let mut replay = AlignedObservationReplay::<2>::new([2, 2], 1, &device).unwrap();
         replay
-            .insert(0, input.clone(), input.clone() * 2.0, &[true])
+            .insert(0, input.clone(), input.clone() * 2.0, &flags(&[true]))
             .unwrap();
         let (states, next) = replay.gather(&[0]).unwrap();
         assert!(!states.is_autodiff());
@@ -775,29 +789,29 @@ mod tests {
             let (mut position, mut inserted) = (0, 0);
             for (ends, invalid) in steps {
                 let next_states: Vec<f32> = ids.by_ref().take(n).collect();
-                let truncateds: Vec<_> = ends.iter().map(|end| *end == EpisodeEnd::Truncate).collect();
+                let truncated: Vec<_> = ends.iter().map(|end| *end == EpisodeEnd::Truncate).collect();
                 if let Some(invalid) = invalid {
                     let before = gather_all(&replay);
                     let (states, next) = (batch(&observations, DType::F32), batch(&next_states, DType::F32));
                     let error = match invalid {
-                        0 => replay.insert(position, states, Tensor::zeros([n, 2], &device), &truncateds),
+                        0 => replay.insert(position, states, Tensor::zeros([n, 2], &device), &flags(&truncated)),
                         1 => replay.insert(
                             position,
                             batch(&observations, DType::F64),
                             batch(&next_states, DType::F64),
-                            &truncateds,
+                            &flags(&truncated),
                         ),
-                        2 => replay.insert(position, states, next, &vec![false; n + 1]),
-                        _ => replay.insert(position, Tensor::zeros([n + 1, 1], &device), Tensor::zeros([n + 1, 1], &device), &vec![false; n + 1]),
+                        2 => replay.insert(position, states, next, &flags(&vec![false; n + 1])),
+                        _ => replay.insert(position, Tensor::zeros([n + 1, 1], &device), Tensor::zeros([n + 1, 1], &device), &flags(&vec![false; n + 1])),
                     }
                     .unwrap_err();
-                    let expected = ["ShapeMismatch", "DTypeMismatch", "BatchLengthMismatch", "EnvironmentCountMismatch"];
+                    let expected = ["ShapeMismatch", "DTypeMismatch", "ShapeMismatch", "EnvironmentCountMismatch"];
                     prop_assert!(format!("{error:?}").starts_with(expected[invalid]), "{error:?}");
                     prop_assert_eq!(gather_all(&replay), before);
                 }
 
                 replay
-                    .insert(position, batch(&observations, DType::F32), batch(&next_states, DType::F32), &truncateds)
+                    .insert(position, batch(&observations, DType::F32), batch(&next_states, DType::F32), &flags(&truncated))
                     .unwrap();
                 for (env, end) in ends.into_iter().enumerate() {
                     let next = (end != EpisodeEnd::Terminate).then_some(next_states[env]);

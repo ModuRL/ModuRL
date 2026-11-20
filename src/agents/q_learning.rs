@@ -242,7 +242,7 @@ struct QLearningInsert<const R: usize, K: Autodiff> {
     actions: Tensor<2, Int>,
     rewards: Tensor<2>,
     next_terminated: Tensor<2, Bool>,
-    truncated: Vec<bool>,
+    next_truncated: Tensor<2, Bool>,
 }
 
 struct QLearningReplayStorage<const R: usize, K: Autodiff> {
@@ -317,6 +317,11 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 .into());
             }
         }
+        crate::buffers::experience_replay::validate_replay_shape(
+            "next truncation flags",
+            &transitions.next_truncated,
+            [count, 1],
+        )?;
         let reward_dtype = transitions.rewards.dtype();
         if let Some(rewards) = &self.rewards {
             rewards.validate_dtype("rewards", &transitions.rewards)?;
@@ -340,7 +345,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             start,
             transitions.observations,
             transitions.next_observations,
-            &transitions.truncated,
+            &transitions.next_truncated,
         )?;
         if let Some(observations) = new_observations {
             self.observations = Some(observations);
@@ -721,7 +726,10 @@ where
             actions: transitions.actions.clone(),
             rewards: transitions.rewards.clone(),
             next_terminated,
-            truncated: transitions.truncated.to_vec(),
+            next_truncated: Tensor::from_data(
+                TensorData::new(transitions.truncated.to_vec(), [environment_count, 1]),
+                &self.replay_storage_config.storage_device(),
+            ),
         })?;
         let mut completed_episodes = Vec::new();
         for (environment_index, reward) in reward_values.into_iter().enumerate() {

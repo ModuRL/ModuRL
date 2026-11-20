@@ -1393,7 +1393,10 @@ where
                     entropy.change_weight,
                     (&storage_device, self.dtype),
                 ),
-                truncated: truncated.clone(),
+                truncated: Tensor::from_data(
+                    TensorData::new(truncated.clone(), [count, 1]),
+                    &storage_device,
+                ),
             })?;
 
         let mut completed_episodes = Vec::new();

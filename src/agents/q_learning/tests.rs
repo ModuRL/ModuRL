@@ -350,7 +350,7 @@ fn replay_insert(values: &[f64], device: &Device) -> QLearningInsert<2, Float> {
         actions: Tensor::zeros([count, 1], (device, DType::U32)),
         rewards: Tensor::ones([count, 1], device),
         next_terminated: Tensor::from_data(TensorData::new(vec![false; count], [count, 1]), device),
-        truncated: vec![false; count],
+        next_truncated: Tensor::from_data(TensorData::new(vec![false; count], [count, 1]), device),
     }
 }
 
@@ -380,6 +380,14 @@ fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
     assert_eq!(batch.actions.dims(), [4, 1]);
     assert_eq!(batch.next_terminated.dims(), [4, 1]);
     assert_eq!(batch.rewards.dims(), [4, 1]);
+    let mut invalid = replay_insert(&[1.0, 2.0], &device);
+    invalid.next_truncated = Tensor::zeros([2, 2], &device);
+    assert!(matches!(
+        storage.insert(0, invalid),
+        Err(QLearningReplayError::Storage(
+            ReplayStorageError::ShapeMismatch { .. }
+        ))
+    ));
 }
 
 #[test]
@@ -402,7 +410,7 @@ fn replay_preserves_native_integer_and_boolean_observations() {
                 actions: Tensor::zeros([2, 1], (&device, DType::U32)),
                 rewards: Tensor::zeros([2, 1], &device),
                 next_terminated: Tensor::from_data([[false], [true]], &device),
-                truncated: vec![false; 2],
+                next_truncated: Tensor::from_data([[false], [false]], &device),
             },
         )
         .unwrap();
@@ -422,7 +430,7 @@ fn replay_preserves_native_integer_and_boolean_observations() {
                 actions: Tensor::zeros([2, 1], (&device, DType::U32)),
                 rewards: Tensor::zeros([2, 1], &device),
                 next_terminated: Tensor::from_data([[false], [false]], &device),
-                truncated: vec![true, false],
+                next_truncated: Tensor::from_data([[true], [false]], &device),
             },
         )
         .unwrap();
@@ -503,7 +511,7 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
             actions: Tensor::ones([2, 1], (&device, DType::U32)),
             rewards: Tensor::full([2, 1], 2.0, (&device, DType::F64)),
             next_terminated: Tensor::from_data([[false], [false]], &device),
-            truncated: vec![false; 2],
+            next_truncated: Tensor::from_data([[false], [false]], &device),
         })
         .unwrap();
     let before = agent.online_q_network.values.val().into_data();
