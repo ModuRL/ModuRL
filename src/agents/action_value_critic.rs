@@ -1135,14 +1135,16 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(critic.learning_rate(), 2.5);
-        let progress = ScheduleProgress::new(Some(10));
+        let mut progress = ScheduleProgress::new(Some(10));
+        progress.set_elapsed_steps(5);
         let loss = critic.online_network().weight.val().sum();
-        critic.backward_step(&loss, &progress.at_step(5)).unwrap();
+        critic.backward_step(&loss, &progress).unwrap();
         assert_eq!(critic.learning_rate(), 1.25);
         assert_eq!(numbers(critic.online_network().weight.val()), [-0.25; 3]);
+        progress.set_elapsed_steps(10);
         let loss = critic.online_network().weight.val().sum();
         assert!(matches!(
-            critic.backward_step(&loss, &progress.at_step(10)),
+            critic.backward_step(&loss, &progress),
             Err(ActionValueCriticError::InvalidLearningRate)
         ));
         assert_eq!(critic.learning_rate(), 1.25);

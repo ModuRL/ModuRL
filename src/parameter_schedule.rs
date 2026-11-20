@@ -34,13 +34,6 @@ impl ScheduleProgress {
         self.elapsed_steps = elapsed_steps;
     }
 
-    pub(crate) fn at_step(self, elapsed_steps: usize) -> Self {
-        Self {
-            elapsed_steps,
-            ..self
-        }
-    }
-
     pub fn elapsed_steps(&self) -> usize {
         self.elapsed_steps
     }

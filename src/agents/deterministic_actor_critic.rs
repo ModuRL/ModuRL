@@ -986,7 +986,8 @@ where
         }
         let batch = self.sample_batch()?;
         let targets = self.bellman_targets(&batch)?;
-        let progress = self.schedule_progress.at_step(collection_timestep);
+        let mut progress = self.schedule_progress;
+        progress.set_elapsed_steps(collection_timestep);
         let critic_update = self.optimize_critics(&batch, &targets, &progress)?;
         let actor_updated =
             (self.optimization_steps + 1).is_multiple_of(self.strategy.actor_update_interval());

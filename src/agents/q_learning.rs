@@ -620,7 +620,8 @@ where
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(());
         }
-        let progress = self.schedule_progress.at_step(collection_timestep);
+        let mut progress = self.schedule_progress;
+        progress.set_elapsed_steps(collection_timestep);
         let learning_rate = checked_learning_rate(progress.parameter(self.learning_rate.as_ref()))
             .ok_or(QLearningConfigurationError::InvalidLearningRate)?;
         let optimization_device = self.replay_storage_config.optimization_device();
