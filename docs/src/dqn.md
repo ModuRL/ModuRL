@@ -72,6 +72,11 @@ fn main() {
 The Burn optimizer updates the owned online model. The target model has no gradient graph.
 The agent copies the online model at construction and every 500 transitions.
 
+DQN and DDQN accept a constant `f64` or a `ParameterSchedule` in
+`.learning_rate(...)`. For example, use `LinearSchedule::new(2.5e-4, 1e-5)`
+to decay the rate over `training_horizon`. Each optimizer update uses its
+collection timestep; rates must stay finite and positive.
+
 The epsilon schedule decreases exploration from `1.0` to `0.05` during the
 first half of the 500,000-transition horizon. The agent collects 10,000
 transitions before its first update, then samples 128 replay entries every 10

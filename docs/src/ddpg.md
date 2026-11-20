@@ -108,6 +108,11 @@ configure the environment to emit F64 rewards or map them explicitly before pass
 Model parameters must use the optimization device.
 Replay stores detached transitions and uses terminal observations for truncation targets.
 
+The actor and critic learning-rate setters accept a constant `f64` or a
+`ParameterSchedule`. Each optimizer update evaluates its rate at its
+collection timestep relative to `training_horizon`; rates must stay finite
+and positive.
+
 Important defaults and constraints are:
 
 | Setting | Default | Constraint or effect |

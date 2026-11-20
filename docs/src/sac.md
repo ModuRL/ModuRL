@@ -121,7 +121,8 @@ let critic = ActionValueCritic::builder()
 ```
 
 Create each critic with its own online model and optimizer. Separate target models and parameter maps are unnecessary.
-`backward_step(&loss)` optimizes the online model from a Float loss `[1]` and leaves its target unchanged.
+`backward_step(&loss, &progress)` optimizes the online model from a Float loss `[1]`
+at the current schedule progress and leaves its target unchanged.
 `hard_update()` copies the online model into a detached target snapshot.
 `polyak_update(tau)` blends each floating-point target parameter with its matching online parameter.
 Both target-evaluation methods detach their results. Actor evaluation retains action gradients while excluding critic-parameter gradients.
@@ -216,6 +217,10 @@ agent.learn(&mut env, total_timesteps)?;
 `training_horizon` defines how many collected transitions parameter schedules
 take to reach their final values. Schedule progress continues across `learn`
 calls and stops at the end of the horizon.
+The actor, each critic, and the automatic temperature optimizer accept either
+a constant `f64` or a `ParameterSchedule` as their learning rate. Each rate
+is evaluated at the optimizer update's collection timestep and must stay finite
+and positive.
 
 Important defaults and constraints are:
 

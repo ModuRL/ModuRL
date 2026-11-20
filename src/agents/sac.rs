@@ -11,7 +11,7 @@ use burn::{
     optim::{GradientsParams, ModuleOptimizer},
     tensor::{Bool, Cast, DType, Device, Tensor, TensorData, TensorReadError, kind::Autodiff},
 };
-use std::{fmt::Debug, marker::PhantomData, num::NonZeroUsize};
+use std::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, sync::Arc};
 
 use self::replay::{SACOptimizationBatch, SACReplay, SACReplayInsert, SACReplayStorage};
 use super::{
@@ -20,6 +20,7 @@ use super::{
         ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,
         ActionValueCriticNetwork, aggregate_critic_values,
     },
+    checked_learning_rate,
 };
 use crate::{
     buffers::experience_replay::{
@@ -148,7 +149,7 @@ enum SACEntropyConfigurationKind {
     Automatic {
         log_alpha: Param<Tensor<1>>,
         optimizer: ModuleOptimizer,
-        learning_rate: f64,
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         target_entropy_schedule: Option<Box<dyn ParameterSchedule>>,
     },
     Fixed {
@@ -158,11 +159,11 @@ enum SACEntropyConfigurationKind {
 
 impl SACEntropyConfiguration {
     /// Owns Float log alpha `[1]` and its optimizer. Enables its gradients while preserving dtype and device.
-    /// Rejects a nonscalar layout, non-finite log alpha, or a nonpositive or non-finite learning rate.
+    /// Accepts a fixed or scheduled learning rate; rejects invalid initial values and nonscalar log alpha.
     pub fn automatic(
         log_alpha: Param<Tensor<1>>,
         optimizer: impl Into<ModuleOptimizer>,
-        learning_rate: f64,
+        learning_rate: impl ParameterSchedule + Send + Sync + 'static,
     ) -> Result<Self, SACConfigurationError> {
         if log_alpha.val().dims() != [1] {
             return Err(SACConfigurationError::InvalidLogAlphaShape);
@@ -170,7 +171,7 @@ impl SACEntropyConfiguration {
         if !log_alpha.val().try_into_scalar::<f64>()?.is_finite() {
             return Err(SACConfigurationError::InvalidLogAlpha);
         }
-        if !learning_rate.is_finite() || learning_rate <= 0.0 {
+        if checked_learning_rate(learning_rate.value(0.0)).is_none() {
             return Err(SACConfigurationError::InvalidLearningRate);
         }
 
@@ -178,7 +179,7 @@ impl SACEntropyConfiguration {
             kind: SACEntropyConfigurationKind::Automatic {
                 log_alpha: log_alpha.train(),
                 optimizer: optimizer.into(),
-                learning_rate,
+                learning_rate: Arc::new(learning_rate),
                 target_entropy_schedule: None,
             },
         })
@@ -189,7 +190,7 @@ impl SACEntropyConfiguration {
     pub fn automatic_with_target_schedule(
         log_alpha: Param<Tensor<1>>,
         optimizer: impl Into<ModuleOptimizer>,
-        learning_rate: f64,
+        learning_rate: impl ParameterSchedule + Send + Sync + 'static,
         target_entropy_schedule: impl ParameterSchedule + 'static,
     ) -> Result<Self, SACConfigurationError> {
         if !target_entropy_schedule.value(0.0).is_finite()
@@ -453,7 +454,7 @@ where
 pub struct SACAgent<'a, G: SACModelTypes, OS, AS, GE, I = (), const A: usize = 2> {
     policy: G::Policy,
     actor_optimizer: ModuleOptimizer,
-    actor_learning_rate: f64,
+    actor_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
     critics: Vec<ActionValueCritic<G::Critic>>,
     entropy_configuration: SACEntropyConfiguration,
     aggregation_mode: ActionValueCriticAggregationMode,
@@ -496,7 +497,8 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
     >(
         policy: P,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
-        actor_learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        actor_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         critics: Vec<ActionValueCritic<N>>,
         entropy_configuration: SACEntropyConfiguration,
         action_space: AS,
@@ -563,7 +565,7 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
             .batch_size(batch_size)
             .gamma(gamma)
             .tau(tau)
-            .actor_learning_rate(actor_learning_rate)
+            .actor_learning_rate(actor_learning_rate.value(0.0))
             .dtype(dtype)
             .maybe_entropy_change_penalty(entropy_change_penalty)
             .maybe_q_value_clip(q_value_clip)
@@ -883,6 +885,7 @@ where
         &mut self,
         batch: &SACOptimizationBatch<O, A, OS::Kind, AS::Kind>,
         targets: &Tensor<2>,
+        progress: &ScheduleProgress,
     ) -> Result<Vec<Tensor<1>>, SACError<PE, GE, SE, CE>> {
         let mut losses = Vec::with_capacity(self.critics.len());
 
@@ -908,7 +911,7 @@ where
                 None => (predicted - targets.clone().detach()).square().mean() * 0.5,
             };
 
-            critic.backward_step(&loss)?;
+            critic.backward_step(&loss, progress)?;
             losses.push(loss.detach());
         }
 
@@ -929,7 +932,11 @@ where
     fn optimize_actor(
         &mut self,
         batch: &SACOptimizationBatch<O, A, OS::Kind, AS::Kind>,
+        progress: &ScheduleProgress,
     ) -> Result<SACActorUpdate, SACError<PE, GE, SE, CE>> {
+        let learning_rate =
+            checked_learning_rate(progress.parameter(self.actor_learning_rate.as_ref()))
+                .ok_or(SACConfigurationError::InvalidLearningRate)?;
         let terms = self
             .policy
             .expectation(batch.observations.clone(), self.samples)
@@ -973,9 +980,9 @@ where
             .map_or(base_loss.clone(), |penalty| base_loss + penalty.clone());
 
         let gradients = GradientsParams::from_grads(loss.clone().backward(), &self.policy);
-        self.policy =
-            self.actor_optimizer
-                .step(self.actor_learning_rate, self.policy.clone(), gradients);
+        self.policy = self
+            .actor_optimizer
+            .step(learning_rate, self.policy.clone(), gradients);
 
         Ok(SACActorUpdate {
             loss: loss.detach(),
@@ -1002,6 +1009,7 @@ where
         observations: &Tensor<O, OS::Kind>,
         log_probabilities: &Tensor<3>,
         weights: &Tensor<3>,
+        progress: &ScheduleProgress,
     ) -> Result<SACTemperatureUpdate, SACError<PE, GE, SE, CE>> {
         match &mut self.entropy_configuration.kind {
             SACEntropyConfigurationKind::Automatic {
@@ -1010,6 +1018,9 @@ where
                 learning_rate,
                 target_entropy_schedule,
             } => {
+                let learning_rate =
+                    checked_learning_rate(progress.parameter(learning_rate.as_ref()))
+                        .ok_or(SACConfigurationError::InvalidLearningRate)?;
                 let expected = (log_probabilities.clone() * weights.clone())
                     .sum_dim(1)
                     .squeeze_dim::<2>(1)
@@ -1028,7 +1039,7 @@ where
 
                 let loss = sac_alpha_loss(&log_alpha.val(), &expected, target);
                 let gradients = GradientsParams::from_grads(loss.clone().backward(), log_alpha);
-                *log_alpha = optimizer.step(*learning_rate, log_alpha.clone(), gradients);
+                *log_alpha = optimizer.step(learning_rate, log_alpha.clone(), gradients);
 
                 Ok(SACTemperatureUpdate {
                     loss: Some(loss.detach()),
@@ -1070,12 +1081,15 @@ where
         batch.entropy_change_weights = batch.entropy_change_weights.to_device(&device);
 
         let targets = self.compute_bellman_targets(&batch)?;
-        let critic_losses = self.optimize_critics(&batch, &targets)?;
-        let actor = self.optimize_actor(&batch)?;
+        let mut progress = self.schedule_progress;
+        progress.set_elapsed_steps(collection_timestep);
+        let critic_losses = self.optimize_critics(&batch, &targets, &progress)?;
+        let actor = self.optimize_actor(&batch, &progress)?;
         let temperature = self.optimize_temperature(
             &batch.observations,
             &actor.log_probabilities,
             &actor.weights,
+            &progress,
         )?;
 
         for critic in &mut self.critics {
@@ -1594,7 +1608,7 @@ fn validate_sac_configuration(
         return Err(SACConfigurationError::InvalidTau);
     }
 
-    if !actor_learning_rate.is_finite() || actor_learning_rate <= 0.0 {
+    if checked_learning_rate(actor_learning_rate).is_none() {
         return Err(SACConfigurationError::InvalidLearningRate);
     }
 

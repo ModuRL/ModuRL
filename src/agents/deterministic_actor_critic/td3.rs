@@ -18,6 +18,7 @@ use crate::{
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
+    parameter_schedule::ParameterSchedule,
     spaces::{ActionMap, ObservationSpace},
     tensor_rank::{NextRank, TensorBatchTypes},
 };
@@ -27,7 +28,7 @@ use burn::{
     optim::ModuleOptimizer,
     tensor::{DType, Device, Float, Tensor, kind::Autodiff},
 };
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 /// Receives TD3 replay-update and collection metrics.
 pub trait TD3Logger<I = (), const A: usize = 2> {
@@ -136,7 +137,8 @@ impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
     pub fn new<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
         online_actor: M,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
-        actor_learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        actor_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         critics: Vec<ActionValueCritic<N>>,
         action_space: AS,
         observation_space: OS,
@@ -443,7 +445,10 @@ mod tests {
             assert_eq!(entry.policy_actions.is_some(), entry.actor_updated);
             assert_eq!(entry.actor_loss.is_some(), entry.actor_updated);
             assert_eq!(entry.policy_q_values.is_some(), entry.actor_updated);
-            assert_eq!(entry.actor_learning_rate, 0.01);
+            assert_eq!(
+                entry.actor_learning_rate,
+                entry.actor_updated.then_some(0.01)
+            );
         }
 
         fn log_collection(&mut self, entry: &DeterministicActorCriticCollectionLogEntry) {

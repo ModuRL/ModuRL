@@ -11,6 +11,7 @@ use std::{marker::PhantomData, sync::Arc};
 
 use super::PPOConfigurationError;
 use crate::{
+    agents::checked_learning_rate,
     models::{Forward, probabilistic_model::ProbabilisticPolicy},
     parameter_schedule::{ParameterSchedule, ScheduleProgress},
     tensor_rank::{NextRank, PrevRank},
@@ -227,14 +228,7 @@ impl<A: Module, C: Module> SeparatePPONetwork<A, C> {
 }
 
 fn initial_learning_rate(schedule: &dyn ParameterSchedule) -> Result<f64, PPOConfigurationError> {
-    checked_learning_rate(schedule.value(0.0))
-}
-
-fn checked_learning_rate(learning_rate: f64) -> Result<f64, PPOConfigurationError> {
-    if !learning_rate.is_finite() || learning_rate <= 0.0 {
-        return Err(PPOConfigurationError::InvalidLearningRate);
-    }
-    Ok(learning_rate)
+    checked_learning_rate(schedule.value(0.0)).ok_or(PPOConfigurationError::InvalidLearningRate)
 }
 
 /// Executes an owned PPO network configuration with native tensor kinds and explicit batch ranks.
@@ -385,7 +379,8 @@ where
         learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         progress: &ScheduleProgress,
     ) -> Result<(), PPOConfigurationError> {
-        self.learning_rate = checked_learning_rate(progress.parameter(&*learning_rate))?;
+        self.learning_rate = checked_learning_rate(progress.parameter(&*learning_rate))
+            .ok_or(PPOConfigurationError::InvalidLearningRate)?;
         self.learning_rate_schedule = learning_rate;
         Ok(())
     }
@@ -519,7 +514,8 @@ where
         learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         progress: &ScheduleProgress,
     ) -> Result<(), PPOConfigurationError> {
-        let rate = checked_learning_rate(progress.parameter(&*learning_rate))?;
+        let rate = checked_learning_rate(progress.parameter(&*learning_rate))
+            .ok_or(PPOConfigurationError::InvalidLearningRate)?;
         self.actor_learning_rate = rate;
         self.critic_learning_rate = rate;
         self.actor_learning_rate_schedule = learning_rate.clone();

@@ -5,6 +5,7 @@ use burn::{
     optim::ModuleOptimizer,
     tensor::{Bool, Cast, Device, Float, FloatDType, Int, Tensor, kind::Autodiff},
 };
+use std::sync::Arc;
 
 use super::{
     QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
@@ -103,7 +104,8 @@ where
         observation_space: S,
         online_q_network: M,
         #[builder(into)] optimizer: ModuleOptimizer,
-        learning_rate: f64,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         #[builder(default = 1000)] target_update_interval: usize,
         #[builder(
             default = Box::new(LinearSchedule::new(1.0, 0.1)),

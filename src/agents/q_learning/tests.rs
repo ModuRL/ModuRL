@@ -218,7 +218,7 @@ fn float_agent(
         .observation_space(BoxSpace::new_unbounded([1, 1], device))
         .online_q_network(network(&device.clone().autodiff(), DType::F32))
         .optimizer(SgdConfig::new().init())
-        .learning_rate(0.01)
+        .learning_rate(Arc::new(0.01))
         .epsilon_schedule(LinearSchedule::new(1.0, 0.0))
         .replay_capacity(8)
         .batch_size(1)
@@ -484,7 +484,7 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
         .observation_space(ObservationFixture::<3, Bool> { _kind: PhantomData })
         .online_q_network(network(&device, DType::F64))
         .optimizer(SgdConfig::new().init())
-        .learning_rate(0.01)
+        .learning_rate(Arc::new(0.01))
         .epsilon_schedule(LinearSchedule::new(0.0, 0.0))
         .replay_capacity(8)
         .batch_size(2)
@@ -674,6 +674,15 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
     ])
     .unwrap();
     let mut agent = float_agent(&device);
+    agent.learning_rate = Arc::new(|progress: f64| {
+        if progress < 0.4 {
+            0.01
+        } else if progress < 0.6 {
+            0.02
+        } else {
+            0.03
+        }
+    });
     assert!(!agent.target_q_network.values.val().is_require_grad());
     let initial_target = agent.target_q_network.values.val().into_data();
     let mut logger = Logger::default();
@@ -681,7 +690,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
     assert_eq!(agent.schedule_progress.elapsed_steps(), 4);
     assert_eq!(agent.current_epsilon, 0.6);
     assert_eq!(logger.updates, [4]);
-    assert_eq!(logger.learning_rates, [0.01]);
+    assert_eq!(logger.learning_rates, [0.02]);
     assert_eq!(logger.rewards, [vec![2.0, 2.0], vec![2.0, 2.0]]);
     assert_eq!(logger.episodes.len(), 2);
     assert_eq!(
@@ -728,6 +737,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
     agent.learn(&mut env, 2, &mut logger).unwrap();
     assert_eq!(agent.schedule_progress.elapsed_steps(), 6);
     assert_eq!(logger.updates, [4, 6]);
+    assert_eq!(logger.learning_rates, [0.02, 0.03]);
     assert_ne!(
         agent.online_q_network.values.val().into_data(),
         agent.target_q_network.values.val().into_data()
@@ -812,7 +822,7 @@ fn builder_rejects_invalid_learning_rates() {
             .observation_space(BoxSpace::new_unbounded([1, 1], &device))
             .online_q_network(network(&device, DType::F32))
             .optimizer(SgdConfig::new().init())
-            .learning_rate(rate)
+            .learning_rate(Arc::new(rate))
             .training_horizon(10)
             .build()
     };
