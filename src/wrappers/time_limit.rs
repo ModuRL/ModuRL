@@ -8,6 +8,12 @@ use crate::{
     spaces::{ActionSpace, ObservationSpace},
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TimeLimitGymConfigurationError {
+    #[error("max episode steps must be nonzero")]
+    ZeroMaxEpisodeSteps,
+}
+
 /// Truncates an episode after a fixed number of environment steps.
 pub struct TimeLimitGym<G> {
     gym: G,
@@ -16,16 +22,16 @@ pub struct TimeLimitGym<G> {
 }
 
 impl<G> TimeLimitGym<G> {
-    pub fn new(gym: G, max_episode_steps: usize) -> Self {
-        assert!(
-            max_episode_steps > 0,
-            "max_episode_steps must be at least 1"
-        );
-        Self {
+    /// Rejects a zero `max_episode_steps`.
+    pub fn new(gym: G, max_episode_steps: usize) -> Result<Self, TimeLimitGymConfigurationError> {
+        if max_episode_steps == 0 {
+            return Err(TimeLimitGymConfigurationError::ZeroMaxEpisodeSteps);
+        }
+        Ok(Self {
             gym,
             max_episode_steps,
             elapsed_steps: 0,
-        }
+        })
     }
 }
 
@@ -112,7 +118,7 @@ mod tests {
     use burn::tensor::{DType, Device, Int, Tensor};
     use std::convert::Infallible;
 
-    use super::TimeLimitGym;
+    use super::{TimeLimitGym, TimeLimitGymConfigurationError};
     use crate::wrappers::state_test_support::{
         StateTestGym, action as state_action, assert_state_round_trip,
     };
@@ -161,12 +167,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_max_episode_steps() {
+        assert!(matches!(
+            TimeLimitGym::new((), 0),
+            Err(TimeLimitGymConfigurationError::ZeroMaxEpisodeSteps)
+        ));
+    }
+
+    #[test]
     fn truncates_at_limit_and_resets_elapsed_steps() {
         let gym = TestGym {
             terminated: false,
             truncated: false,
         };
-        let mut wrapper = TimeLimitGym::new(gym, 2);
+        let mut wrapper = TimeLimitGym::new(gym, 2).unwrap();
 
         wrapper.reset().unwrap();
         let first = wrapper.step(action()).unwrap();
@@ -188,7 +202,8 @@ mod tests {
                     truncated,
                 },
                 1,
-            );
+            )
+            .unwrap();
             let step = wrapper.step(action()).unwrap();
             assert_eq!((step.terminated, step.truncated), (terminated, truncated));
         }
@@ -202,7 +217,8 @@ mod tests {
                 truncated: false,
             },
             1,
-        );
+        )
+        .unwrap();
         let reset = wrapper.reset().unwrap();
         assert_eq!(reset.info, 7);
         assert_eq!(reset.observation.dims(), [2]);
@@ -224,7 +240,7 @@ mod tests {
     #[test]
     fn restores_elapsed_steps_and_inner_state() {
         assert_state_round_trip(
-            TimeLimitGym::new(StateTestGym::new(13), 4),
+            TimeLimitGym::new(StateTestGym::new(13), 4).unwrap(),
             state_action(),
             1,
             3,
@@ -235,7 +251,7 @@ mod tests {
 
     #[test]
     fn truncates_at_usize_step_limit_from_saved_state() {
-        let mut wrapper = TimeLimitGym::new(StateTestGym::new(13), usize::MAX);
+        let mut wrapper = TimeLimitGym::new(StateTestGym::new(13), usize::MAX).unwrap();
         let (inner_state, _) = wrapper.save_state().unwrap();
         wrapper.set_state(&(inner_state, usize::MAX - 1)).unwrap();
 
@@ -245,7 +261,7 @@ mod tests {
 
     #[test]
     fn forwards_legal_actions_from_inner_gym() {
-        let mut wrapper = TimeLimitGym::new(StateTestGym::new(13), 4);
+        let mut wrapper = TimeLimitGym::new(StateTestGym::new(13), 4).unwrap();
 
         assert_eq!(wrapper.legal_actions().unwrap(), vec![0, 1]);
         wrapper.step(state_action()).unwrap();

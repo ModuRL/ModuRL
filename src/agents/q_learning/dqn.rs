@@ -8,7 +8,8 @@ use burn::{
 use std::sync::Arc;
 
 use super::{
-    QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
+    QAgentError, QCollectionLogEntry, QLearningAgent, QLearningConfigurationError, QLearningLogger,
+    QLearningTarget, QLogEntry,
 };
 use crate::{
     agents::Agent,
@@ -121,7 +122,7 @@ where
         #[builder(default)] legal_action_mask: bool,
         logger: Option<&'a mut dyn DQNLogger<I>>,
         replay_device: Option<Device>,
-    ) -> Result<Self, QAgentError<GE, ME>> {
+    ) -> Result<Self, QLearningConfigurationError> {
         let inner = QLearningAgent::<M, S, GE, DQNTarget, R>::builder()
             .action_space(action_space)
             .observation_space(observation_space)
@@ -215,10 +216,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        agents::q_learning::{
-            QLearningConfigurationError,
-            tests::{ObservationFixture, network},
-        },
+        agents::q_learning::tests::{ObservationFixture, network},
         agents::test_support::FixedEnv,
         gym::{VectorizedGymError, VectorizedGymWrapper},
         models::MaskedLogits,
@@ -354,9 +352,7 @@ mod tests {
             .build();
         assert!(matches!(
             result,
-            Err(QAgentError::ConfigurationError(
-                QLearningConfigurationError::LegalActionMaskRequiresRank2 { actual: 4 }
-            ))
+            Err(QLearningConfigurationError::LegalActionMaskRequiresRank2 { actual: 4 })
         ));
     }
 

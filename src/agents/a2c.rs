@@ -588,7 +588,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        let mut progress = crate::parameter_schedule::ScheduleProgress::new(Some(8));
+        let mut progress = crate::parameter_schedule::ScheduleProgress::new(Some(8)).unwrap();
         progress.advance_steps(2);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut shared.inner, &progress);
         PPONetwork::<2, 2, 2>::update_learning_rates(&mut separate.inner, &progress);

@@ -81,9 +81,9 @@ pub(super) struct SACReplayInsert<const O: usize, const A: usize, K: Autodiff, L
     pub actions: Tensor<A, L>,
     pub rewards: Tensor<2>,
     pub terminated: Tensor<2, Bool>,
+    pub truncated: Tensor<2, Bool>,
     pub collection_policy_entropies: Tensor<2>,
     pub entropy_change_weights: Tensor<2>,
-    pub truncated: Vec<bool>,
 }
 
 pub(super) struct SACOptimizationBatch<const O: usize, const A: usize, K: Autodiff, L: Autodiff> {
@@ -174,14 +174,7 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
             [count, 1],
         )?;
 
-        if transitions.truncated.len() != count {
-            return Err(ReplayStorageError::BatchLengthMismatch {
-                field: "truncations",
-                expected: count,
-                actual: transitions.truncated.len(),
-            }
-            .into());
-        }
+        validate_shape("truncation", &transitions.truncated, [count, 1])?;
 
         Ok(count)
     }
@@ -306,7 +299,7 @@ mod tests {
             terminated: Tensor::from_data([[false], [true]], device),
             collection_policy_entropies: Tensor::zeros([2, 1], device),
             entropy_change_weights: Tensor::zeros([2, 1], device),
-            truncated: vec![true, false],
+            truncated: Tensor::from_data([[true], [false]], device),
         }
     }
 
@@ -389,6 +382,15 @@ mod tests {
                 .unwrap(),
             [10, 20]
         );
+        let mut invalid = integer_transitions(&device, DType::I64);
+        invalid.truncated = Tensor::zeros([2, 2], &device);
+        assert!(matches!(
+            storage.insert(0, invalid),
+            Err(SACReplayError::Shape {
+                field: "truncation",
+                ..
+            })
+        ));
         let invalid = integer_transitions(&device, DType::I32);
         assert!(matches!(
             storage.insert(0, invalid),
@@ -464,7 +466,7 @@ mod tests {
                         terminated: Tensor::from_data([[false], [false]], &device),
                         collection_policy_entropies: Tensor::zeros([2, 1], &device),
                         entropy_change_weights: Tensor::zeros([2, 1], &device),
-                        truncated: vec![true, false],
+                        truncated: Tensor::from_data([[true], [false]], &device),
                     },
                 )
                 .unwrap();
@@ -510,7 +512,7 @@ mod tests {
             terminated: Tensor::from_data([[false], [false]], &device),
             collection_policy_entropies: Tensor::zeros([2, 1], &device),
             entropy_change_weights: Tensor::zeros([2, 1], &device),
-            truncated: vec![true, false],
+            truncated: Tensor::from_data([[true], [false]], &device),
         };
         transitions.rewards = Tensor::ones([2, 2], &device);
         assert!(matches!(
@@ -541,7 +543,7 @@ mod tests {
                     terminated: Tensor::from_data([[false], [false]], &device),
                     collection_policy_entropies: Tensor::zeros([2, 1], &device),
                     entropy_change_weights: Tensor::zeros([2, 1], &device),
-                    truncated: vec![true, false],
+                    truncated: Tensor::from_data([[true], [false]], &device),
                 },
             )
             .unwrap();

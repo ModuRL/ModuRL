@@ -27,6 +27,12 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - Added `modurl::tensor_rank::{NextRank, PrevRank}` to infer tensor types with one more or one fewer axis.
   These traits preserve kind without converting values. `NextRank` covers ranks 1–1024; `PrevRank` covers ranks 2–1025.
 
+- Replay insertion now represents truncation as a Bool tensor `[count, 1]`, matching
+  termination. Truncation is consumed during aligned next-observation handling, not
+  stored as a replay column or included in sampled batches. Insert fields are named
+  `truncated` (SAC and DDPG/TD3) or `next_truncated` (DQN/DDQN).
+  Truncation still bootstraps; only termination masks Bellman targets.
+
 ### Tensor shapes and space traits
 
 - Removed the combined `Space` trait. Implement `ActionSpace<A>` for action checks and sampling,
@@ -57,6 +63,11 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Environments and agents
 
+- DQN and DDQN builders now return `QLearningConfigurationError` directly instead of
+  `QAgentError`. Configuration-time tensor reads use its `Tensor` variant;
+  runtime failures continue to use `QAgentError`. `QLearningConfigurationError`
+  no longer implements `Clone`, `Copy`, `PartialEq`, or `Eq` because it can contain
+  a tensor read error.
 - PPO and A2C use `.logger(...)` instead of `.logging_info(...)` to match the other agents.
 - All agent optimizers accept constant `f64` learning rates or a `ParameterSchedule`.
   Off-policy updates evaluate the rate at their collection timestep; invalid rates return an error.

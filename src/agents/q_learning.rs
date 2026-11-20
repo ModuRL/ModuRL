@@ -19,7 +19,9 @@ use crate::{
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
-    parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
+    parameter_schedule::{
+        LinearSchedule, ParameterSchedule, ScheduleProgress, ScheduleProgressError,
+    },
     spaces::{ActionSpace, Discrete, ObservationSpace, SpaceError},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
@@ -29,8 +31,10 @@ use crate::{
 pub mod ddqn;
 pub mod dqn;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum QLearningConfigurationError {
+    #[error("reading Q-learning configuration failed: {0}")]
+    Tensor(#[from] TensorReadError),
     #[error("Q-network parameters must share one device")]
     ModelDevice,
     #[error("replay capacity must be nonzero")]
@@ -242,7 +246,7 @@ struct QLearningInsert<const R: usize, K: Autodiff> {
     actions: Tensor<2, Int>,
     rewards: Tensor<2>,
     next_terminated: Tensor<2, Bool>,
-    truncated: Vec<bool>,
+    next_truncated: Tensor<2, Bool>,
 }
 
 struct QLearningReplayStorage<const R: usize, K: Autodiff> {
@@ -317,6 +321,11 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 .into());
             }
         }
+        crate::buffers::experience_replay::validate_replay_shape(
+            "next truncation flags",
+            &transitions.next_truncated,
+            [count, 1],
+        )?;
         let reward_dtype = transitions.rewards.dtype();
         if let Some(rewards) = &self.rewards {
             rewards.validate_dtype("rewards", &transitions.rewards)?;
@@ -340,7 +349,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             start,
             transitions.observations,
             transitions.next_observations,
-            &transitions.truncated,
+            &transitions.next_truncated,
         )?;
         if let Some(observations) = new_observations {
             self.observations = Some(observations);
@@ -469,18 +478,16 @@ where
         training_horizon: Option<usize>,
         replay_device: Option<Device>,
         #[builder(default)] legal_action_mask: bool,
-    ) -> Result<Self, QAgentError<GE, ME>> {
+    ) -> Result<Self, QLearningConfigurationError> {
         const {
             assert!(R >= 2, "observations require batch and item axes");
         }
         if checked_learning_rate(learning_rate.value(0.0)).is_none() {
-            return Err(QLearningConfigurationError::InvalidLearningRate.into());
+            return Err(QLearningConfigurationError::InvalidLearningRate);
         }
         let observation_shape = observation_space.shape();
         if legal_action_mask && R != 2 {
-            return Err(
-                QLearningConfigurationError::LegalActionMaskRequiresRank2 { actual: R }.into(),
-            );
+            return Err(QLearningConfigurationError::LegalActionMaskRequiresRank2 { actual: R });
         }
         let initial_epsilon = epsilon_schedule.value(0.0);
         QLearningConfigurationValidator::validate_configuration()
@@ -530,7 +537,11 @@ where
             learning_rate,
             current_epsilon: initial_epsilon,
             epsilon_schedule,
-            schedule_progress: ScheduleProgress::new(training_horizon),
+            schedule_progress: ScheduleProgress::new(training_horizon).map_err(
+                |ScheduleProgressError::ZeroTrainingHorizon| {
+                    QLearningConfigurationError::ZeroTrainingHorizon
+                },
+            )?,
             action_space,
             observation_space,
             experience_replay: ExperienceReplay::with_storage(replay_storage, batch_size),
@@ -721,7 +732,10 @@ where
             actions: transitions.actions.clone(),
             rewards: transitions.rewards.clone(),
             next_terminated,
-            truncated: transitions.truncated.to_vec(),
+            next_truncated: Tensor::from_data(
+                TensorData::new(transitions.truncated.to_vec(), [environment_count, 1]),
+                &self.replay_storage_config.storage_device(),
+            ),
         })?;
         let mut completed_episodes = Vec::new();
         for (environment_index, reward) in reward_values.into_iter().enumerate() {

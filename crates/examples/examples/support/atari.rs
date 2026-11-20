@@ -100,10 +100,10 @@ pub fn make_atari_env(
     let _ = render;
     let mut env = builder.build().expect("failed to load the Atari ROM");
     let has_fire = env.minimal_action_set().contains(&1);
-    let env = TimeLimitGym::new(env, max_episode_frames);
+    let env = TimeLimitGym::new(env, max_episode_frames).unwrap();
     let env = RecordEpisodeStatisticsGym::new(env);
     let env = NoopResetGym::new_with_noop_max(env, 30);
-    let env = MaxAndSkipGym::new(env, 4);
+    let env = MaxAndSkipGym::new(env, 4).unwrap();
     let env = EpisodicLifeGym::new(env, &Device::flex());
     let env = if has_fire {
         OptionalFireResetGym::Fire(FireResetGym::new(env))
@@ -113,5 +113,5 @@ pub fn make_atari_env(
     let env = RecordRawRewardGym::new(env);
     let env = ClipRewardGym::new(env);
     let env = WarpGym::new(env);
-    FrameStackGym::new(env, 4, FrameObservationSpace)
+    FrameStackGym::new(env, 4, FrameObservationSpace).unwrap()
 }
