@@ -469,7 +469,7 @@ pub struct SACAgent<'a, G: SACModelTypes, OS, AS, GE, I = (), const A: usize = 2
     gamma: f64,
     tau: f64,
     training_start: usize,
-    samples: usize,
+    samples: NonZeroUsize,
     entropy_change_penalty: Option<f64>,
     q_value_clip: Option<f64>,
     schedule_progress: ScheduleProgress,
@@ -575,6 +575,7 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
             .maybe_q_value_clip(q_value_clip)
             .maybe_training_horizon(training_horizon)
             .call()?;
+        let samples = NonZeroUsize::new(samples).ok_or(SACConfigurationError::ZeroSamples)?;
 
         let replay_storage_config = ReplayStorageConfig::from_models(
             policy.devices().into_iter().chain(
@@ -838,10 +839,7 @@ where
     ) -> Result<Tensor<2>, SACError<PE, GE, SE, CE>> {
         let terms = self
             .policy
-            .expectation(
-                batch.next_observations.clone(),
-                NonZeroUsize::new(self.samples).expect("samples validated at construction"),
-            )
+            .expectation(batch.next_observations.clone(), self.samples)
             .map_err(SACError::PolicyError)?;
         let actions = terms.actions().clone().without_autodiff();
         let logs = terms.log_probabilities().clone().detach().cast(self.dtype);
@@ -946,10 +944,7 @@ where
                 .ok_or(SACConfigurationError::InvalidLearningRate)?;
         let terms = self
             .policy
-            .expectation(
-                batch.observations.clone(),
-                NonZeroUsize::new(self.samples).expect("samples validated at construction"),
-            )
+            .expectation(batch.observations.clone(), self.samples)
             .map_err(SACError::PolicyError)?;
 
         let values = self
@@ -1154,7 +1149,7 @@ where
                 observations
                     .clone()
                     .to_device(&self.replay_storage_config.optimization_device()),
-                NonZeroUsize::new(self.samples).expect("samples validated at construction"),
+                self.samples,
             )
             .map_err(SACError::PolicyError)?;
         let values = -(terms.log_probabilities().clone().cast(self.dtype)
