@@ -76,7 +76,7 @@ impl Gym<usize> for TwoStepTestGym {
         Ok(StepInfo {
             observation: Tensor::zeros([4], (&self.device, DType::F32)),
             reward: 1.0,
-            done: self.steps == 2 && !self.truncates,
+            terminated: self.steps == 2 && !self.truncates,
             truncated: self.steps == 2 && self.truncates,
             info: self.steps,
         })
@@ -125,8 +125,8 @@ mod rollout_batch_tests {
             ))
             .rewards(rewards.clone())
             .training_rewards(rewards.clone())
-            .next_dones(vec![true, false])
-            .truncateds(vec![false, true])
+            .next_terminated(vec![true, false])
+            .next_truncated(vec![false, true])
             .log_probs(Tensor::zeros([2, 1], (device, DType::F64)))
             .values(Tensor::zeros([2, 1], (device, DType::F64)))
             .build()
@@ -513,8 +513,8 @@ mod schedule_tests {
                 &self,
                 rewards: &Tensor<3>,
                 values: &Tensor<3>,
-                _next_dones: &Tensor<3, Bool>,
-                _next_truncateds: &Tensor<3, Bool>,
+                _next_terminated: &Tensor<3, Bool>,
+                _next_truncated: &Tensor<3, Bool>,
                 _bootstrapped_values: &Tensor<2>,
                 _gamma: f64,
             ) -> AdvantageEstimate {
@@ -567,8 +567,8 @@ mod schedule_tests {
                 &self,
                 rewards: &Tensor<3>,
                 values: &Tensor<3>,
-                _next_dones: &Tensor<3, Bool>,
-                _next_truncateds: &Tensor<3, Bool>,
+                _next_terminated: &Tensor<3, Bool>,
+                _next_truncated: &Tensor<3, Bool>,
                 _bootstrapped_values: &Tensor<2>,
                 _gamma: f64,
             ) -> AdvantageEstimate {
@@ -650,7 +650,7 @@ mod schedule_tests {
                 Ok(StepInfo {
                     observation: Tensor::ones([2, 2], (&self.device, DType::F32)),
                     reward: 1.0,
-                    done: false,
+                    terminated: false,
                     truncated: false,
                     info: (),
                 })
@@ -878,7 +878,7 @@ mod schedule_tests {
                 Ok(StepInfo {
                     observation: Tensor::from_data([true], &self.device),
                     reward: 0.25,
-                    done: false,
+                    terminated: false,
                     truncated: true,
                     info: (),
                 })
@@ -1262,7 +1262,7 @@ mod schedule_tests {
                 Ok(StepInfo {
                     observation: Tensor::full([4], 7.0, (&self.device, DType::F32)),
                     reward: 1.0,
-                    done: false,
+                    terminated: false,
                     truncated: true,
                     info: (),
                 })
@@ -1701,7 +1701,7 @@ mod schedule_tests {
                     1 => Ok(StepInfo {
                         observation: Tensor::zeros([4], (&self.device, DType::F32)),
                         reward: 1.0,
-                        done: false,
+                        terminated: false,
                         truncated: false,
                         info: self.steps,
                     }),
@@ -1709,7 +1709,7 @@ mod schedule_tests {
                     3 => Ok(StepInfo {
                         observation: Tensor::zeros([4], (&self.device, DType::F32)),
                         reward: 2.0,
-                        done: true,
+                        terminated: true,
                         truncated: false,
                         info: self.steps,
                     }),
@@ -1873,8 +1873,8 @@ mod schedule_tests {
             &self,
             rewards: &Tensor<3>,
             values: &Tensor<3>,
-            _next_dones: &Tensor<3, Bool>,
-            _next_truncateds: &Tensor<3, Bool>,
+            _next_terminated: &Tensor<3, Bool>,
+            _next_truncated: &Tensor<3, Bool>,
             _bootstrapped_values: &Tensor<2>,
             _gamma: f64,
         ) -> AdvantageEstimate {

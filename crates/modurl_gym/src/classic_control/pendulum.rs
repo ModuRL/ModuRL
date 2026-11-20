@@ -185,7 +185,7 @@ impl Gym for PendulumV1 {
         Ok(StepInfo {
             observation: self.observation(),
             reward: -cost as f32,
-            done: false,
+            terminated: false,
             truncated: false,
             info: (),
         })
@@ -257,7 +257,7 @@ mod tests {
                 );
             }
             assert!((f64::from(actual.reward) - transition.reward).abs() <= 1e-5);
-            assert!(!actual.done);
+            assert!(!actual.terminated);
             assert!(!actual.truncated);
         }
     }

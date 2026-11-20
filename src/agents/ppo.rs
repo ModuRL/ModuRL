@@ -78,8 +78,10 @@ where
     SpaceError(#[source] SE),
     #[error("invalid PPO configuration: {0}")]
     ConfigurationError(#[source] PPOConfigurationError),
-    #[error("termination batches differ in length: {dones} dones and {truncateds} truncations")]
-    MismatchedTerminationBatch { dones: usize, truncateds: usize },
+    #[error(
+        "termination batches differ in length: {terminated} termination flags and {truncated} truncation flags"
+    )]
+    MismatchedTerminationBatch { terminated: usize, truncated: usize },
     #[error("batch length mismatch for {field}: expected {expected}, got {actual}")]
     BatchLengthMismatch {
         field: &'static str,
@@ -191,8 +193,8 @@ struct PPOExperience<O: NextRank = Tensor<2>, A: NextRank = Tensor<2>> {
     actions: A,
     rewards: Tensor<2>,
     training_rewards: Tensor<2>,
-    next_dones: Vec<bool>,
-    truncateds: Vec<bool>,
+    next_terminated: Vec<bool>,
+    next_truncated: Vec<bool>,
     log_probs: Tensor<2>,
     values: Tensor<2>,
     prepared: Option<PPOPreparedExperience>,
@@ -272,8 +274,8 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
         actions: A,
         rewards: Tensor<2>,
         training_rewards: Tensor<2>,
-        next_dones: Vec<bool>,
-        truncateds: Vec<bool>,
+        next_terminated: Vec<bool>,
+        next_truncated: Vec<bool>,
         log_probs: Tensor<2>,
         values: Tensor<2>,
     ) -> Self {
@@ -283,8 +285,8 @@ impl<O: NextRank, A: NextRank> PPOExperience<O, A> {
             actions,
             rewards,
             training_rewards,
-            next_dones,
-            truncateds,
+            next_terminated,
+            next_truncated,
             log_probs,
             values,
             prepared: None,
@@ -746,21 +748,21 @@ where
         let training_rewards = experience::stack_tensor_field(experiences, |experience| {
             experience.training_rewards.clone()
         })?;
-        let next_dones = experience::stack_bool_field(
+        let next_terminated = experience::stack_bool_field(
             experiences,
-            |experience| &experience.next_dones,
+            |experience| &experience.next_terminated,
             &values_tensor.device(),
         )?;
-        let truncateds = experience::stack_bool_field(
+        let next_truncated = experience::stack_bool_field(
             experiences,
-            |experience| &experience.truncateds,
+            |experience| &experience.next_truncated,
             &values_tensor.device(),
         )?;
         let estimate = self.advantage_estimator.estimate(
             &training_rewards,
             &values_tensor,
-            &next_dones,
-            &truncateds,
+            &next_terminated,
+            &next_truncated,
             &bootstrapped_values,
             self.gamma,
         );
@@ -858,20 +860,22 @@ where
         validation: &N,
         rewards: Tensor<2>,
         transition_next_observations: &OS::Batch,
-        dones: &[bool],
-        truncateds: &[bool],
+        terminated: &[bool],
+        truncated: &[bool],
     ) -> Result<Tensor<2>, PPOError<N::Error, GE, AS::Error>> {
-        if dones.len() != truncateds.len() {
+        if terminated.len() != truncated.len() {
             return Err(PPOError::MismatchedTerminationBatch {
-                dones: dones.len(),
-                truncateds: truncateds.len(),
+                terminated: terminated.len(),
+                truncated: truncated.len(),
             });
         }
-        let truncated_indices = truncateds
+        let truncated_indices = truncated
             .iter()
-            .zip(dones)
+            .zip(terminated)
             .enumerate()
-            .filter_map(|(index, (truncated, done))| (*truncated && !*done).then_some(index as i64))
+            .filter_map(|(index, (truncated, terminated))| {
+                (*truncated && !*terminated).then_some(index as i64)
+            })
             .collect::<Vec<_>>();
         if truncated_indices.is_empty() {
             return Ok(rewards);
@@ -1114,8 +1118,8 @@ where
         &mut self,
         rewards: &Tensor<2>,
         infos: Vec<I>,
-        dones: &[bool],
-        truncateds: &[bool],
+        terminated: &[bool],
+        truncated: &[bool],
         first_collection_timestep: usize,
     ) -> Result<(), TensorReadError> {
         let Some(logging_info) = &mut self.logging_info else {
@@ -1134,8 +1138,8 @@ where
             if let Some(entry) = self.episode_tracker.record(
                 environment_index,
                 reward,
-                dones[environment_index],
-                truncateds[environment_index],
+                terminated[environment_index],
+                truncated[environment_index],
                 collection_timestep,
             ) {
                 completed_episodes.push(entry);
@@ -1299,8 +1303,8 @@ where
         let count = observations.dims()[0];
         for (field, actual) in [
             ("training actions", training_actions.dims()[0]),
-            ("done flags", step.dones.len()),
-            ("truncation flags", step.truncateds.len()),
+            ("termination flags", step.terminated.len()),
+            ("truncation flags", step.truncated.len()),
             ("terminal observations", step.terminal_observations.len()),
             ("environment infos", step.infos.len()),
             ("next observations", step.observations.dims()[0]),
@@ -1347,23 +1351,23 @@ where
             observations: next_observations,
             rewards,
             infos,
-            dones,
-            truncateds,
+            terminated,
+            truncated,
             terminal_observations: _,
         } = step;
         self.log_collection(
             &rewards,
             infos,
-            &dones,
-            &truncateds,
+            &terminated,
+            &truncated,
             first_collection_timestep,
         )?;
         let training_rewards = self.bootstrap_truncated_rewards(
             validation,
             rewards.clone().detach(),
             &training_next_observations,
-            &dones,
-            &truncateds,
+            &terminated,
+            &truncated,
         )?;
         self.rollout_buffer.push(
             PPOExperience::builder()
@@ -1372,8 +1376,8 @@ where
                 .actions(collection_action.policy_actions.detach())
                 .rewards(rewards.detach())
                 .training_rewards(training_rewards)
-                .next_dones(dones)
-                .truncateds(truncateds)
+                .next_terminated(terminated)
+                .next_truncated(truncated)
                 .log_probs(collection_action.log_probs)
                 .values(collection_action.values)
                 .build(),

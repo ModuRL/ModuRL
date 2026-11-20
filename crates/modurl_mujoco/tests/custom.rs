@@ -12,7 +12,7 @@ impl MujocoTask for SlideTask {
     fn transition(&mut self, previous: &MujocoState, next: &MujocoState, _: &[f64]) -> TaskStep {
         TaskStep {
             reward: (next.qpos[0] - previous.qpos[0]) as f32,
-            done: next.qpos[0] > 0.1,
+            terminated: next.qpos[0] > 0.1,
             truncated: false,
         }
     }
@@ -52,7 +52,7 @@ impl MujocoTask for ContactTask {
     fn transition(&mut self, _: &MujocoState, _: &MujocoState, _: &[f64]) -> TaskStep {
         TaskStep {
             reward: 0.0,
-            done: false,
+            terminated: false,
             truncated: false,
         }
     }
@@ -88,7 +88,7 @@ impl MujocoTask for GroundForceTask {
     fn transition(&mut self, _: &MujocoState, _: &MujocoState, _: &[f64]) -> TaskStep {
         TaskStep {
             reward: 0.0,
-            done: false,
+            terminated: false,
             truncated: false,
         }
     }
@@ -173,7 +173,7 @@ impl MujocoTask for DisturbTask {
     fn transition(&mut self, _: &MujocoState, _: &MujocoState, _: &[f64]) -> TaskStep {
         TaskStep {
             reward: 0.0,
-            done: false,
+            terminated: false,
             truncated: false,
         }
     }
@@ -244,7 +244,7 @@ impl MujocoTask for MappedTask {
     fn transition(&mut self, _: &MujocoState, _: &MujocoState, action: &[f64]) -> TaskStep {
         TaskStep {
             reward: action[1] as f32,
-            done: false,
+            terminated: false,
             truncated: false,
         }
     }

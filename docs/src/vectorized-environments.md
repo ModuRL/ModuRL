@@ -63,7 +63,7 @@ for the next call to `act`.
 
 ## Understand Auto-Reset
 
-When an inner environment returns `done` or `truncated`, ModuRL resets that one
+When an inner environment returns `terminated` or `truncated`, ModuRL resets that one
 environment immediately. The `observations` field then contains the first observation
 of its next episode. This lets the next batched step continue without a special
 reset branch.

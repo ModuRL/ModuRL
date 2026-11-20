@@ -77,6 +77,10 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - `Agent` gains `type ActContext<'c>`, passed as `&mut` to `act_for_training` and `act`; built-in agents use `()`.
 - Renamed `ResetInfo::state` and `StepInfo::state` to `observation`.
   Both structures gain an observation tensor type parameter: `ResetInfo<I, T>` and `StepInfo<I, T>`.
+- Renamed `StepInfo::done` and MuJoCo's `TaskStep::done` to `terminated`.
+  The batched flags `MultiGymStepInfo::dones` and `truncateds` are now `terminated` and `truncated`.
+  The `MismatchedTerminationBatch` fields on PPO and A2C errors follow the same naming.
+  An episode still ends when either flag is set; the rename does not change bootstrapping.
 - Renamed `MultiGymStepInfo::states` to `observations`, `terminal_states` to `terminal_observations`,
   and `transition_next_states()` to `transition_next_observations()`.
   `MultiGymStepInfo<I, T>` uses an unbatched terminal tensor type `T` and stores batched observations as `T::Next`.

@@ -67,8 +67,8 @@ fn vectorization_preserves_axes_and_terminal_observations() {
     assert_eq!(first.rewards.dtype(), DType::F32);
     assert!(first.terminal_observations.iter().all(Option::is_none));
     let second = environments.step(Tensor::zeros([2, 6], &device)).unwrap();
-    assert_eq!(second.dones, [false, false]);
-    assert_eq!(second.truncateds, [true, true]);
+    assert_eq!(second.terminated, [false, false]);
+    assert_eq!(second.truncated, [true, true]);
     for (index, terminal) in second.terminal_observations.iter().enumerate() {
         let terminal = terminal.as_ref().unwrap();
         assert_eq!(terminal.dims(), [17]);

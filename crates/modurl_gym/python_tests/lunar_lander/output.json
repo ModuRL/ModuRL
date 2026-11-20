@@ -11,7 +11,7 @@
       0.0
     ],
     "reward": 0.0,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.000001907348633,
@@ -57,7 +57,7 @@
       0.0
     ],
     "reward": -2.401857859925157,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.000787734985352,
@@ -103,7 +103,7 @@
       0.0
     ],
     "reward": 1.8660676343126112,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.001587867736816,
@@ -149,7 +149,7 @@
       0.0
     ],
     "reward": -2.4285956893507574,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.002388000488281,
@@ -195,7 +195,7 @@
       0.0
     ],
     "reward": -2.66682760417079,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.003976821899414,
@@ -241,7 +241,7 @@
       0.0
     ],
     "reward": -2.833057913880991,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.006353378295898,
@@ -287,7 +287,7 @@
       0.0
     ],
     "reward": 1.5777182889265589,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.008842468261719,
@@ -333,7 +333,7 @@
       0.0
     ],
     "reward": -2.671045595379013,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.011332511901855,
@@ -379,7 +379,7 @@
       0.0
     ],
     "reward": -2.3364652827941783,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.013038635253906,
@@ -425,7 +425,7 @@
       0.0
     ],
     "reward": -2.699486570623846,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.015532493591309,
@@ -471,7 +471,7 @@
       0.0
     ],
     "reward": -2.230076771697098,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.017242431640625,
@@ -517,7 +517,7 @@
       0.0
     ],
     "reward": -2.24916123168245,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.018952369689941,
@@ -563,7 +563,7 @@
       0.0
     ],
     "reward": -1.950633160474381,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.019875526428223,
@@ -609,7 +609,7 @@
       0.0
     ],
     "reward": 2.3023554595351756,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.021130561828613,
@@ -655,7 +655,7 @@
       0.0
     ],
     "reward": -2.2890927258669067,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.023174285888672,
@@ -701,7 +701,7 @@
       0.0
     ],
     "reward": -2.113521981636012,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.025219917297363,
@@ -747,7 +747,7 @@
       0.0
     ],
     "reward": -2.3851668650802638,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.028054237365723,
@@ -793,7 +793,7 @@
       0.0
     ],
     "reward": 2.00631048935075,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.031332015991211,
@@ -839,7 +839,7 @@
       0.0
     ],
     "reward": 1.9456795433493255,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.03509521484375,
@@ -885,7 +885,7 @@
       0.0
     ],
     "reward": -2.272307551020589,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.038859367370605,
@@ -931,7 +931,7 @@
       0.0
     ],
     "reward": -2.5980938304552113,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.043414115905762,
@@ -977,7 +977,7 @@
       0.0
     ],
     "reward": -2.02296210341015,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.047183990478516,
@@ -1023,7 +1023,7 @@
       0.0
     ],
     "reward": 2.054959170580628,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.051617622375488,
@@ -1069,7 +1069,7 @@
       0.0
     ],
     "reward": -2.1368095228044126,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.056053161621094,
@@ -1115,7 +1115,7 @@
       0.0
     ],
     "reward": 2.045054280161861,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.061235427856445,
@@ -1161,7 +1161,7 @@
       0.0
     ],
     "reward": -2.631052388499539,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.067188262939453,
@@ -1207,7 +1207,7 @@
       0.0
     ],
     "reward": 1.8100599832624595,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.073981285095215,
@@ -1253,7 +1253,7 @@
       0.0
     ],
     "reward": 1.7250626898242956,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.081671714782715,
@@ -1299,7 +1299,7 @@
       0.0
     ],
     "reward": -2.8121827029887343,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.0901460647583,
@@ -1345,7 +1345,7 @@
       0.0
     ],
     "reward": 1.4609681076335448,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.099640846252441,
@@ -1391,7 +1391,7 @@
       0.0
     ],
     "reward": -3.022035478949191,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.109917640686035,
@@ -1437,7 +1437,7 @@
       0.0
     ],
     "reward": -2.617122783079992,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.120196342468262,
@@ -1483,7 +1483,7 @@
       0.0
     ],
     "reward": -2.087992551192001,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.12969970703125,
@@ -1529,7 +1529,7 @@
       0.0
     ],
     "reward": -2.85174899087704,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.139981269836426,
@@ -1575,7 +1575,7 @@
       0.0
     ],
     "reward": -1.9810783788087167,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.149491310119629,
@@ -1621,7 +1621,7 @@
       0.0
     ],
     "reward": -1.7477837547071704,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.15822982788086,
@@ -1667,7 +1667,7 @@
       0.0
     ],
     "reward": -1.9563902182458435,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.166971206665039,
@@ -1713,7 +1713,7 @@
       0.0
     ],
     "reward": -1.4547414173267714,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.174943923950195,
@@ -1759,7 +1759,7 @@
       0.0
     ],
     "reward": 2.2242618150550983,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.18453311920166,
@@ -1805,7 +1805,7 @@
       0.0
     ],
     "reward": -1.679612900636073,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.194124221801758,
@@ -1851,7 +1851,7 @@
       0.0
     ],
     "reward": -1.6221870852049278,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.203716278076172,
@@ -1897,7 +1897,7 @@
       0.0
     ],
     "reward": -2.093281957269254,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.214072227478027,
@@ -1943,7 +1943,7 @@
       0.0
     ],
     "reward": 2.0596581161675376,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.226221084594727,
@@ -1989,7 +1989,7 @@
       0.0
     ],
     "reward": -1.7332503633321323,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.238369941711426,
@@ -2035,7 +2035,7 @@
       0.0
     ],
     "reward": -1.1785439431372982,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.249761581420898,
@@ -2081,7 +2081,7 @@
       0.0
     ],
     "reward": -1.4245808034490324,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.261154174804688,
@@ -2127,7 +2127,7 @@
       0.0
     ],
     "reward": -0.8812462455694845,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.2717924118042,
@@ -2173,7 +2173,7 @@
       0.0
     ],
     "reward": -1.1136773954581258,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.282430648803711,
@@ -2219,7 +2219,7 @@
       0.0
     ],
     "reward": 2.678739659728177,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.295096397399902,
@@ -2265,7 +2265,7 @@
       0.0
     ],
     "reward": 2.5648991981091855,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.309814453125,
@@ -2311,7 +2311,7 @@
       0.0
     ],
     "reward": -0.5945387392237922,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.32378101348877,
@@ -2357,7 +2357,7 @@
       0.0
     ],
     "reward": -0.8692565911666179,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.337748527526855,
@@ -2403,7 +2403,7 @@
       0.0
     ],
     "reward": -1.3931648364609248,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.352466583251953,
@@ -2449,7 +2449,7 @@
       0.0
     ],
     "reward": -0.4377318611313672,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.366435050964355,
@@ -2495,7 +2495,7 @@
       0.0
     ],
     "reward": -0.7037966911610738,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.380404472351074,
@@ -2541,7 +2541,7 @@
       0.0
     ],
     "reward": -1.2221306733160862,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.395121574401855,
@@ -2587,7 +2587,7 @@
       0.0
     ],
     "reward": -0.28330841177714094,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.40909194946289,
@@ -2633,7 +2633,7 @@
       0.0
     ],
     "reward": -0.043753508904386534,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.422314643859863,
@@ -2679,7 +2679,7 @@
       0.0
     ],
     "reward": 3.386209981873333,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.437726020812988,
@@ -2725,7 +2725,7 @@
       0.0
     ],
     "reward": 3.2753951219764135,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.455322265625,
@@ -2771,7 +2771,7 @@
       0.0
     ],
     "reward": -0.9899215983377292,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.47366714477539,
@@ -2817,7 +2817,7 @@
       0.0
     ],
     "reward": -1.1580181101766118,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.492759704589844,
@@ -2863,7 +2863,7 @@
       0.0
     ],
     "reward": -0.1837859084010904,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.51110553741455,
@@ -2909,7 +2909,7 @@
       0.0
     ],
     "reward": 0.014074897153109306,
-    "done": false,
+    "terminated": false,
     "truncated": false,
     "info": {
       "raw_lander_pos_x": 10.528706550598145,

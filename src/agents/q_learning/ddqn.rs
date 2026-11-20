@@ -58,7 +58,7 @@ impl QLearningTarget for DDQNTarget {
     /// The shared training loop detaches the targets before computing the loss.
     fn target_q_values(
         rewards: &Tensor<2>,
-        next_dones: &Tensor<2, Bool>,
+        next_terminated: &Tensor<2, Bool>,
         online_next_q_values: Option<&Tensor<2>>,
         target_next_q_values: &Tensor<2>,
         gamma: f64,
@@ -67,7 +67,12 @@ impl QLearningTarget for DDQNTarget {
             .expect("DDQN target calculation requires online next-observation Q values");
         let next_actions = online_next_q_values.clone().argmax(1);
         let next_q_values = selected_action_q_values(target_next_q_values, &next_actions);
-        bellman_targets(rewards.clone(), next_dones.clone(), next_q_values, gamma)
+        bellman_targets(
+            rewards.clone(),
+            next_terminated.clone(),
+            next_q_values,
+            gamma,
+        )
     }
 }
 

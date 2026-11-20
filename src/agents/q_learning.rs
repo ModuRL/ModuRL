@@ -221,7 +221,7 @@ pub(crate) trait QLearningTarget {
     /// Truncation alone must not set the termination flags. The caller detaches returned targets.
     fn target_q_values(
         rewards: &Tensor<2>,
-        next_dones: &Tensor<2, Bool>,
+        next_terminated: &Tensor<2, Bool>,
         online_next_q_values: Option<&Tensor<2>>,
         target_next_q_values: &Tensor<2>,
         gamma: f64,
@@ -233,7 +233,7 @@ struct QLearningBatch<const R: usize, K: Autodiff> {
     next_observations: Tensor<R, K>,
     actions: Tensor<2, Int>,
     rewards: Tensor<2>,
-    next_dones: Tensor<2, Bool>,
+    next_terminated: Tensor<2, Bool>,
 }
 
 struct QLearningInsert<const R: usize, K: Autodiff> {
@@ -241,15 +241,15 @@ struct QLearningInsert<const R: usize, K: Autodiff> {
     next_observations: Tensor<R, K>,
     actions: Tensor<2, Int>,
     rewards: Tensor<2>,
-    next_dones: Tensor<2, Bool>,
-    truncateds: Vec<bool>,
+    next_terminated: Tensor<2, Bool>,
+    truncated: Vec<bool>,
 }
 
 struct QLearningReplayStorage<const R: usize, K: Autodiff> {
     observations: Option<AlignedObservationReplay<R, K>>,
     actions: TensorReplayColumn<2, Int>,
     rewards: Option<TensorReplayColumn<2>>,
-    next_dones: TensorReplayColumn<2, Bool>,
+    next_terminated: TensorReplayColumn<2, Bool>,
     observation_storage_shape: [usize; R],
     device: Device,
 }
@@ -268,7 +268,7 @@ impl<const R: usize, K: Autodiff> QLearningReplayStorage<R, K> {
                 (&device, DType::U32),
             ),
             rewards: None,
-            next_dones: TensorReplayColumn::new([observation_storage_shape[0], 1], &device),
+            next_terminated: TensorReplayColumn::new([observation_storage_shape[0], 1], &device),
             observation_storage_shape,
             device,
         }
@@ -303,7 +303,10 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
         for (field, actual) in [
             ("actions", transitions.actions.dims()[0]),
             ("rewards", transitions.rewards.dims()[0]),
-            ("next dones", transitions.next_dones.dims()[0]),
+            (
+                "next termination flags",
+                transitions.next_terminated.dims()[0],
+            ),
         ] {
             if actual != count {
                 return Err(ReplayStorageError::BatchLengthMismatch {
@@ -337,7 +340,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             start,
             transitions.observations,
             transitions.next_observations,
-            &transitions.truncateds,
+            &transitions.truncated,
         )?;
         if let Some(observations) = new_observations {
             self.observations = Some(observations);
@@ -354,9 +357,9 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
                 )
             })
             .write(start, transitions.rewards.to_device(&self.device))?;
-        self.next_dones.write(
+        self.next_terminated.write(
             start,
-            transfer_bool_tensor(transitions.next_dones, &self.device),
+            transfer_bool_tensor(transitions.next_terminated, &self.device),
         )?;
         Ok(count)
     }
@@ -379,7 +382,7 @@ impl<const R: usize, K: Autodiff> ReplayStorage for QLearningReplayStorage<R, K>
             next_observations,
             actions: self.actions.gather(rows.clone()),
             rewards: rewards.gather(rows.clone()),
-            next_dones: self.next_dones.gather(rows),
+            next_terminated: self.next_terminated.gather(rows),
         })
     }
 
@@ -401,8 +404,8 @@ struct QCollectedTransitions<'a, const R: usize, K: Autodiff> {
     next_observations: &'a Tensor<R, K>,
     actions: &'a Tensor<2, Int>,
     rewards: &'a Tensor<2>,
-    dones: &'a [bool],
-    truncateds: &'a [bool],
+    terminated: &'a [bool],
+    truncated: &'a [bool],
     first_timestep: usize,
 }
 
@@ -634,7 +637,7 @@ where
         let actions = batch.actions.to_device(&optimization_device);
         let rewards = batch.rewards.to_device(&optimization_device);
         let reward_dtype = rewards.dtype();
-        let next_dones = transfer_bool_tensor(batch.next_dones, &optimization_device);
+        let next_terminated = transfer_bool_tensor(batch.next_terminated, &optimization_device);
         let target_next_q_values = self
             .target_q_network
             .forward(next_observations.clone())
@@ -649,7 +652,7 @@ where
         }
         let target_q_values = T::target_q_values(
             &rewards,
-            &next_dones,
+            &next_terminated,
             online_next_q_values.as_ref(),
             &target_next_q_values,
             self.gamma,
@@ -701,15 +704,15 @@ where
         transitions: QCollectedTransitions<'_, R, S::Kind>,
         episodes: &mut QEpisodeTracker,
     ) -> Result<Vec<QEpisodeLogEntry>, QAgentError<GE, ME>> {
-        let environment_count = transitions.dones.len();
+        let environment_count = transitions.terminated.len();
         let reward_values = transitions
             .rewards
             .clone()
             .try_into_data_as::<f32>()?
             .try_to_vec::<f32>()
             .map_err(TensorReadError::from)?;
-        let next_dones = Tensor::<2, Bool>::from_data(
-            TensorData::new(transitions.dones.to_vec(), [environment_count, 1]),
+        let next_terminated = Tensor::<2, Bool>::from_data(
+            TensorData::new(transitions.terminated.to_vec(), [environment_count, 1]),
             &self.replay_storage_config.storage_device(),
         );
         self.experience_replay.add(QLearningInsert {
@@ -717,8 +720,8 @@ where
             next_observations: transitions.next_observations.clone(),
             actions: transitions.actions.clone(),
             rewards: transitions.rewards.clone(),
-            next_dones,
-            truncateds: transitions.truncateds.to_vec(),
+            next_terminated,
+            truncated: transitions.truncated.to_vec(),
         })?;
         let mut completed_episodes = Vec::new();
         for (environment_index, reward) in reward_values.into_iter().enumerate() {
@@ -728,8 +731,8 @@ where
             if let Some(entry) = episodes.record(
                 environment_index,
                 reward,
-                transitions.dones[environment_index],
-                transitions.truncateds[environment_index],
+                transitions.terminated[environment_index],
+                transitions.truncated[environment_index],
                 collection_timestep,
             ) {
                 completed_episodes.push(entry);
@@ -748,11 +751,11 @@ where
     where
         Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
-        let count = step.dones.len();
+        let count = step.terminated.len();
         for (field, actual) in [
             ("observations", observations.dims()[0]),
             ("training actions", actions.dims()[0]),
-            ("truncation flags", step.truncateds.len()),
+            ("truncation flags", step.truncated.len()),
             ("terminal observations", step.terminal_observations.len()),
             ("environment infos", step.infos.len()),
             ("environment observations", step.observations.dims()[0]),
@@ -782,7 +785,7 @@ where
     where
         Tensor<U, S::Kind>: NextRank<Next = Tensor<R, S::Kind>>,
     {
-        let count = step.dones.len();
+        let count = step.terminated.len();
         let first_timestep = self.schedule_progress.elapsed_steps();
         let transition_next_observations = step.transition_next_observations();
         let collection_rewards = step.rewards.clone();
@@ -792,8 +795,8 @@ where
                 next_observations: &transition_next_observations,
                 actions: &actions,
                 rewards: &step.rewards,
-                dones: &step.dones,
-                truncateds: &step.truncateds,
+                terminated: &step.terminated,
+                truncated: &step.truncated,
                 first_timestep,
             },
             episodes,

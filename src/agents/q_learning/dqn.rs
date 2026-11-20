@@ -57,14 +57,14 @@ impl QLearningTarget for DQNTarget {
     /// The shared training loop detaches the targets before computing the loss.
     fn target_q_values(
         rewards: &Tensor<2>,
-        next_dones: &Tensor<2, Bool>,
+        next_terminated: &Tensor<2, Bool>,
         _online_next_q_values: Option<&Tensor<2>>,
         target_next_q_values: &Tensor<2>,
         gamma: f64,
     ) -> Tensor<2> {
         bellman_targets(
             rewards.clone(),
-            next_dones.clone(),
+            next_terminated.clone(),
             target_next_q_values.clone().max_dim(1),
             gamma,
         )

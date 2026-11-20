@@ -150,7 +150,7 @@ impl Gym for EndingEnv {
         Ok(StepInfo {
             observation: Tensor::full([self.terminal_width], 10.0, &self.device),
             reward: 2.0,
-            done: self.terminated,
+            terminated: self.terminated,
             truncated: !self.terminated,
             info: (),
         })
@@ -751,7 +751,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     let observations = env.reset().unwrap();
     let actions = agent.act_for_training(&observations, &mut ()).unwrap();
     let mut bad_step = env.step(actions.clone()).unwrap();
-    bad_step.dones.pop();
+    bad_step.terminated.pop();
     assert!(
         agent
             .learn_from_timesteps(&observations, actions, bad_step)

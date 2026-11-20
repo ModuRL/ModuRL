@@ -117,7 +117,7 @@ fn check_parity<I, E, F>(
                 expected.reward,
             );
         }
-        assert_eq!(step.done, expected.terminated, "step {index}");
+        assert_eq!(step.terminated, expected.terminated, "step {index}");
         assert_eq!(step.truncated, expected.truncated, "step {index}");
     }
 

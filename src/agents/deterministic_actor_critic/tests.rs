@@ -322,7 +322,7 @@ impl Gym for EpisodeEnv {
         Ok(StepInfo {
             observation: Tensor::from_data([self.steps as f64], (&self.device, DType::F64)),
             reward: 2.0,
-            done: self.steps == 2 && !self.truncate,
+            terminated: self.steps == 2 && !self.truncate,
             truncated: self.steps == 2 && self.truncate,
             info: (),
         })
@@ -507,7 +507,7 @@ fn caller_collected_steps_reject_length_mismatches_and_recover() {
     let observations = env.reset().unwrap();
     let actions = agent.act(&observations).unwrap().without_autodiff();
     let mut bad_step = env.step(actions.clone()).unwrap();
-    bad_step.dones.pop();
+    bad_step.terminated.pop();
     assert!(
         agent
             .learn_from_timesteps(&observations, actions.clone(), bad_step, &mut logger,)
@@ -700,8 +700,8 @@ impl MultiGym<(), 3, 2> for BooleanEnv {
             observations: Tensor::from_data([[[false]], [[true]]], &self.device),
             rewards: Tensor::ones([2, 1], (&self.device, DType::F64)),
             infos: vec![(), ()],
-            dones: vec![false, true],
-            truncateds: vec![true, false],
+            terminated: vec![false, true],
+            truncated: vec![true, false],
             terminal_observations: vec![
                 Some(terminal),
                 Some(Tensor::from_data([[false]], &self.device)),

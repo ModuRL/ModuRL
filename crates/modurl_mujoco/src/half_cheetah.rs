@@ -97,7 +97,7 @@ impl Gym for HalfCheetahV5 {
         Ok(StepInfo {
             observation: self.observation()?,
             reward: reward as f32,
-            done: false,
+            terminated: false,
             truncated: false,
             info: (),
         })

@@ -56,7 +56,7 @@ impl Gym<TestInfo> for CounterEnv {
                 (&Device::flex(), DType::F64),
             ),
             reward: action as f32,
-            done: ended && !self.truncate,
+            terminated: ended && !self.truncate,
             truncated: ended && self.truncate,
             info: TestInfo {
                 id: self.id,
@@ -194,8 +194,8 @@ impl MultiGym<SlotInfo, 2, 2> for GroupEnv {
             ),
             rewards: Tensor::from_data(TensorData::new(actions, [self.count, 1]), &Device::flex()),
             infos,
-            dones: (0..self.count).map(|slot| slot + 1 == self.count).collect(),
-            truncateds: vec![false; self.count],
+            terminated: (0..self.count).map(|slot| slot + 1 == self.count).collect(),
+            truncated: vec![false; self.count],
             terminal_observations,
         })
     }
@@ -251,7 +251,7 @@ impl Gym for ScalarEnv {
         Ok(StepInfo {
             observation: action,
             reward: 1.0,
-            done: true,
+            terminated: true,
             truncated: false,
             info: (),
         })
@@ -285,7 +285,7 @@ impl Gym<(), 2, 2> for ContinuousEnv {
         Ok(StepInfo {
             observation: action,
             reward: 1.0,
-            done: true,
+            terminated: true,
             truncated: false,
             info: (),
         })

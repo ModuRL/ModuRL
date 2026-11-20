@@ -344,7 +344,7 @@ def make_cleanrl_ppo_runner(args, device):
     actions = torch.zeros((128, 32), dtype=torch.long, device=device)
     log_probs = torch.zeros((128, 32), device=device)
     rewards = torch.zeros((128, 32), device=device)
-    dones = torch.zeros((128, 32), dtype=torch.bool, device=device)
+    episode_ends = torch.zeros((128, 32), dtype=torch.bool, device=device)
     values = torch.zeros((128, 32), device=device)
     reset, _ = envs.reset(seed=[SEED + index for index in range(32)])
     next_observation = torch.as_tensor(reset, device=device)
@@ -364,14 +364,14 @@ def make_cleanrl_ppo_runner(args, device):
                     with torch.no_grad():
                         reward[indices] += 0.99 * model.value(torch.as_tensor(terminal, device=device)).cpu().numpy()
                 rewards[step] = torch.as_tensor(reward, dtype=torch.float32, device=device)
-                dones[step] = torch.as_tensor(terminated | truncated, device=device)
+                episode_ends[step] = torch.as_tensor(terminated | truncated, device=device)
                 next_observation = torch.as_tensor(obs, device=device)
             with torch.no_grad():
                 next_value = model.value(next_observation)
                 advantages = torch.zeros_like(rewards)
                 gae = torch.zeros(32, device=device)
                 for step in reversed(range(128)):
-                    mask = (~dones[step]).float()
+                    mask = (~episode_ends[step]).float()
                     delta = rewards[step] + 0.99 * next_value * mask - values[step]
                     gae = delta + 0.99 * 0.95 * mask * gae
                     advantages[step] = gae

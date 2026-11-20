@@ -25,14 +25,14 @@ impl QLearningTarget for TestTarget {
     /// Builds Float targets [batch_size, 1] from rewards and Bool termination flags [batch_size, 1] and Q values [batch_size, action_count].
     fn target_q_values(
         rewards: &Tensor<2>,
-        next_dones: &Tensor<2, Bool>,
+        next_terminated: &Tensor<2, Bool>,
         _online: Option<&Tensor<2>>,
         target: &Tensor<2>,
         gamma: f64,
     ) -> Tensor<2> {
         bellman_targets(
             rewards.clone(),
-            next_dones.clone(),
+            next_terminated.clone(),
             target.clone().max_dim(1),
             gamma,
         )
@@ -81,7 +81,7 @@ impl Gym for EpisodeEnv {
         Ok(StepInfo {
             observation: Tensor::from_data([self.steps as f32], &self.device),
             reward: 2.0,
-            done: self.steps == 2 && !self.truncate,
+            terminated: self.steps == 2 && !self.truncate,
             truncated: self.steps == 2 && self.truncate,
             info: (),
         })
@@ -127,7 +127,7 @@ impl Gym for CountingEpisodeEnv {
         Ok(StepInfo {
             observation: Tensor::zeros([1], &self.device),
             reward: 0.0,
-            done: false,
+            terminated: false,
             truncated: false,
             info: (),
         })
@@ -349,8 +349,8 @@ fn replay_insert(values: &[f64], device: &Device) -> QLearningInsert<2, Float> {
         ),
         actions: Tensor::zeros([count, 1], (device, DType::U32)),
         rewards: Tensor::ones([count, 1], device),
-        next_dones: Tensor::from_data(TensorData::new(vec![false; count], [count, 1]), device),
-        truncateds: vec![false; count],
+        next_terminated: Tensor::from_data(TensorData::new(vec![false; count], [count, 1]), device),
+        truncated: vec![false; count],
     }
 }
 
@@ -378,7 +378,7 @@ fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
         [5.0, 6.0, 15.0, 16.0]
     );
     assert_eq!(batch.actions.dims(), [4, 1]);
-    assert_eq!(batch.next_dones.dims(), [4, 1]);
+    assert_eq!(batch.next_terminated.dims(), [4, 1]);
     assert_eq!(batch.rewards.dims(), [4, 1]);
 }
 
@@ -401,8 +401,8 @@ fn replay_preserves_native_integer_and_boolean_observations() {
                 ),
                 actions: Tensor::zeros([2, 1], (&device, DType::U32)),
                 rewards: Tensor::zeros([2, 1], &device),
-                next_dones: Tensor::from_data([[false], [true]], &device),
-                truncateds: vec![false; 2],
+                next_terminated: Tensor::from_data([[false], [true]], &device),
+                truncated: vec![false; 2],
             },
         )
         .unwrap();
@@ -421,8 +421,8 @@ fn replay_preserves_native_integer_and_boolean_observations() {
                 next_observations: Tensor::from_data([[true], [false]], &device),
                 actions: Tensor::zeros([2, 1], (&device, DType::U32)),
                 rewards: Tensor::zeros([2, 1], &device),
-                next_dones: Tensor::from_data([[false], [false]], &device),
-                truncateds: vec![true, false],
+                next_terminated: Tensor::from_data([[false], [false]], &device),
+                truncated: vec![true, false],
             },
         )
         .unwrap();
@@ -502,8 +502,8 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
             next_observations: observations,
             actions: Tensor::ones([2, 1], (&device, DType::U32)),
             rewards: Tensor::full([2, 1], 2.0, (&device, DType::F64)),
-            next_dones: Tensor::from_data([[false], [false]], &device),
-            truncateds: vec![false; 2],
+            next_terminated: Tensor::from_data([[false], [false]], &device),
+            truncated: vec![false; 2],
         })
         .unwrap();
     let before = agent.online_q_network.values.val().into_data();
@@ -635,7 +635,7 @@ fn caller_collected_steps_reject_length_mismatches_and_advance_epsilon() {
     let observations = env.reset().unwrap();
     let actions = agent.act(&observations).unwrap();
     let mut bad_step = env.step(actions.clone()).unwrap();
-    bad_step.dones.pop();
+    bad_step.terminated.pop();
     assert!(
         agent
             .learn_from_timesteps(
@@ -727,7 +727,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
     );
     assert_eq!(
         batch
-            .next_dones
+            .next_terminated
             .try_into_data_as::<bool>()
             .unwrap()
             .try_to_vec::<bool>()

@@ -326,12 +326,12 @@ impl Gym for CartPoleV1 {
 
         self.steps_since_reset += 1;
         if self.steps_since_reset >= 500 {
-            // Consider it done if it has lasted 500 steps.
+            // Truncate the episode after 500 steps.
             self.steps_beyond_terminated = Some(0);
             return Ok(StepInfo {
                 observation: self.state.clone(),
                 reward: 1.0,
-                done: false,
+                terminated: false,
                 truncated: true,
                 info: (),
             });
@@ -345,7 +345,7 @@ impl Gym for CartPoleV1 {
             Ok(StepInfo {
                 observation: self.state.clone(),
                 reward,
-                done: false,
+                terminated: false,
                 truncated: false,
                 info: (),
             })
@@ -357,7 +357,7 @@ impl Gym for CartPoleV1 {
             Ok(StepInfo {
                 observation: self.state.clone(),
                 reward,
-                done: true,
+                terminated: true,
                 truncated: false,
                 info: (),
             })
@@ -377,7 +377,7 @@ impl Gym for CartPoleV1 {
             Ok(StepInfo {
                 observation: self.state.clone(),
                 reward,
-                done: true,
+                terminated: true,
                 truncated: false,
                 info: (),
             })
@@ -430,7 +430,7 @@ mod tests {
         let StepInfo {
             observation: next_state,
             reward,
-            done,
+            terminated,
             truncated: _truncated,
             ..
         } = env
@@ -441,7 +441,7 @@ mod tests {
             .expect("Failed to step environment.");
         assert_eq!(next_state.dims()[0], 4);
         assert!(reward == 1.0);
-        assert!(!done);
+        assert!(!terminated);
     }
 
     #[test]
@@ -476,28 +476,28 @@ mod tests {
         let StepInfo {
             observation: _state,
             reward,
-            done,
+            terminated,
             truncated: _truncated,
             ..
         } = env.step(action).unwrap();
         assert_eq!(reward, 1.0);
-        assert!(!done);
+        assert!(!terminated);
 
-        let mut done = false;
+        let mut terminated = false;
         for _ in 0..50 {
             let action = Tensor::from_data(TensorData::new(vec![1u32], [1]), &Device::flex());
             let StepInfo {
                 observation: _,
                 reward: _,
-                done: d,
+                terminated: d,
                 ..
             } = env.step(action).unwrap();
-            done = d;
-            if done {
+            terminated = d;
+            if terminated {
                 break;
             }
         }
-        assert!(done);
+        assert!(terminated);
     }
 
     impl CartPoleV1 {
@@ -542,10 +542,10 @@ mod tests {
             let StepInfo {
                 observation: _,
                 reward: _,
-                done,
+                terminated,
                 ..
             } = env.step(action).unwrap();
-            if done {
+            if terminated {
                 env.reset().unwrap();
             }
         }

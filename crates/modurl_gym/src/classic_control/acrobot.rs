@@ -269,13 +269,13 @@ impl Gym for AcrobotV1 {
             integrated[2].clamp(-MAX_VELOCITY_1, MAX_VELOCITY_1),
             integrated[3].clamp(-MAX_VELOCITY_2, MAX_VELOCITY_2),
         ];
-        let done = self.terminal();
+        let terminated = self.terminal();
         #[cfg(feature = "rendering")]
         self.render()?;
         Ok(StepInfo {
             observation: self.observation(),
-            reward: if done { 0.0 } else { -1.0 },
-            done,
+            reward: if terminated { 0.0 } else { -1.0 },
+            terminated,
             truncated: false,
             info: (),
         })
@@ -361,7 +361,7 @@ mod tests {
                 );
             }
             assert_eq!(f64::from(actual.reward), transition.reward);
-            assert_eq!(actual.done, transition.terminated);
+            assert_eq!(actual.terminated, transition.terminated);
             assert!(!actual.truncated);
         }
     }

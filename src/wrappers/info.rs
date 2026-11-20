@@ -87,7 +87,7 @@ where
         self.episode_return += step.reward;
         self.episode_length += 1;
 
-        let completed_episode = if step.done || step.truncated {
+        let completed_episode = if step.terminated || step.truncated {
             let statistics = EpisodeStatistics {
                 episode_return: self.episode_return,
                 episode_length: self.episode_length,
@@ -102,7 +102,7 @@ where
         Ok(StepInfo {
             observation: step.observation,
             reward: step.reward,
-            done: step.done,
+            terminated: step.terminated,
             truncated: step.truncated,
             info: EpisodeStatisticsInfo {
                 inner: step.info,
@@ -216,7 +216,7 @@ where
         Ok(StepInfo {
             observation: step.observation,
             reward: step.reward,
-            done: step.done,
+            terminated: step.terminated,
             truncated: step.truncated,
             info: RawRewardInfo {
                 inner: step.info,

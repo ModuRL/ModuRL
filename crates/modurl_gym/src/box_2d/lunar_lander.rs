@@ -1209,7 +1209,7 @@ impl Gym for LunarLanderV3 {
         Ok(StepInfo {
             observation: state_tensor,
             reward,
-            done: terminated,
+            terminated,
             truncated: false,
             info: (),
         })
@@ -1644,7 +1644,7 @@ mod tests {
         let step_info = env.step(action).expect("Failed to step environment");
 
         assert_eq!(step_info.observation.dims(), [8]);
-        assert!(!step_info.done); // Should not be done immediately
+        assert!(!step_info.terminated); // Should not terminate immediately
     }
 
     #[test]
@@ -1749,7 +1749,7 @@ mod tests {
         struct Output {
             observation: Vec<f32>,
             reward: f32,
-            done: bool,
+            terminated: bool,
             truncated: bool,
         }
 
@@ -1799,12 +1799,15 @@ mod tests {
                 actual.reward,
                 expected.reward
             );
-            assert_eq!(actual.done, expected.done, "sequential step {index}");
+            assert_eq!(
+                actual.terminated, expected.terminated,
+                "sequential step {index}"
+            );
             assert_eq!(
                 actual.truncated, expected.truncated,
                 "sequential step {index}"
             );
-            if (expected.done || expected.truncated) && index + 1 < inputs.len() {
+            if (expected.terminated || expected.truncated) && index + 1 < inputs.len() {
                 environment.reset_deterministic().unwrap();
             }
         }
@@ -1832,11 +1835,11 @@ mod tests {
             let StepInfo {
                 observation: _,
                 reward: _,
-                done,
+                terminated,
                 ..
             } = env.step(action).expect("Failed to step environment");
 
-            if done {
+            if terminated {
                 env.reset().expect("Failed to reset environment");
             }
         }
@@ -1919,7 +1922,7 @@ mod tests {
                     val2
                 );
             }
-            if step_info1.done || step_info2.done {
+            if step_info1.terminated || step_info2.terminated {
                 env1.reset().expect("Failed to reset env1");
                 env2.reset().expect("Failed to reset env2");
             }

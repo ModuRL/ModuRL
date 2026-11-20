@@ -103,7 +103,7 @@ fn main() {
             );
         }
 
-        observation = if step.done || step.truncated {
+        observation = if step.terminated || step.truncated {
             gym.reset().expect("failed to reset Atari").observation
         } else {
             step.observation

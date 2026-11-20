@@ -1250,8 +1250,8 @@ where
         for (field, actual) in [
             ("observations", observations.dims()[0]),
             ("training actions", actions.dims()[0]),
-            ("done flags", step.dones.len()),
-            ("truncation flags", step.truncateds.len()),
+            ("termination flags", step.terminated.len()),
+            ("truncation flags", step.truncated.len()),
             ("terminal observations", step.terminal_observations.len()),
             ("environment infos", step.infos.len()),
             ("environment observations", step.observations.dims()[0]),
@@ -1336,8 +1336,8 @@ where
             observations: next_observations,
             rewards,
             infos,
-            dones,
-            truncateds,
+            terminated,
+            truncated,
             ..
         } = step;
 
@@ -1384,7 +1384,7 @@ where
                 actions,
                 rewards: rewards.clone(),
                 terminated: Tensor::<2, Bool>::from_data(
-                    TensorData::new(dones.clone(), [count, 1]),
+                    TensorData::new(terminated.clone(), [count, 1]),
                     &storage_device,
                 ),
                 collection_policy_entropies: entropy.values,
@@ -1393,7 +1393,7 @@ where
                     entropy.change_weight,
                     (&storage_device, self.dtype),
                 ),
-                truncateds: truncateds.clone(),
+                truncated: truncated.clone(),
             })?;
 
         let mut completed_episodes = Vec::new();
@@ -1402,8 +1402,8 @@ where
                 if let Some(entry) = episodes.record(
                     index,
                     reward,
-                    dones[index],
-                    truncateds[index],
+                    terminated[index],
+                    truncated[index],
                     first_timestep + index + 1,
                 ) {
                     completed_episodes.push(entry);

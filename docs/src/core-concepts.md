@@ -58,7 +58,7 @@ threads. Applications can also implement the public `MultiGym` trait when
 they need a different way to manage or step a batch of environments.
 
 Vectorized environments auto-reset each inner environment when it returns
-`done` or `truncated`. The `observations` field in `MultiGymStepInfo` contains the
+`terminated` or `truncated`. The `observations` field in `MultiGymStepInfo` contains the
 next observation to continue training from. If an inner environment ended, that next
 observation is already the reset observation for the next episode; the final
 observation is kept in `terminal_observations`.
