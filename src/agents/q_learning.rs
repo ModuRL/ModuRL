@@ -139,7 +139,7 @@ pub struct QLogEntry {
     /// Float loss `[1]` in the compute dtype on the optimization device.
     pub loss: Tensor<1>,
     pub epsilon: f64,
-    pub learning_rate: f32,
+    pub learning_rate: f64,
     /// Selected Float Q values `[batch_size, 1]` in the compute dtype.
     pub q_values: Tensor<2>,
     /// Sampled Float rewards `[batch_size, 1]` in the compute dtype.
@@ -657,7 +657,7 @@ where
         logger.log_update(&QLogEntry {
             loss: loss.clone(),
             epsilon: self.current_epsilon,
-            learning_rate: self.learning_rate as f32,
+            learning_rate: self.learning_rate,
             q_values: selected_q_values,
             replay_rewards: rewards,
             update_index: self.optimization_steps,

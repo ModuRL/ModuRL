@@ -42,9 +42,9 @@ const ADAM_EPSILON: f64 = 1e-5;
 const GAMMA: f64 = 0.99;
 const GAE_LAMBDA: f64 = 0.95;
 const CLIP_COEFFICIENT: f64 = 0.1;
-const ENTROPY_COEFFICIENT: f32 = 0.01;
-const VALUE_COEFFICIENT: f32 = 0.5;
-const MAX_GRADIENT_NORM: f32 = 0.5;
+const ENTROPY_COEFFICIENT: f64 = 0.01;
+const VALUE_COEFFICIENT: f64 = 0.5;
+const MAX_GRADIENT_NORM: f64 = 0.5;
 
 // This wrapper is inside the action-repeat wrapper, so the limit is measured
 // in emulator frames rather than agent steps.

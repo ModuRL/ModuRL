@@ -287,7 +287,7 @@ pub trait PPONetwork<const O: usize, const H: usize, const L: usize>: Module {
         &mut self,
         actor_loss: Tensor<1>,
         critic_loss: Tensor<1>,
-        gradient_clip: f32,
+        gradient_clip: f64,
     ) -> Result<(), TensorReadError>;
 
     /// Updates each learning rate from its schedule at the current training progress.
@@ -365,7 +365,7 @@ where
         &mut self,
         actor_loss: Tensor<1>,
         critic_loss: Tensor<1>,
-        gradient_clip: f32,
+        gradient_clip: f64,
     ) -> Result<(), TensorReadError> {
         let total_loss = actor_loss + critic_loss;
         let mut total_grad = GradientsParams::from_grads(total_loss.backward(), &self.model);
@@ -454,7 +454,7 @@ where
         &mut self,
         actor_loss: Tensor<1>,
         critic_loss: Tensor<1>,
-        gradient_clip: f32,
+        gradient_clip: f64,
     ) -> Result<(), TensorReadError> {
         match self.combined_loss {
             true => {
