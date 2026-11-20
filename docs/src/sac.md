@@ -43,8 +43,9 @@ four parts:
 3. Automatic entropy tuning.
 4. An `SACAgent` that owns replay and runs collection and optimization.
 
-Replay termination and truncation flags are Bool tensors `[batch_size, 1]`, named
-`terminated` and `truncated`, on the same device as the other replay statistics.
+Replay insertion accepts termination and truncation as Bool tensors `[count, 1]`,
+named `terminated` and `truncated`. Truncation is consumed during aligned
+next-observation handling; it is not stored as a replay column or sampled batch field.
 Truncation retains bootstrapping; termination masks it.
 
 The agent stores every collected transition in replay, including transitions

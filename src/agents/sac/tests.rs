@@ -129,7 +129,6 @@ fn categorical_batch(device: &Device, dtype: DType) -> SACOptimizationBatch<2, 2
         actions: Tensor::zeros([2, 1], device),
         rewards: Tensor::ones([2, 1], (device, dtype)),
         terminated: Tensor::from_data([[false], [true]], device),
-        truncated: Tensor::from_data([[false], [true]], device),
         collection_policy_entropies: Tensor::zeros([2, 1], (device, dtype)),
         entropy_change_weights: Tensor::zeros([2, 1], (device, dtype)),
     }
@@ -646,7 +645,6 @@ fn continuous_policy_uses_reparameterized_actions_and_detached_targets() {
         actions: Tensor::zeros([2, 1], &device),
         rewards: Tensor::ones([2, 1], &device),
         terminated: Tensor::from_data([[false], [true]], &device),
-        truncated: Tensor::from_data([[false], [true]], &device),
         collection_policy_entropies: Tensor::zeros([2, 1], &device),
         entropy_change_weights: Tensor::zeros([2, 1], &device),
     };
@@ -1033,7 +1031,6 @@ fn integer_and_boolean_observations_reach_user_models_without_casting() {
         actions: Tensor::zeros([2, 1], &device),
         rewards: Tensor::ones([2, 1], (&device, DType::F64)),
         terminated: Tensor::from_data([[false], [false]], &device),
-        truncated: Tensor::from_data([[false], [false]], &device),
         collection_policy_entropies: Tensor::zeros([2, 1], (&device, DType::F64)),
         entropy_change_weights: Tensor::zeros([2, 1], (&device, DType::F64)),
     };

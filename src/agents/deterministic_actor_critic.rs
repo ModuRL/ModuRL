@@ -818,7 +818,6 @@ where
             actions: batch.actions.to_device(&device),
             rewards: batch.rewards.to_device(&device),
             terminated: transfer_bool_tensor(batch.terminated, &device),
-            truncated: transfer_bool_tensor(batch.truncated, &device),
         })
     }
 

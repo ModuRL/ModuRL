@@ -46,7 +46,6 @@ pub(super) struct DeterministicBatch<const O: usize, const A: usize, K: Autodiff
     pub(super) actions: Tensor<A>,
     pub(super) rewards: Tensor<2>,
     pub(super) terminated: Tensor<2, Bool>,
-    pub(super) truncated: Tensor<2, Bool>,
 }
 
 /// Native observations [num_envs, ...observation_shape] and Float actions [num_envs, ...action_shape].
@@ -125,7 +124,6 @@ pub(super) struct DeterministicReplayStorage<const O: usize, const A: usize, K: 
     actions: TensorReplayColumn<A>,
     rewards: TensorReplayColumn<2>,
     terminated: TensorReplayColumn<2, Bool>,
-    truncated: TensorReplayColumn<2, Bool>,
     environment_count: usize,
 }
 
@@ -175,7 +173,6 @@ impl<const O: usize, const A: usize, K: Autodiff> DeterministicReplayStorage<O, 
             actions: TensorReplayColumn::new(action_shape, (&device, dtype)),
             rewards: TensorReplayColumn::new([capacity, 1], (&device, dtype)),
             terminated: TensorReplayColumn::new([capacity, 1], &device),
-            truncated: TensorReplayColumn::new([capacity, 1], &device),
             environment_count,
         })
     }
@@ -283,8 +280,6 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
             .write(start, transitions.rewards.to_device(&device))?;
         self.terminated
             .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
-        self.truncated
-            .write(start, transfer_bool_tensor(transitions.truncated, &device))?;
         Ok(count)
     }
 
@@ -299,8 +294,7 @@ impl<const O: usize, const A: usize, K: Autodiff> ReplayStorage
             next_observations,
             actions: self.actions.gather(rows.clone()),
             rewards: self.rewards.gather(rows.clone()),
-            terminated: self.terminated.gather(rows.clone()),
-            truncated: self.truncated.gather(rows.clone()),
+            terminated: self.terminated.gather(rows),
         })
     }
 
@@ -444,7 +438,6 @@ mod tests {
         assert_eq!(batch.actions.dims(), [2, 1, 1]);
         assert_eq!(batch.rewards.dims(), [2, 1]);
         assert_eq!(batch.terminated.dims(), [2, 1]);
-        assert_eq!(batch.truncated.dims(), [2, 1]);
         assert_eq!(
             batch
                 .next_observations
@@ -456,7 +449,6 @@ mod tests {
         let empty = storage.gather(&[]).unwrap();
         assert_eq!(empty.observations.dims(), [0, 1, 2]);
         assert_eq!(empty.actions.dims(), [0, 1, 1]);
-        assert_eq!(empty.truncated.dims(), [0, 1]);
     }
 
     #[test]
@@ -487,19 +479,6 @@ mod tests {
             )
             .unwrap();
         let batch = storage.gather(&[0, 1]).unwrap();
-        assert_eq!(batch.truncated.dims(), [2, 1]);
-        assert_eq!(batch.truncated.device(), batch.terminated.device());
-        assert!(!batch.truncated.is_autodiff());
-        assert_eq!(
-            batch
-                .truncated
-                .clone()
-                .into_data()
-                .iter::<bool>()
-                .collect::<Vec<_>>(),
-            [true, false]
-        );
-        assert_eq!(storage.gather(&[]).unwrap().truncated.dims(), [0, 1]);
         for tensor in [
             batch.observations,
             batch.next_observations,

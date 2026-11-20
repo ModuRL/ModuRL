@@ -379,8 +379,6 @@ fn replay_matches_observation_dtype_and_does_not_alias_gathered_observations() {
     );
     assert_eq!(batch.actions.dims(), [4, 1]);
     assert_eq!(batch.next_terminated.dims(), [4, 1]);
-    assert_eq!(batch.next_truncated.dims(), [4, 1]);
-    assert_eq!(storage.gather(&[]).unwrap().next_truncated.dims(), [0, 1]);
     assert_eq!(batch.rewards.dims(), [4, 1]);
     let mut invalid = replay_insert(&[1.0, 2.0], &device);
     invalid.next_truncated = Tensor::zeros([2, 2], &device);
@@ -437,19 +435,6 @@ fn replay_preserves_native_integer_and_boolean_observations() {
         )
         .unwrap();
     let batch = boolean.gather(&[0, 1]).unwrap();
-    assert_eq!(
-        batch.next_truncated.device(),
-        batch.next_terminated.device()
-    );
-    assert!(!batch.next_truncated.is_autodiff());
-    assert_eq!(
-        batch
-            .next_truncated
-            .into_data()
-            .iter::<bool>()
-            .collect::<Vec<_>>(),
-        [true, false]
-    );
     assert_eq!(
         batch
             .observations

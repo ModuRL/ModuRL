@@ -27,8 +27,9 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - Added `modurl::tensor_rank::{NextRank, PrevRank}` to infer tensor types with one more or one fewer axis.
   These traits preserve kind without converting values. `NextRank` covers ranks 1–1024; `PrevRank` covers ranks 2–1025.
 
-- Replay insertion, storage, and sampled batches now represent truncation as a Bool tensor
-  `[batch_size, 1]`, matching termination and its device handling. Fields are named
+- Replay insertion now represents truncation as a Bool tensor `[count, 1]`, matching
+  termination. Truncation is consumed during aligned next-observation handling, not
+  stored as a replay column or included in sampled batches. Insert fields are named
   `truncated` (SAC and DDPG/TD3) or `next_truncated` (DQN/DDQN).
   Truncation still bootstraps; only termination masks Bellman targets.
 

@@ -92,7 +92,6 @@ pub(super) struct SACOptimizationBatch<const O: usize, const A: usize, K: Autodi
     pub actions: Tensor<A, L>,
     pub rewards: Tensor<2>,
     pub terminated: Tensor<2, Bool>,
-    pub truncated: Tensor<2, Bool>,
     pub collection_policy_entropies: Tensor<2>,
     pub entropy_change_weights: Tensor<2>,
 }
@@ -102,7 +101,6 @@ pub(super) struct SACReplayStorage<const O: usize, const A: usize, K: Autodiff, 
     actions: TensorReplayColumn<A, L>,
     rewards: TensorReplayColumn<2>,
     terminated: TensorReplayColumn<2, Bool>,
-    truncated: TensorReplayColumn<2, Bool>,
     collection_policy_entropies: TensorReplayColumn<2>,
     entropy_change_weights: TensorReplayColumn<2>,
 }
@@ -145,7 +143,6 @@ impl<const O: usize, const A: usize, K: Autodiff, L: Autodiff> SACReplayStorage<
             actions: TensorReplayColumn::new(action_shape, (&device, action_dtype)),
             rewards: TensorReplayColumn::new([capacity, 1], (&device, dtype)),
             terminated: TensorReplayColumn::new([capacity, 1], &device),
-            truncated: TensorReplayColumn::new([capacity, 1], &device),
             collection_policy_entropies: TensorReplayColumn::new([capacity, 1], (&device, dtype)),
             entropy_change_weights: TensorReplayColumn::new([capacity, 1], (&device, dtype)),
         })
@@ -242,8 +239,6 @@ where
             .write(start, transitions.rewards.to_device(&device))?;
         self.terminated
             .write(start, transfer_bool_tensor(transitions.terminated, &device))?;
-        self.truncated
-            .write(start, transfer_bool_tensor(transitions.truncated, &device))?;
 
         self.collection_policy_entropies.write(
             start,
@@ -275,7 +270,6 @@ where
             actions: self.actions.gather(rows.clone()),
             rewards: self.rewards.gather(rows.clone()),
             terminated: self.terminated.gather(rows.clone()),
-            truncated: self.truncated.gather(rows.clone()),
             collection_policy_entropies: self.collection_policy_entropies.gather(rows.clone()),
             entropy_change_weights: self.entropy_change_weights.gather(rows),
         })
@@ -366,19 +360,6 @@ mod tests {
             .insert(0, integer_transitions(&device, DType::I64))
             .unwrap();
         let batch = storage.gather(&[0, 1]).unwrap();
-        assert_eq!(batch.truncated.dims(), [2, 1]);
-        assert_eq!(batch.truncated.device(), batch.terminated.device());
-        assert!(!batch.truncated.is_autodiff());
-        assert_eq!(
-            batch
-                .truncated
-                .clone()
-                .into_data()
-                .iter::<bool>()
-                .collect::<Vec<_>>(),
-            [true, false]
-        );
-        assert_eq!(storage.gather(&[]).unwrap().truncated.dims(), [0, 1]);
         assert_eq!(batch.observations.dtype(), DType::I64);
         assert_eq!(batch.rewards.dtype(), DType::F64);
         assert_eq!(
