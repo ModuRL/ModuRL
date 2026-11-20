@@ -1,8 +1,9 @@
 //! Action-value networks, optimization, target snapshots, and ensemble aggregation.
 
+use super::checked_learning_rate;
 use crate::{
     models::Forward,
-    parameter_schedule::{LearningRateSchedule, ParameterSchedule, ScheduleProgress},
+    parameter_schedule::{ParameterSchedule, ScheduleProgress},
 };
 use bon::bon;
 use burn::{
@@ -10,6 +11,7 @@ use burn::{
     optim::{GradientsParams, ModuleOptimizer},
     tensor::{DType, Device, Float, Int, Tensor, TensorReadError, kind::Basic},
 };
+use std::sync::Arc;
 
 /// Estimates action values (Q values) for replay actions and policy candidates.
 /// Ranks O and A include batch and event axes. Rank C adds one candidate axis to A.
@@ -429,7 +431,7 @@ pub struct ActionValueCritic<N: Module> {
     target_network: N,
     optimizer: ModuleOptimizer,
     learning_rate: f64,
-    learning_rate_schedule: LearningRateSchedule,
+    learning_rate_schedule: Arc<dyn ParameterSchedule + Send + Sync>,
 }
 
 #[bon]
@@ -450,11 +452,10 @@ impl<N: Module> ActionValueCritic<N> {
     pub fn new(
         online_network: N,
         #[builder(into)] optimizer: ModuleOptimizer,
-        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| LearningRateSchedule::from(schedule))]
-        learning_rate: LearningRateSchedule,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
     ) -> Result<Self, ActionValueCriticError> {
-        let initial_rate = learning_rate
-            .initial_rate()
+        let initial_rate = checked_learning_rate(learning_rate.value(0.0))
             .ok_or(ActionValueCriticError::InvalidLearningRate)?;
 
         let online_network = online_network.train();
@@ -483,10 +484,9 @@ impl<N: Module> ActionValueCritic<N> {
             });
         }
 
-        let learning_rate = self
-            .learning_rate_schedule
-            .rate(progress)
-            .ok_or(ActionValueCriticError::InvalidLearningRate)?;
+        let learning_rate =
+            checked_learning_rate(progress.parameter(self.learning_rate_schedule.as_ref()))
+                .ok_or(ActionValueCriticError::InvalidLearningRate)?;
         let gradients = GradientsParams::from_grads(loss.clone().backward(), &self.online_network);
         self.online_network =
             self.optimizer
@@ -1127,26 +1127,26 @@ mod tests {
             .optimizer(SgdConfig::new().init())
             .learning_rate(|progress: f64| {
                 if progress < 1.0 {
-                    0.25 * (1.0 - progress)
+                    2.5 * (1.0 - progress)
                 } else {
                     f64::NAN
                 }
             })
             .build()
             .unwrap();
-        assert_eq!(critic.learning_rate(), 0.25);
+        assert_eq!(critic.learning_rate(), 2.5);
         let progress = ScheduleProgress::new(Some(10));
         let loss = critic.online_network().weight.val().sum();
         critic.backward_step(&loss, &progress.at_step(5)).unwrap();
-        assert_eq!(critic.learning_rate(), 0.125);
-        assert_eq!(numbers(critic.online_network().weight.val()), [0.875; 3]);
+        assert_eq!(critic.learning_rate(), 1.25);
+        assert_eq!(numbers(critic.online_network().weight.val()), [-0.25; 3]);
         let loss = critic.online_network().weight.val().sum();
         assert!(matches!(
             critic.backward_step(&loss, &progress.at_step(10)),
             Err(ActionValueCriticError::InvalidLearningRate)
         ));
-        assert_eq!(critic.learning_rate(), 0.125);
-        assert_eq!(numbers(critic.online_network().weight.val()), [0.875; 3]);
+        assert_eq!(critic.learning_rate(), 1.25);
+        assert_eq!(numbers(critic.online_network().weight.val()), [-0.25; 3]);
     }
 
     #[test]

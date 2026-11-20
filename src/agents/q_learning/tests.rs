@@ -218,7 +218,7 @@ fn float_agent(
         .observation_space(BoxSpace::new_unbounded([1, 1], device))
         .online_q_network(network(&device.clone().autodiff(), DType::F32))
         .optimizer(SgdConfig::new().init())
-        .learning_rate(0.01)
+        .learning_rate(Arc::new(0.01))
         .epsilon_schedule(LinearSchedule::new(1.0, 0.0))
         .replay_capacity(8)
         .batch_size(1)
@@ -484,7 +484,7 @@ fn native_high_rank_boolean_model_trains_with_matching_replay() {
         .observation_space(ObservationFixture::<3, Bool> { _kind: PhantomData })
         .online_q_network(network(&device, DType::F64))
         .optimizer(SgdConfig::new().init())
-        .learning_rate(0.01)
+        .learning_rate(Arc::new(0.01))
         .epsilon_schedule(LinearSchedule::new(0.0, 0.0))
         .replay_capacity(8)
         .batch_size(2)
@@ -611,7 +611,7 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
     ])
     .unwrap();
     let mut agent = float_agent(&device);
-    agent.learning_rate = LearningRateSchedule::from(|progress: f64| {
+    agent.learning_rate = Arc::new(|progress: f64| {
         if progress < 0.4 {
             0.01
         } else if progress < 0.6 {
@@ -758,7 +758,7 @@ fn builder_rejects_invalid_learning_rates_and_compute_dtypes() {
             .observation_space(BoxSpace::new_unbounded([1, 1], &device))
             .online_q_network(network(&device, DType::F32))
             .optimizer(SgdConfig::new().init())
-            .learning_rate(rate)
+            .learning_rate(Arc::new(rate))
             .training_horizon(10)
             .dtype(dtype)
             .build()

@@ -9,19 +9,17 @@ use burn::{
     },
 };
 use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use crate::{
-    agents::ReplayStorageConfig,
+    agents::{ReplayStorageConfig, checked_learning_rate},
     buffers::experience_replay::{
         AlignedObservationReplay, ExperienceReplay, ExperienceReplayError, ReplayStorage,
         ReplayStorageError, TensorReplayColumn, replay_index_tensor, validate_replay_alignment,
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
-    parameter_schedule::{
-        LearningRateSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
-    },
+    parameter_schedule::{LinearSchedule, ParameterSchedule, ScheduleProgress},
     spaces::{ActionSpace, Discrete, ObservationSpace, SpaceError},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
@@ -408,7 +406,7 @@ where
     target_q_network: M,
     target_update_interval: usize,
     optimizer: ModuleOptimizer,
-    learning_rate: LearningRateSchedule,
+    learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
     current_epsilon: f64,
     epsilon_schedule: Box<dyn ParameterSchedule>,
     schedule_progress: ScheduleProgress,
@@ -448,7 +446,7 @@ where
         observation_space: S,
         online_q_network: M,
         #[builder(into)] optimizer: ModuleOptimizer,
-        #[builder(into)] learning_rate: LearningRateSchedule,
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         #[builder(default = 1000)] target_update_interval: usize,
         #[builder(default = Box::new(LinearSchedule::new(1.0, 0.1)), with = |schedule: impl ParameterSchedule + 'static| Box::new(schedule))]
         epsilon_schedule: Box<dyn ParameterSchedule>,
@@ -468,7 +466,7 @@ where
         if !dtype.is_float() {
             return Err(QLearningConfigurationError::InvalidDType(dtype).into());
         }
-        if learning_rate.initial_rate().is_none() {
+        if checked_learning_rate(learning_rate.value(0.0)).is_none() {
             return Err(QLearningConfigurationError::InvalidLearningRate.into());
         }
         let observation_shape = observation_space.shape();
@@ -622,9 +620,8 @@ where
         if self.experience_replay.len() < self.experience_replay.get_batch_size() {
             return Ok(());
         }
-        let learning_rate = self
-            .learning_rate
-            .rate(&self.schedule_progress.at_step(collection_timestep))
+        let progress = self.schedule_progress.at_step(collection_timestep);
+        let learning_rate = checked_learning_rate(progress.parameter(self.learning_rate.as_ref()))
             .ok_or(QLearningConfigurationError::InvalidLearningRate)?;
         let optimization_device = self.replay_storage_config.optimization_device();
         let batch = self.experience_replay.sample()?;

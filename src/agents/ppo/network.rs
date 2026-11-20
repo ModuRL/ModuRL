@@ -11,8 +11,9 @@ use std::{marker::PhantomData, sync::Arc};
 
 use super::PPOConfigurationError;
 use crate::{
+    agents::checked_learning_rate,
     models::{Forward, probabilistic_model::ProbabilisticPolicy},
-    parameter_schedule::{ParameterSchedule, ScheduleProgress, checked_learning_rate},
+    parameter_schedule::{ParameterSchedule, ScheduleProgress},
     tensor_rank::{NextRank, PrevRank},
 };
 

@@ -6,6 +6,7 @@ use super::{
         ActionValueCritic, ActionValueCriticError, ActionValueCriticNetwork,
         interpolate_target_model,
     },
+    checked_learning_rate,
 };
 use crate::{
     buffers::experience_replay::{
@@ -14,7 +15,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     objectives::bellman_targets,
-    parameter_schedule::{LearningRateSchedule, ScheduleProgress},
+    parameter_schedule::{ParameterSchedule, ScheduleProgress},
     spaces::{ActionMap, ObservationSpace},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
@@ -27,7 +28,7 @@ use burn::{
         DType, Device, Distribution, Float, Tensor, TensorData, TensorReadError, kind::Autodiff,
     },
 };
-use std::{fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
 pub mod ddpg;
 mod replay;
@@ -339,7 +340,7 @@ impl DeterministicActorCriticConfigurationValidator {
         update_frequency: usize,
         training_horizon: Option<usize>,
     ) -> Result<(), DeterministicActorCriticConfigurationError> {
-        let error = if !actor_learning_rate.is_finite() || actor_learning_rate <= 0.0 {
+        let error = if checked_learning_rate(actor_learning_rate).is_none() {
             Some(DeterministicActorCriticConfigurationError::InvalidActorLearningRate)
         } else if !dtype.is_float() {
             Some(DeterministicActorCriticConfigurationError::InvalidDType(
@@ -461,7 +462,7 @@ pub(crate) struct DeterministicActorCriticAgent<
     target_actor: G::Actor,
     actor_optimizer: ModuleOptimizer,
     actor_learning_rate: f64,
-    actor_learning_rate_schedule: LearningRateSchedule,
+    actor_learning_rate_schedule: Arc<dyn ParameterSchedule + Send + Sync>,
     critics: Vec<ActionValueCritic<G::Critic>>,
     strategy: S,
     action_space: AS,
@@ -497,7 +498,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
     pub(crate) fn new<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
         online_actor: M,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
-        #[builder(into)] actor_learning_rate: LearningRateSchedule,
+        actor_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         critics: Vec<ActionValueCritic<N>>,
         strategy: S,
         action_space: AS,
@@ -544,9 +545,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
                 "observations and actions require batch and item axes; candidates add one action axis"
             );
         }
-        let initial_actor_learning_rate = actor_learning_rate
-            .initial_rate()
-            .ok_or(DeterministicActorCriticConfigurationError::InvalidActorLearningRate)?;
+        let initial_actor_learning_rate = actor_learning_rate.value(0.0);
         DeterministicActorCriticConfigurationValidator::validate_configuration()
             .actor_learning_rate(initial_actor_learning_rate)
             .dtype(dtype)
@@ -924,10 +923,9 @@ where
         observations: &Tensor<O, OS::Kind>,
         progress: &ScheduleProgress,
     ) -> Result<ActorUpdate<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
-        let learning_rate = self
-            .actor_learning_rate_schedule
-            .rate(progress)
-            .ok_or(DeterministicActorCriticConfigurationError::InvalidActorLearningRate)?;
+        let learning_rate =
+            checked_learning_rate(progress.parameter(self.actor_learning_rate_schedule.as_ref()))
+                .ok_or(DeterministicActorCriticConfigurationError::InvalidActorLearningRate)?;
         let count = observations.dims()[0];
         let latent = self
             .online_actor

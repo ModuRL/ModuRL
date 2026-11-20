@@ -5,6 +5,7 @@ use burn::{
     optim::ModuleOptimizer,
     tensor::{Bool, Cast, DType, Device, Float, FloatDType, Int, Tensor, kind::Autodiff},
 };
+use std::sync::Arc;
 
 use super::{
     QAgentError, QCollectionLogEntry, QLearningAgent, QLearningLogger, QLearningTarget, QLogEntry,
@@ -14,7 +15,7 @@ use crate::{
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
     objectives::bellman_targets,
-    parameter_schedule::{LearningRateSchedule, LinearSchedule, ParameterSchedule},
+    parameter_schedule::{LinearSchedule, ParameterSchedule},
     spaces::{Discrete, ObservationSpace},
     tensor_rank::NextRank,
 };
@@ -103,8 +104,8 @@ where
         observation_space: S,
         online_q_network: M,
         #[builder(into)] optimizer: ModuleOptimizer,
-        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| LearningRateSchedule::from(schedule))]
-        learning_rate: LearningRateSchedule,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         #[builder(default = 1000)] target_update_interval: usize,
         #[builder(
             default = Box::new(LinearSchedule::new(1.0, 0.1)),

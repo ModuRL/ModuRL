@@ -18,7 +18,7 @@ use crate::{
     },
     gym::{MultiGym, MultiGymStepInfo},
     models::Forward,
-    parameter_schedule::{LearningRateSchedule, ParameterSchedule},
+    parameter_schedule::ParameterSchedule,
     spaces::{ActionMap, ObservationSpace},
     tensor_rank::{NextRank, TensorBatchTypes},
 };
@@ -28,7 +28,7 @@ use burn::{
     optim::ModuleOptimizer,
     tensor::{DType, Device, Float, Tensor, kind::Autodiff},
 };
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 /// Receives TD3 replay-update and collection metrics.
 pub trait TD3Logger<I = (), const A: usize = 2> {
@@ -136,8 +136,8 @@ impl<'a, G: DeterministicActorCriticModelTypes, OS, AS, GE, I, const A: usize>
     pub fn new<M, N, AE: Debug, CE: Debug, SE: Debug, const O: usize, const C: usize>(
         online_actor: M,
         #[builder(into)] actor_optimizer: ModuleOptimizer,
-        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| LearningRateSchedule::from(schedule))]
-        actor_learning_rate: LearningRateSchedule,
+        #[builder(with = |schedule: impl ParameterSchedule + Send + Sync + 'static| Arc::new(schedule))]
+        actor_learning_rate: Arc<dyn ParameterSchedule + Send + Sync>,
         critics: Vec<ActionValueCritic<N>>,
         action_space: AS,
         observation_space: OS,

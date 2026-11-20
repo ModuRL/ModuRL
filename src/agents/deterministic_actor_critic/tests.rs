@@ -210,7 +210,7 @@ fn agent(
     DeterministicActorCriticAgent::builder()
         .online_actor(linear_model(&[0.25], device, dtype))
         .actor_optimizer(SgdConfig::new().init())
-        .actor_learning_rate(0.01)
+        .actor_learning_rate(Arc::new(0.01))
         .critics(vec![critic(device, dtype), critic(device, dtype)])
         .strategy(TestStrategy {
             interval,
@@ -410,7 +410,7 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
     let device = Device::flex().autodiff();
     let mut agent = agent(&device, DType::F64, 2);
     agent.actor_learning_rate_schedule =
-        LearningRateSchedule::from(|progress: f64| if progress >= 0.2 { 0.02 } else { 0.01 });
+        Arc::new(|progress: f64| if progress >= 0.2 { 0.02 } else { 0.01 });
     let env_device = device.clone().without_autodiff();
     let mut env = VectorizedGymWrapper::new(vec![
         EpisodeEnv {
@@ -717,7 +717,7 @@ fn native_high_rank_boolean_collection_trains_and_rejects_invalid_terminals() {
             weight: Param::from_tensor(Tensor::from_data([[0.25f64]], (&device, DType::F64))),
         })
         .actor_optimizer(SgdConfig::new().init())
-        .actor_learning_rate(0.01)
+        .actor_learning_rate(Arc::new(0.01))
         .critics(vec![
             ActionValueCritic::builder()
                 .online_network(BooleanCritic {
@@ -811,7 +811,7 @@ fn builder_and_actions_reject_invalid_contracts() {
         DeterministicActorCriticAgent::<_, _, _, _, Infallible>::builder()
             .online_actor(linear_model(&[0.25], &device, DType::F32))
             .actor_optimizer(SgdConfig::new().init())
-            .actor_learning_rate(rate)
+            .actor_learning_rate(Arc::new(rate))
             .critics(vec![critic(&device, DType::F32)])
             .strategy(TestStrategy {
                 interval: 1,

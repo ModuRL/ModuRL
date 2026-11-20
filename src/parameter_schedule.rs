@@ -3,28 +3,6 @@ pub trait ParameterSchedule {
     fn value(&self, t: f64) -> f64;
 }
 
-pub(crate) struct LearningRateSchedule(Box<dyn ParameterSchedule + Send + Sync>);
-
-impl<S: ParameterSchedule + Send + Sync + 'static> From<S> for LearningRateSchedule {
-    fn from(schedule: S) -> Self {
-        Self(Box::new(schedule))
-    }
-}
-
-impl LearningRateSchedule {
-    pub(crate) fn initial_rate(&self) -> Option<f64> {
-        checked_learning_rate(self.0.value(0.0))
-    }
-
-    pub(crate) fn rate(&self, progress: &ScheduleProgress) -> Option<f64> {
-        checked_learning_rate(progress.parameter(self.0.as_ref()))
-    }
-}
-
-pub(crate) fn checked_learning_rate(rate: f64) -> Option<f64> {
-    (rate.is_finite() && rate > 0.0).then_some(rate)
-}
-
 /// Tracks progress through a fixed training horizon for parameter schedules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScheduleProgress {
