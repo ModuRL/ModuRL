@@ -358,7 +358,7 @@ fn categorical_bellman_targets_and_half_mse_preserve_f64() {
 fn agent_builder_rejects_invalid_sizes_ranges_and_dtype() {
     let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
     let device = Device::flex().autodiff();
-    for case in 0..12 {
+    for case in 0..13 {
         let critics = if case == 10 {
             vec![]
         } else {
@@ -386,6 +386,7 @@ fn agent_builder_rejects_invalid_sizes_ranges_and_dtype() {
                 16
             })
             .batch_size(if case == 1 { 0 } else { 2 })
+            .samples(if case == 12 { 0 } else { 1 })
             .gamma(if case == 3 { f64::NAN } else { 0.99 })
             .tau(if case == 4 { 1.1 } else { 0.005 })
             .dtype(if case == 6 { DType::I64 } else { DType::F32 })
@@ -408,6 +409,7 @@ fn agent_builder_rejects_invalid_sizes_ranges_and_dtype() {
                 | (9, SACConfigurationError::ZeroTrainingHorizon)
                 | (10, SACConfigurationError::NoCritics)
                 | (11, SACConfigurationError::EmptySpace)
+                | (12, SACConfigurationError::ZeroSamples)
         ));
     }
 }
@@ -635,7 +637,7 @@ fn continuous_policy_uses_reparameterized_actions_and_detached_targets() {
             Tensor::zeros([1, 1], &device),
             Tensor::full([1, 1], 100.0, &device),
         ))
-        .samples(NonZeroUsize::new(4).unwrap())
+        .samples(4)
         .training_horizon(4)
         .build()
         .unwrap();

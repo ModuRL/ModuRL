@@ -63,6 +63,8 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Environments and agents
 
+- SAC's `samples` builder parameter now takes `usize` (default `1`) instead of
+  `NonZeroUsize`; zero returns `SACConfigurationError::ZeroSamples`.
 - DQN and DDQN builders now return `QLearningConfigurationError` directly instead of
   `QAgentError`. Configuration-time tensor reads use its `Tensor` variant;
   runtime failures continue to use `QAgentError`. `QLearningConfigurationError`
