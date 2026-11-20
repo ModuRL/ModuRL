@@ -23,7 +23,7 @@ use support::{atari::make_atari_env, nature_cnn::NatureCnn};
 
 const SEED: i32 = 1;
 const FRAME_SKIP: usize = 4;
-const MAX_EPISODE_FRAMES: u32 = 400_000;
+const MAX_EPISODE_FRAMES: usize = 400_000;
 const ATARI_FRAME_RATE: f64 = 60.0;
 
 fn main() {

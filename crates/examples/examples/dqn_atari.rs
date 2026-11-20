@@ -27,7 +27,7 @@ use support::{
 
 const SEED: i32 = 1;
 const NUM_ENVS: usize = 1;
-const MAX_EPISODE_FRAMES: u32 = 108_000;
+const MAX_EPISODE_FRAMES: usize = 108_000;
 
 // Separate state and next-state storage at this capacity uses about 53 GiB.
 const REPLAY_CAPACITY: usize = 1_000_000;
