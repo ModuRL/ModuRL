@@ -129,6 +129,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 ### Environment wrappers and device placement
 
 - Added `PerfectStateGym` with `save_state` and `set_state`; core wrappers implement it when their inner gym does.
+- `TimeLimitGym::new` takes a `usize` step limit, and its saved state stores the elapsed step count as `usize`.
 - Added `PerfectStateMultiGym` with per-slot `save_state` and `set_state`; `VectorizedGymWrapper`, `StackedMultiGym`, and the input, output, and device wrappers implement it when their inner gyms do.
 - Added `LegalActionsGym` and `LegalActionsMultiGym`, which report legal discrete action indices per gym or slot; vectorized, stacked, map, device, and single-gym wrappers forward them.
 - Added `LegalActionMaskGym`, which appends a legal-action mask to flat observations, and `MaskedLogits`, which applies it to policy or Q-network outputs; DQN and DDQN gain `legal_action_mask` so epsilon-random actions stay legal. `Discrete::sample_batch_masked` samples masked random actions using the backend device RNG. DQN and DDQN epsilon-random actions now sample through the action space on-device, so seeded exploration sequences differ from earlier releases.

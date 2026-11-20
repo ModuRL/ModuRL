@@ -81,7 +81,7 @@ where
 pub fn make_atari_env(
     rom_path: PathBuf,
     seed: i32,
-    max_episode_frames: u32,
+    max_episode_frames: usize,
     render: bool,
 ) -> impl Gym<
     RawRewardInfo<EpisodeStatisticsInfo<AtariInfo>>,

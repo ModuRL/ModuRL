@@ -11,12 +11,12 @@ use crate::{
 /// Truncates an episode after a fixed number of environment steps.
 pub struct TimeLimitGym<G> {
     gym: G,
-    max_episode_steps: u32,
-    elapsed_steps: u32,
+    max_episode_steps: usize,
+    elapsed_steps: usize,
 }
 
 impl<G> TimeLimitGym<G> {
-    pub fn new(gym: G, max_episode_steps: u32) -> Self {
+    pub fn new(gym: G, max_episode_steps: usize) -> Self {
         assert!(
             max_episode_steps > 0,
             "max_episode_steps must be at least 1"
@@ -79,7 +79,7 @@ where
     G::ObservationSpace: ObservationSpace<BO, Kind = K>,
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
-    type State = (G::State, u32);
+    type State = (G::State, usize);
 
     fn save_state(&self) -> Result<Self::State, Self::Error> {
         Ok((self.gym.save_state()?, self.elapsed_steps))
@@ -106,7 +106,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        gym::{Gym, LegalActionsGym, ResetInfo, StepInfo},
+        gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo},
         spaces::{BoxSpace, Discrete},
     };
     use burn::tensor::{DType, Device, Int, Tensor};
@@ -231,6 +231,16 @@ mod tests {
             |observation| observation.into_data(),
             |_: &()| (),
         );
+    }
+
+    #[test]
+    fn truncates_at_usize_step_limit_from_saved_state() {
+        let mut wrapper = TimeLimitGym::new(StateTestGym::new(13), usize::MAX);
+        let (inner_state, _) = wrapper.save_state().unwrap();
+        wrapper.set_state(&(inner_state, usize::MAX - 1)).unwrap();
+
+        assert!(wrapper.step(state_action()).unwrap().truncated);
+        assert_eq!(wrapper.save_state().unwrap().1, usize::MAX);
     }
 
     #[test]
