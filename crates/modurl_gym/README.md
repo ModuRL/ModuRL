@@ -63,6 +63,8 @@ and observation batches to an accelerator.
 `BipedalWalkerV3` implements the standard environment. The hardcore obstacle variant is not included.
 
 The environment structs expose Gymnasium's unwrapped dynamics. Apply registry time limits explicitly with ModuRL's `TimeLimitGym` wrapper.
+`TimeLimitGym::new` returns `Result`; handle it with `?` or `.expect(...)`.
+A zero limit returns `TimeLimitGymConfigurationError::ZeroMaxEpisodeSteps`.
 
 ## Cargo features
 

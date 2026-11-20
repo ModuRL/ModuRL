@@ -122,6 +122,8 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   `f64` implements `ParameterSchedule` as a constant. PPO and A2C `set_learning_rate` take the same input,
   replace the schedule from the current training progress, and return `PPOConfigurationError::InvalidLearningRate` for a nonpositive or non-finite rate.
 - Agent builders make `.training_horizon(...)` optional. Without it, schedules span the first `learn` call's `num_timesteps`; set it explicitly for chunked training.
+- `ScheduleProgress::new` now returns `Result` with `ScheduleProgressError::ZeroTrainingHorizon`
+  for `Some(0)` instead of panicking. `None` still defers the horizon (#192).
 - PPO and A2C builders replace `gae_lambda` with `advantage_estimator`, which accepts any `AdvantageEstimator`.
   `GAE::new(lambda)` returns `GAEError::InvalidLambda` for invalid lambdas instead of
   `PPOConfigurationError::InvalidGaeLambda`; defaults remain 0.95 for PPO and 1.0 for A2C.
@@ -139,6 +141,13 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Environment wrappers and device placement
 
+- `TimeLimitGym::new`, `MaxAndSkipGym::new`, and `FrameStackGym::new` now return `Result`
+  with `TimeLimitGymConfigurationError`, `MaxAndSkipGymConfigurationError`, and
+  `FrameStackGymConfigurationError` instead of panicking on zero limits or an invalid frame-stack space.
+  `NormalizeRewardGym::new` and `with_clip` return `NormalizeRewardGymConfigurationError`
+  for invalid discounts or clipping limits; `NormalizeObservationGym::with_clip` returns
+  `NormalizeObservationGymConfigurationError` for invalid clipping limits. Handle these results
+  before using the wrappers (#192).
 - Added `PerfectStateGym` with `save_state` and `set_state`; core wrappers implement it when their inner gym does.
 - Added `PerfectStateMultiGym` with per-slot `save_state` and `set_state`; `VectorizedGymWrapper`, `StackedMultiGym`, and the input, output, and device wrappers implement it when their inner gyms do.
 - Added `LegalActionsGym` and `LegalActionsMultiGym`, which report legal discrete action indices per gym or slot; vectorized, stacked, map, device, and single-gym wrappers forward them.
