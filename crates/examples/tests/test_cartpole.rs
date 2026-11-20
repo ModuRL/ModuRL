@@ -41,7 +41,7 @@ fn model(input: usize, output: usize, hidden: Vec<usize>, gain: f64, device: &De
 
 /// Evaluates Float observations [1, 4] with Int actions [1, 1] over 100 completed CartPole episodes.
 fn get_average_steps<
-    A: for<'c> Agent<ObservationSpace = BoxSpace<2>, ActionSpace = Discrete, ActContext<'c> = ()>,
+    A: for<'c> Agent<ActionSpace = Discrete, ObservationSpace = BoxSpace<2>, ActContext<'c> = ()>,
 >(
     agent: &mut A,
     device: &Device,
@@ -87,8 +87,8 @@ fn ppo_cartpole() {
         .unwrap();
     let mut agent = PPOAgent::builder()
         .network_info(networks)
-        .observation_space(env.observation_space())
         .action_space(env.action_space())
+        .observation_space(env.observation_space())
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
@@ -170,8 +170,8 @@ fn ppo_cartpole_shared() {
         .unwrap_or(0.5);
     let mut agent = PPOAgent::builder()
         .network_info(shared_network(&device))
-        .observation_space(env.observation_space())
         .action_space(env.action_space())
+        .observation_space(env.observation_space())
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)
@@ -212,8 +212,8 @@ fn ppo_cartpole_shared_multithreaded() {
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let mut agent = PPOAgent::builder()
         .network_info(shared_network(&device))
-        .observation_space(env.observation_space())
         .action_space(env.action_space())
+        .observation_space(env.observation_space())
         .batch_size(2048)
         .mini_batch_size(64)
         .normalize_advantage(true)

@@ -24,8 +24,8 @@ pub use vectorized::{VectorizedGymError, VectorizedGymWrapper};
 pub trait Gym<I = (), const O: usize = 2, const A: usize = 2> {
     type Error;
 
-    type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
+    type ObservationSpace: ObservationSpace<O>;
 
     /// Steps with unbatched `action_shape`, one rank below `A`; scalar actions use `[1]`.
     /// Returns unbatched `observation_shape`, one rank below `O`, a scalar reward, and host flags.
@@ -41,9 +41,9 @@ pub trait Gym<I = (), const O: usize = 2, const A: usize = 2> {
         &mut self,
     ) -> Result<ResetInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error>;
 
-    fn observation_space(&self) -> Self::ObservationSpace;
-
     fn action_space(&self) -> Self::ActionSpace;
+
+    fn observation_space(&self) -> Self::ObservationSpace;
 }
 
 /// A gym whose whole state can be saved and restored.
@@ -66,8 +66,8 @@ pub trait PerfectStateGym<I = (), const O: usize = 2, const A: usize = 2>: Gym<I
 pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2> {
     type Error;
 
-    type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
+    type ObservationSpace: ObservationSpace<O>;
 
     /// Steps with `[num_envs, ...action_shape]` of rank `A` in the action space's kind.
     /// Returns observations `[num_envs, ...observation_shape]` of rank `O` and rewards `[num_envs, 1]`.
@@ -77,9 +77,9 @@ pub trait MultiGym<I = (), const O: usize = 2, const A: usize = 2> {
         action: <Self::ActionSpace as TensorBatchTypes>::Batch,
     ) -> Result<MultiGymStepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error>;
 
-    fn observation_space(&self) -> Self::ObservationSpace;
-
     fn action_space(&self) -> Self::ActionSpace;
+
+    fn observation_space(&self) -> Self::ObservationSpace;
 
     fn num_envs(&self) -> usize;
 

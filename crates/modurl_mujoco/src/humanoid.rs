@@ -185,8 +185,8 @@ impl HumanoidV5 {
 
 impl Gym<HumanoidV5Info> for HumanoidV5 {
     type Error = MujocoError;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = BoxSpace<2>;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Returns unbatched F32 observations `[observation_size]` on CPU Flex with reset metadata.
     fn reset(&mut self) -> Result<ResetInfo<HumanoidV5Info>, Self::Error> {
@@ -228,13 +228,13 @@ impl Gym<HumanoidV5Info> for HumanoidV5 {
         })
     }
 
-    fn observation_space(&self) -> BoxSpace<2> {
-        self.core
-            .unbounded_observation_space(self.observation_size())
-    }
-
     fn action_space(&self) -> BoxSpace<2> {
         self.core
             .action_space_bounded(ACTION_MINIMUM, ACTION_MAXIMUM)
+    }
+
+    fn observation_space(&self) -> BoxSpace<2> {
+        self.core
+            .unbounded_observation_space(self.observation_size())
     }
 }

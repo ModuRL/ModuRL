@@ -1163,7 +1163,7 @@ where
     /// Preserves native observation kind, dtype, and device. Each learn call starts a new collection sequence.
     fn prepare_replay_collection(
         &mut self,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
+        env: &mut dyn MultiGym<I, O, A, Error = GE, ActionSpace = AS, ObservationSpace = OS>,
     ) -> Result<Tensor<O, OS::Kind>, SACError<PE, GE, SE, CE>> {
         let count = env.num_envs();
         self.validate_replay_environment_count(count)?;
@@ -1205,7 +1205,7 @@ where
     /// Preserves native observations and terminal targets. Returns detached collection rewards `[num_envs, 1]` and episode statistics.
     fn collect_transitions<const U: usize>(
         &mut self,
-        env: &mut dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS>,
+        env: &mut dyn MultiGym<I, O, A, Error = GE, ActionSpace = AS, ObservationSpace = OS>,
         observations: &mut Tensor<O, OS::Kind>,
         episodes: &mut SACEpisodeTracker,
     ) -> Result<SACCollectionLogEntry<I>, SACError<PE, GE, SE, CE>>
@@ -1487,9 +1487,9 @@ where
     GE: Debug,
 {
     type Error = SACError<P::Error, GE, AS::Error, N::Error>;
-    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ObservationSpace = OS, ActionSpace = AS> + 'e;
-    type ObservationSpace = OS;
+    type Env<'e> = dyn MultiGym<I, O, A, Error = GE, ActionSpace = AS, ObservationSpace = OS> + 'e;
     type ActionSpace = AS;
+    type ObservationSpace = OS;
     type ActContext<'c> = ();
     type TrainingActions = Tensor<A, AS::Kind>;
 

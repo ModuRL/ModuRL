@@ -50,7 +50,7 @@ fn check_parity<I, E, F>(
     contact_observation_start: Option<usize>,
 ) where
     F: Fn(&mut E, &[f64], &[f64]) -> Result<Tensor<1>, MujocoError>,
-    E: Gym<I, Error = MujocoError, ObservationSpace = BoxSpace<2>, ActionSpace = BoxSpace<2>>,
+    E: Gym<I, Error = MujocoError, ActionSpace = BoxSpace<2>, ObservationSpace = BoxSpace<2>>,
 {
     let fixture: Fixture = serde_json::from_str(fixture_json).unwrap();
     assert_eq!(fixture.gymnasium_version, "1.2.1");

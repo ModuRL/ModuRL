@@ -46,8 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let environment_device = Device::flex();
     let env = VectorizedGymWrapper::from(CartPoleV1::builder().seed(42).build()?);
     let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
-    let observation_space = env.observation_space();
     let action_space = env.action_space();
+    let observation_space = env.observation_space();
     let observation_size = observation_space.shape()[0];
     let action_count = action_space.get_possible_values();
     let policy = ProbabilisticPolicyModel::new(

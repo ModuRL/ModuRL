@@ -72,8 +72,8 @@ struct EpisodeEnv {
 
 impl Gym for EpisodeEnv {
     type Error = Infallible;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = Discrete;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Accepts an Int scalar action [1] and returns a Float observation [1] on the environment device.
     fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
@@ -96,12 +96,12 @@ impl Gym for EpisodeEnv {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        BoxSpace::new_unbounded([1, 1], &self.device)
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         Discrete::new(2).unwrap()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, 1], &self.device)
     }
 }
 
@@ -118,8 +118,8 @@ struct CountingEpisodeEnv {
 
 impl Gym for CountingEpisodeEnv {
     type Error = Infallible;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = Discrete;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Accepts an Int scalar action [1] and returns a Float observation [1] on the environment device.
     fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
@@ -141,12 +141,12 @@ impl Gym for CountingEpisodeEnv {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        BoxSpace::new_unbounded([1, 1], &self.device)
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         Discrete::new(2).unwrap()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, 1], &self.device)
     }
 }
 

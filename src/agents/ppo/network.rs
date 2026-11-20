@@ -1040,13 +1040,13 @@ mod tests {
                 .build()
                 .unwrap();
             let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
-                .observation_space(BoxSpace::new_unbounded([1, 4], &device))
                 .action_space(BoxSpace::new_with_universal_bounds(
                     [1, 3],
                     -1.0,
                     1.0,
                     &device,
                 ))
+                .observation_space(BoxSpace::new_unbounded([1, 4], &device))
                 .network_info(networks)
                 .normalize_advantage(false)
                 .gradient_clip(100.0)
@@ -1099,8 +1099,8 @@ mod tests {
             .unwrap();
         let mut logger = NoopLogger::default();
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(2)
             .mini_batch_size(2)
@@ -1156,8 +1156,8 @@ mod tests {
             .unwrap();
         let mut logger = NoopLogger::default();
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(2)
             .mini_batch_size(2)
@@ -1217,8 +1217,8 @@ mod tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::builder()
-            .observation_space(valid_env.observation_space())
             .action_space(valid_env.action_space())
+            .observation_space(valid_env.observation_space())
             .network_info(networks)
             .batch_size(2)
             .mini_batch_size(2)

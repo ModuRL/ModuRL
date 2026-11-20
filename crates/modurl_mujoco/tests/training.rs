@@ -102,8 +102,8 @@ fn a2c_trains_with_mujoco_and_time_limit_truncations() {
         .unwrap();
     let mut logger = TrainingLogger::default();
     let mut agent = A2CAgent::builder()
-        .observation_space(environments.observation_space())
         .action_space(environments.action_space())
+        .observation_space(environments.observation_space())
         .network_info(networks.into())
         .batch_size(4)
         .training_horizon(8)
@@ -134,8 +134,8 @@ fn ppo_trains_with_mujoco_and_time_limit_truncations() {
         .unwrap();
     let mut logger = TrainingLogger::default();
     let mut agent = PPOAgent::builder()
-        .observation_space(environments.observation_space())
         .action_space(environments.action_space())
+        .observation_space(environments.observation_space())
         .network_info(networks)
         .batch_size(4)
         .mini_batch_size(4)

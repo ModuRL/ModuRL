@@ -52,8 +52,8 @@ where
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
     type Error = G::Error;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Returns the inner gym's unbatched rank-`BO - 1` observation, preserving its kind, dtype, device, and item axes.
     fn reset(
@@ -183,8 +183,8 @@ where
     G::ActionSpace: ActionSpace<BA, Kind = AK>,
 {
     type Error = G::Error;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Returns the inner gym's unbatched rank-`BO - 1` observation, preserving its kind, dtype, device, and item axes.
     fn reset(

@@ -120,8 +120,8 @@ fn ppo_training_is_device_deterministic() {
             .unwrap();
         let mut agent = PPOAgent::builder()
             .network_info(networks)
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .batch_size(16)
             .mini_batch_size(4)
             .num_epochs(2)

@@ -29,8 +29,8 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Tensor shapes and space traits
 
-- Removed the combined `Space` trait. Implement `ObservationSpace<O>` for observation checks,
-  `ActionSpace<A>` for action checks and sampling, and `ActionMap<L, A>` for policy-to-environment conversion.
+- Removed the combined `Space` trait. Implement `ActionSpace<A>` for action checks and sampling,
+  `ObservationSpace<O>` for observation checks, and `ActionMap<L, A>` for policy-to-environment conversion.
 - Both space roles have an associated tensor `Kind`. `ObservationSpace` has no associated error type;
   `ActionSpace` retains `Error`. `contains()` returns `bool`, and `shape()` returns the item shape without a batch axis.
 - `Discrete::new` returns `Result<Discrete, SpaceError>` and rejects category counts outside `1..=2^24`
@@ -66,7 +66,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   `Gym<I = (), O = 2, A = 2>`, `MultiGym<I = (), O = 2, A = 2>`, and `Agent<I = (), O = 2, A = 2>`.
   These const parameters count batch axes even for `Gym`, whose step and reset values are unbatched.
   `PrevRank` determines each unbatched tensor type.
-- `Gym` and `MultiGym` replace `SpaceError` and boxed combined spaces with associated `ObservationSpace` and `ActionSpace` types.
+- `Gym` and `MultiGym` replace `SpaceError` and boxed combined spaces with associated `ActionSpace` and `ObservationSpace` types.
   Their space accessors return those types directly. Trait objects must specify both associated space types.
   `Agent` also adds associated space types. Its action-space error is `ActionSpace::Error`; `Agent::SpaceError` is removed.
 - `Agent` gains `type TrainingActions`, `act_for_training`, and `learn_from_timesteps` for caller-owned loops; `act` is now provided.
@@ -281,7 +281,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Prelude changes
 
-- Added exports for `Forward`, `ModelError`, `PolicyTypes`, `ObservationSpace`, `ActionSpace`, `ActionMap`, `SpaceError`,
+- Added exports for `Forward`, `ModelError`, `PolicyTypes`, `ActionSpace`, `ObservationSpace`, `ActionMap`, `SpaceError`,
   `DistributionTensorError`, `QLearningReplayError`, `NextRank`, `PrevRank`, and the new input/output/device wrappers.
 - Removed exports for `Space`, `TensorMapMultiGymWrapper`, and the three removed MLP initializer types.
   Buffer and sampling errors remain available through their defining modules.

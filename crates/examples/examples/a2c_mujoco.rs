@@ -60,9 +60,9 @@ fn main() {
     let env = VectorizedGymWrapper::new(vec![env]).unwrap();
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let rollout_batch_size = 5 * env.num_envs();
+    let action_space = env.action_space();
     let observation_space = env.observation_space();
     let observation_size = observation_space.shape()[0];
-    let action_space = env.action_space();
     let action_shape = action_space.shape();
     let action_size = action_shape.iter().product::<usize>();
 
@@ -114,8 +114,8 @@ fn main() {
 
     let mut grapher = OnPolicyGrapher::a2c_mujoco(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
     let mut agent = A2CAgent::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
+        .observation_space(observation_space)
         .network_info(networks)
         // SB3 A2C collects five steps from each environment per update.
         .batch_size(rollout_batch_size)

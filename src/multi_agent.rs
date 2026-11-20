@@ -10,13 +10,13 @@ use crate::tensor_rank::TensorBatchTypes;
 /// Ended slots auto-reset, retaining each agent's terminal observation.
 pub trait MultiAgentGym<I = (), const O: usize = 2, const A: usize = 2> {
     type Error;
-    type ObservationSpace: ObservationSpace<O>;
     type ActionSpace: ActionSpace<A>;
+    type ObservationSpace: ObservationSpace<O>;
 
     fn num_agents(&self) -> usize;
     fn num_envs(&self) -> usize;
-    fn observation_space(&self, agent: usize) -> Self::ObservationSpace;
     fn action_space(&self, agent: usize) -> Self::ActionSpace;
+    fn observation_space(&self, agent: usize) -> Self::ObservationSpace;
 
     /// Resets all slots, returning one `[num_envs, ...observation_shape]` batch per agent in agent order.
     /// Reset before the first step. Observation dtype and device follow the agent's space.

@@ -142,8 +142,8 @@ struct EndingEnv {
 
 impl Gym for EndingEnv {
     type Error = Infallible;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = Discrete;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Accepts an Int scalar action `[1]`, returning a Float terminal vector `[terminal_width]` filled with 10 and reward 2.
     fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
@@ -164,15 +164,15 @@ impl Gym for EndingEnv {
         })
     }
 
+    fn action_space(&self) -> Discrete {
+        Discrete::new(2).unwrap()
+    }
+
     fn observation_space(&self) -> BoxSpace<2> {
         BoxSpace::new(
             Tensor::zeros([1, 1], &self.device),
             Tensor::full([1, 1], 100.0, &self.device),
         )
-    }
-
-    fn action_space(&self) -> Discrete {
-        Discrete::new(2).unwrap()
     }
 }
 
@@ -933,7 +933,7 @@ fn caller_collected_training_matches_learn() {
         }])
         .unwrap()
     };
-    let build_agent = |observation_space: BoxSpace<2>, action_space: Discrete| {
+    let build_agent = |action_space: Discrete, observation_space: BoxSpace<2>| {
         SACAgent::<_, _, _, VectorizedGymError<Infallible>>::builder()
             .policy(ProbabilisticPolicyModel::new(
                 linear_model(1, 2, 0.0, &device),
@@ -956,7 +956,7 @@ fn caller_collected_training_matches_learn() {
     device.seed(153);
     let mut learned_env = build_env();
     let mut learned_agent =
-        build_agent(learned_env.observation_space(), learned_env.action_space());
+        build_agent(learned_env.action_space(), learned_env.observation_space());
     learned_agent.learn(&mut learned_env, 2).unwrap();
     assert_eq!(learned_agent.optimization_steps, 1);
     let mut learned_parameters = Parameters(Vec::new());
@@ -970,7 +970,7 @@ fn caller_collected_training_matches_learn() {
 
     device.seed(153);
     let mut caller_env = build_env();
-    let mut caller_agent = build_agent(caller_env.observation_space(), caller_env.action_space());
+    let mut caller_agent = build_agent(caller_env.action_space(), caller_env.observation_space());
     let mut observations = caller_env.reset().unwrap();
     for _ in 0..2 {
         let actions = caller_agent

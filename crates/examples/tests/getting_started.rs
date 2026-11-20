@@ -19,8 +19,8 @@ fn getting_started_program_trains_one_rollout() {
         device.clone(),
     );
 
-    let observation_space = env.observation_space();
     let action_space = env.action_space();
+    let observation_space = env.observation_space();
 
     let actor_network = MLP::builder()
         .input_size(observation_space.shape()[0])
@@ -57,8 +57,8 @@ fn getting_started_program_trains_one_rollout() {
         .unwrap();
 
     let mut agent = PPOAgent::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
+        .observation_space(observation_space)
         .network_info(network_info)
         .batch_size(1024)
         .mini_batch_size(64)

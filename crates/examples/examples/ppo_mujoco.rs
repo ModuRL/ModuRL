@@ -64,9 +64,9 @@ fn main() {
     .with_clip(10.0);
     let env = VectorizedGymWrapper::new(vec![env]).unwrap();
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
+    let action_space = env.action_space();
     let observation_space = env.observation_space();
     let observation_size = observation_space.shape()[0];
-    let action_space = env.action_space();
     let action_shape = action_space.shape();
     let action_size = action_shape.iter().product::<usize>();
 
@@ -123,8 +123,8 @@ fn main() {
     let mut grapher = OnPolicyGrapher::ppo_mujoco(TOTAL_TIMESTEPS, ENVIRONMENT_NAME);
 
     let mut agent = PPOAgent::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
+        .observation_space(observation_space)
         .network_info(networks)
         .batch_size(2_048)
         .mini_batch_size(64)

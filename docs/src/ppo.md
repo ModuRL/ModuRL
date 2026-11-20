@@ -12,8 +12,8 @@ policy and value heads.
 
 `SeparatePPONetwork::builder()` requires `actor_learning_rate` and
 `critic_learning_rate`. `SharedPPONetwork::builder()` requires `learning_rate`.
-Both builders return `Result`. PPO's builder also requires `observation_space`
-and returns `Result`. The constructor names remain `new`.
+Both network builders return `Result`. PPO's agent builder requires `action_space`
+and `observation_space` and also returns `Result`. The constructor names remain `new`.
 
 Pass a `SeparatePPONetwork` or `SharedPPONetwork` directly to `.network_info(network)`.
 

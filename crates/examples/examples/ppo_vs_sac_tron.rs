@@ -97,8 +97,8 @@ impl Tron {
 
 impl MultiAgentGym for Tron {
     type Error = TronError;
-    type ObservationSpace = BoxSpace;
     type ActionSpace = Discrete;
+    type ObservationSpace = BoxSpace;
 
     fn num_agents(&self) -> usize {
         2
@@ -106,11 +106,11 @@ impl MultiAgentGym for Tron {
     fn num_envs(&self) -> usize {
         self.slots.len()
     }
-    fn observation_space(&self, _agent: usize) -> BoxSpace {
-        BoxSpace::new_with_universal_bounds([1, 192], 0.0, 1.0, &self.device)
-    }
     fn action_space(&self, _agent: usize) -> Discrete {
         Discrete::new(4).unwrap()
+    }
+    fn observation_space(&self, _agent: usize) -> BoxSpace {
+        BoxSpace::new_with_universal_bounds([1, 192], 0.0, 1.0, &self.device)
     }
     fn reset(&mut self) -> Result<Vec<Tensor<2>>, TronError> {
         for slot in 0..self.num_envs() {
@@ -233,8 +233,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .critic_learning_rate(3e-4)
         .build()?;
     let mut ppo = PPOAgent::<_, _, _, TronError>::builder()
-        .observation_space(env.observation_space(0))
         .action_space(env.action_space(0))
+        .observation_space(env.observation_space(0))
         .network_info(networks)
         .batch_size(1024)
         .mini_batch_size(64)

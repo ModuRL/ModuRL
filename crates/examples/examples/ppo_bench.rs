@@ -31,8 +31,8 @@ fn ppo_cartpole() {
     let vec_env: VectorizedGymWrapper<CartPoleV1> = VectorizedGymWrapper::new(envs).unwrap();
     let mut vec_env = DeviceMultiGymWrapper::new(vec_env, Device::flex(), device.clone());
 
-    let observation_space = vec_env.observation_space();
     let action_space = vec_env.action_space();
+    let observation_space = vec_env.observation_space();
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
@@ -83,8 +83,8 @@ fn ppo_cartpole() {
     // PPO config
     // Stable baselines3 config:
     let mut agent = PPOAgent::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
+        .observation_space(observation_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
         .mini_batch_size(64)

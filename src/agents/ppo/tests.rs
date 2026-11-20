@@ -67,8 +67,8 @@ impl TwoStepTestGym {
 
 impl Gym<usize> for TwoStepTestGym {
     type Error = Infallible;
-    type ObservationSpace = BoxSpace;
     type ActionSpace = Discrete;
+    type ObservationSpace = BoxSpace;
 
     /// Steps with one scalar Int action `[1]`, returning Float observations `[4]` on the fixture device.
     fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo<usize>, Self::Error> {
@@ -91,12 +91,12 @@ impl Gym<usize> for TwoStepTestGym {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        BoxSpace::new_with_universal_bounds([1, 4], -1.0, 1.0, &self.device)
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         Discrete::new(2).unwrap()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_with_universal_bounds([1, 4], -1.0, 1.0, &self.device)
     }
 }
 
@@ -318,13 +318,13 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
-            .observation_space(BoxSpace::new_unbounded([1, 64], &device))
             .action_space(BoxSpace::new_with_universal_bounds(
                 [1, 8],
                 -10.0,
                 10.0,
                 &device,
             ))
+            .observation_space(BoxSpace::new_unbounded([1, 64], &device))
             .network_info(network)
             .batch_size(1)
             .mini_batch_size(1)
@@ -373,13 +373,13 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
-            .observation_space(BoxSpace::new_unbounded([1, 64], &device))
             .action_space(BoxSpace::new_with_universal_bounds(
                 [1, 8],
                 -10.0,
                 10.0,
                 &device,
             ))
+            .observation_space(BoxSpace::new_unbounded([1, 64], &device))
             .network_info(network)
             .batch_size(1)
             .mini_batch_size(1)
@@ -472,8 +472,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(network)
             .batch_size(2)
             .mini_batch_size(2)
@@ -543,8 +543,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(6)
             .mini_batch_size(6)
@@ -598,8 +598,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(6)
             .mini_batch_size(6)
@@ -639,8 +639,8 @@ mod schedule_tests {
 
         impl Gym<(), 3> for MatrixGym {
             type Error = Infallible;
-            type ObservationSpace = BoxSpace<3>;
             type ActionSpace = Discrete;
+            type ObservationSpace = BoxSpace<3>;
 
             /// Accepts an Int scalar [1] and returns unbatched Float observations [2, 2] on the fixture device.
             fn step(
@@ -689,8 +689,8 @@ mod schedule_tests {
             .unwrap();
         let mut logger = NoopLogger::default();
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(2)
             .mini_batch_size(2)
@@ -757,8 +757,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut boolean_agent = PPOAgent::<_, _, _, Infallible>::builder()
-            .observation_space(BoolSpace)
             .action_space(Discrete::new(2).unwrap())
+            .observation_space(BoolSpace)
             .network_info(networks)
             .training_horizon(1)
             .build()
@@ -793,8 +793,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut integer_agent = PPOAgent::<_, _, _, Infallible>::builder()
-            .observation_space(Discrete::new(2).unwrap())
             .action_space(Discrete::new(2).unwrap())
+            .observation_space(Discrete::new(2).unwrap())
             .network_info(networks)
             .training_horizon(1)
             .build()
@@ -867,8 +867,8 @@ mod schedule_tests {
 
         impl Gym for BooleanGym {
             type Error = Infallible;
-            type ObservationSpace = BooleanSpace;
             type ActionSpace = Discrete;
+            type ObservationSpace = BooleanSpace;
 
             /// Accepts an Int action [1] and returns terminal Bool observations [1] with an F32 reward.
             fn step(
@@ -937,8 +937,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(network)
             .batch_size(2)
             .mini_batch_size(2)
@@ -1058,8 +1058,8 @@ mod schedule_tests {
         }
         let mut logger = DTypeLogger { updates: 0 };
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(2)
             .mini_batch_size(2)
@@ -1157,8 +1157,8 @@ mod schedule_tests {
                     updates: 0,
                 };
                 let mut agent = PPOAgent::builder()
-                    .observation_space(env.observation_space())
                     .action_space(env.action_space())
+                    .observation_space(env.observation_space())
                     .network_info(networks)
                     .clipped(clipped)
                     .normalize_advantage(false)
@@ -1206,8 +1206,8 @@ mod schedule_tests {
             }
             let mut logger = Logger(Vec::new());
             let mut agent = PPOAgent::builder()
-                .observation_space(env.observation_space())
                 .action_space(env.action_space())
+                .observation_space(env.observation_space())
                 .network_info(networks)
                 .batch_size(4)
                 .mini_batch_size(2)
@@ -1254,8 +1254,8 @@ mod schedule_tests {
 
         impl Gym for TruncatedGym {
             type Error = Infallible;
-            type ObservationSpace = BoxSpace;
             type ActionSpace = Discrete;
+            type ObservationSpace = BoxSpace;
 
             /// Accepts one Int action [1] and returns terminal Float observations [4] filled with seven.
             fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
@@ -1303,8 +1303,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(1)
             .mini_batch_size(1)
@@ -1488,8 +1488,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
-            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
             .action_space(Discrete::new(2).unwrap())
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
             .network_info(networks)
             .batch_size(2)
             .mini_batch_size(2)
@@ -1590,8 +1590,8 @@ mod schedule_tests {
             completed_episodes: Vec::new(),
         };
         let mut agent = PPOAgent::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(2)
             .mini_batch_size(2)
@@ -1648,8 +1648,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(8)
             .mini_batch_size(8)
@@ -1691,8 +1691,8 @@ mod schedule_tests {
 
         impl Gym<usize> for ScriptedGym {
             type Error = ScriptedGymError;
-            type ObservationSpace = BoxSpace;
             type ActionSpace = Discrete;
+            type ObservationSpace = BoxSpace;
 
             /// Accepts Int actions [1] and returns Float observations [4] on the fixture device.
             fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo<usize>, Self::Error> {
@@ -1725,12 +1725,12 @@ mod schedule_tests {
                 })
             }
 
-            fn observation_space(&self) -> Self::ObservationSpace {
-                BoxSpace::new_with_universal_bounds([1, 4], -1.0, 1.0, &self.device)
-            }
-
             fn action_space(&self) -> Self::ActionSpace {
                 Discrete::new(2).unwrap()
+            }
+
+            fn observation_space(&self) -> Self::ObservationSpace {
+                BoxSpace::new_with_universal_bounds([1, 4], -1.0, 1.0, &self.device)
             }
         }
 
@@ -1769,8 +1769,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::<_, _, _, VectorizedGymError<ScriptedGymError>, usize>::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(8)
             .mini_batch_size(8)
@@ -1806,7 +1806,7 @@ mod schedule_tests {
             ])
             .unwrap()
         };
-        let build_agent = |observation_space, action_space| {
+        let build_agent = |action_space, observation_space| {
             let networks = SeparatePPONetwork::builder()
                 .actor_network(ProbabilisticPolicyModel::new(
                     mlp(4, 2, &device),
@@ -1820,8 +1820,8 @@ mod schedule_tests {
                 .build()
                 .unwrap();
             PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
-                .observation_space(observation_space)
                 .action_space(action_space)
+                .observation_space(observation_space)
                 .network_info(networks)
                 .batch_size(4)
                 .mini_batch_size(4)
@@ -1834,7 +1834,7 @@ mod schedule_tests {
         device.seed(153);
         let mut learned_env = build_env();
         let mut learned_agent =
-            build_agent(learned_env.observation_space(), learned_env.action_space());
+            build_agent(learned_env.action_space(), learned_env.observation_space());
         learned_agent.learn(&mut learned_env, 4).unwrap();
         let mut learned_parameters = Parameters(Vec::new());
         learned_agent.network().visit(&mut learned_parameters);
@@ -1842,7 +1842,7 @@ mod schedule_tests {
         device.seed(153);
         let mut caller_env = build_env();
         let mut caller_agent =
-            build_agent(caller_env.observation_space(), caller_env.action_space());
+            build_agent(caller_env.action_space(), caller_env.observation_space());
         let mut observations = caller_env.reset().unwrap();
         for _ in 0..2 {
             let training_actions = caller_agent
@@ -1918,8 +1918,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(6)
             .mini_batch_size(6)
@@ -1975,8 +1975,8 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(networks)
             .batch_size(6)
             .mini_batch_size(6)
@@ -2017,8 +2017,8 @@ mod schedule_tests {
         .try_into()
         .unwrap();
         let mut agent = PPOAgent::<_, _, _, VectorizedGymError<Infallible>, usize>::builder()
-            .observation_space(env.observation_space())
             .action_space(env.action_space())
+            .observation_space(env.observation_space())
             .network_info(
                 SeparatePPONetwork::builder()
                     .actor_network(ProbabilisticPolicyModel::new(
@@ -2119,13 +2119,13 @@ mod schedule_tests {
             .build()
             .unwrap();
         let mut agent = PPOAgent::<_, _, _, Infallible>::builder()
-            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
             .action_space(BoxSpace::new_with_universal_bounds(
                 [1, 3],
                 -1.0,
                 1.0,
                 &device,
             ))
+            .observation_space(BoxSpace::new_unbounded([1, 4], &device))
             .network_info(networks)
             .batch_size(4)
             .mini_batch_size(4)

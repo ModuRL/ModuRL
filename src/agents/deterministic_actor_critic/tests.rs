@@ -311,8 +311,8 @@ pub(super) struct EpisodeEnv {
 
 impl Gym for EpisodeEnv {
     type Error = Infallible;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = BoxSpace<2>;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Accepts Float action [1] and returns Float terminal-capable observation [1] on the CPU device.
     fn step(&mut self, action: Tensor<1>) -> Result<StepInfo, Self::Error> {
@@ -338,12 +338,12 @@ impl Gym for EpisodeEnv {
         })
     }
 
-    fn observation_space(&self) -> BoxSpace<2> {
-        BoxSpace::new_unbounded([1, 1], &self.device)
-    }
-
     fn action_space(&self) -> BoxSpace<2> {
         BoxSpace::new_with_universal_bounds([1, 1], -1.0, 1.0, &self.device)
+    }
+
+    fn observation_space(&self) -> BoxSpace<2> {
+        BoxSpace::new_unbounded([1, 1], &self.device)
     }
 }
 
@@ -681,8 +681,8 @@ struct BooleanEnv {
 
 impl MultiGym<(), 3, 2> for BooleanEnv {
     type Error = Infallible;
-    type ObservationSpace = BooleanSpace;
     type ActionSpace = BoxSpace<2>;
+    type ObservationSpace = BooleanSpace;
 
     /// Accepts Float actions [2, 1] and returns Bool reset observations [2, 1, 1] with unbatched terminal observations [1, 1].
     fn step(
@@ -709,12 +709,12 @@ impl MultiGym<(), 3, 2> for BooleanEnv {
         })
     }
 
-    fn observation_space(&self) -> BooleanSpace {
-        BooleanSpace
-    }
-
     fn action_space(&self) -> BoxSpace<2> {
         BoxSpace::new_with_universal_bounds([1, 1], -1.0, 1.0, &self.device)
+    }
+
+    fn observation_space(&self) -> BooleanSpace {
+        BooleanSpace
     }
 
     fn num_envs(&self) -> usize {

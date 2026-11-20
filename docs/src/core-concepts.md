@@ -21,10 +21,10 @@ DQN, and `DDQNAgent` implements Double DQN.
 An agent coordinates the pieces needed for training: model modules, optimizers,
 schedules, buffers, distributions, and update logic.
 
-Observation and action spaces share `TensorBatchTypes` from `modurl::tensor_rank`.
+Action and observation spaces share `TensorBatchTypes` from `modurl::tensor_rank`.
 This contract declares `Kind`, `Item`, and `Batch`. `Item` omits the batch axis;
 `Batch` adds one leading batch axis. The types must agree with `NextRank` and
-`PrevRank`. `ObservationSpace<O>` and `ActionSpace<A>` bind the batch type to a
+`PrevRank`. `ActionSpace<A>` and `ObservationSpace<O>` bind the batch type to a
 native Burn tensor with the declared rank and kind.
 
 For `BoxSpace<2>`, `Item` is `Tensor<1>` and `Batch` is `Tensor<2>`.
@@ -63,11 +63,8 @@ next observation to continue training from. If an inner environment ended, that 
 observation is already the reset observation for the next episode; the final
 observation is kept in `terminal_observations`.
 
-An observation space (`ObservationSpace`) or action space (`ActionSpace`)
-describes what observations or actions look like.
-
-For observations, the space tells you the input shape your networks need. For
-actions, the space tells you what kind of actions the environment accepts.
+An action space (`ActionSpace`) describes what actions the environment accepts.
+An observation space (`ObservationSpace`) describes the input shape your networks need.
 
 CartPole has a discrete action space. That is why the PPO example uses
 `CategoricalDistribution`: the policy chooses from a fixed set of actions.

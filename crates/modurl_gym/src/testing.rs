@@ -110,8 +110,8 @@ pub(crate) fn check_discrete_parity<T, E>(
 ) where
     T: Gym<
             Error = E,
-            ObservationSpace = modurl::spaces::BoxSpace<2>,
             ActionSpace = modurl::spaces::Discrete,
+            ObservationSpace = modurl::spaces::BoxSpace<2>,
         >,
     E: std::fmt::Debug,
 {

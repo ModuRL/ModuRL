@@ -37,8 +37,8 @@ impl CounterEnv {
 
 impl Gym<TestInfo> for CounterEnv {
     type Error = TestError;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = Discrete;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Accepts scalar Int actions `[1]` and returns unbatched F64 observations `[2]` on the CPU fixture device.
     fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo<TestInfo>, Self::Error> {
@@ -83,12 +83,12 @@ impl Gym<TestInfo> for CounterEnv {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        BoxSpace::new_unbounded([1, 2], &Device::flex())
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         Discrete::new(10).unwrap()
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, 2], &Device::flex())
     }
 }
 
@@ -134,8 +134,8 @@ impl GroupEnv {
 
 impl MultiGym<SlotInfo, 2, 2> for GroupEnv {
     type Error = TestError;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = BoxSpace<2>;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Accepts F32 actions `[count, 1]` and returns F32 observations `[count, 3]` and rewards `[count]`.
     fn step(&mut self, action: Tensor<2>) -> Result<MultiGymStepInfo<SlotInfo>, Self::Error> {
@@ -200,12 +200,12 @@ impl MultiGym<SlotInfo, 2, 2> for GroupEnv {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        BoxSpace::new_unbounded([1, self.observation_width], &Device::flex())
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         BoxSpace::new_unbounded([1, self.action_width], &Device::flex())
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, self.observation_width], &Device::flex())
     }
 
     fn num_envs(&self) -> usize {
@@ -242,8 +242,8 @@ pub(super) struct ScalarEnv;
 
 impl Gym for ScalarEnv {
     type Error = TestError;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = BoxSpace<2>;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Returns an F64 scalar action `[1]` as the terminal observation `[1]`, preserving device and gradients.
     fn step(&mut self, action: Tensor<1>) -> Result<StepInfo, Self::Error> {
@@ -265,19 +265,19 @@ impl Gym for ScalarEnv {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
+    fn action_space(&self) -> Self::ActionSpace {
         BoxSpace::new_unbounded([1, 1], &Device::flex())
     }
 
-    fn action_space(&self) -> Self::ActionSpace {
+    fn observation_space(&self) -> Self::ObservationSpace {
         BoxSpace::new_unbounded([1, 1], &Device::flex())
     }
 }
 
 impl Gym<(), 2, 2> for ContinuousEnv {
     type Error = TestError;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = BoxSpace<2>;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Returns each unbatched F64 action vector `[2]` as the terminal observation `[2]` on the fixture CPU device.
     fn step(&mut self, action: Tensor<1>) -> Result<StepInfo, Self::Error> {
@@ -299,11 +299,11 @@ impl Gym<(), 2, 2> for ContinuousEnv {
         })
     }
 
-    fn observation_space(&self) -> Self::ObservationSpace {
-        BoxSpace::new_unbounded([1, 2], &Device::flex())
-    }
-
     fn action_space(&self) -> Self::ActionSpace {
         BoxSpace::new_with_universal_bounds([1, 2], -10.0, 10.0, &Device::flex())
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, 2], &Device::flex())
     }
 }

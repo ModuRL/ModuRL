@@ -72,8 +72,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Environment: {ENVIRONMENT_NAME}");
     let env = VectorizedGymWrapper::from(TimeLimitGym::new(mujoco::build_environment(), 1_000));
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
-    let observation_space = env.observation_space();
     let action_space = env.action_space();
+    let observation_space = env.observation_space();
     let observation_size = observation_space.shape()[0];
     let action_size = action_space.shape().iter().product();
     let model = GaussianModule {

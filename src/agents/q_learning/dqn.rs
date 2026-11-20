@@ -166,9 +166,9 @@ where
 {
     type Error = QAgentError<GE, M::Error>;
     type Env<'e> =
-        dyn MultiGym<I, R, 2, Error = GE, ObservationSpace = S, ActionSpace = Discrete> + 'e;
-    type ObservationSpace = S;
+        dyn MultiGym<I, R, 2, Error = GE, ActionSpace = Discrete, ObservationSpace = S> + 'e;
     type ActionSpace = Discrete;
+    type ObservationSpace = S;
     type ActContext<'c> = ();
     type TrainingActions = Tensor<2, Int>;
 

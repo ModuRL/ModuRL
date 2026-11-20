@@ -169,8 +169,8 @@ fn main() {
     let mut logger = OnPolicyGrapher::ppo_atari(TRAINING_TIMESTEPS, game_name);
 
     let mut agent = PPOAgent::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
+        .observation_space(observation_space)
         .network_info(networks)
         .clipped(true)
         .batch_size(BATCH_SIZE)

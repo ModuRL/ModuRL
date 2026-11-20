@@ -28,8 +28,8 @@ impl DebugLunarLander {
 
 impl Gym for DebugLunarLander {
     type Error = <LunarLanderV3 as Gym>::Error;
-    type ObservationSpace = <LunarLanderV3 as Gym>::ObservationSpace;
     type ActionSpace = <LunarLanderV3 as Gym>::ActionSpace;
+    type ObservationSpace = <LunarLanderV3 as Gym>::ObservationSpace;
 
     fn action_space(&self) -> Self::ActionSpace {
         self.env.action_space()
@@ -78,8 +78,8 @@ fn main() {
 
     let env = VectorizedGymWrapper::new(envs).unwrap();
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
-    let observation_space = env.observation_space();
     let action_space = env.action_space();
+    let observation_space = env.observation_space();
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
@@ -130,8 +130,8 @@ fn main() {
 
     // PPO config - Optimized hyperparameters for Lunar Lander
     let mut agent = PPOAgent::builder()
-        .observation_space(observation_space)
         .action_space(action_space)
+        .observation_space(observation_space)
         .network_info(ppo_network_info)
         .batch_size(2048)
         .mini_batch_size(64)

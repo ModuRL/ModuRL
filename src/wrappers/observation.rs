@@ -90,8 +90,8 @@ where
     G: LegalActionsGym<I, 2, ObservationSpace = BoxSpace<2>>,
 {
     type Error = LegalActionMaskGymError<G::Error>;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = BoxSpace<2>;
 
     fn reset(&mut self) -> Result<ResetInfo<I, Tensor<1>>, Self::Error> {
         let reset = self
@@ -251,8 +251,8 @@ where
     Tensor<O, K>: NextRank<Next = Tensor<F, K>>,
 {
     type Error = FrameStackGymError<G::Error>;
-    type ObservationSpace = S;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = S;
 
     /// Repeats the unbatched rank-`O` reset observation to fill `[stack_size, ...observation_shape]` of rank `F`.
     /// Scalar inputs `[1]` produce `[stack_size, 1]`; all outputs preserve kind, dtype, and device.
@@ -378,8 +378,8 @@ where
     K: Ordered,
 {
     type Error = MaxAndSkipGymError<G::Error>;
-    type ObservationSpace = G::ObservationSpace;
     type ActionSpace = G::ActionSpace;
+    type ObservationSpace = G::ObservationSpace;
 
     /// Returns the inner gym's unbatched rank-`O` observation, preserving its shape, kind, dtype, and device.
     fn reset(&mut self) -> Result<ResetInfo<I, Tensor<O, K>>, Self::Error> {
@@ -486,8 +486,8 @@ mod tests {
 
     impl Gym for InvalidLegalActionsGym {
         type Error = std::convert::Infallible;
-        type ObservationSpace = BoxSpace<2>;
         type ActionSpace = Discrete;
+        type ObservationSpace = BoxSpace<2>;
 
         /// Accepts an action with shape `[1]` and returns the inner observation.
         fn step(&mut self, action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
@@ -498,12 +498,12 @@ mod tests {
             self.0.reset()
         }
 
-        fn observation_space(&self) -> Self::ObservationSpace {
-            self.0.observation_space()
-        }
-
         fn action_space(&self) -> Self::ActionSpace {
             self.0.action_space()
+        }
+
+        fn observation_space(&self) -> Self::ObservationSpace {
+            self.0.observation_space()
         }
     }
 

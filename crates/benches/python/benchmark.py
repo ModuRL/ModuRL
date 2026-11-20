@@ -412,7 +412,7 @@ def make_cleanrl_dqn_runner(args, device):
     optimizer = torch.optim.Adam(online.parameters(), lr=1e-4, eps=1e-8)
     online.benchmark_updates = 0
     online.benchmark_fusion = enable_fusion([online.encoder, target.encoder], device)
-    replay = AlignedReplayBuffer(config["replay_capacity"], env.observation_space, env.action_space, device=device)
+    replay = AlignedReplayBuffer(config["replay_capacity"], action_space=env.action_space, observation_space=env.observation_space, device=device)
     observation, _ = env.reset(seed=SEED)
     total_steps = 0
 

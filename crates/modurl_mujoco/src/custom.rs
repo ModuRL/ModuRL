@@ -206,8 +206,8 @@ impl<T: MujocoTask> CustomMujoco<T> {
 
 impl<T: MujocoTask> Gym for CustomMujoco<T> {
     type Error = MujocoError;
-    type ObservationSpace = BoxSpace<2>;
     type ActionSpace = BoxSpace<2>;
+    type ObservationSpace = BoxSpace<2>;
 
     /// Returns unbatched F32 observations `[observation_dim]` on CPU Flex with reset metadata.
     fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
@@ -273,15 +273,15 @@ impl<T: MujocoTask> Gym for CustomMujoco<T> {
         })
     }
 
-    fn observation_space(&self) -> BoxSpace<2> {
-        self.core.unbounded_observation_space(self.observation_dim)
-    }
-
     fn action_space(&self) -> BoxSpace<2> {
         if self.task.physical_control_targets() {
             self.core.unbounded_action_space_for_dim(self.action_dim)
         } else {
             self.core.action_space_for_dim(self.action_dim)
         }
+    }
+
+    fn observation_space(&self) -> BoxSpace<2> {
+        self.core.unbounded_observation_space(self.observation_dim)
     }
 }

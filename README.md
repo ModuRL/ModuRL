@@ -22,7 +22,7 @@ cd ModuRL
 cargo run --release -p examples --example ppo_cartpole
 ```
 
-The same `Gym`, `ObservationSpace`, and `ActionSpace` traits used by training agents also support direct environment interaction:
+The same `Gym`, `ActionSpace`, and `ObservationSpace` traits used by training agents also support direct environment interaction:
 
 ```rust
 use burn::tensor::Device;
@@ -88,8 +88,8 @@ let networks = SeparatePPONetwork::builder()
         .build()?;
 
 let mut agent = PPOAgent::builder()
-    .observation_space(observation_space)
     .action_space(action_space)
+    .observation_space(observation_space)
     .network_info(networks)
     .batch_size(2_048)
     .mini_batch_size(64)
