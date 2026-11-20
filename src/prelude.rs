@@ -10,8 +10,8 @@ pub use crate::advantage_estimation::{
 pub use crate::agents::{
     Agent, ToEnvironmentActions,
     a2c::{
-        A2CAgent, A2CCollectionLogEntry, A2CEpisodeLogEntry, A2CError, A2CLogEntry, A2CLogger,
-        A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
+        A2CAgent, A2CCollectionLogEntry, A2CConfigurationError, A2CEpisodeLogEntry, A2CError,
+        A2CLogEntry, A2CLogger, A2CNetworkInfo, SeparateA2CNetwork, SharedA2CNetwork,
     },
     action_value_critic::{
         ActionValueCritic, ActionValueCriticAggregationMode, ActionValueCriticError,

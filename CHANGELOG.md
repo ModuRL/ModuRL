@@ -109,7 +109,12 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - PPO and A2C network builders merge `lr_scheduler`, `actor_lr_scheduler` and `critic_lr_scheduler` into
   `learning_rate`, `actor_learning_rate` and `critic_learning_rate`, which take an `f64` or any `ParameterSchedule`.
   `f64` implements `ParameterSchedule` as a constant. PPO and A2C `set_learning_rate` take the same input,
-  replace the schedule from the current training progress, and return `PPOConfigurationError::InvalidLearningRate` for a nonpositive or non-finite rate.
+  replace the schedule from the current training progress, and return
+  `PPOConfigurationError::InvalidLearningRate` or `A2CConfigurationError::InvalidLearningRate`,
+  respectively, for a nonpositive or non-finite rate.
+- A2C builders return `A2CConfigurationError` instead of `PPOConfigurationError`.
+  `A2CError::ConfigurationError` wraps the A2C-specific error, and
+  `A2CError` no longer converts arbitrary `PPOError` values.
 - Agent builders make `.training_horizon(...)` optional. Without it, schedules span the first `learn` call's `num_timesteps`; set it explicitly for chunked training.
 - PPO and A2C builders replace `gae_lambda` with `advantage_estimator`, which accepts any `AdvantageEstimator`.
   `GAE::new(lambda)` returns `GAEError::InvalidLambda` for invalid lambdas instead of
