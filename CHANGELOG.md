@@ -159,7 +159,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   is evaluated with the statistics it trained on. `RunningMeanStd` is a public Burn module
   that saves and loads like a model with `save_file`/`try_load_file`; `with_update_statistics(false)` freezes it.
   Exhaustive matches on `NormalizeObservationGymError` and `NormalizeRewardGymConfigurationError`
-  need the new `StatisticsSizeMismatch` and `InvalidStatisticsSize` variants.
+  need the new `StatisticsSizeMismatch`, `InvalidStatisticsSize`, and `InvalidStatistics` variants.
 - Added `PerfectStateGym` with `save_state` and `set_state`; core wrappers implement it when their inner gym does.
 - `TimeLimitGym::new` takes a `usize` step limit, and its saved state stores the elapsed step count as `usize`.
 - Added `PerfectStateMultiGym` with per-slot `save_state` and `set_state`; `VectorizedGymWrapper`, `StackedMultiGym`, and the input, output, and device wrappers implement it when their inner gyms do.

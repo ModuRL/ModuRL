@@ -80,7 +80,7 @@ has its single component.
 | `RunningMeanStd::from_tensors(mean, variance, count)` / `validate` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
 | `RunningMeanStd::try_load_file` | Burn's `RecordError` for a missing or corrupt file, a file without statistics, or statistics of a different length than the template. |
 | `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when installed or restored statistics differ in length from the declared observation shape (checked once per install), and again if an observation's component count differs. |
-| `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component. |
+| `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component; `InvalidStatistics` if `validate()` rejects them. |
 
 Both wrappers expose `inner`, `inner_mut`, and `into_inner`. Their saved
 `PerfectStateGym` states expose `statistics()` and restore the `update_statistics`

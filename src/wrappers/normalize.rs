@@ -162,16 +162,72 @@ impl RunningMeanStd {
         self.count = fixed(self.count.val().add_scalar(1.0));
     }
 
-    /// Standardizes `values` with the running statistics, then clips them to `[-limit, limit]`.
     /// Centers and scales `[size]` values, then clips them to `±clip`.
+    /// Half-precision inputs and statistics are widened to F32 first, so the stabilizing
+    /// epsilon does not round to zero.
     fn normalize(&self, values: Tensor<1>, clip: Option<f64>) -> Tensor<1> {
-        self.scale(values - self.mean.val(), clip)
+        let normalized = (widen(values) - widen(self.mean.val()))
+            / widen(self.variance.val())
+                .add_scalar(NORMALIZATION_EPSILON)
+                .sqrt();
+        clip.map_or(normalized.clone(), |limit| normalized.clamp(-limit, limit))
     }
 
-    /// Divides `[size]` values by the running standard deviation, then clips them to `±clip`.
-    fn scale(&self, values: Tensor<1>, clip: Option<f64>) -> Tensor<1> {
-        let scaled = values / self.variance.val().add_scalar(NORMALIZATION_EPSILON).sqrt();
-        clip.map_or(scaled.clone(), |limit| scaled.clamp(-limit, limit))
+    /// Reads the single-component mean, variance, and count to the host.
+    fn scalars(&self) -> Result<RewardMoments, RunningMeanStdError> {
+        let read = |param: &Param<Tensor<1>>| {
+            param
+                .val()
+                .try_to_vec_as::<f64>()
+                .map(|values| values[0])
+                .map_err(RunningMeanStdError::TensorRead)
+        };
+        Ok(RewardMoments {
+            mean: read(&self.mean)?,
+            variance: read(&self.variance)?,
+            count: read(&self.count)?,
+        })
+    }
+
+    /// Single-component statistics holding `moments`, on this module's device and dtype.
+    fn with_scalars(&self, moments: RewardMoments) -> Self {
+        let tensor = |value: f64| fixed(self.tensor(TensorData::new(vec![value], [1])));
+        Self {
+            mean: tensor(moments.mean),
+            variance: tensor(moments.variance),
+            count: tensor(moments.count),
+        }
+    }
+}
+
+/// Casts a half-precision `[size]` tensor to F32 and leaves wider dtypes unchanged.
+fn widen(tensor: Tensor<1>) -> Tensor<1> {
+    match tensor.dtype() {
+        DType::F16 | DType::BF16 => tensor.cast(DType::F32),
+        _ => tensor,
+    }
+}
+
+/// Host copy of single-component reward statistics, so stepping never reads from the device.
+#[derive(Debug, Clone, Copy)]
+struct RewardMoments {
+    mean: f64,
+    variance: f64,
+    count: f64,
+}
+
+impl RewardMoments {
+    fn update(&mut self, value: f64) {
+        let total = self.count + 1.0;
+        let delta = value - self.mean;
+        self.mean += delta / total;
+        self.variance = (self.variance * self.count + delta * delta * self.count / total) / total;
+        self.count = total;
+    }
+
+    fn scale(&self, value: f64, clip: Option<f64>) -> f64 {
+        let scaled = value / (self.variance + NORMALIZATION_EPSILON).sqrt();
+        clip.map_or(scaled, |limit| scaled.clamp(-limit, limit))
     }
 }
 
@@ -451,12 +507,15 @@ pub enum NormalizeRewardGymConfigurationError {
     InvalidClip,
     #[error("reward statistics must have exactly one component, got {0}")]
     InvalidStatisticsSize(usize),
+    #[error("reward statistics are invalid; `RunningMeanStd::validate` reports why")]
+    InvalidStatistics,
 }
 
 /// Scales immediate rewards by the running standard deviation of discounted rewards.
 pub struct NormalizeRewardGym<G> {
     gym: G,
     statistics: RunningMeanStd,
+    moments: RewardMoments,
     discounted_reward: f64,
     gamma: f64,
     clip: Option<f64>,
@@ -472,6 +531,11 @@ impl<G> NormalizeRewardGym<G> {
         Ok(Self {
             gym,
             statistics: RunningMeanStd::new(1, &Device::default()),
+            moments: RewardMoments {
+                mean: 0.0,
+                variance: 1.0,
+                count: RUNNING_STATS_EPSILON,
+            },
             discounted_reward: 0.0,
             gamma,
             clip: None,
@@ -510,6 +574,12 @@ impl<G> NormalizeRewardGym<G> {
                 statistics.len(),
             ));
         }
+        statistics
+            .validate()
+            .map_err(|_| NormalizeRewardGymConfigurationError::InvalidStatistics)?;
+        self.moments = statistics
+            .scalars()
+            .map_err(|_| NormalizeRewardGymConfigurationError::InvalidStatistics)?;
         self.statistics = statistics;
         Ok(())
     }
@@ -549,6 +619,7 @@ impl<G> NormalizeRewardGym<G> {
 pub struct NormalizeRewardGymState<S> {
     inner_state: S,
     statistics: RunningMeanStd,
+    moments: RewardMoments,
     discounted_reward: f64,
     update_statistics: bool,
 }
@@ -587,22 +658,14 @@ where
         let mut step = self.gym.step(action)?;
         self.discounted_reward = self.discounted_reward * self.gamma + f64::from(step.reward);
         if self.update_statistics {
-            let discounted = self
-                .statistics
-                .tensor(TensorData::new(vec![self.discounted_reward], [1]));
-            self.statistics.update(discounted);
+            self.moments.update(self.discounted_reward);
+            self.statistics = self.statistics.with_scalars(self.moments);
         }
         if step.terminated || step.truncated {
             self.discounted_reward = 0.0;
         }
 
-        let reward = self
-            .statistics
-            .tensor(TensorData::new(vec![f64::from(step.reward)], [1]));
-        step.reward = self
-            .statistics
-            .scale(reward, self.clip)
-            .into_scalar::<f32>();
+        step.reward = self.moments.scale(f64::from(step.reward), self.clip) as f32;
         Ok(step)
     }
 
@@ -628,6 +691,7 @@ where
         Ok(NormalizeRewardGymState {
             inner_state: self.gym.save_state()?,
             statistics: self.statistics.clone(),
+            moments: self.moments,
             discounted_reward: self.discounted_reward,
             update_statistics: self.update_statistics,
         })
@@ -636,6 +700,7 @@ where
     fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
         self.gym.set_state(&state.inner_state)?;
         self.statistics.clone_from(&state.statistics);
+        self.moments = state.moments;
         self.discounted_reward = state.discounted_reward;
         self.update_statistics = state.update_statistics;
         Ok(())
@@ -999,7 +1064,15 @@ mod tests {
 
     #[test]
     fn loaded_reward_statistics_scale_without_updating() {
-        let statistics = stats(&[0.0], &[4.0], 100.0).unwrap();
+        let path = temp_path("reward_rms.bpk");
+        stats(&[0.0], &[4.0], 100.0)
+            .unwrap()
+            .save_file(&path)
+            .unwrap();
+        let statistics = RunningMeanStd::new(1, &Device::flex())
+            .try_load_file(&path)
+            .unwrap();
+        statistics.validate().unwrap();
         let gym = TestGym::new([
             TestGym::step(0.0, 2.0, false, false, 1),
             TestGym::step(0.0, 4.0, false, false, 2),
@@ -1013,6 +1086,23 @@ mod tests {
         assert!((wrapper.step(action()).unwrap().reward - 1.0).abs() < 1e-6);
         assert!((wrapper.step(action()).unwrap().reward - 2.0).abs() < 1e-6);
         assert_same(wrapper.statistics(), &statistics);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn frozen_f16_statistics_with_zero_variance_stay_finite() {
+        let device = Device::flex();
+        let f16 = |value: f64| {
+            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, DType::F16))
+        };
+        let statistics = RunningMeanStd::from_tensors(f16(2.0), f16(0.0), 100.0).unwrap();
+        let gym = TestGym::new([TestGym::step(2.0, 0.0, false, false, 1)]);
+        let mut wrapper = NormalizeObservationGym::new(gym)
+            .with_statistics(statistics)
+            .with_update_statistics(false);
+
+        let observation = wrapper.step(action()).unwrap().observation;
+        assert_eq!(observation.into_data().try_to_vec::<f32>().unwrap(), vec![0.0]);
     }
 
     #[test]
