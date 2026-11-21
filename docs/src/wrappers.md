@@ -64,7 +64,7 @@ statistics it trained on. Call `with_update_statistics(false)` to keep loaded st
 fixed during evaluation. The file holds only the statistics, so set the same `with_clip`
 limit used in training.
 
-Statistics are kept in `f64` on devices that support it, otherwise in F32. Loading keeps the saved dtype, so load `f64` statistics on a device that supports
+Statistics are kept in `f64` on devices that support it, otherwise in F32. Burn reads loaded values from the file lazily, and `validate()` reads them, so call it before overwriting or deleting the file. Loading keeps the saved dtype, so load `f64` statistics on a device that supports
 `f64`, even if the policy runs on another device. `try_load_file` checks parameter names and shapes but not values, so call
 `validate()` before saving and after loading; it also rejects tensors on different devices or with different dtypes. Statistics and
 model checkpoints are both `.bpk` files but are not interchangeable: each fails to load

@@ -135,26 +135,9 @@ impl RunningMeanStd {
         Ok(())
     }
 
-    pub fn mean(&self) -> Tensor<1> {
-        self.mean.val()
-    }
-
-    pub fn variance(&self) -> Tensor<1> {
-        self.variance.val()
-    }
-
-    /// The number of samples summarized, as a one-element tensor.
-    pub fn count(&self) -> Tensor<1> {
-        self.count.val()
-    }
-
     /// Number of normalized components.
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.mean.val().dims()[0]
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// Builds a one-dimensional tensor on the statistics' device with their dtype.
@@ -332,20 +315,6 @@ impl<G> NormalizeObservationGym<G> {
     /// The current running statistics, or `None` before the first observation.
     pub fn statistics(&self) -> Option<&RunningMeanStd> {
         self.statistics.as_ref()
-    }
-
-    /// Replaces the running statistics; `None` restarts from the first observation.
-    pub fn set_statistics(&mut self, statistics: Option<RunningMeanStd>) {
-        self.statistics = statistics.map(RunningMeanStd::promoted);
-        self.statistics_shape_checked = false;
-    }
-
-    pub fn update_statistics(&self) -> bool {
-        self.update_statistics
-    }
-
-    pub fn set_update_statistics(&mut self, update: bool) {
-        self.update_statistics = update;
     }
 
     pub fn inner(&self) -> &G {
@@ -577,7 +546,18 @@ impl<G> NormalizeRewardGym<G> {
         mut self,
         statistics: RunningMeanStd,
     ) -> Result<Self, NormalizeRewardGymConfigurationError> {
-        self.set_statistics(statistics)?;
+        if statistics.len() != 1 {
+            return Err(NormalizeRewardGymConfigurationError::InvalidStatisticsSize(
+                statistics.len(),
+            ));
+        }
+        statistics
+            .validate()
+            .map_err(|_| NormalizeRewardGymConfigurationError::InvalidStatistics)?;
+        self.moments = statistics
+            .scalars()
+            .map_err(|_| NormalizeRewardGymConfigurationError::InvalidStatistics)?;
+        self.device = statistics.mean.val().device();
         Ok(self)
     }
 
@@ -593,34 +573,6 @@ impl<G> NormalizeRewardGym<G> {
     /// device otherwise), in `f64` where that device supports it.
     pub fn statistics(&self) -> RunningMeanStd {
         RunningMeanStd::from_moments(&self.device, self.moments)
-    }
-
-    /// Replaces the running statistics; rejects statistics without exactly one component.
-    pub fn set_statistics(
-        &mut self,
-        statistics: RunningMeanStd,
-    ) -> Result<(), NormalizeRewardGymConfigurationError> {
-        if statistics.len() != 1 {
-            return Err(NormalizeRewardGymConfigurationError::InvalidStatisticsSize(
-                statistics.len(),
-            ));
-        }
-        statistics
-            .validate()
-            .map_err(|_| NormalizeRewardGymConfigurationError::InvalidStatistics)?;
-        self.moments = statistics
-            .scalars()
-            .map_err(|_| NormalizeRewardGymConfigurationError::InvalidStatistics)?;
-        self.device = statistics.mean.val().device();
-        Ok(())
-    }
-
-    pub fn update_statistics(&self) -> bool {
-        self.update_statistics
-    }
-
-    pub fn set_update_statistics(&mut self, update: bool) {
-        self.update_statistics = update;
     }
 
     pub fn inner(&self) -> &G {
@@ -758,13 +710,17 @@ mod tests {
             test_support::{TestGym, action, scalar},
         },
     };
-    use burn::module::Module;
+    use burn::module::{Module, Param};
     use burn::tensor::{DType, Device, Tensor, TensorData};
 
+    use proptest::{collection::vec, option, prelude::*};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::{
-        NormalizeObservationGym, NormalizeObservationGymConfigurationError,
+        NORMALIZATION_EPSILON, NormalizeObservationGym, NormalizeObservationGymConfigurationError,
         NormalizeObservationGymError, NormalizeRewardGym, NormalizeRewardGymConfigurationError,
-        RunningMeanStd, RunningMeanStdError,
+        RUNNING_STATS_EPSILON, RewardMoments, RunningMeanStd, RunningMeanStdError,
+        accumulator_dtype, fixed,
     };
     use crate::gym::PerfectStateGym;
 
@@ -773,14 +729,18 @@ mod tests {
         variance: &[f64],
         count: f64,
     ) -> Result<RunningMeanStd, RunningMeanStdError> {
-        let device = Device::flex();
-        let tensor = |values: &[f64]| {
-            Tensor::<1>::from_data(
-                TensorData::new(values.to_vec(), [values.len()]),
-                (&device, DType::F64),
-            )
-        };
-        RunningMeanStd::from_tensors(tensor(mean), tensor(variance), count)
+        RunningMeanStd::from_tensors(
+            tensor(mean, DType::F64),
+            tensor(variance, DType::F64),
+            count,
+        )
+    }
+
+    fn tensor(values: &[f64], dtype: DType) -> Tensor<1> {
+        Tensor::from_data(
+            TensorData::new(values.to_vec(), [values.len()]),
+            (&Device::flex(), dtype),
+        )
     }
 
     /// Reads a `[size]` statistics tensor back to the host.
@@ -789,13 +749,145 @@ mod tests {
     }
 
     fn assert_same(left: &RunningMeanStd, right: &RunningMeanStd) {
-        assert_eq!(host(left.mean()), host(right.mean()));
-        assert_eq!(host(left.variance()), host(right.variance()));
-        assert_eq!(host(left.count()), host(right.count()));
+        assert_eq!(left.mean.val().dtype(), right.mean.val().dtype());
+        assert_eq!(host(left.mean.val()), host(right.mean.val()));
+        assert_eq!(host(left.variance.val()), host(right.variance.val()));
+        assert_eq!(host(left.count.val()), host(right.count.val()));
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("modurl-{name}-{}.bpk", std::process::id()))
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("modurl-{name}-{}-{id}.bpk", std::process::id()))
+    }
+
+    /// Saves `statistics` with Burn and loads them into a fresh template, as the docs show.
+    fn reload(statistics: &RunningMeanStd) -> RunningMeanStd {
+        let path = temp_path("statistics");
+        statistics.clone().save_file(&path).unwrap();
+        let loaded = RunningMeanStd::new(statistics.len(), &Device::flex())
+            .try_load_file(&path)
+            .unwrap();
+        // Burn reads loaded tensors from the file lazily, so copy them before deleting it.
+        let copy = |param: Param<Tensor<1>>| {
+            let tensor = param.val();
+            fixed(Tensor::from_data(
+                tensor.to_data(),
+                (&tensor.device(), tensor.dtype()),
+            ))
+        };
+        let loaded = RunningMeanStd {
+            mean: copy(loaded.mean),
+            variance: copy(loaded.variance),
+            count: copy(loaded.count),
+        };
+        std::fs::remove_file(&path).unwrap();
+        loaded
+    }
+
+    #[test]
+    fn validated_statistics_keep_their_values_when_the_file_is_overwritten() {
+        let path = temp_path("overwritten");
+        stats(&[1.0], &[1.0], 1.0)
+            .unwrap()
+            .save_file(&path)
+            .unwrap();
+        let loaded = RunningMeanStd::new(1, &Device::flex())
+            .try_load_file(&path)
+            .unwrap();
+        loaded.validate().unwrap();
+        stats(&[5.0], &[1.0], 1.0)
+            .unwrap()
+            .save_file(&path)
+            .unwrap();
+        assert_eq!(host(loaded.mean.val()), vec![1.0]);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    fn scalar_moments(statistics: &RunningMeanStd) -> RewardMoments {
+        statistics.scalars().unwrap()
+    }
+
+    fn assert_close(actual: f64, expected: f64, tolerance: f64) -> Result<(), TestCaseError> {
+        prop_assert!(
+            actual.is_finite() && (actual - expected).abs() <= tolerance * (expected.abs() + 1.0),
+            "{actual} is not within {tolerance} of {expected}"
+        );
+        Ok(())
+    }
+
+    /// Valid single-component statistics in any float dtype, with exact zero variances and,
+    /// outside F16, counts beyond F16's range.
+    fn statistics() -> impl Strategy<Value = RunningMeanStd> {
+        prop_oneof![
+            Just(DType::F16),
+            Just(DType::BF16),
+            Just(DType::F32),
+            Just(DType::F64)
+        ]
+        .prop_flat_map(|dtype| {
+            let max_count = if dtype == DType::F16 { 6e4 } else { 1e6 };
+            (
+                Just(dtype),
+                -1e3f64..1e3,
+                prop_oneof![Just(0.0), 1e-6f64..1e3],
+                1e-4f64..max_count,
+            )
+        })
+        .prop_map(|(dtype, mean, variance, count)| {
+            RunningMeanStd::from_tensors(tensor(&[mean], dtype), tensor(&[variance], dtype), count)
+                .unwrap()
+        })
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Corruption {
+        Empty,
+        LengthMismatch,
+        NonFiniteMean,
+        InvalidVariance,
+        InvalidCount,
+        MixedDtypes,
+    }
+
+    fn corruption() -> impl Strategy<Value = Corruption> {
+        prop_oneof![
+            Just(Corruption::Empty),
+            Just(Corruption::LengthMismatch),
+            Just(Corruption::NonFiniteMean),
+            Just(Corruption::InvalidVariance),
+            Just(Corruption::InvalidCount),
+            Just(Corruption::MixedDtypes),
+        ]
+    }
+
+    fn reports(corruption: Corruption, error: &RunningMeanStdError) -> bool {
+        matches!(
+            (corruption, error),
+            (Corruption::Empty, RunningMeanStdError::Empty)
+                | (
+                    Corruption::LengthMismatch,
+                    RunningMeanStdError::LengthMismatch { .. }
+                )
+                | (
+                    Corruption::NonFiniteMean,
+                    RunningMeanStdError::NonFiniteMean
+                )
+                | (
+                    Corruption::InvalidVariance,
+                    RunningMeanStdError::InvalidVariance
+                )
+                | (Corruption::InvalidCount, RunningMeanStdError::InvalidCount)
+                | (Corruption::MixedDtypes, RunningMeanStdError::DTypeMismatch)
+        )
+    }
+
+    fn observation_script(observations: &[f32]) -> TestGym {
+        TestGym::new(
+            observations
+                .iter()
+                .map(|&observation| TestGym::step(observation, 0.0, false, false, 0)),
+        )
     }
 
     #[test]
@@ -913,61 +1005,181 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rejects_invalid_running_statistics() {
-        assert!(matches!(
-            stats(&[], &[], 1.0),
-            Err(RunningMeanStdError::Empty)
-        ));
-        assert!(matches!(
-            stats(&[0.0], &[1.0, 1.0], 1.0),
-            Err(RunningMeanStdError::LengthMismatch {
-                mean: 1,
-                variance: 2
-            })
-        ));
-        assert!(matches!(
-            stats(&[f64::NAN], &[1.0], 1.0),
-            Err(RunningMeanStdError::NonFiniteMean)
-        ));
-        for variance in [-1.0, f64::INFINITY] {
-            assert!(matches!(
-                stats(&[0.0], &[variance], 1.0),
-                Err(RunningMeanStdError::InvalidVariance)
-            ));
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn invalid_statistics_are_rejected_when_built_and_after_loading(
+            corruption in corruption(),
+            dtype in prop_oneof![Just(DType::F32), Just(DType::F64)],
+            len in 1usize..4,
+            non_finite in prop_oneof![Just(f64::NAN), Just(f64::INFINITY), Just(f64::NEG_INFINITY)],
+            negative in -1e3f64..-1e-6,
+            nonpositive in prop_oneof![Just(0.0), -1e3f64..0.0],
+        ) {
+            let (mut mean, mut variance, mut count) = (vec![0.0; len], vec![1.0; len], 1.0);
+            let mut variance_dtype = dtype;
+            match corruption {
+                Corruption::Empty => (mean, variance) = (Vec::new(), Vec::new()),
+                Corruption::LengthMismatch => variance.push(1.0),
+                Corruption::NonFiniteMean => mean[len - 1] = non_finite,
+                Corruption::InvalidVariance => {
+                    variance[len - 1] = if non_finite.is_nan() { negative } else { non_finite };
+                }
+                Corruption::InvalidCount => {
+                    count = if non_finite.is_nan() { nonpositive } else { non_finite };
+                }
+                Corruption::MixedDtypes => {
+                    variance_dtype = if dtype == DType::F32 { DType::F64 } else { DType::F32 };
+                }
+            }
+
+            let built = RunningMeanStd::from_tensors(
+                tensor(&mean, dtype),
+                tensor(&variance, variance_dtype),
+                count,
+            );
+            prop_assert!(built.as_ref().is_err_and(|error| reports(corruption, error)), "{built:?}");
+
+            if !matches!(corruption, Corruption::Empty | Corruption::LengthMismatch) {
+                let unchecked = RunningMeanStd {
+                    mean: fixed(tensor(&mean, dtype)),
+                    variance: fixed(tensor(&variance, variance_dtype)),
+                    count: fixed(tensor(&[count], dtype)),
+                };
+                let loaded = reload(&unchecked).validate();
+                prop_assert!(loaded.as_ref().is_err_and(|error| reports(corruption, error)), "{loaded:?}");
+            }
         }
-        for count in [0.0, -1.0, f64::NAN] {
-            assert!(matches!(
-                stats(&[0.0], &[1.0], count),
-                Err(RunningMeanStdError::InvalidCount)
-            ));
+
+        #[test]
+        fn frozen_statistics_normalize_by_the_formula_after_reloading(
+            statistics in statistics(),
+            offsets in vec(prop_oneof![Just(0.0f64), -1e3f64..1e3], 1..8),
+            clip in option::of(1.0f64..20.0),
+        ) {
+            let loaded = reload(&statistics);
+            prop_assert!(loaded.validate().is_ok());
+            assert_same(&loaded, &statistics);
+            let RewardMoments { mean, variance, count } = scalar_moments(&statistics);
+            let observations: Vec<f32> = offsets.iter().map(|offset| (mean + offset) as f32).collect();
+
+            let mut wrapper = NormalizeObservationGym::new(observation_script(&observations))
+                .with_statistics(loaded)
+                .with_update_statistics(false);
+            if let Some(limit) = clip {
+                wrapper = wrapper.with_clip(limit).unwrap();
+            }
+            for &observation in &observations {
+                let normalized = f64::from(scalar(&wrapper.step(action()).unwrap().observation));
+                let expected = (f64::from(observation) - mean) / (variance + NORMALIZATION_EPSILON).sqrt();
+                let expected = clip.map_or(expected, |limit| expected.clamp(-limit, limit));
+                assert_close(normalized, expected, 1e-4)?;
+            }
+            let frozen = scalar_moments(wrapper.statistics().unwrap());
+            prop_assert_eq!((frozen.mean, frozen.variance, frozen.count), (mean, variance, count));
         }
-    }
 
-    #[test]
-    fn running_statistics_round_trip_through_burn_files() {
-        let statistics = stats(&[1.5, -2.0], &[0.25, 4.0], 12.0).unwrap();
-        let path = temp_path("running-mean-std");
-        statistics.clone().save_file(&path).unwrap();
+        #[test]
+        fn trained_observation_statistics_match_f64_updates_and_reload_identically(
+            installed in option::of(statistics()),
+            observations in vec(prop_oneof![Just(300.0f32), -1e4f32..1e4], 1..20),
+            probes in vec(-1e4f32..1e4, 1..4),
+        ) {
+            let mut expected = installed.as_ref().map_or(
+                RewardMoments { mean: 0.0, variance: 1.0, count: RUNNING_STATS_EPSILON },
+                scalar_moments,
+            );
+            let script: Vec<f32> = observations.iter().chain(&probes).copied().collect();
+            let mut training = NormalizeObservationGym::new(observation_script(&script));
+            if let Some(statistics) = installed {
+                training = training.with_statistics(statistics);
+            }
+            for &observation in &observations {
+                expected.update(f64::from(observation));
+                prop_assert!(scalar(&training.step(action()).unwrap().observation).is_finite());
+            }
 
-        let loaded = RunningMeanStd::new(2, &Device::flex()).try_load_file(&path);
-        let wrong_length = RunningMeanStd::new(3, &Device::flex()).try_load_file(&path);
-        let loaded = loaded.unwrap();
-        assert_same(&loaded, &statistics);
-        assert_eq!(loaded.mean().dtype(), DType::F64);
-        assert!(wrong_length.is_err());
-        std::fs::remove_file(&path).unwrap();
-    }
+            let trained = training.statistics().unwrap().clone();
+            prop_assert!(trained.validate().is_ok());
+            prop_assert!(!matches!(trained.mean.val().dtype(), DType::F16 | DType::BF16));
+            let actual = scalar_moments(&trained);
+            assert_close(actual.mean, expected.mean, 1e-3)?;
+            assert_close(actual.variance, expected.variance, 1e-3)?;
+            assert_close(actual.count, expected.count, 1e-6)?;
 
-    #[test]
-    fn new_statistics_accumulate_in_f64_where_supported() {
-        let statistics = RunningMeanStd::new(1, &Device::flex());
-        assert_eq!(statistics.mean().dtype(), DType::F64);
+            let loaded = reload(&trained);
+            assert_same(&loaded, &trained);
+            training.update_statistics = false;
+            let mut evaluation = NormalizeObservationGym::new(observation_script(&probes))
+                .with_statistics(loaded)
+                .with_update_statistics(false);
+            for _ in &probes {
+                prop_assert_eq!(
+                    scalar(&evaluation.step(action()).unwrap().observation),
+                    scalar(&training.step(action()).unwrap().observation)
+                );
+            }
+        }
 
-        let mut statistics = stats(&[0.0], &[1.0], 16_777_216.0).unwrap();
-        let sample = statistics.tensor(TensorData::new(vec![1.0f64], [1]));
-        statistics.update(sample);
-        assert_eq!(host(statistics.count()), vec![16_777_217.0]);
+        #[test]
+        fn trained_reward_statistics_reload_to_the_same_scaling(
+            installed in option::of(statistics()),
+            gamma in 0.0f64..=1.0,
+            rewards in vec((prop_oneof![Just(2e-4f32), -1e3f32..1e3], prop::bool::weighted(0.1)), 1..30),
+            probes in vec(-1e3f32..1e3, 1..4),
+            clip in option::of(1.0f64..20.0),
+            supports_f64 in any::<bool>(),
+        ) {
+            let script = |rewards: &mut dyn Iterator<Item = (f32, bool)>| {
+                TestGym::new(rewards.map(|(reward, done)| TestGym::step(0.0, reward, done, false, 0)))
+            };
+            let probe_steps = || probes.iter().map(|&reward| (reward, false));
+            let with_clip = |wrapper: NormalizeRewardGym<TestGym>| match clip {
+                Some(limit) => wrapper.with_clip(limit).unwrap(),
+                None => wrapper,
+            };
+            let mut training = with_clip(
+                NormalizeRewardGym::new(script(&mut rewards.iter().copied().chain(probe_steps())), gamma)
+                    .unwrap(),
+            );
+            if let Some(statistics) = installed {
+                training = training.with_statistics(statistics).unwrap();
+            }
+            let start = training.moments.count;
+            for _ in &rewards {
+                prop_assert!(training.step(action()).unwrap().reward.is_finite());
+            }
+            assert_close(training.moments.count, start + rewards.len() as f64, 1e-12)?;
+
+            let exported = if supports_f64 {
+                training.statistics()
+            } else {
+                RunningMeanStd::from_moments_in(&Device::flex(), accumulator_dtype(false), training.moments)
+            };
+            prop_assert_eq!(exported.mean.val().dtype(), accumulator_dtype(supports_f64));
+            prop_assert!(exported.validate().is_ok());
+            let loaded = reload(&exported);
+            assert_same(&loaded, &exported);
+
+            training.update_statistics = false;
+            let mut evaluation = with_clip(
+                NormalizeRewardGym::new(script(&mut probe_steps()), gamma)
+                    .unwrap()
+                    .with_statistics(loaded)
+                    .unwrap()
+                    .with_update_statistics(false),
+            );
+            for _ in &probes {
+                let reloaded = f64::from(evaluation.step(action()).unwrap().reward);
+                let trained = f64::from(training.step(action()).unwrap().reward);
+                if supports_f64 {
+                    prop_assert_eq!(reloaded, trained);
+                } else {
+                    assert_close(reloaded, trained, 1e-5)?;
+                }
+            }
+        }
     }
 
     #[test]
@@ -986,63 +1198,26 @@ mod tests {
             .unwrap();
 
         let statistics_from_model = RunningMeanStd::new(2, &device).try_load_file(&model_path);
+        let wrong_length = RunningMeanStd::new(3, &device).try_load_file(&statistics_path);
         let model_from_statistics = LinearConfig::new(2, 2)
             .init(&device)
             .try_load_file(&statistics_path);
         std::fs::remove_file(&model_path).unwrap();
         std::fs::remove_file(&statistics_path).unwrap();
         assert!(statistics_from_model.is_err());
+        assert!(wrong_length.is_err());
         assert!(model_from_statistics.is_err());
     }
 
     #[test]
-    fn loaded_observation_statistics_normalize_without_updating() {
-        let statistics = stats(&[2.0], &[4.0], 100.0).unwrap();
-        let gym = TestGym::new([TestGym::step(4.0, 0.0, false, false, 1)]);
-        let mut wrapper = NormalizeObservationGym::new(gym)
-            .with_statistics(statistics.clone())
-            .with_update_statistics(false);
+    fn new_statistics_accumulate_in_f64_where_supported() {
+        assert_eq!(accumulator_dtype(false), DType::F32);
+        let statistics = RunningMeanStd::new(1, &Device::flex());
+        assert_eq!(statistics.mean.val().dtype(), DType::F64);
 
-        let reset = wrapper.reset().unwrap();
-        let step = wrapper.step(action()).unwrap();
-
-        assert!((scalar(&reset.observation) - 49.0).abs() < 1e-6);
-        assert!((scalar(&step.observation) - 1.0).abs() < 1e-6);
-        assert_same(wrapper.statistics().unwrap(), &statistics);
-    }
-
-    #[test]
-    fn exported_observation_statistics_normalize_evaluation_observations() {
-        let mut training = NormalizeObservationGym::new(TestGym::new([
-            TestGym::step(1.0, 0.0, false, false, 1),
-            TestGym::step(3.0, 0.0, false, false, 2),
-        ]));
-        training.reset().unwrap();
-        training.step(action()).unwrap();
-        training.step(action()).unwrap();
-        let path = temp_path("exported-statistics");
-        training
-            .statistics()
-            .unwrap()
-            .clone()
-            .save_file(&path)
-            .unwrap();
-
-        let loaded = RunningMeanStd::new(1, &Device::flex()).try_load_file(&path);
-        let loaded = loaded.unwrap();
-        let expected = (5.0 - host(loaded.mean())[0]) / (host(loaded.variance())[0] + 1e-8).sqrt();
-        let mut evaluation =
-            NormalizeObservationGym::new(TestGym::new([TestGym::step(5.0, 0.0, false, false, 1)]))
-                .with_statistics(loaded)
-                .with_update_statistics(false);
-        let step = evaluation.step(action()).unwrap();
-
-        assert!((f64::from(scalar(&step.observation)) - expected).abs() < 1e-5);
-        assert_same(
-            evaluation.statistics().unwrap(),
-            training.statistics().unwrap(),
-        );
-        std::fs::remove_file(&path).unwrap();
+        let mut statistics = stats(&[0.0], &[1.0], 16_777_216.0).unwrap();
+        statistics.update(tensor(&[1.0], DType::F64));
+        assert_eq!(host(statistics.count.val()), vec![16_777_217.0]);
     }
 
     #[test]
@@ -1066,80 +1241,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_reports_statistics_broken_by_non_finite_rewards() {
-        let gym = TestGym::new([TestGym::step(0.0, f32::NAN, false, false, 1)]);
-        let mut wrapper = NormalizeRewardGym::new(gym, 0.99).unwrap();
-        wrapper.step(action()).unwrap();
-        assert!(matches!(
-            wrapper.statistics().validate(),
-            Err(RunningMeanStdError::NonFiniteMean)
-        ));
-    }
-
-    #[test]
-    fn saved_states_restore_update_statistics() {
-        let mut observation = NormalizeObservationGym::new(StateTestGym::new(3));
-        let state = observation.save_state().unwrap();
-        observation.set_update_statistics(false);
-        observation.set_state(&state).unwrap();
-        assert!(observation.update_statistics());
-
-        let mut reward = NormalizeRewardGym::new(StateTestGym::new(5), 0.9)
-            .unwrap()
-            .with_update_statistics(false);
-        let state = reward.save_state().unwrap();
-        reward.set_update_statistics(true);
-        reward.set_state(&state).unwrap();
-        assert!(!reward.update_statistics());
-    }
-
-    #[test]
-    fn loaded_reward_statistics_scale_without_updating() {
-        let path = temp_path("reward_rms.bpk");
-        stats(&[0.0], &[4.0], 100.0)
-            .unwrap()
-            .save_file(&path)
-            .unwrap();
-        let statistics = RunningMeanStd::new(1, &Device::flex())
-            .try_load_file(&path)
-            .unwrap();
-        statistics.validate().unwrap();
-        let gym = TestGym::new([
-            TestGym::step(0.0, 2.0, false, false, 1),
-            TestGym::step(0.0, 4.0, false, false, 2),
-        ]);
-        let mut wrapper = NormalizeRewardGym::new(gym, 0.99)
-            .unwrap()
-            .with_statistics(statistics.clone())
-            .unwrap()
-            .with_update_statistics(false);
-
-        assert!((wrapper.step(action()).unwrap().reward - 1.0).abs() < 1e-6);
-        assert!((wrapper.step(action()).unwrap().reward - 2.0).abs() < 1e-6);
-        assert_same(&wrapper.statistics(), &statistics);
-        std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn frozen_f16_statistics_with_zero_variance_stay_finite() {
-        let device = Device::flex();
-        let f16 = |value: f64| {
-            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, DType::F16))
-        };
-        let statistics = RunningMeanStd::from_tensors(f16(2.0), f16(0.0), 100.0).unwrap();
-        let gym = TestGym::new([TestGym::step(2.0, 0.0, false, false, 1)]);
-        let mut wrapper = NormalizeObservationGym::new(gym)
-            .with_statistics(statistics)
-            .with_update_statistics(false);
-
-        let observation = wrapper.step(action()).unwrap().observation;
-        assert_eq!(
-            observation.into_data().try_to_vec::<f32>().unwrap(),
-            vec![0.0]
-        );
-    }
-
-    #[test]
     fn rejects_multi_component_reward_statistics() {
         let statistics = stats(&[0.0, 0.0], &[1.0, 1.0], 1.0).unwrap();
         assert!(matches!(
@@ -1153,147 +1254,38 @@ mod tests {
     }
 
     #[test]
-    fn saved_states_expose_statistics() {
-        let mut observation = NormalizeObservationGym::new(StateTestGym::new(3));
-        assert!(observation.save_state().unwrap().statistics().is_none());
-        observation.reset().unwrap();
-        assert_same(
-            observation.save_state().unwrap().statistics().unwrap(),
-            observation.statistics().unwrap(),
-        );
-
-        let mut reward = NormalizeRewardGym::new(StateTestGym::new(5), 0.9).unwrap();
-        reward.step(state_action()).unwrap();
-        assert_same(
-            &reward.save_state().unwrap().statistics(),
-            &reward.statistics(),
-        );
-    }
-
-    #[test]
-    fn trained_half_precision_reward_statistics_reload_with_the_same_scaling() {
-        let device = Device::flex();
-        let f16 = |value: f64| {
-            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, DType::F16))
-        };
-        let installed = RunningMeanStd::from_tensors(f16(0.0), f16(0.0), 1.0).unwrap();
-        let steps = || {
-            TestGym::new([
-                TestGym::step(0.0, 0.0002, false, false, 1),
-                TestGym::step(0.0, 0.0002, false, false, 2),
-            ])
-        };
-        let mut trained = NormalizeRewardGym::new(steps(), 0.0)
-            .unwrap()
-            .with_statistics(installed)
-            .unwrap();
-        trained.step(action()).unwrap();
-        trained.set_update_statistics(false);
-
-        let path = temp_path("trained_reward_rms.bpk");
-        trained.statistics().save_file(&path).unwrap();
-        let loaded = RunningMeanStd::new(1, &device)
-            .try_load_file(&path)
-            .unwrap();
-        loaded.validate().unwrap();
-        let mut reloaded = NormalizeRewardGym::new(steps(), 0.0)
-            .unwrap()
-            .with_statistics(loaded)
-            .unwrap()
-            .with_update_statistics(false);
-        std::fs::remove_file(&path).unwrap();
-
-        let expected = trained.step(action()).unwrap().reward;
-        assert_eq!(reloaded.step(action()).unwrap().reward, expected);
-    }
-
-    #[test]
-    fn reward_statistics_export_counts_beyond_half_precision() {
-        let device = Device::flex();
-        let statistics = RunningMeanStd::from_tensors(
-            Tensor::from_data(TensorData::new(vec![0.0f32], [1]), (&device, DType::F32)),
-            Tensor::from_data(TensorData::new(vec![1.0f32], [1]), (&device, DType::F32)),
-            70_000.0,
-        )
-        .unwrap();
-        let gym = TestGym::new([TestGym::step(0.0, 1.0, false, false, 1)]);
-        let mut wrapper = NormalizeRewardGym::new(gym, 0.99)
-            .unwrap()
-            .with_statistics(statistics)
-            .unwrap();
-
+    fn validate_reports_statistics_broken_by_non_finite_rewards() {
+        let gym = TestGym::new([TestGym::step(0.0, f32::NAN, false, false, 1)]);
+        let mut wrapper = NormalizeRewardGym::new(gym, 0.99).unwrap();
         wrapper.step(action()).unwrap();
-        let exported = wrapper.statistics();
-        exported.validate().unwrap();
-        assert_eq!(host(exported.count()), vec![70_001.0]);
-    }
-
-    #[test]
-    fn reward_statistics_export_in_f32_without_f64() {
-        assert_eq!(super::accumulator_dtype(true), DType::F64);
-        assert_eq!(super::accumulator_dtype(false), DType::F32);
-
-        let moments = super::RewardMoments {
-            mean: 0.0002,
-            variance: 1e-8,
-            count: 70_001.0,
-        };
-        let exported = RunningMeanStd::from_moments_in(
-            &Device::flex(),
-            super::accumulator_dtype(false),
-            moments,
-        );
-        assert_eq!(exported.variance().dtype(), DType::F32);
-        exported.validate().unwrap();
-        assert_eq!(host(exported.count()), vec![70_001.0]);
-        assert!((host(exported.variance())[0] - 1e-8).abs() < 1e-12);
-    }
-
-    #[test]
-    fn statistics_reject_mixed_dtypes() {
-        let device = Device::flex();
-        let tensor = |value: f64, dtype: DType| {
-            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, dtype))
-        };
         assert!(matches!(
-            RunningMeanStd::from_tensors(tensor(0.0, DType::F32), tensor(1.0, DType::F16), 1.0),
-            Err(RunningMeanStdError::DTypeMismatch)
+            wrapper.statistics().validate(),
+            Err(RunningMeanStdError::NonFiniteMean)
         ));
     }
 
     #[test]
-    fn half_precision_observation_statistics_train_in_f32() {
-        let device = Device::flex();
-        let f16 = |value: f64| {
-            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, DType::F16))
-        };
-        let statistics = RunningMeanStd::from_tensors(f16(0.0), f16(1.0), 1.0).unwrap();
-        let gym = TestGym::new([TestGym::step(300.0, 0.0, false, false, 1)]);
-        let mut wrapper = NormalizeObservationGym::new(gym).with_statistics(statistics);
+    fn saved_states_expose_statistics_and_restore_update_statistics() {
+        let mut observation = NormalizeObservationGym::new(StateTestGym::new(3));
+        assert!(observation.save_state().unwrap().statistics().is_none());
+        observation.reset().unwrap();
+        let state = observation.save_state().unwrap();
+        assert_same(
+            state.statistics().unwrap(),
+            observation.statistics().unwrap(),
+        );
+        observation.update_statistics = false;
+        observation.set_state(&state).unwrap();
+        assert!(observation.update_statistics);
 
-        wrapper.step(action()).unwrap();
-        let statistics = wrapper.statistics().unwrap();
-        assert_eq!(statistics.variance().dtype(), DType::F32);
-        statistics.validate().unwrap();
-    }
-
-    #[test]
-    fn reward_statistics_export_live_f64_moments() {
-        let device = Device::flex();
-        let f16 = |value: f64| {
-            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, DType::F16))
-        };
-        let statistics = RunningMeanStd::from_tensors(f16(0.0), f16(1.0), 1.0).unwrap();
-        let gym = TestGym::new([TestGym::step(0.0, 300.0, false, false, 1)]);
-        let mut wrapper = NormalizeRewardGym::new(gym, 0.99)
+        let mut reward = NormalizeRewardGym::new(StateTestGym::new(5), 0.9)
             .unwrap()
-            .with_statistics(statistics)
-            .unwrap();
-
-        wrapper.step(action()).unwrap();
-        let statistics = wrapper.statistics();
-        assert_eq!(statistics.variance().dtype(), DType::F64);
-        statistics.validate().unwrap();
-        assert_eq!(host(statistics.count()), vec![2.0]);
+            .with_update_statistics(false);
+        reward.step(state_action()).unwrap();
+        let state = reward.save_state().unwrap();
+        assert_same(&state.statistics(), &reward.statistics());
+        reward.update_statistics = true;
+        reward.set_state(&state).unwrap();
+        assert!(!reward.update_statistics);
     }
 }
