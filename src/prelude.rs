@@ -77,5 +77,6 @@ pub use crate::wrappers::{
     NormalizeObservationGymConfigurationError, NormalizeObservationGymError,
     NormalizeObservationGymState, NormalizeRewardGym, NormalizeRewardGymConfigurationError,
     NormalizeRewardGymState, OutputMapMultiGymWrapper, RawRewardInfo, RecordEpisodeStatisticsGym,
-    RecordRawRewardGym, TensorMapMultiGymError, TimeLimitGym, TimeLimitGymConfigurationError,
+    RecordRawRewardGym, RunningMeanStd, RunningMeanStdError, RunningMeanStdFileError,
+    TensorMapMultiGymError, TimeLimitGym, TimeLimitGymConfigurationError,
 };

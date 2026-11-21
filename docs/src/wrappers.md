@@ -53,6 +53,37 @@ let gym = NormalizeRewardGym::new(gym, 0.99)
     .expect("finite positive reward clip");
 ```
 
+### Saving normalization statistics
+
+`NormalizeObservationGym` and `NormalizeRewardGym` keep their running mean, variance,
+and sample count in a `RunningMeanStd`. Export it with `statistics()`, save it with
+`save_file` or `to_bytes`, and load it into a new wrapper with `with_statistics` so a
+trained policy is evaluated or deployed with the statistics it trained on. Call
+`with_update_statistics(false)` to keep loaded statistics fixed during evaluation.
+
+| Method | Result |
+| --- | --- |
+| `RunningMeanStd::new(mean, variance, count)` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
+| `RunningMeanStd::save_file` / `load_file` | `RunningMeanStdFileError` for I/O failures, a foreign or truncated file, an unsupported format version, or invalid statistics. |
+| `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` when the statistics length differs from the observation's component count. |
+| `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component. |
+
+Both wrappers expose `inner`, `inner_mut`, and `into_inner`, and their saved
+`PerfectStateGym` states expose `statistics()`. Each wrapped environment keeps its own
+statistics, so with `VectorizedGymWrapper` read them from one of `envs()`:
+
+```rust,ignore
+// After training: rewards wrap observations, inside a vectorized wrapper.
+let reward_gym = &env.envs()[0];
+reward_gym.inner().statistics().expect("observed at least once").save_file("obs_rms.bin")?;
+reward_gym.statistics().save_file("reward_rms.bin")?;
+
+// Evaluation: normalize observations with the saved, fixed statistics.
+let gym = NormalizeObservationGym::new(gym)
+    .with_statistics(RunningMeanStd::load_file("obs_rms.bin")?)
+    .with_update_statistics(false);
+```
+
 `FrameStackGym<G, BF, S>` uses native Burn tensors. `BF` is the stacked batch
 rank. Two `PrevRank` mappings determine the inner observation's single rank. The defaults
 stack vectors `[features]` into `[stack_size, features]`. Scalar observations use
