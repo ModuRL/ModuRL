@@ -67,6 +67,7 @@ limit used in training.
 Loading checks only the length, so call `validate()` on loaded statistics. Statistics and
 model checkpoints are both `.bpk` files but are not interchangeable: each fails to load
 into the other.
+
 `NormalizeObservationGym::statistics()` returns an `Option` because the wrapper sizes
 its statistics from the first observation; `NormalizeRewardGym::statistics()` always
 has its single component.
@@ -90,6 +91,7 @@ reward_gym.inner().statistics().expect("observed at least once").clone().save_fi
 reward_gym.statistics().clone().save_file("reward_rms.bpk")?;
 
 // Evaluation: load into a template of the observation length, then check the values.
+// `obs_dim` is the observation's component count, the length the training wrapper saw.
 let statistics = RunningMeanStd::new(obs_dim, &device).try_load_file("obs_rms.bpk")?;
 statistics.validate()?;
 let gym = NormalizeObservationGym::new(gym)
