@@ -46,6 +46,11 @@ pub enum RunningMeanStdError {
     TensorRead(#[source] TensorReadError),
 }
 
+/// F64 where the device supports it; F32 otherwise, so statistics are never half precision.
+fn accumulator_dtype(supports_f64: bool) -> DType {
+    if supports_f64 { DType::F64 } else { DType::F32 }
+}
+
 /// Wraps a `[size]` statistics tensor as a saved parameter that never takes gradients.
 fn fixed(tensor: Tensor<1>) -> Param<Tensor<1>> {
     Param::from_tensor(tensor).set_require_grad(false)
@@ -55,11 +60,14 @@ impl RunningMeanStd {
     /// Starts `size` components at zero mean and unit variance on `device`. This is also the
     /// template `try_load_file` loads saved statistics into; a file of another length is rejected.
     pub fn new(size: usize, device: &Device) -> Self {
-        let dtype = if device.supports_dtype(DType::F64) {
-            DType::F64
-        } else {
-            DType::F32
-        };
+        Self::new_in(
+            size,
+            device,
+            accumulator_dtype(device.supports_dtype(DType::F64)),
+        )
+    }
+
+    fn new_in(size: usize, device: &Device, dtype: DType) -> Self {
         Self {
             mean: fixed(Tensor::zeros([size], (device, dtype))),
             variance: fixed(Tensor::ones([size], (device, dtype))),
@@ -191,7 +199,15 @@ impl RunningMeanStd {
 
     /// Single-component statistics holding `moments` on `device`, in `f64` where supported.
     fn from_moments(device: &Device, moments: RewardMoments) -> Self {
-        Self::new(1, device).with_scalars(moments)
+        Self::from_moments_in(
+            device,
+            accumulator_dtype(device.supports_dtype(DType::F64)),
+            moments,
+        )
+    }
+
+    fn from_moments_in(device: &Device, dtype: DType, moments: RewardMoments) -> Self {
+        Self::new_in(1, device, dtype).with_scalars(moments)
     }
 
     /// Reads the single-component mean, variance, and count to the host.
@@ -1210,6 +1226,27 @@ mod tests {
         let exported = wrapper.statistics();
         exported.validate().unwrap();
         assert_eq!(host(exported.count()), vec![70_001.0]);
+    }
+
+    #[test]
+    fn reward_statistics_export_in_f32_without_f64() {
+        assert_eq!(super::accumulator_dtype(true), DType::F64);
+        assert_eq!(super::accumulator_dtype(false), DType::F32);
+
+        let moments = super::RewardMoments {
+            mean: 0.0002,
+            variance: 1e-8,
+            count: 70_001.0,
+        };
+        let exported = RunningMeanStd::from_moments_in(
+            &Device::flex(),
+            super::accumulator_dtype(false),
+            moments,
+        );
+        assert_eq!(exported.variance().dtype(), DType::F32);
+        exported.validate().unwrap();
+        assert_eq!(host(exported.count()), vec![70_001.0]);
+        assert!((host(exported.variance())[0] - 1e-8).abs() < 1e-12);
     }
 
     #[test]
