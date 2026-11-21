@@ -710,7 +710,7 @@ mod tests {
             test_support::{TestGym, action, scalar},
         },
     };
-    use burn::module::{Module, Param};
+    use burn::module::Module;
     use burn::tensor::{DType, Device, Tensor, TensorData};
 
     use proptest::{collection::vec, option, prelude::*};
@@ -762,27 +762,22 @@ mod tests {
     }
 
     /// Saves `statistics` with Burn and loads them into a fresh template, as the docs show.
-    fn reload(statistics: &RunningMeanStd) -> RunningMeanStd {
-        let path = temp_path("statistics");
-        statistics.clone().save_file(&path).unwrap();
+    /// Deletes the checkpoint on drop; Burn reads loaded tensors from it lazily.
+    struct Checkpoint(std::path::PathBuf);
+
+    impl Drop for Checkpoint {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn reload(statistics: &RunningMeanStd) -> (RunningMeanStd, Checkpoint) {
+        let file = Checkpoint(temp_path("statistics"));
+        statistics.clone().save_file(&file.0).unwrap();
         let loaded = RunningMeanStd::new(statistics.len(), &Device::flex())
-            .try_load_file(&path)
+            .try_load_file(&file.0)
             .unwrap();
-        // Burn reads loaded tensors from the file lazily, so copy them before deleting it.
-        let copy = |param: Param<Tensor<1>>| {
-            let tensor = param.val();
-            fixed(Tensor::from_data(
-                tensor.to_data(),
-                (&tensor.device(), tensor.dtype()),
-            ))
-        };
-        let loaded = RunningMeanStd {
-            mean: copy(loaded.mean),
-            variance: copy(loaded.variance),
-            count: copy(loaded.count),
-        };
-        std::fs::remove_file(&path).unwrap();
-        loaded
+        (loaded, file)
     }
 
     #[test]
@@ -1047,7 +1042,8 @@ mod tests {
                     variance: fixed(tensor(&variance, variance_dtype)),
                     count: fixed(tensor(&[count], dtype)),
                 };
-                let loaded = reload(&unchecked).validate();
+                let (loaded, _file) = reload(&unchecked);
+                let loaded = loaded.validate();
                 prop_assert!(loaded.as_ref().is_err_and(|error| reports(corruption, error)), "{loaded:?}");
             }
         }
@@ -1058,7 +1054,7 @@ mod tests {
             offsets in vec(prop_oneof![Just(0.0f64), -1e3f64..1e3], 1..8),
             clip in option::of(1.0f64..20.0),
         ) {
-            let loaded = reload(&statistics);
+            let (loaded, _file) = reload(&statistics);
             prop_assert!(loaded.validate().is_ok());
             assert_same(&loaded, &statistics);
             let RewardMoments { mean, variance, count } = scalar_moments(&statistics);
@@ -1108,7 +1104,7 @@ mod tests {
             assert_close(actual.variance, expected.variance, 1e-3)?;
             assert_close(actual.count, expected.count, 1e-6)?;
 
-            let loaded = reload(&trained);
+            let (loaded, _file) = reload(&trained);
             assert_same(&loaded, &trained);
             training.update_statistics = false;
             let mut evaluation = NormalizeObservationGym::new(observation_script(&probes))
@@ -1159,7 +1155,7 @@ mod tests {
             };
             prop_assert_eq!(exported.mean.val().dtype(), accumulator_dtype(supports_f64));
             prop_assert!(exported.validate().is_ok());
-            let loaded = reload(&exported);
+            let (loaded, _file) = reload(&exported);
             assert_same(&loaded, &exported);
 
             training.update_statistics = false;
