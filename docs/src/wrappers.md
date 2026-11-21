@@ -72,7 +72,7 @@ has its single component.
 | `RunningMeanStd::new(mean, variance, count)` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
 | `RunningMeanStd::to_bytes` | `RunningMeanStdError` when updates left the statistics invalid, for example after a NaN reward, so a saved file always loads. |
 | `RunningMeanStd::save_file` / `load_file` | `RunningMeanStdFileError` for I/O failures, a foreign or truncated file, an unsupported format version, or invalid statistics; a failed save leaves the file untouched. |
-| `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when the statistics length differs from the declared observation shape, and again if an observation's component count differs. |
+| `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when installed or restored statistics differ in length from the declared observation shape (checked once per install), and again if an observation's component count differs. |
 | `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component. |
 
 Both wrappers expose `inner`, `inner_mut`, and `into_inner`. Their saved

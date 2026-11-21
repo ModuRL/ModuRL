@@ -251,6 +251,7 @@ pub struct NormalizeObservationGym<G> {
     statistics: Option<RunningMeanStd>,
     clip: Option<f64>,
     update_statistics: bool,
+    statistics_shape_checked: bool,
 }
 
 impl<G> NormalizeObservationGym<G> {
@@ -260,6 +261,7 @@ impl<G> NormalizeObservationGym<G> {
             statistics: None,
             clip: None,
             update_statistics: true,
+            statistics_shape_checked: true,
         }
     }
 
@@ -267,6 +269,7 @@ impl<G> NormalizeObservationGym<G> {
     /// Their length must equal the number of observation components; `reset` and `step` report a mismatch.
     pub fn with_statistics(mut self, statistics: RunningMeanStd) -> Self {
         self.statistics = Some(statistics);
+        self.statistics_shape_checked = false;
         self
     }
 
@@ -285,6 +288,7 @@ impl<G> NormalizeObservationGym<G> {
     /// Replaces the running statistics; `None` restarts from the first observation.
     pub fn set_statistics(&mut self, statistics: Option<RunningMeanStd>) {
         self.statistics = statistics;
+        self.statistics_shape_checked = false;
     }
 
     pub fn update_statistics(&self) -> bool {
@@ -319,21 +323,26 @@ impl<G> NormalizeObservationGym<G> {
         Ok(self)
     }
 
-    /// Rejects loaded statistics that cannot match the declared observation shape before the inner gym changes.
+    /// Rejects installed or restored statistics that cannot match the declared observation shape
+    /// before the inner gym changes. Runs once per install, since `observation_space()` may allocate.
     fn check_statistics_shape<E>(
-        &self,
-        shape: &[usize],
+        &mut self,
+        shape: impl FnOnce(&G) -> Vec<usize>,
     ) -> Result<(), NormalizeObservationGymError<E>> {
-        let observation = shape.iter().product();
-        match &self.statistics {
-            Some(statistics) if statistics.len() != observation => {
-                Err(NormalizeObservationGymError::StatisticsSizeMismatch {
+        if self.statistics_shape_checked {
+            return Ok(());
+        }
+        if let Some(statistics) = &self.statistics {
+            let observation = shape(&self.gym).iter().product();
+            if statistics.len() != observation {
+                return Err(NormalizeObservationGymError::StatisticsSizeMismatch {
                     statistics: statistics.len(),
                     observation,
-                })
+                });
             }
-            _ => Ok(()),
         }
+        self.statistics_shape_checked = true;
+        Ok(())
     }
 
     /// Normalizes an unbatched rank-`O` observation, preserving its shape, kind, dtype, and device.
@@ -395,7 +404,7 @@ where
 
     /// Normalizes the reset observation without changing its unbatched rank-`O` shape, kind, dtype, or device.
     fn reset(&mut self) -> Result<ResetInfo<I, Tensor<O, K>>, Self::Error> {
-        self.check_statistics_shape(&self.gym.observation_space().shape())?;
+        self.check_statistics_shape(|gym| gym.observation_space().shape())?;
         let mut reset = self
             .gym
             .reset()
@@ -410,7 +419,7 @@ where
         &mut self,
         action: <Self::ActionSpace as TensorBatchTypes>::Item,
     ) -> Result<StepInfo<I, Tensor<O, K>>, Self::Error> {
-        self.check_statistics_shape(&self.gym.observation_space().shape())?;
+        self.check_statistics_shape(|gym| gym.observation_space().shape())?;
         let mut step = self
             .gym
             .step(action)
@@ -456,6 +465,7 @@ where
             .map_err(NormalizeObservationGymError::GymError)?;
         self.statistics.clone_from(&state.statistics);
         self.update_statistics = state.update_statistics;
+        self.statistics_shape_checked = false;
         Ok(())
     }
 }
