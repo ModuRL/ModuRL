@@ -61,6 +61,18 @@ impl RunningMeanStd {
         variance: Vec<f64>,
         count: f64,
     ) -> Result<Self, RunningMeanStdError> {
+        let statistics = Self {
+            mean,
+            variance,
+            count,
+        };
+        statistics.validate()?;
+        Ok(statistics)
+    }
+
+    /// Checks the invariants [`new`](Self::new) enforces; updates from non-finite samples can break them.
+    pub fn validate(&self) -> Result<(), RunningMeanStdError> {
+        let (mean, variance, count) = (&self.mean, &self.variance, self.count);
         if mean.is_empty() {
             return Err(RunningMeanStdError::Empty);
         }
@@ -82,11 +94,7 @@ impl RunningMeanStd {
         if !count.is_finite() || count <= 0.0 {
             return Err(RunningMeanStdError::InvalidCount);
         }
-        Ok(Self {
-            mean,
-            variance,
-            count,
-        })
+        Ok(())
     }
 
     fn initial(size: usize) -> Self {
@@ -120,7 +128,9 @@ impl RunningMeanStd {
     }
 
     /// Encodes the statistics in ModuRL's versioned little-endian binary format.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Fails like [`validate`](Self::validate), so every encoded file can be loaded again.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, RunningMeanStdError> {
+        self.validate()?;
         let mut bytes = Vec::with_capacity(STATISTICS_FILE_HEADER_LEN + 16 * self.mean.len());
         bytes.extend_from_slice(STATISTICS_FILE_MAGIC);
         bytes.extend_from_slice(&STATISTICS_FILE_VERSION.to_le_bytes());
@@ -129,7 +139,7 @@ impl RunningMeanStd {
         for value in self.mean.iter().chain(&self.variance) {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        bytes
+        Ok(bytes)
     }
 
     /// Decodes statistics written by [`to_bytes`](Self::to_bytes) and validates them like [`new`](Self::new).
@@ -170,11 +180,15 @@ impl RunningMeanStd {
     }
 
     /// Writes [`to_bytes`](Self::to_bytes) to `path`, replacing an existing file.
+    /// Invalid statistics return `InvalidStatistics` without touching the file.
     pub fn save_file<P: AsRef<std::path::Path>>(
         &self,
         path: P,
     ) -> Result<(), RunningMeanStdFileError> {
-        std::fs::write(path, self.to_bytes()).map_err(RunningMeanStdFileError::Io)
+        let bytes = self
+            .to_bytes()
+            .map_err(RunningMeanStdFileError::InvalidStatistics)?;
+        std::fs::write(path, bytes).map_err(RunningMeanStdFileError::Io)
     }
 
     /// Reads statistics written by [`save_file`](Self::save_file).
@@ -202,6 +216,7 @@ impl RunningMeanStd {
 pub struct NormalizeObservationGymState<S> {
     inner_state: S,
     statistics: Option<RunningMeanStd>,
+    update_statistics: bool,
 }
 
 impl<S> NormalizeObservationGymState<S> {
@@ -304,6 +319,23 @@ impl<G> NormalizeObservationGym<G> {
         Ok(self)
     }
 
+    /// Rejects loaded statistics that cannot match the declared observation shape before the inner gym changes.
+    fn check_statistics_shape<E>(
+        &self,
+        shape: &[usize],
+    ) -> Result<(), NormalizeObservationGymError<E>> {
+        let observation = shape.iter().product();
+        match &self.statistics {
+            Some(statistics) if statistics.len() != observation => {
+                Err(NormalizeObservationGymError::StatisticsSizeMismatch {
+                    statistics: statistics.len(),
+                    observation,
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Normalizes an unbatched rank-`O` observation, preserving its shape, kind, dtype, and device.
     /// Reads components as F32 for host statistics and casts normalized F32 values back to the input dtype.
     fn normalize<const O: usize, K: Basic, E>(
@@ -363,6 +395,7 @@ where
 
     /// Normalizes the reset observation without changing its unbatched rank-`O` shape, kind, dtype, or device.
     fn reset(&mut self) -> Result<ResetInfo<I, Tensor<O, K>>, Self::Error> {
+        self.check_statistics_shape(&self.gym.observation_space().shape())?;
         let mut reset = self
             .gym
             .reset()
@@ -377,6 +410,7 @@ where
         &mut self,
         action: <Self::ActionSpace as TensorBatchTypes>::Item,
     ) -> Result<StepInfo<I, Tensor<O, K>>, Self::Error> {
+        self.check_statistics_shape(&self.gym.observation_space().shape())?;
         let mut step = self
             .gym
             .step(action)
@@ -412,6 +446,7 @@ where
                 .save_state()
                 .map_err(NormalizeObservationGymError::GymError)?,
             statistics: self.statistics.clone(),
+            update_statistics: self.update_statistics,
         })
     }
 
@@ -420,6 +455,7 @@ where
             .set_state(&state.inner_state)
             .map_err(NormalizeObservationGymError::GymError)?;
         self.statistics.clone_from(&state.statistics);
+        self.update_statistics = state.update_statistics;
         Ok(())
     }
 }
@@ -547,6 +583,7 @@ pub struct NormalizeRewardGymState<S> {
     inner_state: S,
     statistics: RunningMeanStd,
     discounted_reward: f64,
+    update_statistics: bool,
 }
 
 impl<S> NormalizeRewardGymState<S> {
@@ -620,6 +657,7 @@ where
             inner_state: self.gym.save_state()?,
             statistics: self.statistics.clone(),
             discounted_reward: self.discounted_reward,
+            update_statistics: self.update_statistics,
         })
     }
 
@@ -627,6 +665,7 @@ where
         self.gym.set_state(&state.inner_state)?;
         self.statistics.clone_from(&state.statistics);
         self.discounted_reward = state.discounted_reward;
+        self.update_statistics = state.update_statistics;
         Ok(())
     }
 }
@@ -810,7 +849,7 @@ mod tests {
     fn running_statistics_round_trip_through_bytes_and_files() {
         let statistics = RunningMeanStd::new(vec![1.5, -2.0], vec![0.25, 4.0], 12.0).unwrap();
         assert_eq!(
-            RunningMeanStd::from_bytes(&statistics.to_bytes()).unwrap(),
+            RunningMeanStd::from_bytes(&statistics.to_bytes().unwrap()).unwrap(),
             statistics
         );
 
@@ -828,7 +867,8 @@ mod tests {
     fn rejects_malformed_statistics_bytes() {
         let bytes = RunningMeanStd::new(vec![0.0], vec![1.0], 2.0)
             .unwrap()
-            .to_bytes();
+            .to_bytes()
+            .unwrap();
         assert!(matches!(
             RunningMeanStd::from_bytes(b"not statistics"),
             Err(RunningMeanStdFileError::InvalidHeader)
@@ -878,7 +918,7 @@ mod tests {
         training.reset().unwrap();
         training.step(action()).unwrap();
         training.step(action()).unwrap();
-        let bytes = training.statistics().unwrap().to_bytes();
+        let bytes = training.statistics().unwrap().to_bytes().unwrap();
 
         let loaded = RunningMeanStd::from_bytes(&bytes).unwrap();
         let expected = (5.0 - loaded.mean()[0]) / (loaded.variance()[0] + 1e-8).sqrt();
@@ -893,17 +933,63 @@ mod tests {
     }
 
     #[test]
-    fn reports_observation_statistics_size_mismatch() {
+    fn reports_observation_statistics_size_mismatch_before_inner_gym_runs() {
         let statistics = RunningMeanStd::new(vec![0.0, 0.0], vec![1.0, 1.0], 1.0).unwrap();
-        let gym = TestGym::new([TestGym::step(1.0, 0.0, false, false, 1)]);
-        let mut wrapper = NormalizeObservationGym::new(gym).with_statistics(statistics);
-        assert!(matches!(
-            wrapper.reset(),
-            Err(NormalizeObservationGymError::StatisticsSizeMismatch {
-                statistics: 2,
-                observation: 1
-            })
+        // An empty script panics if the inner gym is stepped.
+        let mut wrapper =
+            NormalizeObservationGym::new(TestGym::new([])).with_statistics(statistics);
+        for result in [
+            wrapper.reset().map(|_| ()),
+            wrapper.step(action()).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(NormalizeObservationGymError::StatisticsSizeMismatch {
+                    statistics: 2,
+                    observation: 1
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn saving_invalid_statistics_fails_before_writing() {
+        let gym = TestGym::new([TestGym::step(0.0, f32::NAN, false, false, 1)]);
+        let mut wrapper = NormalizeRewardGym::new(gym, 0.99).unwrap();
+        wrapper.step(action()).unwrap();
+        assert_eq!(
+            wrapper.statistics().to_bytes(),
+            Err(RunningMeanStdError::NonFiniteMean)
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "modurl-invalid-running-mean-std-{}.bin",
+            std::process::id()
         ));
+        assert!(matches!(
+            wrapper.statistics().save_file(&path),
+            Err(RunningMeanStdFileError::InvalidStatistics(
+                RunningMeanStdError::NonFiniteMean
+            ))
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn saved_states_restore_update_statistics() {
+        let mut observation = NormalizeObservationGym::new(StateTestGym::new(3));
+        let state = observation.save_state().unwrap();
+        observation.set_update_statistics(false);
+        observation.set_state(&state).unwrap();
+        assert!(observation.update_statistics());
+
+        let mut reward = NormalizeRewardGym::new(StateTestGym::new(5), 0.9)
+            .unwrap()
+            .with_update_statistics(false);
+        let state = reward.save_state().unwrap();
+        reward.set_update_statistics(true);
+        reward.set_state(&state).unwrap();
+        assert!(!reward.update_statistics());
     }
 
     #[test]

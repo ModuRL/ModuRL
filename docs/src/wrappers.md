@@ -70,13 +70,15 @@ has its single component.
 | Method | Result |
 | --- | --- |
 | `RunningMeanStd::new(mean, variance, count)` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
-| `RunningMeanStd::save_file` / `load_file` | `RunningMeanStdFileError` for I/O failures, a foreign or truncated file, an unsupported format version, or invalid statistics. |
-| `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` when the statistics length differs from the observation's component count. |
+| `RunningMeanStd::to_bytes` | `RunningMeanStdError` when updates left the statistics invalid, for example after a NaN reward, so a saved file always loads. |
+| `RunningMeanStd::save_file` / `load_file` | `RunningMeanStdFileError` for I/O failures, a foreign or truncated file, an unsupported format version, or invalid statistics; a failed save leaves the file untouched. |
+| `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when the statistics length differs from the declared observation shape, and again if an observation's component count differs. |
 | `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component. |
 
-Both wrappers expose `inner`, `inner_mut`, and `into_inner`, and their saved
-`PerfectStateGym` states expose `statistics()`. Each wrapped environment keeps its own
-statistics, so with `VectorizedGymWrapper` read them from one of `envs()`:
+Both wrappers expose `inner`, `inner_mut`, and `into_inner`. Their saved
+`PerfectStateGym` states expose `statistics()` and restore the `update_statistics`
+setting. Each wrapped environment keeps its own statistics, so with
+`VectorizedGymWrapper` read them from one of `envs()`:
 
 ```rust,ignore
 // After training: rewards wrap observations, inside a vectorized wrapper.
