@@ -2,7 +2,7 @@ use crate::tensor_rank::{PrevRank, TensorBatchTypes};
 use burn::tensor::{DType, Device, Distribution, Float, Int, Tensor};
 
 pub mod multi_part;
-pub use multi_part::{MultiPartSpace, ObservationPart, ObservationParts};
+pub use multi_part::{DiscretePart, MultiPartSpace, ObservationPart, ObservationParts};
 
 /// Checks which rank-`O` observation batches are valid.
 /// A single environment uses a batch of one.
@@ -88,6 +88,23 @@ pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceError {
+    /// A field does not match the shared float dtype or configured integer dtype.
+    #[error("observation part {part} has dtype {actual:?}, expected {expected:?}")]
+    PartDTypeMismatch {
+        part: usize,
+        expected: DType,
+        actual: DType,
+    },
+    /// A discrete field cannot represent every category in the transport dtype.
+    #[error(
+        "observation part {part} has {categories} categories, exceeding {max_categories} for {dtype:?}"
+    )]
+    DiscretePartPrecision {
+        part: usize,
+        categories: usize,
+        dtype: DType,
+        max_categories: usize,
+    },
     /// Multipart transport requires at least one environment row.
     #[error("multipart observations require a nonempty batch")]
     EmptyObservationBatch,

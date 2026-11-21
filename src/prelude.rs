@@ -71,7 +71,7 @@ pub use crate::parameter_schedule::{
     ScheduleProgressError,
 };
 pub use crate::spaces::{ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace, SpaceError};
-pub use crate::spaces::{MultiPartSpace, ObservationPart, ObservationParts};
+pub use crate::spaces::{DiscretePart, MultiPartSpace, ObservationPart, ObservationParts};
 pub use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 pub use crate::wrappers::{
     ClipRewardGym, ClipRewardGymError, DeviceMultiGymWrapper, EpisodeStatistics,

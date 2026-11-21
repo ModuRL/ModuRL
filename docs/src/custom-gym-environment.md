@@ -227,13 +227,26 @@ impl From<(Tensor<2>, Tensor<2>)> for MotionObs {
 // space.pack(obs.into())?; MotionObs::from(space.unpack(packed)?);
 ```
 
-`pack` checks shapes (including batch sizes) and device compatibility, not bounds;
-call `space.contains(&packed)` to check bounds. Mixing F32 and F64 fields promotes
-everything to F64, and unpacked floating fields keep that dtype. `Discrete`
-fields travel as floats in the packed tensor and come back as `Int` after
-`unpack`; valid indices are lossless because `Discrete` caps its category count
-at 2^24. Match encoder parameter dtypes to the packed dtype. Empty batches are
-rejected.
+`pack` checks shapes (including batch sizes), dtypes and device compatibility,
+not bounds; call `space.contains(&packed)` to check bounds. All Float fields must
+share one dtype: mixing F32 and F64 returns `SpaceError::PartDTypeMismatch` with
+the field index and expected/actual dtypes. F16 and BF16 are preserved too.
+`MultiPartEncoder` likewise rejects different output dtypes from its field
+encoders rather than casting them. Match encoder parameter dtypes to their
+inputs and choose a common output dtype explicitly.
+
+`Discrete` fields travel as floats in the packed tensor and come back as `Int`
+after `unpack`. They use the Float fields' shared dtype, or F32 if every field is
+discrete. The category-count limit depends on that float dtype: 2048 for F16,
+256 for BF16, and 2^24 for F32/F64. Pack and unpack return
+`SpaceError::DiscretePartPrecision` if a field exceeds the limit.
+
+Plain `Discrete` fields require and restore I32, matching their sampling dtype.
+For another native integer dtype, put
+`DiscretePart::new(Discrete::new(3)?, burn::tensor::IntDType::I64)` in the space
+tuple instead. The configured dtype must match the input to `pack` and native
+field `contains`; `unpack` restores it exactly. Category counts must also fit
+the configured integer dtype. Empty batches are rejected.
 
 ## Vectorize the Environment
 

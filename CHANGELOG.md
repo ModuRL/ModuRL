@@ -40,8 +40,16 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   of 2–8 `BoxSpace`/`Discrete` fields packs into the existing flat observation
   tensor, so agents, buffers, wrappers and environments work unchanged;
   `MultiPartEncoder` unpacks it inside the model.
+  Float fields must share one dtype; F16/BF16 are preserved, and mixed dtypes
+  return an error. Discrete fields use the shared float dtype (F32 for an
+  all-discrete layout); category-count limits depend on dtype: 2048 for F16,
+  256 for BF16, and 2^24 for F32/F64. Plain `Discrete` fields require and restore
+  I32; `DiscretePart` configures another integer dtype, which must also fit the
+  category count. Field encoder outputs must likewise share one dtype.
+  `InvalidPartShape` reports full batched shapes for both pack and unpack.
   The new `SpaceError` variants `EmptyObservationBatch`, `InvalidPartShape` and
-  `IncompatibleParts` break exhaustive matches on that enum.
+  `IncompatibleParts`, plus `PartDTypeMismatch` and `DiscretePartPrecision`, break
+  exhaustive matches on that enum.
 
 - Removed the combined `Space` trait. Implement `ActionSpace<A>` for action checks and sampling,
   `ObservationSpace<O>` for observation checks, and `ActionMap<L, A>` for policy-to-environment conversion.

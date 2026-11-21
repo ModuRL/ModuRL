@@ -40,6 +40,13 @@ pub enum MultiPartEncoderError {
     /// Encoder outputs must share the input batch size and each other's device.
     #[error("field encoder outputs have incompatible batch sizes or devices")]
     IncompatibleOutputs,
+    /// Field encoder outputs must share one floating-point dtype.
+    #[error("encoder output {part} has dtype {actual:?}, expected {expected:?}")]
+    OutputDTypeMismatch {
+        part: usize,
+        expected: burn::tensor::DType,
+        actual: burn::tensor::DType,
+    },
 }
 
 /// Tuple dispatch for 2–8 typed field encoders.
@@ -56,6 +63,7 @@ pub trait EncodeObservationParts<P: ObservationParts> {
 ///
 /// `E` is a tuple of modules implementing [`PartEncoder`] for their respective
 /// native batches. Burn visits all tuple parameters; the space is skipped.
+/// All field outputs must share one dtype; concatenation never casts them.
 /// Compose its [`Forward`] output with an MLP trunk or policy/value heads in a
 /// custom module, just as with any other feature extractor.
 #[derive(Module)]
@@ -116,8 +124,12 @@ macro_rules! impl_encoders {
                 if fields.iter().any(|f| f.dims()[0] != batch_size || f.device() != device) {
                     return Err(MultiPartEncoderError::IncompatibleOutputs);
                 }
-                let dtype = if fields.iter().any(|f| f.dtype() == burn::tensor::DType::F64) { burn::tensor::DType::F64 } else { burn::tensor::DType::F32 };
-                Ok(Tensor::cat(fields.into_iter().map(|f| f.cast(dtype)).collect(), 1))
+                let expected = fields[0].dtype();
+                for (part, field) in fields.iter().enumerate() {
+                    let actual = field.dtype();
+                    if actual != expected { return Err(MultiPartEncoderError::OutputDTypeMismatch { part, expected, actual }); }
+                }
+                Ok(Tensor::cat(fields, 1))
             }
         }
     };
@@ -155,14 +167,17 @@ mod tests {
         }
     }
     #[derive(Module, Debug)]
-    struct ModeEncoder;
+    struct ModeEncoder {
+        #[module(skip)]
+        dtype: DType,
+    }
     impl Forward<2, 2> for ModeEncoder {
         type InputKind = Int;
         type OutputKind = Float;
         type Error = Infallible;
         /// Casts category indices `[batch, 1]` to float features of the same shape.
         fn forward(&self, batch: Tensor<2, Int>) -> Result<Tensor<2>, Self::Error> {
-            Ok(batch.float())
+            Ok(batch.cast(burn::tensor::FloatDType::from(self.dtype)))
         }
     }
 
@@ -191,6 +206,48 @@ mod tests {
             .unwrap()
     }
 
+    #[derive(Module, Debug)]
+    struct Echo;
+    impl Forward<2, 2> for Echo {
+        type InputKind = Float;
+        type OutputKind = Float;
+        type Error = Infallible;
+        /// Returns `[batch, features]` unchanged, including its dtype.
+        fn forward(&self, batch: Tensor<2>) -> Result<Tensor<2>, Self::Error> {
+            Ok(batch)
+        }
+    }
+
+    #[test]
+    fn encoder_outputs_preserve_one_dtype_and_reject_mismatches() {
+        let device = Device::flex();
+        for dtype in [DType::F16, DType::BF16, DType::F32, DType::F64] {
+            let space = MultiPartSpace::new((
+                BoxSpace::new_unbounded([1, 2], &device),
+                BoxSpace::new_unbounded([1, 3], &device),
+            ));
+            let encoder = MultiPartEncoder::new((Echo, Echo), space);
+            let output = encoder
+                .forward(Tensor::ones([2, 5], (&device, dtype)))
+                .unwrap();
+            assert_eq!(output.dims(), [2, 5]);
+            assert_eq!(output.dtype(), dtype);
+        }
+        let space = MultiPartSpace::new((
+            BoxSpace::new_unbounded([1, 2], &device),
+            Discrete::new(2).unwrap(),
+        ));
+        let encoder = MultiPartEncoder::new((Echo, ModeEncoder { dtype: DType::F64 }), space);
+        assert!(matches!(
+            encoder.forward(Tensor::zeros([2, 3], (&device, DType::F32))),
+            Err(MultiPartEncoderError::OutputDTypeMismatch {
+                part: 1,
+                expected: DType::F32,
+                actual: DType::F64
+            })
+        ));
+    }
+
     #[test]
     fn mixed_encoder_shape_gradient_and_errors() {
         let _guard = crate::sampling::tests::RNG_LOCK.lock().unwrap();
@@ -207,7 +264,7 @@ mod tests {
                         model: mlp(4, 2, &device, dtype),
                     },
                     mlp(3, 2, &device, dtype),
-                    ModeEncoder,
+                    ModeEncoder { dtype },
                 ),
                 space.clone(),
             );
