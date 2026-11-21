@@ -36,6 +36,12 @@ A critic, for example, returns `[B, 1]` state-value estimates. A Q-network
 returns action values. A probabilistic actor returns parameters for a
 distribution.
 
+For observations with separately encoded fields, `MultiPartEncoder` unpacks the
+flat transport tensor, runs a typed encoder for each field and concatenates the
+features. Feed its output to a trunk or policy/value heads as above. See
+[Combine Typed Observation Fields](./custom-gym-environment.md#combine-typed-observation-fields)
+for environment-side packing and model-side construction.
+
 ## Probabilistic Policies Use a Distribution
 
 `ProbabilisticPolicyModel<T>` owns the native model and distribution directly.

@@ -152,6 +152,130 @@ use counter_env::CounterEnv;
 The action space must accept the actions that `step` understands. The observation
 space must match the tensors returned by `reset` and `step`.
 
+## Combine Typed Observation Fields
+
+This is ModuRL's typed answer to Gymnasium/SB3 `Dict` observations.
+
+Keep a single flat `BoxSpace` when the observation is already a feature vector,
+or when reshaping slices inside your model is enough. Use `MultiPartSpace` when
+fields need distinct shapes, kinds or encoders, such as an image, a joint vector
+and a discrete mode. It groups 2–8 typed spaces without string keys. Agents and
+buffers still receive one flat floating-point tensor; see the wrapper caveats below.
+
+For example, pack joint positions and velocities as two vector fields:
+
+```rust,ignore
+use burn::tensor::{DType, Device, Tensor};
+use modurl::prelude::*;
+
+let device = Device::flex();
+let space = MultiPartSpace::new((
+    BoxSpace::new_unbounded([1, 3], &device),
+    BoxSpace::new_unbounded([1, 3], &device),
+));
+let positions = Tensor::zeros([1, 3], (&device, DType::F32));
+let velocities = Tensor::zeros([1, 3], (&device, DType::F32));
+let packed = space.pack((positions, velocities))?; // [1, 6]
+// Gym returns unbatched observations, so remove the singleton batch axis.
+let observation: Tensor<1> = packed.clone().reshape([6]);
+```
+
+Set the environment's `ObservationSpace` to
+`MultiPartSpace<(BoxSpace<2>, BoxSpace<2>)>` and return `space.clone()` from
+`observation_space`. Single-environment `reset` and `step` put the unbatched
+`observation` above in `ResetInfo` and `StepInfo`; a `MultiGym` returns the
+batched `packed` tensor instead. Propagate `SpaceError` through the environment's
+error type.
+
+On the model side, give each field its own encoder. This continues the example
+with two MLPs, each producing eight features:
+
+```rust,ignore
+let positions_encoder = MLP::builder()
+    .input_size(3).output_size(8).options((&device, DType::F32))
+    .build()?;
+let velocities_encoder = MLP::builder()
+    .input_size(3).output_size(8).options((&device, DType::F32))
+    .build()?;
+let encoder = MultiPartEncoder::new(
+    (positions_encoder, velocities_encoder), space.clone(),
+);
+let features = encoder.forward(packed)?; // [1, 16]
+```
+
+Own `encoder` and a trunk or output heads in your Burn module, and pass these
+features to the next module in its `Forward` implementation. Each field encoder
+implements `Forward<R, 2>` with the field's native input kind and `Float` output.
+For an image `BoxSpace<4>`, use a rank-4 encoder; for `Discrete`, use a rank-2
+encoder with `InputKind = Int`. See [Models, Policies, and
+Distributions](./models-policies-and-distributions.md#models-produce-tensors)
+for the model contract.
+
+Named application structs can convert to and from the typed batch tuple:
+
+```rust,ignore
+struct MotionObs { positions: Tensor<2>, velocities: Tensor<2> }
+
+impl From<MotionObs> for (Tensor<2>, Tensor<2>) {
+    fn from(obs: MotionObs) -> Self { (obs.positions, obs.velocities) }
+}
+impl From<(Tensor<2>, Tensor<2>)> for MotionObs {
+    fn from((positions, velocities): (Tensor<2>, Tensor<2>)) -> Self {
+        Self { positions, velocities }
+    }
+}
+// space.pack(obs.into())?; MotionObs::from(space.unpack(packed)?);
+```
+
+`pack` checks shapes (including batch sizes), dtypes and device compatibility,
+not bounds; call `space.contains(&packed)` to check bounds. All Float fields must
+share one dtype: mixing F32 and F64 returns `SpaceError::PartDTypeMismatch` with
+the field index and expected/actual dtypes. F16 and BF16 are preserved too.
+`MultiPartEncoder` likewise rejects different output dtypes from its field
+encoders rather than casting them. Match encoder parameter dtypes to their
+inputs and choose a common output dtype explicitly.
+
+`Discrete` fields travel as floats in the packed tensor and come back as `Int`
+after `unpack`. They use the Float fields' shared dtype, or F32 if every field is
+discrete. The category-count limit depends on that float dtype: 2048 for F16,
+256 for BF16, and 2^24 for F32/F64. Pack and unpack return
+`SpaceError::DiscretePartPrecision` if a field exceeds the limit.
+
+Plain `Discrete` fields require and restore I32, matching their sampling dtype.
+For another native integer dtype, put
+`DiscretePart::new(Discrete::new(3)?, burn::tensor::IntDType::I64)` in the space
+tuple instead. The configured dtype must match the input to `pack` and native
+field `contains`; `unpack` restores it exactly. Category counts must also fit
+the configured integer dtype. Empty batches are rejected.
+
+`unpack` (and therefore `MultiPartEncoder::forward`) checks discrete columns
+for finite integral values using a native integer round-trip, returning
+`SpaceError::InvalidDiscretePartValue` rather than silently truncating them.
+The blanket `NormalizeObservationGym` must be told to skip discrete columns,
+or continuous fields must be normalized before packing. For a multipart space:
+
+```rust,ignore
+let env = NormalizeObservationGym::new(env)
+    .with_passthrough_columns(space.discrete_columns());
+```
+
+This opt-in selection skips both normalization and clipping. For rank-generic
+observations, indices refer to row-major flattened unbatched components; for
+multipart observations these are the packed feature columns. Out-of-range
+indices return an error on reset/step. By default every component is normalized.
+
+`FrameStackGym` adds a frame axis, while `MultiPartEncoder` accepts only
+`[batch, flat_len]`. Fold that axis into the batch inside the model before
+encoding, then restore the frame axis or concatenate its features:
+
+```rust,ignore
+let [batch, frames, flat_len] = stacked.dims();
+let encoded = encoder.forward(stacked.reshape([batch * frames, flat_len]))?;
+let features = encoded.dims()[1];
+let temporal = encoded.reshape([batch, frames, features]);
+let concatenated = temporal.reshape([batch, frames * features]);
+```
+
 ## Vectorize the Environment
 
 Build several instances, then wrap them as a batch:

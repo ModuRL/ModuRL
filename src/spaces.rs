@@ -1,6 +1,9 @@
 use crate::tensor_rank::{PrevRank, TensorBatchTypes};
 use burn::tensor::{DType, Device, Distribution, Float, Int, Tensor};
 
+pub mod multi_part;
+pub use multi_part::{DiscretePart, MultiPartSpace, ObservationPart, ObservationParts};
+
 /// Checks which rank-`O` observation batches are valid.
 /// A single environment uses a batch of one.
 /// The associated observation tensor omits the batch axis and preserves the tensor kind.
@@ -85,6 +88,40 @@ pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceError {
+    /// A packed discrete field is non-finite or fails its native integer round-trip.
+    #[error(
+        "observation part {part} must contain finite integral values that round-trip through its integer dtype"
+    )]
+    InvalidDiscretePartValue { part: usize },
+    /// A field does not match the shared float dtype or configured integer dtype.
+    #[error("observation part {part} has dtype {actual:?}, expected {expected:?}")]
+    PartDTypeMismatch {
+        part: usize,
+        expected: DType,
+        actual: DType,
+    },
+    /// A discrete field cannot represent every category in the transport dtype.
+    #[error(
+        "observation part {part} has {categories} categories, exceeding {max_categories} for {dtype:?}"
+    )]
+    DiscretePartPrecision {
+        part: usize,
+        categories: usize,
+        dtype: DType,
+        max_categories: usize,
+    },
+    /// Multipart transport requires at least one environment row.
+    #[error("multipart observations require a nonempty batch")]
+    EmptyObservationBatch,
+    /// A native field shape or packed observation width does not match its layout.
+    #[error("invalid observation part shape: expected {expected:?}, got {actual:?}")]
+    InvalidPartShape {
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    /// Native fields have different batch sizes or devices.
+    #[error("observation parts must have the same batch size and device")]
+    IncompatibleParts,
     #[error("discrete spaces require 1..=2^24 categories, got {0}")]
     InvalidCategoryCount(usize),
     #[error("invalid policy output shape: expected {expected:?}, got {actual:?}")]
@@ -97,7 +134,7 @@ pub enum SpaceError {
 }
 
 /// Integer actions in `0..possible_values` with rank-2 category logits.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Discrete {
     possible_values: usize,
 }
@@ -212,7 +249,7 @@ impl Discrete {
 /// Inclusive component bounds for rank-`R` continuous batches. Bounds have a
 /// leading batch axis of length one: vector bounds are `[1, features]`, and image
 /// bounds are `[1, channels, height, width]`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BoxSpace<const R: usize = 2> {
     low: Tensor<R>,
     high: Tensor<R>,
