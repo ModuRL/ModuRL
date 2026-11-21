@@ -61,6 +61,12 @@ and sample count in a `RunningMeanStd`. Export it with `statistics()`, save it w
 trained policy is evaluated or deployed with the statistics it trained on. Call
 `with_update_statistics(false)` to keep loaded statistics fixed during evaluation.
 
+The file uses ModuRL's own versioned binary format, not a Burn record, so it is
+separate from the `.bpk` files that agent networks write with Burn's `save_file`.
+`NormalizeObservationGym::statistics()` returns an `Option` because the wrapper sizes
+its statistics from the first observation; `NormalizeRewardGym::statistics()` always
+has its single component.
+
 | Method | Result |
 | --- | --- |
 | `RunningMeanStd::new(mean, variance, count)` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
