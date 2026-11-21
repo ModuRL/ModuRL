@@ -163,14 +163,29 @@ impl RunningMeanStd {
     }
 
     /// Centers and scales `[size]` values, then clips them to `±clip`.
-    /// Half-precision inputs and statistics are widened to F32 first, so the stabilizing
-    /// epsilon does not round to zero.
     fn normalize(&self, values: Tensor<1>, clip: Option<f64>) -> Tensor<1> {
-        let normalized = (widen(values) - widen(self.mean.val()))
-            / widen(self.variance.val())
-                .add_scalar(NORMALIZATION_EPSILON)
-                .sqrt();
+        let normalized = (values - self.mean.val())
+            / self.variance.val().add_scalar(NORMALIZATION_EPSILON).sqrt();
         clip.map_or(normalized.clone(), |limit| normalized.clamp(-limit, limit))
+    }
+
+    /// Casts half-precision `[size]` statistics to F32, where the stabilizing epsilon and
+    /// squared deviations stay representable; wider dtypes are unchanged.
+    fn promoted(self) -> Self {
+        if !matches!(self.mean.val().dtype(), DType::F16 | DType::BF16) {
+            return self;
+        }
+        let cast = |param: Param<Tensor<1>>| fixed(param.val().cast(DType::F32));
+        Self {
+            mean: cast(self.mean),
+            variance: cast(self.variance),
+            count: cast(self.count),
+        }
+    }
+
+    /// Single-component statistics holding `moments` on `device`, in `f64` where supported.
+    fn from_moments(device: &Device, moments: RewardMoments) -> Self {
+        Self::new(1, device).with_scalars(moments)
     }
 
     /// Reads the single-component mean, variance, and count to the host.
@@ -197,14 +212,6 @@ impl RunningMeanStd {
             variance: tensor(moments.variance),
             count: tensor(moments.count),
         }
-    }
-}
-
-/// Casts a half-precision `[size]` tensor to F32 and leaves wider dtypes unchanged.
-fn widen(tensor: Tensor<1>) -> Tensor<1> {
-    match tensor.dtype() {
-        DType::F16 | DType::BF16 => tensor.cast(DType::F32),
-        _ => tensor,
     }
 }
 
@@ -288,7 +295,7 @@ impl<G> NormalizeObservationGym<G> {
     /// Starts from `statistics`, for example ones saved after training, instead of zero mean and unit variance.
     /// Their length must equal the number of observation components; `reset` and `step` report a mismatch.
     pub fn with_statistics(mut self, statistics: RunningMeanStd) -> Self {
-        self.statistics = Some(statistics);
+        self.statistics = Some(statistics.promoted());
         self.statistics_shape_checked = false;
         self
     }
@@ -307,7 +314,7 @@ impl<G> NormalizeObservationGym<G> {
 
     /// Replaces the running statistics; `None` restarts from the first observation.
     pub fn set_statistics(&mut self, statistics: Option<RunningMeanStd>) {
-        self.statistics = statistics;
+        self.statistics = statistics.map(RunningMeanStd::promoted);
         self.statistics_shape_checked = false;
     }
 
@@ -380,7 +387,7 @@ impl<G> NormalizeObservationGym<G> {
         let size = values.len();
         let statistics = self
             .statistics
-            .get_or_insert_with(|| RunningMeanStd::new(size, &device));
+            .get_or_insert_with(|| RunningMeanStd::new(size, &device).promoted());
         if statistics.len() != size {
             return Err(NormalizeObservationGymError::StatisticsSizeMismatch {
                 statistics: statistics.len(),
@@ -514,7 +521,7 @@ pub enum NormalizeRewardGymConfigurationError {
 /// Scales immediate rewards by the running standard deviation of discounted rewards.
 pub struct NormalizeRewardGym<G> {
     gym: G,
-    statistics: RunningMeanStd,
+    device: Device,
     moments: RewardMoments,
     discounted_reward: f64,
     gamma: f64,
@@ -530,7 +537,7 @@ impl<G> NormalizeRewardGym<G> {
         }
         Ok(Self {
             gym,
-            statistics: RunningMeanStd::new(1, &Device::default()),
+            device: Device::default(),
             moments: RewardMoments {
                 mean: 0.0,
                 variance: 1.0,
@@ -559,9 +566,11 @@ impl<G> NormalizeRewardGym<G> {
         self
     }
 
-    /// The current running statistics of the discounted return, with one component.
-    pub fn statistics(&self) -> &RunningMeanStd {
-        &self.statistics
+    /// The current running statistics of the discounted return, with one component, built from
+    /// the wrapper's host `f64` copy on the device of the installed statistics (Burn's default
+    /// device otherwise), in `f64` where that device supports it.
+    pub fn statistics(&self) -> RunningMeanStd {
+        RunningMeanStd::from_moments(&self.device, self.moments)
     }
 
     /// Replaces the running statistics; rejects statistics without exactly one component.
@@ -580,7 +589,7 @@ impl<G> NormalizeRewardGym<G> {
         self.moments = statistics
             .scalars()
             .map_err(|_| NormalizeRewardGymConfigurationError::InvalidStatistics)?;
-        self.statistics = statistics;
+        self.device = statistics.mean.val().device();
         Ok(())
     }
 
@@ -618,16 +627,17 @@ impl<G> NormalizeRewardGym<G> {
 #[derive(Clone)]
 pub struct NormalizeRewardGymState<S> {
     inner_state: S,
-    statistics: RunningMeanStd,
+    device: Device,
     moments: RewardMoments,
     discounted_reward: f64,
     update_statistics: bool,
 }
 
 impl<S> NormalizeRewardGymState<S> {
-    /// The saved running statistics of the discounted return.
-    pub fn statistics(&self) -> &RunningMeanStd {
-        &self.statistics
+    /// The saved running statistics of the discounted return, built like
+    /// [`NormalizeRewardGym::statistics`].
+    pub fn statistics(&self) -> RunningMeanStd {
+        RunningMeanStd::from_moments(&self.device, self.moments)
     }
 }
 
@@ -659,7 +669,6 @@ where
         self.discounted_reward = self.discounted_reward * self.gamma + f64::from(step.reward);
         if self.update_statistics {
             self.moments.update(self.discounted_reward);
-            self.statistics = self.statistics.with_scalars(self.moments);
         }
         if step.terminated || step.truncated {
             self.discounted_reward = 0.0;
@@ -690,7 +699,7 @@ where
     fn save_state(&self) -> Result<Self::State, Self::Error> {
         Ok(NormalizeRewardGymState {
             inner_state: self.gym.save_state()?,
-            statistics: self.statistics.clone(),
+            device: self.device.clone(),
             moments: self.moments,
             discounted_reward: self.discounted_reward,
             update_statistics: self.update_statistics,
@@ -699,7 +708,7 @@ where
 
     fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
         self.gym.set_state(&state.inner_state)?;
-        self.statistics.clone_from(&state.statistics);
+        self.device.clone_from(&state.device);
         self.moments = state.moments;
         self.discounted_reward = state.discounted_reward;
         self.update_statistics = state.update_statistics;
@@ -1085,7 +1094,7 @@ mod tests {
 
         assert!((wrapper.step(action()).unwrap().reward - 1.0).abs() < 1e-6);
         assert!((wrapper.step(action()).unwrap().reward - 2.0).abs() < 1e-6);
-        assert_same(wrapper.statistics(), &statistics);
+        assert_same(&wrapper.statistics(), &statistics);
         std::fs::remove_file(&path).unwrap();
     }
 
@@ -1102,7 +1111,10 @@ mod tests {
             .with_update_statistics(false);
 
         let observation = wrapper.step(action()).unwrap().observation;
-        assert_eq!(observation.into_data().try_to_vec::<f32>().unwrap(), vec![0.0]);
+        assert_eq!(
+            observation.into_data().try_to_vec::<f32>().unwrap(),
+            vec![0.0]
+        );
     }
 
     #[test]
@@ -1131,8 +1143,44 @@ mod tests {
         let mut reward = NormalizeRewardGym::new(StateTestGym::new(5), 0.9).unwrap();
         reward.step(state_action()).unwrap();
         assert_same(
-            reward.save_state().unwrap().statistics(),
-            reward.statistics(),
+            &reward.save_state().unwrap().statistics(),
+            &reward.statistics(),
         );
+    }
+
+    #[test]
+    fn half_precision_observation_statistics_train_in_f32() {
+        let device = Device::flex();
+        let f16 = |value: f64| {
+            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, DType::F16))
+        };
+        let statistics = RunningMeanStd::from_tensors(f16(0.0), f16(1.0), 1.0).unwrap();
+        let gym = TestGym::new([TestGym::step(300.0, 0.0, false, false, 1)]);
+        let mut wrapper = NormalizeObservationGym::new(gym).with_statistics(statistics);
+
+        wrapper.step(action()).unwrap();
+        let statistics = wrapper.statistics().unwrap();
+        assert_eq!(statistics.variance().dtype(), DType::F32);
+        statistics.validate().unwrap();
+    }
+
+    #[test]
+    fn reward_statistics_export_live_f64_moments() {
+        let device = Device::flex();
+        let f16 = |value: f64| {
+            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, DType::F16))
+        };
+        let statistics = RunningMeanStd::from_tensors(f16(0.0), f16(1.0), 1.0).unwrap();
+        let gym = TestGym::new([TestGym::step(0.0, 300.0, false, false, 1)]);
+        let mut wrapper = NormalizeRewardGym::new(gym, 0.99)
+            .unwrap()
+            .with_statistics(statistics)
+            .unwrap();
+
+        wrapper.step(action()).unwrap();
+        let statistics = wrapper.statistics();
+        assert_eq!(statistics.variance().dtype(), DType::F64);
+        statistics.validate().unwrap();
+        assert_eq!(host(statistics.count()), vec![2.0]);
     }
 }

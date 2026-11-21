@@ -71,9 +71,12 @@ dtype. Loading keeps the saved dtype, so load `f64` statistics on a device that 
 model checkpoints are both `.bpk` files but are not interchangeable: each fails to load
 into the other.
 
-Half-precision (F16 or BF16) observations and statistics are normalized in F32, so a
-zero-variance component gives `0` instead of NaN. The reward wrapper scales rewards with a
-host `f64` copy of its statistics, so stepping a CPU environment never reads from the GPU.
+`NormalizeObservationGym` promotes half-precision (F16 or BF16) statistics to F32 when it
+installs or creates them, so updates do not overflow and a zero-variance component gives
+`0` instead of NaN. `NormalizeRewardGym` keeps its statistics on the host in `f64`, so
+stepping a CPU environment never touches the GPU; `statistics()` builds a new
+`RunningMeanStd` from them, in `f64` where the device supports it, on the device of the
+statistics passed to `with_statistics` (Burn's default device otherwise).
 
 `NormalizeObservationGym::statistics()` returns an `Option` because the wrapper sizes
 its statistics from the first observation; `NormalizeRewardGym::statistics()` always
@@ -98,7 +101,7 @@ let reward_gym = &env.envs()[0];
 let obs_rms = reward_gym.inner().statistics().expect("observed at least once").clone();
 obs_rms.validate()?;
 obs_rms.save_file("obs_rms.bpk")?;
-let reward_rms = reward_gym.statistics().clone();
+let reward_rms = reward_gym.statistics();
 reward_rms.validate()?;
 reward_rms.save_file("reward_rms.bpk")?;
 
