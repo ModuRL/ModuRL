@@ -1,7 +1,7 @@
 //! Running observation and reward normalization wrappers.
 
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
-use burn::tensor::{Int, Tensor, TensorData, TensorReadError, kind::Basic};
+use burn::tensor::{Int, Slice, Tensor, TensorData, TensorReadError, kind::Basic};
 
 use crate::{
     gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo},
@@ -50,6 +50,9 @@ pub struct NormalizeObservationGymState<S> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum NormalizeObservationGymError<E> {
+    /// A passthrough column exceeds the flattened unbatched observation size.
+    #[error("passthrough column {column} is outside the {features} observation features")]
+    InvalidPassthroughColumn { column: usize, features: usize },
     #[error("wrapped gym error: {0}")]
     GymError(#[source] E),
     #[error("failed to read an observation: {0}")]
@@ -63,10 +66,12 @@ pub enum NormalizeObservationGymConfigurationError {
 }
 
 /// Normalizes each observation component using its running mean and variance.
+/// Use [`Self::with_passthrough_columns`] to preserve discrete packed columns.
 pub struct NormalizeObservationGym<G> {
     gym: G,
     statistics: Option<RunningMeanStd>,
     clip: Option<f64>,
+    passthrough_columns: Vec<usize>,
 }
 
 impl<G> NormalizeObservationGym<G> {
@@ -75,7 +80,20 @@ impl<G> NormalizeObservationGym<G> {
             gym,
             statistics: None,
             clip: None,
+            passthrough_columns: Vec::new(),
         }
+    }
+
+    /// Skips normalization and clipping for selected components, preserving exact values.
+    /// Indices address a row-major flattened unbatched observation; for flat
+    /// observations they are feature columns. Duplicate indices are ignored.
+    /// Replaces any previous selection. The default is empty (normalize everything).
+    /// Out-of-range indices return an error on reset/step, before updating statistics.
+    pub fn with_passthrough_columns(mut self, columns: impl IntoIterator<Item = usize>) -> Self {
+        self.passthrough_columns = columns.into_iter().collect();
+        self.passthrough_columns.sort_unstable();
+        self.passthrough_columns.dedup();
+        self
     }
 
     /// Clips normalized observations to `[-limit, limit]`; rejects a non-finite or nonpositive `limit`.
@@ -92,15 +110,27 @@ impl<G> NormalizeObservationGym<G> {
 
     /// Normalizes an unbatched rank-`O` observation, preserving its shape, kind, dtype, and device.
     /// Reads components as F32 for host statistics and casts normalized F32 values back to the input dtype.
-    fn normalize<const O: usize, K: Basic>(
+    fn normalize<const O: usize, K: Basic, E>(
         &mut self,
         observation: &Tensor<O, K>,
-    ) -> Result<Tensor<O, K>, TensorReadError> {
+    ) -> Result<Tensor<O, K>, NormalizeObservationGymError<E>> {
         let shape = observation.dims();
+        let features = shape.iter().product::<usize>();
+        if let Some(&column) = self
+            .passthrough_columns
+            .iter()
+            .find(|&&column| column >= features)
+        {
+            return Err(NormalizeObservationGymError::InvalidPassthroughColumn {
+                column,
+                features,
+            });
+        }
         let device = observation.device();
         let dtype = observation.dtype();
         let values = observation
-            .try_to_vec_as::<f32>()?
+            .try_to_vec_as::<f32>()
+            .map_err(NormalizeObservationGymError::TensorRead)?
             .into_iter()
             .map(f64::from)
             .collect::<Vec<_>>();
@@ -118,10 +148,19 @@ impl<G> NormalizeObservationGym<G> {
                 self.clip.map_or(value, |limit| value.clamp(-limit, limit)) as f32
             })
             .collect::<Vec<_>>();
-        Ok(Tensor::from_data(
-            TensorData::new(normalized, shape),
-            (&device, dtype),
-        ))
+        let normalized = Tensor::from_data(TensorData::new(normalized, shape), (&device, dtype));
+        if self.passthrough_columns.is_empty() {
+            return Ok(normalized);
+        }
+        let original = observation.clone().reshape([features]);
+        let mut normalized = normalized.reshape([features]);
+        for &column in &self.passthrough_columns {
+            normalized = normalized.slice_assign(
+                [Slice::from(column..column + 1)],
+                original.clone().slice_dim(0, column..column + 1),
+            );
+        }
+        Ok(normalized.reshape(shape))
     }
 }
 
@@ -144,9 +183,7 @@ where
             .gym
             .reset()
             .map_err(NormalizeObservationGymError::GymError)?;
-        reset.observation = self
-            .normalize(&reset.observation)
-            .map_err(NormalizeObservationGymError::TensorRead)?;
+        reset.observation = self.normalize::<O, K, G::Error>(&reset.observation)?;
         Ok(reset)
     }
 
@@ -160,9 +197,7 @@ where
             .gym
             .step(action)
             .map_err(NormalizeObservationGymError::GymError)?;
-        step.observation = self
-            .normalize(&step.observation)
-            .map_err(NormalizeObservationGymError::TensorRead)?;
+        step.observation = self.normalize::<O, K, G::Error>(&step.observation)?;
         Ok(step)
     }
 
@@ -358,13 +393,14 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        gym::Gym,
+        gym::{Gym, ResetInfo, StepInfo},
+        spaces::{BoxSpace, Discrete, DiscretePart, MultiPartSpace, SpaceError},
         wrappers::{
             state_test_support::{StateTestGym, action as state_action, assert_state_round_trip},
             test_support::{TestGym, action, scalar},
         },
     };
-    use burn::tensor::{DType, Device, Tensor};
+    use burn::tensor::{DType, Device, Int, IntDType, Tensor};
 
     use super::{
         NormalizeObservationGym, NormalizeObservationGymConfigurationError, NormalizeRewardGym,
@@ -397,7 +433,9 @@ mod tests {
         let observations =
             Tensor::<2>::from_data([[1.0f64, 2.0], [3.0, 4.0]], (&device, DType::F64));
         let mut wrapper = NormalizeObservationGym::new(());
-        let normalized = wrapper.normalize(&observations).unwrap();
+        let normalized = wrapper
+            .normalize::<2, _, std::convert::Infallible>(&observations)
+            .unwrap();
         assert_eq!(normalized.dims(), [2, 2]);
         assert_eq!(normalized.dtype(), DType::F64);
         assert_eq!(normalized.device(), device);
@@ -409,6 +447,174 @@ mod tests {
                 .iter()
                 .all(|value| value.abs() < 0.02)
         );
+    }
+
+    #[test]
+    fn passthrough_components_keep_exact_values_at_any_rank() {
+        let device = Device::flex();
+        let observations = Tensor::<2>::from_data(
+            [[1.0f64, 2.000000000000001], [3.0, 4.000000000000001]],
+            (&device, DType::F64),
+        );
+        let mut wrapper = NormalizeObservationGym::new(())
+            .with_passthrough_columns([3, 1, 3])
+            .with_clip(0.01)
+            .unwrap();
+        let normalized = wrapper
+            .normalize::<2, _, std::convert::Infallible>(&observations)
+            .unwrap();
+        assert_eq!(normalized.dims(), [2, 2]);
+        assert_eq!(normalized.dtype(), DType::F64);
+        let values = normalized.into_data().try_to_vec::<f64>().unwrap();
+        assert_eq!(values[1], 2.000000000000001);
+        assert_eq!(values[3], 4.000000000000001);
+        assert!(values[0].abs() <= 0.01 && values[2].abs() <= 0.01);
+        let mut wrapper = NormalizeObservationGym::new(()).with_passthrough_columns([]);
+        let normalized = wrapper
+            .normalize::<2, _, std::convert::Infallible>(&observations)
+            .unwrap();
+        assert!(
+            normalized
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap()
+                .iter()
+                .all(|value| value.abs() < 0.02)
+        );
+    }
+
+    #[test]
+    fn invalid_passthrough_columns_do_not_update_statistics() {
+        let mut wrapper = NormalizeObservationGym::new(()).with_passthrough_columns([4]);
+        let observations = Tensor::<2>::zeros([2, 2], &Device::flex());
+        assert!(matches!(
+            wrapper.normalize::<2, _, std::convert::Infallible>(&observations),
+            Err(
+                super::NormalizeObservationGymError::InvalidPassthroughColumn {
+                    column: 4,
+                    features: 4
+                }
+            )
+        ));
+        assert!(wrapper.statistics.is_none());
+        let mut wrapper =
+            NormalizeObservationGym::new(TestGym::new([TestGym::step(1.0, 0.0, false, false, 1)]))
+                .with_passthrough_columns([1]);
+        assert!(matches!(
+            wrapper.reset(),
+            Err(
+                super::NormalizeObservationGymError::InvalidPassthroughColumn {
+                    column: 1,
+                    features: 1
+                }
+            )
+        ));
+        assert!(matches!(
+            wrapper.step(action()),
+            Err(
+                super::NormalizeObservationGymError::InvalidPassthroughColumn {
+                    column: 1,
+                    features: 1
+                }
+            )
+        ));
+        assert!(wrapper.statistics.is_none());
+    }
+
+    #[test]
+    fn multipart_reset_and_step_preserve_reported_categories() {
+        type Space = MultiPartSpace<(BoxSpace<2>, DiscretePart)>;
+        struct Env {
+            space: Space,
+            mode: i64,
+        }
+        impl Env {
+            fn observation(&self) -> Result<Tensor<1>, SpaceError> {
+                let device = Device::flex();
+                self.space
+                    .pack((
+                        Tensor::from_data([[self.mode as f64 * 10.0, 20.0]], (&device, DType::F64)),
+                        Tensor::from_data([[self.mode]], (&device, DType::I64)),
+                    ))
+                    .map(|batch| batch.reshape([3]))
+            }
+        }
+        impl Gym<i64> for Env {
+            type Error = SpaceError;
+            type ActionSpace = Discrete;
+            type ObservationSpace = Space;
+            fn reset(&mut self) -> Result<ResetInfo<i64>, Self::Error> {
+                self.mode = 2;
+                Ok(ResetInfo {
+                    observation: self.observation()?,
+                    info: self.mode,
+                })
+            }
+            /// Consumes an unbatched action `[1]` and returns a packed observation `[3]`.
+            fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo<i64>, Self::Error> {
+                self.mode = 3;
+                Ok(StepInfo {
+                    observation: self.observation()?,
+                    reward: 1.0,
+                    terminated: false,
+                    truncated: false,
+                    info: self.mode,
+                })
+            }
+            fn action_space(&self) -> Discrete {
+                Discrete::new(2).unwrap()
+            }
+            fn observation_space(&self) -> Space {
+                self.space.clone()
+            }
+        }
+        let device = Device::flex();
+        let space = MultiPartSpace::new((
+            BoxSpace::new_unbounded([1, 2], &device),
+            DiscretePart::new(Discrete::new(4).unwrap(), IntDType::I64),
+        ));
+        let mut wrapper = NormalizeObservationGym::new(Env {
+            space: space.clone(),
+            mode: 0,
+        })
+        .with_passthrough_columns(space.discrete_columns())
+        .with_clip(0.125)
+        .unwrap();
+        let reset = wrapper.reset().unwrap();
+        let fields = space.unpack(reset.observation.reshape([1, 3])).unwrap();
+        assert_eq!(reset.info, 2);
+        assert_eq!(fields.1.dtype(), DType::I64);
+        assert_eq!(fields.1.into_scalar::<i64>(), reset.info);
+        assert!(
+            fields
+                .0
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap()
+                .iter()
+                .all(|value| value.abs() <= 0.125)
+        );
+        let step = wrapper.step(Tensor::from_data([0i32], &device)).unwrap();
+        let fields = space.unpack(step.observation.reshape([1, 3])).unwrap();
+        assert_eq!(step.info, 3);
+        assert_eq!(fields.1.into_scalar::<i64>(), step.info);
+        assert!(
+            fields
+                .0
+                .into_data()
+                .try_to_vec::<f64>()
+                .unwrap()
+                .iter()
+                .all(|value| value.abs() <= 0.125)
+        );
+        let mut blanket = NormalizeObservationGym::new(Env {
+            space: space.clone(),
+            mode: 0,
+        });
+        assert!(matches!(
+            space.unpack(blanket.reset().unwrap().observation.reshape([1, 3])),
+            Err(SpaceError::InvalidDiscretePartValue { part: 1 })
+        ));
     }
 
     #[test]

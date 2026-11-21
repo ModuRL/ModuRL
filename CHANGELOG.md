@@ -38,8 +38,16 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - Observations can now combine typed fields, such as an image, a joint vector and
   a discrete mode, and each field can get its own encoder. A `MultiPartSpace` tuple
   of 2–8 `BoxSpace`/`Discrete` fields packs into the existing flat observation
-  tensor, so agents, buffers, wrappers and environments work unchanged;
-  `MultiPartEncoder` unpacks it inside the model.
+  tensor, keeping existing agent, buffer and environment interfaces unchanged;
+  `MultiPartEncoder` unpacks it inside the model. `FrameStackGym` adds a frame
+  axis: the model must reshape `[batch, frames, flat_len]` to
+  `[batch * frames, flat_len]` before encoding, then restore or concatenate frames.
+  Blanket observation normalization must skip discrete columns (or continuous
+  fields must be normalized before packing): opt in with
+  `NormalizeObservationGym::new(env).with_passthrough_columns(space.discrete_columns())`.
+  Skipped columns preserve their exact values and are not clipped; the default
+  still normalizes every component. Invalid indices error on reset/step.
+  Unpack rejects non-integral discrete values instead of silently truncating them.
   Float fields must share one dtype; F16/BF16 are preserved, and mixed dtypes
   return an error. Discrete fields use the shared float dtype (F32 for an
   all-discrete layout); category-count limits depend on dtype: 2048 for F16,
@@ -48,8 +56,11 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   category count. Field encoder outputs must likewise share one dtype.
   `InvalidPartShape` reports full batched shapes for both pack and unpack.
   The new `SpaceError` variants `EmptyObservationBatch`, `InvalidPartShape` and
-  `IncompatibleParts`, plus `PartDTypeMismatch` and `DiscretePartPrecision`, break
-  exhaustive matches on that enum.
+  `IncompatibleParts`, plus `PartDTypeMismatch`, `DiscretePartPrecision` and
+  `InvalidDiscretePartValue`, break exhaustive matches on that enum.
+  `NormalizeObservationGymError::InvalidPassthroughColumn` likewise breaks
+  exhaustive matches on the wrapper error enum. Discrete field bounds checks
+  now accept the full I8/U8/I16/U16 category capacities.
 
 - Removed the combined `Space` trait. Implement `ActionSpace<A>` for action checks and sampling,
   `ObservationSpace<O>` for observation checks, and `ActionMap<L, A>` for policy-to-environment conversion.

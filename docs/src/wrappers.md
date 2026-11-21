@@ -53,6 +53,14 @@ let gym = NormalizeRewardGym::new(gym, 0.99)
     .expect("finite positive reward clip");
 ```
 
+Observation normalization handles every component by default. Opt in to
+`with_passthrough_columns(indices)` to preserve selected components without
+normalization or clipping. Indices address row-major flattened unbatched
+observations; duplicates are ignored, and out-of-range indices return
+`NormalizeObservationGymError::InvalidPassthroughColumn` on reset/step.
+For multipart discrete fields, use `space.discrete_columns()` as the indices
+([example](./custom-gym-environment.md#combine-typed-observation-fields)).
+
 `FrameStackGym<G, BF, S>` uses native Burn tensors. `BF` is the stacked batch
 rank. Two `PrevRank` mappings determine the inner observation's single rank. The defaults
 stack vectors `[features]` into `[stack_size, features]`. Scalar observations use

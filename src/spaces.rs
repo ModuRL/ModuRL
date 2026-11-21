@@ -88,6 +88,11 @@ pub trait ActionMap<const L: usize, const A: usize>: ActionSpace<A> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SpaceError {
+    /// A packed discrete field is non-finite or fails its native integer round-trip.
+    #[error(
+        "observation part {part} must contain finite integral values that round-trip through its integer dtype"
+    )]
+    InvalidDiscretePartValue { part: usize },
     /// A field does not match the shared float dtype or configured integer dtype.
     #[error("observation part {part} has dtype {actual:?}, expected {expected:?}")]
     PartDTypeMismatch {

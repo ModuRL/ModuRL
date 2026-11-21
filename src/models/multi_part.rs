@@ -64,6 +64,9 @@ pub trait EncodeObservationParts<P: ObservationParts> {
 /// `E` is a tuple of modules implementing [`PartEncoder`] for their respective
 /// native batches. Burn visits all tuple parameters; the space is skipped.
 /// All field outputs must share one dtype; concatenation never casts them.
+/// Input must be `[batch, flat_len]`. Fold frame-stacked observations from
+/// `[batch, frames, flat_len]` to `[batch * frames, flat_len]` before encoding,
+/// then reshape features back or concatenate them across frames.
 /// Compose its [`Forward`] output with an MLP trunk or policy/value heads in a
 /// custom module, just as with any other feature extractor.
 #[derive(Module)]
@@ -245,6 +248,16 @@ mod tests {
                 expected: DType::F32,
                 actual: DType::F64
             })
+        ));
+        let encoder = MultiPartEncoder::new(
+            (Echo, ModeEncoder { dtype: DType::F32 }),
+            encoder.space().clone(),
+        );
+        assert!(matches!(
+            encoder.forward(Tensor::from_data([[1.0f32, 1.0, 0.009]], &device)),
+            Err(MultiPartEncoderError::Space(
+                SpaceError::InvalidDiscretePartValue { part: 1 }
+            ))
         ));
     }
 

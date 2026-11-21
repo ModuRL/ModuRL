@@ -159,8 +159,8 @@ This is ModuRL's typed answer to Gymnasium/SB3 `Dict` observations.
 Keep a single flat `BoxSpace` when the observation is already a feature vector,
 or when reshaping slices inside your model is enough. Use `MultiPartSpace` when
 fields need distinct shapes, kinds or encoders, such as an image, a joint vector
-and a discrete mode. It groups 2–8 typed spaces without string keys. Agents,
-buffers and wrappers still receive one flat floating-point tensor.
+and a discrete mode. It groups 2–8 typed spaces without string keys. Agents and
+buffers still receive one flat floating-point tensor; see the wrapper caveats below.
 
 For example, pack joint positions and velocities as two vector fields:
 
@@ -247,6 +247,34 @@ For another native integer dtype, put
 tuple instead. The configured dtype must match the input to `pack` and native
 field `contains`; `unpack` restores it exactly. Category counts must also fit
 the configured integer dtype. Empty batches are rejected.
+
+`unpack` (and therefore `MultiPartEncoder::forward`) checks discrete columns
+for finite integral values using a native integer round-trip, returning
+`SpaceError::InvalidDiscretePartValue` rather than silently truncating them.
+The blanket `NormalizeObservationGym` must be told to skip discrete columns,
+or continuous fields must be normalized before packing. For a multipart space:
+
+```rust,ignore
+let env = NormalizeObservationGym::new(env)
+    .with_passthrough_columns(space.discrete_columns());
+```
+
+This opt-in selection skips both normalization and clipping. For rank-generic
+observations, indices refer to row-major flattened unbatched components; for
+multipart observations these are the packed feature columns. Out-of-range
+indices return an error on reset/step. By default every component is normalized.
+
+`FrameStackGym` adds a frame axis, while `MultiPartEncoder` accepts only
+`[batch, flat_len]`. Fold that axis into the batch inside the model before
+encoding, then restore the frame axis or concatenate its features:
+
+```rust,ignore
+let [batch, frames, flat_len] = stacked.dims();
+let encoded = encoder.forward(stacked.reshape([batch * frames, flat_len]))?;
+let features = encoded.dims()[1];
+let temporal = encoded.reshape([batch, frames, features]);
+let concatenated = temporal.reshape([batch, frames * features]);
+```
 
 ## Vectorize the Environment
 

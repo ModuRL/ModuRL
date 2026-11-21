@@ -9,6 +9,11 @@
 //! I32; [`DiscretePart`] configures another native integer dtype. Pack/unpack
 //! reject category counts exceeding either dtype's capacity. Packing validates
 //! shapes and dtypes, not bounds; use [`ObservationSpace::contains`] for bounds.
+//! Unpacking rejects non-integral discrete columns instead of truncating them.
+//! Configure observation normalization with
+//! `with_passthrough_columns(space.discrete_columns())`, or normalize continuous
+//! fields before packing. Frame-stacked inputs must fold their frame axis into
+//! the batch axis before a multipart encoder, then restore or concatenate frames.
 //!
 //! A named application struct needs no string keys or runtime schema. Convert it
 //! to and from the tuple accepted by [`MultiPartSpace::pack`] and returned by
@@ -151,7 +156,16 @@ macro_rules! impl_discrete_part {
                 batch.cast(($dtype)(self))
             }
             fn contains(&self, batch: &Self::Batch) -> bool {
-                batch.dtype() == DType::from(($dtype)(self)) && ($space)(self).contains(batch)
+                if batch.dtype() != DType::from(($dtype)(self)) {
+                    return false;
+                }
+                let values = match batch.dtype() {
+                    DType::I8 | DType::U8 | DType::I16 | DType::U16 => {
+                        batch.clone().cast(IntDType::I32)
+                    }
+                    _ => batch.clone(),
+                };
+                ($space)(self).contains(&values)
             }
         }
     };
@@ -193,12 +207,25 @@ fn validate_precision<P: ObservationPart>(
     Ok(())
 }
 
+/// Checks that discrete `[batch, width]` values survive their native integer conversion.
+fn discrete_round_trip_matches<P: ObservationPart>(space: &P, batch: &Tensor<2>) -> bool {
+    space.categories().is_none()
+        || space
+            .flatten_as(space.unflatten(batch.clone()), batch.dtype())
+            .equal(batch.clone())
+            .bool_and(batch.clone().is_finite())
+            .all()
+            .into_scalar::<bool>()
+}
+
 /// A typed layout of observation spaces, implemented for tuples of 2–8 fields.
 pub trait ObservationParts: Clone {
     /// Tuple of native batched tensors.
     type Parts;
     /// Total number of scalars per environment.
     fn flat_len(&self) -> usize;
+    /// Packed feature indices belonging to discrete fields, in transport order.
+    fn discrete_columns(&self) -> Vec<usize>;
     /// Validates native shapes and combines the fields along axis one.
     fn pack(&self, parts: Self::Parts) -> Result<Tensor<2>, SpaceError>;
     /// Validates `[batch, flat_len]` and restores each field.
@@ -235,6 +262,11 @@ impl<P: ObservationParts> MultiPartSpace<P> {
     pub fn flat_len(&self) -> usize {
         self.parts.flat_len()
     }
+    /// Returns the packed feature columns that observation normalization must skip.
+    /// Pass these to `NormalizeObservationGym::with_passthrough_columns`.
+    pub fn discrete_columns(&self) -> Vec<usize> {
+        self.parts.discrete_columns()
+    }
     /// Packs native batches without casting Float fields, which must share one dtype.
     /// Discrete fields use that dtype, or F32 for an all-discrete layout.
     /// Discrete category limits depend on the float dtype (F16: 2048, BF16: 256,
@@ -247,6 +279,7 @@ impl<P: ObservationParts> MultiPartSpace<P> {
     /// Restores `[batch, flat_len]` to native ranks and kinds.
     /// Floating fields retain the packed dtype; discrete fields restore I32 or
     /// the dtype configured by [`DiscretePart`]. Empty batches are rejected.
+    /// Discrete columns must contain finite integral values that survive an integer round-trip.
     pub fn unpack(&self, batch: Tensor<2>) -> Result<P::Parts, SpaceError> {
         self.parts.unpack(batch)
     }
@@ -272,6 +305,15 @@ macro_rules! impl_parts {
         impl<$($P: ObservationPart + Clone),+> ObservationParts for ($($P,)+) {
             type Parts = ($($P::Batch,)+);
             fn flat_len(&self) -> usize { 0 $(+ self.$i.flat_len())+ }
+            fn discrete_columns(&self) -> Vec<usize> {
+                let mut columns = Vec::new();
+                let mut offset = 0;
+                $(let end = offset + self.$i.flat_len();
+                if self.$i.categories().is_some() { columns.extend(offset..end); }
+                offset = end;)+
+                let _ = offset;
+                columns
+            }
             fn pack(&self, parts: Self::Parts) -> Result<Tensor<2>, SpaceError> {
                 let mut dtype = None;
                 $(let actual = self.$i.batch_shape(&parts.$i);
@@ -314,7 +356,11 @@ macro_rules! impl_parts {
                 let mut offset = 0;
                 let result = ($({
                     let end = offset + self.$i.flat_len();
-                    let field = self.$i.unflatten(batch.clone().slice([0..count, offset..end]));
+                    let flat = batch.clone().slice([0..count, offset..end]);
+                    if !discrete_round_trip_matches(&self.$i, &flat) {
+                        return Err(SpaceError::InvalidDiscretePartValue { part: $i });
+                    }
+                    let field = self.$i.unflatten(flat);
                     offset = end;
                     field
                 },)+);
@@ -324,10 +370,7 @@ macro_rules! impl_parts {
             /// Validates `[batch, flat_len]` and every field's bounds.
             fn contains(&self, batch: &Tensor<2>) -> bool {
                 let Ok(parts) = self.unpack(batch.clone()) else { return false; };
-                if !($(self.$i.contains(&parts.$i))&&+) { return false; }
-                // A cast to integer must not silently accept fractional categories or NaNs.
-                let Ok(restored) = self.pack(parts) else { return false; };
-                restored.cast(batch.dtype()).equal(batch.clone()).all().into_scalar::<bool>()
+                $(self.$i.contains(&parts.$i))&&+
             }
         }
     };
@@ -579,5 +622,90 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn unpack_rejects_fractional_and_nonfinite_discrete_values() {
+        let device = Device::flex();
+        let space = MultiPartSpace::new((
+            BoxSpace::new_unbounded([1, 1], &device),
+            Discrete::new(4).unwrap(),
+        ));
+        for dtype in [DType::F16, DType::BF16, DType::F32, DType::F64] {
+            for value in [0.009, 1.5, f64::NAN, f64::INFINITY] {
+                let packed = Tensor::from_data([[0.5f64, value]], (&device, dtype));
+                assert!(matches!(
+                    space.unpack(packed.clone()),
+                    Err(SpaceError::InvalidDiscretePartValue { part: 1 })
+                ));
+                assert!(!ObservationSpace::contains(&space, &packed));
+            }
+            let restored = space
+                .unpack(Tensor::from_data([[0.5f64, 2.0]], (&device, dtype)))
+                .unwrap();
+            assert_eq!(restored.1.into_scalar::<i32>(), 2);
+            let out_of_bounds = Tensor::from_data([[0.5f64, 4.0]], (&device, dtype));
+            assert!(space.unpack(out_of_bounds.clone()).is_ok());
+            assert!(!ObservationSpace::contains(&space, &out_of_bounds));
+        }
+    }
+
+    #[test]
+    fn discrete_columns_follow_flat_transport_offsets() {
+        let device = Device::flex();
+        let space = MultiPartSpace::new((
+            BoxSpace::new_unbounded([1, 2], &device),
+            Discrete::new(3).unwrap(),
+            BoxSpace::new_unbounded([1, 1, 2, 2], &device),
+            DiscretePart::new(Discrete::new(2).unwrap(), IntDType::U32),
+        ));
+        assert_eq!(space.discrete_columns(), vec![2, 7]);
+        assert!(
+            MultiPartSpace::new((
+                BoxSpace::new_unbounded([1, 2], &device),
+                BoxSpace::new_unbounded([1, 3], &device)
+            ))
+            .discrete_columns()
+            .is_empty()
+        );
+        assert_eq!(
+            MultiPartSpace::new((Discrete::new(2).unwrap(), Discrete::new(3).unwrap()))
+                .discrete_columns(),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn narrow_integer_bounds_include_full_capacity_endpoints() {
+        let device = Device::flex();
+        for (dtype, categories) in [
+            (IntDType::I8, 128),
+            (IntDType::U8, 256),
+            (IntDType::I16, 32768),
+            (IntDType::U16, 65536),
+        ] {
+            let part = DiscretePart::new(Discrete::new(categories).unwrap(), dtype);
+            let indices = Tensor::<2, Int>::from_data([[0i32], [(categories - 1) as i32]], &device)
+                .cast(dtype);
+            assert!(ObservationPart::contains(&part, &indices));
+            assert!(!ObservationPart::contains(
+                &part,
+                &indices.clone().cast(IntDType::I32)
+            ));
+            let space =
+                MultiPartSpace::new((BoxSpace::new_unbounded([1, 1], &device), part.clone()));
+            let packed = space
+                .pack((Tensor::zeros([2, 1], &device), indices.clone()))
+                .unwrap();
+            assert!(ObservationSpace::contains(&space, &packed));
+            assert_eq!(
+                space.unpack(packed).unwrap().1.into_data(),
+                indices.into_data()
+            );
+            if matches!(dtype, IntDType::I8 | IntDType::I16) {
+                let negative = Tensor::<2, Int>::from_data([[-1i32]], &device).cast(dtype);
+                assert!(!ObservationPart::contains(&part, &negative));
+            }
+        }
     }
 }
