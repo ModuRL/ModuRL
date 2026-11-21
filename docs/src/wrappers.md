@@ -65,7 +65,8 @@ fixed during evaluation. The file holds only the statistics, so set the same `wi
 limit used in training.
 
 Statistics are kept in `f64` on devices that support it, otherwise in the device's float
-dtype. `try_load_file` checks parameter names and shapes but not values, so call
+dtype. Loading keeps the saved dtype, so load `f64` statistics on a device that supports
+`f64`, even if the policy runs on another device. `try_load_file` checks parameter names and shapes but not values, so call
 `validate()` before saving and after loading; it also rejects tensors on different devices. Statistics and
 model checkpoints are both `.bpk` files but are not interchangeable: each fails to load
 into the other.
