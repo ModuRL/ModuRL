@@ -64,7 +64,9 @@ statistics it trained on. Call `with_update_statistics(false)` to keep loaded st
 fixed during evaluation. The file holds only the statistics, so set the same `with_clip`
 limit used in training.
 
-Loading checks only the length, so call `validate()` on loaded statistics. Statistics and
+Statistics are kept in `f64` on devices that support it, otherwise in the device's float
+dtype. `try_load_file` checks parameter names and shapes but not values, so call
+`validate()` before saving and after loading; it also rejects tensors on different devices. Statistics and
 model checkpoints are both `.bpk` files but are not interchangeable: each fails to load
 into the other.
 
@@ -87,8 +89,13 @@ setting. Each wrapped environment keeps its own statistics, so with
 ```rust,ignore
 // After training: rewards wrap observations, inside a vectorized wrapper.
 let reward_gym = &env.envs()[0];
-reward_gym.inner().statistics().expect("observed at least once").clone().save_file("obs_rms.bpk")?;
-reward_gym.statistics().clone().save_file("reward_rms.bpk")?;
+// Check the values first: a NaN reward or observation would otherwise be saved as-is.
+let obs_rms = reward_gym.inner().statistics().expect("observed at least once").clone();
+obs_rms.validate()?;
+obs_rms.save_file("obs_rms.bpk")?;
+let reward_rms = reward_gym.statistics().clone();
+reward_rms.validate()?;
+reward_rms.save_file("reward_rms.bpk")?;
 
 // Evaluation: load into a template of the observation length, then check the values.
 // `obs_dim` is the observation's component count, the length the training wrapper saw.

@@ -3,7 +3,7 @@
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::{
     module::{Module, Param},
-    tensor::{Device, Int, Tensor, TensorData, TensorReadError, kind::Basic},
+    tensor::{DType, Device, Int, Tensor, TensorData, TensorReadError, kind::Basic},
 };
 
 use crate::{
@@ -38,6 +38,8 @@ pub enum RunningMeanStdError {
     InvalidVariance,
     #[error("count must be finite and positive")]
     InvalidCount,
+    #[error("mean, variance, and count must be on the same device")]
+    DeviceMismatch,
     #[error("failed to read statistics: {0}")]
     TensorRead(#[source] TensorReadError),
 }
@@ -51,10 +53,15 @@ impl RunningMeanStd {
     /// Starts `size` components at zero mean and unit variance on `device`. This is also the
     /// template `try_load_file` loads saved statistics into; a file of another length is rejected.
     pub fn new(size: usize, device: &Device) -> Self {
+        let dtype = if device.supports_dtype(DType::F64) {
+            DType::F64
+        } else {
+            device.settings().float_dtype.into()
+        };
         Self {
-            mean: fixed(Tensor::zeros([size], device)),
-            variance: fixed(Tensor::ones([size], device)),
-            count: fixed(Tensor::full([1], RUNNING_STATS_EPSILON, device)),
+            mean: fixed(Tensor::zeros([size], (device, dtype))),
+            variance: fixed(Tensor::ones([size], (device, dtype))),
+            count: fixed(Tensor::full([1], RUNNING_STATS_EPSILON, (device, dtype))),
         }
     }
 
@@ -74,9 +81,14 @@ impl RunningMeanStd {
         Ok(statistics)
     }
 
-    /// Checks the invariants [`from_tensors`](Self::from_tensors) enforces. `try_load_file` checks
-    /// only lengths, and updates from non-finite samples can break these, so call it after either.
+    /// Checks the invariants [`from_tensors`](Self::from_tensors) enforces, including that all
+    /// `[size]` tensors share a device. `try_load_file` checks names and shapes but not values, and
+    /// updates from non-finite samples can break these, so call it before saving and after loading.
     pub fn validate(&self) -> Result<(), RunningMeanStdError> {
+        let device = self.mean.val().device();
+        if self.variance.val().device() != device || self.count.val().device() != device {
+            return Err(RunningMeanStdError::DeviceMismatch);
+        }
         let read = |param: &Param<Tensor<1>>| {
             param
                 .val()
@@ -849,6 +861,17 @@ mod tests {
         assert_eq!(loaded.mean().dtype(), DType::F64);
         assert!(wrong_length.is_err());
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn new_statistics_accumulate_in_f64_where_supported() {
+        let statistics = RunningMeanStd::new(1, &Device::flex());
+        assert_eq!(statistics.mean().dtype(), DType::F64);
+
+        let mut statistics = stats(&[0.0], &[1.0], 16_777_216.0).unwrap();
+        let sample = statistics.tensor(TensorData::new(vec![1.0f64], [1]));
+        statistics.update(sample);
+        assert_eq!(host(statistics.count()), vec![16_777_217.0]);
     }
 
     #[test]
