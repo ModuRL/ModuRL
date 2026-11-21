@@ -66,6 +66,9 @@ The file is a burnpack (`.bpk`) written and read with Burn's own burnpack writer
 reader, the format agent networks use with Burn's `save_file`: mean and variance are `f64`
 tensors and the count is a scalar. Saving follows Burn's file handling, including adding
 `.bpk` when the path has no extension and replacing the file atomically.
+Statistics and model checkpoints share the extension but are not interchangeable:
+`RunningMeanStd::load_file` rejects a model checkpoint, and a module's `try_load_file`
+rejects a statistics file.
 `NormalizeObservationGym::statistics()` returns an `Option` because the wrapper sizes
 its statistics from the first observation; `NormalizeRewardGym::statistics()` always
 has its single component.

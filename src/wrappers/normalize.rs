@@ -951,6 +951,38 @@ mod tests {
     }
 
     #[test]
+    fn statistics_and_model_files_are_not_interchangeable() {
+        use burn::module::Module;
+        use burn::nn::LinearConfig;
+
+        let device = Device::flex();
+        let directory = std::env::temp_dir();
+        let model_path = directory.join(format!("modurl-model-{}.bpk", std::process::id()));
+        let statistics_path =
+            directory.join(format!("modurl-statistics-{}.bpk", std::process::id()));
+        LinearConfig::new(2, 2)
+            .init(&device)
+            .save_file(&model_path)
+            .unwrap();
+        RunningMeanStd::new(vec![0.0, 1.0], vec![1.0, 2.0], 3.0)
+            .unwrap()
+            .save_file(&statistics_path)
+            .unwrap();
+
+        let statistics_from_model = RunningMeanStd::load_file(&model_path);
+        let model_from_statistics = LinearConfig::new(2, 2)
+            .init(&device)
+            .try_load_file(&statistics_path);
+        std::fs::remove_file(&model_path).unwrap();
+        std::fs::remove_file(&statistics_path).unwrap();
+        assert!(matches!(
+            statistics_from_model,
+            Err(RunningMeanStdFileError::NotStatisticsFile)
+        ));
+        assert!(model_from_statistics.is_err());
+    }
+
+    #[test]
     fn rejects_malformed_statistics_bytes() {
         let valid = statistics_pack("modurl.running_mean_std", 1, 2.0, burn_pack::DType::F64);
         assert!(RunningMeanStd::from_bytes(&valid).is_ok());
