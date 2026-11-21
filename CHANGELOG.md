@@ -9,14 +9,6 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Rust and tensor backend
 
-- Observations can now combine typed fields, such as an image, a joint vector and
-  a discrete mode, and each field can get its own encoder. A `MultiPartSpace` tuple
-  of 2–8 `BoxSpace`/`Discrete` fields packs into the existing flat observation
-  tensor, so agents, buffers, wrappers and environments work unchanged;
-  `MultiPartEncoder` unpacks it inside the model.
-  The new `SpaceError` variants `EmptyObservationBatch`, `InvalidPartShape` and
-  `IncompatibleParts` break exhaustive matches on that enum.
-
 - Discount `gamma` and advantage-estimation `lambda` parameters now consistently use `f64`,
   including PPO, A2C, DQN/DDQN, GAE, NStep, and UPGO. Callers with `f32` variables must
   convert them to `f64`; custom advantage estimators must update their method signatures.
@@ -42,6 +34,14 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   Truncation still bootstraps; only termination masks Bellman targets.
 
 ### Tensor shapes and space traits
+
+- Observations can now combine typed fields, such as an image, a joint vector and
+  a discrete mode, and each field can get its own encoder. A `MultiPartSpace` tuple
+  of 2–8 `BoxSpace`/`Discrete` fields packs into the existing flat observation
+  tensor, so agents, buffers, wrappers and environments work unchanged;
+  `MultiPartEncoder` unpacks it inside the model.
+  The new `SpaceError` variants `EmptyObservationBatch`, `InvalidPartShape` and
+  `IncompatibleParts` break exhaustive matches on that enum.
 
 - Removed the combined `Space` trait. Implement `ActionSpace<A>` for action checks and sampling,
   `ObservationSpace<O>` for observation checks, and `ActionMap<L, A>` for policy-to-environment conversion.

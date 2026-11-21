@@ -1,5 +1,7 @@
 //! Typed observation fields transported through the existing flat tensor interface.
 //!
+//! ModuRL's typed answer to Gymnasium/SB3 `Dict` observations.
+//!
 //! A named application struct needs no string keys or runtime schema. Convert it
 //! to and from the tuple accepted by [`MultiPartSpace::pack`] and returned by
 //! [`MultiPartSpace::unpack`]:

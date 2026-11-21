@@ -154,6 +154,8 @@ space must match the tensors returned by `reset` and `step`.
 
 ## Combine Typed Observation Fields
 
+This is ModuRL's typed answer to Gymnasium/SB3 `Dict` observations.
+
 Keep a single flat `BoxSpace` when the observation is already a feature vector,
 or when reshaping slices inside your model is enough. Use `MultiPartSpace` when
 fields need distinct shapes, kinds or encoders, such as an image, a joint vector
@@ -174,6 +176,7 @@ let space = MultiPartSpace::new((
 let positions = Tensor::zeros([1, 3], (&device, DType::F32));
 let velocities = Tensor::zeros([1, 3], (&device, DType::F32));
 let packed = space.pack((positions, velocities))?; // [1, 6]
+// Gym returns unbatched observations, so remove the singleton batch axis.
 let observation: Tensor<1> = packed.clone().reshape([6]);
 ```
 
@@ -224,12 +227,13 @@ impl From<(Tensor<2>, Tensor<2>)> for MotionObs {
 // space.pack(obs.into())?; MotionObs::from(space.unpack(packed)?);
 ```
 
-`pack` validates shapes, batch sizes and devices, but does not check bounds;
-call `space.contains(&packed)` when you need bounds validation. If any field is
-F64, packing promotes all fields to F64, and unpacked floating fields keep that
-dtype. Discrete indices travel as floats and return to `Int` on unpacking; valid
-indices are lossless because `Discrete` caps its category count at 2^24. Match
-encoder parameter dtypes to the packed dtype. Empty batches are rejected.
+`pack` checks shapes (including batch sizes) and device compatibility, not bounds;
+call `space.contains(&packed)` to check bounds. Mixing F32 and F64 fields promotes
+everything to F64, and unpacked floating fields keep that dtype. `Discrete`
+fields travel as floats in the packed tensor and come back as `Int` after
+`unpack`; valid indices are lossless because `Discrete` caps its category count
+at 2^24. Match encoder parameter dtypes to the packed dtype. Empty batches are
+rejected.
 
 ## Vectorize the Environment
 
