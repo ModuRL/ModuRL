@@ -180,7 +180,8 @@ impl RunningMeanStd {
     }
 
     /// Writes [`to_bytes`](Self::to_bytes) to `path`, replacing an existing file.
-    /// Invalid statistics return `InvalidStatistics` without touching the file.
+    /// The bytes go to a temporary file in the same directory that is renamed over `path` only after
+    /// it is fully written, so a failed save leaves any existing file untouched.
     pub fn save_file<P: AsRef<std::path::Path>>(
         &self,
         path: P,
@@ -188,7 +189,10 @@ impl RunningMeanStd {
         let bytes = self
             .to_bytes()
             .map_err(RunningMeanStdFileError::InvalidStatistics)?;
-        std::fs::write(path, bytes).map_err(RunningMeanStdFileError::Io)
+        replace_file(path.as_ref(), |file| {
+            std::io::Write::write_all(file, &bytes)
+        })
+        .map_err(RunningMeanStdFileError::Io)
     }
 
     /// Reads statistics written by [`save_file`](Self::save_file).
@@ -209,6 +213,44 @@ impl RunningMeanStd {
         }
         self.count = total_count;
     }
+}
+
+/// Writes a sibling temporary file with `write`, then renames it over `path`; removes it on failure.
+fn replace_file(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    static TEMPORARY_FILE_COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "statistics path has no file name",
+        )
+    })?;
+    let mut temporary_name = std::ffi::OsString::from(".");
+    temporary_name.push(file_name);
+    temporary_name.push(format!(
+        ".{}-{}.tmp",
+        std::process::id(),
+        TEMPORARY_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let temporary_path = path.with_file_name(temporary_name);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)?;
+    let result = write(&mut file)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&temporary_path, path)
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    result
 }
 
 /// Opaque saved state for observation normalization.
@@ -705,7 +747,7 @@ mod tests {
     use super::{
         NormalizeObservationGym, NormalizeObservationGymConfigurationError,
         NormalizeObservationGymError, NormalizeRewardGym, NormalizeRewardGymConfigurationError,
-        RunningMeanStd, RunningMeanStdError, RunningMeanStdFileError,
+        RunningMeanStd, RunningMeanStdError, RunningMeanStdFileError, replace_file,
     };
     use crate::gym::PerfectStateGym;
 
@@ -871,6 +913,28 @@ mod tests {
         let loaded = RunningMeanStd::load_file(&path);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(loaded.unwrap(), statistics);
+    }
+
+    #[test]
+    fn failed_save_keeps_existing_statistics_file() {
+        let directory =
+            std::env::temp_dir().join(format!("modurl-failed-save-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("obs_rms.bin");
+        let statistics = RunningMeanStd::new(vec![1.0], vec![2.0], 3.0).unwrap();
+        statistics.save_file(&path).unwrap();
+
+        let result = replace_file(&path, |file| {
+            std::io::Write::write_all(file, b"MURL")?;
+            Err(std::io::Error::other("disk full"))
+        });
+        let loaded = RunningMeanStd::load_file(&path);
+        let leftover = std::fs::read_dir(&directory).unwrap().count();
+        std::fs::remove_dir_all(&directory).unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(loaded.unwrap(), statistics);
+        assert_eq!(leftover, 1);
     }
 
     #[test]

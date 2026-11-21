@@ -59,7 +59,8 @@ let gym = NormalizeRewardGym::new(gym, 0.99)
 and sample count in a `RunningMeanStd`. Export it with `statistics()`, save it with
 `save_file` or `to_bytes`, and load it into a new wrapper with `with_statistics` so a
 trained policy is evaluated or deployed with the statistics it trained on. Call
-`with_update_statistics(false)` to keep loaded statistics fixed during evaluation.
+`with_update_statistics(false)` to keep loaded statistics fixed during evaluation. The
+file holds only the statistics, so set the same `with_clip` limit used in training.
 
 The file uses ModuRL's own versioned binary format, not a Burn record, so it is
 separate from the `.bpk` files that agent networks write with Burn's `save_file`.
@@ -71,7 +72,7 @@ has its single component.
 | --- | --- |
 | `RunningMeanStd::new(mean, variance, count)` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
 | `RunningMeanStd::to_bytes` | `RunningMeanStdError` when updates left the statistics invalid, for example after a NaN reward, so a saved file always loads. |
-| `RunningMeanStd::save_file` / `load_file` | `RunningMeanStdFileError` for I/O failures, a foreign or truncated file, an unsupported format version, or invalid statistics; a failed save leaves the file untouched. |
+| `RunningMeanStd::save_file` / `load_file` | `RunningMeanStdFileError` for I/O failures, a foreign or truncated file, an unsupported format version, or invalid statistics; a failed save, including an I/O error partway through the write, leaves an existing file untouched. |
 | `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when installed or restored statistics differ in length from the declared observation shape (checked once per install), and again if an observation's component count differs. |
 | `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component. |
 
@@ -86,10 +87,11 @@ let reward_gym = &env.envs()[0];
 reward_gym.inner().statistics().expect("observed at least once").save_file("obs_rms.bin")?;
 reward_gym.statistics().save_file("reward_rms.bin")?;
 
-// Evaluation: normalize observations with the saved, fixed statistics.
+// Evaluation: normalize observations with the saved, fixed statistics and the training clip.
 let gym = NormalizeObservationGym::new(gym)
     .with_statistics(RunningMeanStd::load_file("obs_rms.bin")?)
-    .with_update_statistics(false);
+    .with_update_statistics(false)
+    .with_clip(10.0)?;
 ```
 
 `FrameStackGym<G, BF, S>` uses native Burn tensors. `BF` is the stacked batch
