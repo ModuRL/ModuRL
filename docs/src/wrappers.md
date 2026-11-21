@@ -55,9 +55,9 @@ let gym = NormalizeRewardGym::new(gym, 0.99)
 
 ### Saving normalization statistics
 
-`NormalizeObservationGym` and `NormalizeRewardGym` keep their running mean, variance,
-and sample count as tensors in a `RunningMeanStd`, a Burn module. Export it with
-`statistics()`, save it with Burn's `save_file` like a model, and load it with
+`NormalizeObservationGym` keeps its running mean, variance, and sample count as tensors in
+a `RunningMeanStd`, a Burn module; `NormalizeRewardGym` builds one when you call
+`statistics()`. Export it with `statistics()`, save it with Burn's `save_file` like a model, and load it with
 `try_load_file` into a template from `RunningMeanStd::new(size, &device)`, then pass it to
 a new wrapper with `with_statistics` so a trained policy is evaluated or deployed with the
 statistics it trained on. Call `with_update_statistics(false)` to keep loaded statistics
