@@ -873,6 +873,69 @@ fn public_builders_return_configuration_errors() {
 }
 
 #[test]
+fn checkpoint_round_trip_preserves_trained_q_predictions() {
+    use crate::agents::Agent;
+
+    let _guard = RNG_LOCK.lock().unwrap();
+    let device = Device::flex().autodiff();
+    macro_rules! check_checkpoint {
+        ($agent:ident) => {{
+            let build = |model| {
+                $agent::<_, _, VectorizedGymError<Infallible>>::builder()
+                    .action_space(Discrete::new(2).unwrap())
+                    .observation_space(BoxSpace::new_unbounded([1, 1], &device))
+                    .online_q_network(model)
+                    .optimizer(SgdConfig::new().init())
+                    .learning_rate(0.01)
+                    .epsilon_schedule(0.0)
+                    .batch_size(2)
+                    .training_start(1)
+                    .update_frequency(1)
+                    .build()
+                    .unwrap()
+            };
+            let mut agent = build(network(&device, DType::F32));
+            let input = Tensor::<2>::zeros([2, 1], &device);
+            let initial = agent.network().forward(input.clone()).unwrap().into_data();
+            let mut env = VectorizedGymWrapper::new(vec![EpisodeEnv {
+                device: device.clone().without_autodiff(),
+                steps: 0,
+                truncate: false,
+            }])
+            .unwrap();
+            agent.learn(&mut env, 4).unwrap();
+            let expected = agent.network().forward(input.clone()).unwrap().into_data();
+            assert_ne!(initial, expected);
+            let expected_actions = agent.act_for_training(&input, &mut ()).unwrap().into_data();
+            let path = std::env::temp_dir().join(format!(
+                "modurl-{}-{}.bpk",
+                stringify!($agent),
+                std::process::id()
+            ));
+            agent.network().clone().save_file(&path).unwrap();
+            let model = network::<Float>(&device, DType::F32)
+                .try_load_file(&path)
+                .unwrap();
+            let mut loaded = build(model);
+            assert_eq!(
+                loaded.network().forward(input.clone()).unwrap().into_data(),
+                expected
+            );
+            assert_eq!(
+                loaded
+                    .act_for_training(&input, &mut ())
+                    .unwrap()
+                    .into_data(),
+                expected_actions
+            );
+            std::fs::remove_file(&path).unwrap();
+        }};
+    }
+    check_checkpoint!(DQNAgent);
+    check_checkpoint!(DDQNAgent);
+}
+
+#[test]
 fn accepts_valid_configuration() {
     assert!(matches!(
         QLearningConfigurationValidator::validate_configuration()

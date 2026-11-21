@@ -566,6 +566,10 @@ where
     GE: std::fmt::Debug,
     T: QLearningTarget,
 {
+    pub(crate) fn network(&self) -> &M {
+        &self.online_q_network
+    }
+
     pub(crate) fn get_action_space(&self) -> &Discrete {
         &self.action_space
     }

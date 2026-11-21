@@ -273,6 +273,9 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### DQN and DDQN
 
+- DQN and DDQN expose the trained online Q-network through `network()`. Save it with Burn's
+  `save_file` and reload it through `.online_q_network(...)`. Only model weights are saved;
+  replay, optimizer and target-network state are not.
 - `DQNAgent<'a, M, S, GE, I = (), R = 2>` and `DDQNAgent` own a concrete Burn model `M`
   and observation space `S`. `R` includes the batch axis; native observation kinds and dtypes are preserved.
 - Constructors use `Type::builder()`. Supply `.online_q_network(model)`, a Burn optimizer through `.optimizer(...)`,

@@ -94,6 +94,33 @@ DQN](./ddqn.md) to use the alternative target calculation. To record and
 interpret training metrics, read [Understand a Q-Learning Training
 Run](./understand-q-learning-training.md).
 
+## Save and Load Weights
+
+DQN exposes its trained model through `network()`. Use Burn's
+`Module` persistence methods to save the online Q-network:
+
+```rust,ignore
+use burn::module::Module;
+
+agent.network().clone().save_file("dqn-cartpole.bpk").unwrap();
+```
+
+To reload, construct a network with the same architecture and load the file
+before passing it to the existing builder:
+
+```rust,ignore
+let online_q_network = online_q_network
+    .try_load_file("dqn-cartpole.bpk")
+    .unwrap();
+// Pass this model to DQNAgent::builder().online_q_network(online_q_network).
+```
+
+`DDQNAgent::network()` follows the same pattern. These are model-weight
+snapshots, not full training checkpoints: replay, optimizer state, schedules,
+and the lagging target network are not saved. A new agent initializes its
+target from the loaded online network as usual. For greedy evaluation, set
+`.epsilon_schedule(0.0)` on the new agent.
+
 ## Graph a Training Run
 
 Run the repository example when you want terminal graphs instead of the minimal

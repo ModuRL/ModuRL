@@ -146,6 +146,11 @@ where
         })
     }
 
+    /// Returns the online Q-network for model inspection and checkpoint snapshots.
+    pub fn network(&self) -> &M {
+        self.inner.network()
+    }
+
     pub fn get_action_space(&self) -> &Discrete {
         self.inner.get_action_space()
     }

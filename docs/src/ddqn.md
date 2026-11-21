@@ -42,3 +42,5 @@ This is a change in the agent's learning target, not a change in the Q-network
 shape or device setup. Use [Value-Based Training](./q-learning.md) for the
 shared configuration rules. To record and interpret training metrics, read
 [Understand a Q-Learning Training Run](./understand-q-learning-training.md).
+
+See [Save and Load Weights](./dqn.md#save-and-load-weights) to save and reload the trained online Q-network.
