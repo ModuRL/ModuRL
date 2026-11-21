@@ -71,6 +71,10 @@ dtype. Loading keeps the saved dtype, so load `f64` statistics on a device that 
 model checkpoints are both `.bpk` files but are not interchangeable: each fails to load
 into the other.
 
+Half-precision (F16 or BF16) observations and statistics are normalized in F32, so a
+zero-variance component gives `0` instead of NaN. The reward wrapper scales rewards with a
+host `f64` copy of its statistics, so stepping a CPU environment never reads from the GPU.
+
 `NormalizeObservationGym::statistics()` returns an `Option` because the wrapper sizes
 its statistics from the first observation; `NormalizeRewardGym::statistics()` always
 has its single component.
