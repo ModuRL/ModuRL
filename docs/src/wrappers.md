@@ -67,7 +67,7 @@ limit used in training.
 Statistics are kept in `f64` on devices that support it, otherwise in the device's float
 dtype. Loading keeps the saved dtype, so load `f64` statistics on a device that supports
 `f64`, even if the policy runs on another device. `try_load_file` checks parameter names and shapes but not values, so call
-`validate()` before saving and after loading; it also rejects tensors on different devices. Statistics and
+`validate()` before saving and after loading; it also rejects tensors on different devices or with different dtypes. Statistics and
 model checkpoints are both `.bpk` files but are not interchangeable: each fails to load
 into the other.
 
@@ -84,7 +84,7 @@ has its single component.
 
 | Method | Result |
 | --- | --- |
-| `RunningMeanStd::from_tensors(mean, variance, count)` / `validate` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
+| `RunningMeanStd::from_tensors(mean, variance, count)` / `validate` | `RunningMeanStdError` for empty or mismatched components, tensors on different devices or with different dtypes, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
 | `RunningMeanStd::try_load_file` | Burn's `RecordError` for a missing or corrupt file, a file without statistics, or statistics of a different length than the template. |
 | `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when installed or restored statistics differ in length from the declared observation shape (checked once per install), and again if an observation's component count differs. |
 | `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component; `InvalidStatistics` if `validate()` rejects them. |

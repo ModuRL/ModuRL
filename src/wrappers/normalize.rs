@@ -40,6 +40,8 @@ pub enum RunningMeanStdError {
     InvalidCount,
     #[error("mean, variance, and count must be on the same device")]
     DeviceMismatch,
+    #[error("mean, variance, and count must have the same dtype")]
+    DTypeMismatch,
     #[error("failed to read statistics: {0}")]
     TensorRead(#[source] TensorReadError),
 }
@@ -88,6 +90,10 @@ impl RunningMeanStd {
         let device = self.mean.val().device();
         if self.variance.val().device() != device || self.count.val().device() != device {
             return Err(RunningMeanStdError::DeviceMismatch);
+        }
+        let dtype = self.mean.val().dtype();
+        if self.variance.val().dtype() != dtype || self.count.val().dtype() != dtype {
+            return Err(RunningMeanStdError::DTypeMismatch);
         }
         let read = |param: &Param<Tensor<1>>| {
             param
@@ -1146,6 +1152,18 @@ mod tests {
             &reward.save_state().unwrap().statistics(),
             &reward.statistics(),
         );
+    }
+
+    #[test]
+    fn statistics_reject_mixed_dtypes() {
+        let device = Device::flex();
+        let tensor = |value: f64, dtype: DType| {
+            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, dtype))
+        };
+        assert!(matches!(
+            RunningMeanStd::from_tensors(tensor(0.0, DType::F32), tensor(1.0, DType::F16), 1.0),
+            Err(RunningMeanStdError::DTypeMismatch)
+        ));
     }
 
     #[test]
