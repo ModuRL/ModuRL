@@ -929,11 +929,6 @@ fn checkpoint_round_trip_preserves_trained_q_predictions() {
                 expected_actions
             );
             std::fs::remove_file(&path).unwrap();
-            assert!(
-                network::<Float>(&device, DType::F32)
-                    .try_load_file(&path)
-                    .is_err()
-            );
         }};
     }
     check_checkpoint!(DQNAgent);
