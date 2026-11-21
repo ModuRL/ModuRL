@@ -96,7 +96,7 @@ Run](./understand-q-learning-training.md).
 
 ## Save and Load Weights
 
-Like PPO, DQN exposes its trained model through `network()`. Use Burn's
+DQN exposes its trained model through `network()`. Use Burn's
 `Module` persistence methods to save the online Q-network:
 
 ```rust,ignore
