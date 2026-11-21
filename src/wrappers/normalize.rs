@@ -58,7 +58,7 @@ impl RunningMeanStd {
         let dtype = if device.supports_dtype(DType::F64) {
             DType::F64
         } else {
-            device.settings().float_dtype.into()
+            DType::F32
         };
         Self {
             mean: fixed(Tensor::zeros([size], (device, dtype))),
@@ -1152,6 +1152,64 @@ mod tests {
             &reward.save_state().unwrap().statistics(),
             &reward.statistics(),
         );
+    }
+
+    #[test]
+    fn trained_half_precision_reward_statistics_reload_with_the_same_scaling() {
+        let device = Device::flex();
+        let f16 = |value: f64| {
+            Tensor::from_data(TensorData::new(vec![value], [1]), (&device, DType::F16))
+        };
+        let installed = RunningMeanStd::from_tensors(f16(0.0), f16(0.0), 1.0).unwrap();
+        let steps = || {
+            TestGym::new([
+                TestGym::step(0.0, 0.0002, false, false, 1),
+                TestGym::step(0.0, 0.0002, false, false, 2),
+            ])
+        };
+        let mut trained = NormalizeRewardGym::new(steps(), 0.0)
+            .unwrap()
+            .with_statistics(installed)
+            .unwrap();
+        trained.step(action()).unwrap();
+        trained.set_update_statistics(false);
+
+        let path = temp_path("trained_reward_rms.bpk");
+        trained.statistics().save_file(&path).unwrap();
+        let loaded = RunningMeanStd::new(1, &device)
+            .try_load_file(&path)
+            .unwrap();
+        loaded.validate().unwrap();
+        let mut reloaded = NormalizeRewardGym::new(steps(), 0.0)
+            .unwrap()
+            .with_statistics(loaded)
+            .unwrap()
+            .with_update_statistics(false);
+        std::fs::remove_file(&path).unwrap();
+
+        let expected = trained.step(action()).unwrap().reward;
+        assert_eq!(reloaded.step(action()).unwrap().reward, expected);
+    }
+
+    #[test]
+    fn reward_statistics_export_counts_beyond_half_precision() {
+        let device = Device::flex();
+        let statistics = RunningMeanStd::from_tensors(
+            Tensor::from_data(TensorData::new(vec![0.0f32], [1]), (&device, DType::F32)),
+            Tensor::from_data(TensorData::new(vec![1.0f32], [1]), (&device, DType::F32)),
+            70_000.0,
+        )
+        .unwrap();
+        let gym = TestGym::new([TestGym::step(0.0, 1.0, false, false, 1)]);
+        let mut wrapper = NormalizeRewardGym::new(gym, 0.99)
+            .unwrap()
+            .with_statistics(statistics)
+            .unwrap();
+
+        wrapper.step(action()).unwrap();
+        let exported = wrapper.statistics();
+        exported.validate().unwrap();
+        assert_eq!(host(exported.count()), vec![70_001.0]);
     }
 
     #[test]

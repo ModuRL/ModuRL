@@ -64,18 +64,19 @@ statistics it trained on. Call `with_update_statistics(false)` to keep loaded st
 fixed during evaluation. The file holds only the statistics, so set the same `with_clip`
 limit used in training.
 
-Statistics are kept in `f64` on devices that support it, otherwise in the device's float
-dtype. Loading keeps the saved dtype, so load `f64` statistics on a device that supports
+Statistics are kept in `f64` on devices that support it, otherwise in F32. Loading keeps the saved dtype, so load `f64` statistics on a device that supports
 `f64`, even if the policy runs on another device. `try_load_file` checks parameter names and shapes but not values, so call
 `validate()` before saving and after loading; it also rejects tensors on different devices or with different dtypes. Statistics and
 model checkpoints are both `.bpk` files but are not interchangeable: each fails to load
 into the other.
 
 `NormalizeObservationGym` promotes half-precision (F16 or BF16) statistics to F32 when it
-installs or creates them, so updates do not overflow and a zero-variance component gives
-`0` instead of NaN. `NormalizeRewardGym` keeps its statistics on the host in `f64`, so
+installs or creates them, so updates do not overflow and an observation equal to the mean
+of a zero-variance component gives `0` instead of NaN. Any other value of that component is
+divided by the stabilizing epsilon, so set `with_clip` to bound it. `NormalizeRewardGym` keeps its statistics on the host in `f64`, so
 stepping a CPU environment never touches the GPU; `statistics()` builds a new
-`RunningMeanStd` from them, in `f64` where the device supports it, on the device of the
+`RunningMeanStd` from them, in `f64` where the device supports it (F32 otherwise, never
+half precision), on the device of the
 statistics passed to `with_statistics` (Burn's default device otherwise).
 
 `NormalizeObservationGym::statistics()` returns an `Option` because the wrapper sizes
