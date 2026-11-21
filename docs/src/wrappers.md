@@ -62,8 +62,10 @@ trained policy is evaluated or deployed with the statistics it trained on. Call
 `with_update_statistics(false)` to keep loaded statistics fixed during evaluation. The
 file holds only the statistics, so set the same `with_clip` limit used in training.
 
-The file uses ModuRL's own versioned binary format, not a Burn record, so it is
-separate from the `.bpk` files that agent networks write with Burn's `save_file`.
+The file is a burnpack (`.bpk`) written and read with Burn's own burnpack writer and
+reader, the format agent networks use with Burn's `save_file`: mean and variance are `f64`
+tensors and the count is a scalar. Saving follows Burn's file handling, including adding
+`.bpk` when the path has no extension and replacing the file atomically.
 `NormalizeObservationGym::statistics()` returns an `Option` because the wrapper sizes
 its statistics from the first observation; `NormalizeRewardGym::statistics()` always
 has its single component.
@@ -71,8 +73,8 @@ has its single component.
 | Method | Result |
 | --- | --- |
 | `RunningMeanStd::new(mean, variance, count)` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
-| `RunningMeanStd::to_bytes` | `RunningMeanStdError` when updates left the statistics invalid, for example after a NaN reward, so a saved file always loads. |
-| `RunningMeanStd::save_file` / `load_file` | `RunningMeanStdFileError` for I/O failures, a foreign or truncated file, an unsupported format version, or invalid statistics; a failed save, including an I/O error partway through the write, leaves an existing file untouched. |
+| `RunningMeanStd::to_bytes` / `save_file` | `RunningMeanStdFileError::InvalidStatistics` when updates left the statistics invalid, for example after a NaN reward, so a saved file always loads; a failed save leaves an existing file untouched. |
+| `RunningMeanStd::from_bytes` / `load_file` | `RunningMeanStdFileError` for a missing or corrupt burnpack (`Record`), a burnpack that does not hold normalization statistics, an unsupported version, a missing or malformed entry, or invalid statistics. |
 | `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when installed or restored statistics differ in length from the declared observation shape (checked once per install), and again if an observation's component count differs. |
 | `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component. |
 
@@ -84,12 +86,12 @@ setting. Each wrapped environment keeps its own statistics, so with
 ```rust,ignore
 // After training: rewards wrap observations, inside a vectorized wrapper.
 let reward_gym = &env.envs()[0];
-reward_gym.inner().statistics().expect("observed at least once").save_file("obs_rms.bin")?;
-reward_gym.statistics().save_file("reward_rms.bin")?;
+reward_gym.inner().statistics().expect("observed at least once").save_file("obs_rms.bpk")?;
+reward_gym.statistics().save_file("reward_rms.bpk")?;
 
 // Evaluation: normalize observations with the saved, fixed statistics and the training clip.
 let gym = NormalizeObservationGym::new(gym)
-    .with_statistics(RunningMeanStd::load_file("obs_rms.bin")?)
+    .with_statistics(RunningMeanStd::load_file("obs_rms.bpk")?)
     .with_update_statistics(false)
     .with_clip(10.0)?;
 ```

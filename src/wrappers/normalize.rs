@@ -11,9 +11,13 @@ use crate::{
 const RUNNING_STATS_EPSILON: f64 = 1e-4;
 const NORMALIZATION_EPSILON: f64 = 1e-8;
 
-const STATISTICS_FILE_MAGIC: &[u8; 8] = b"MURLRMS\0";
-const STATISTICS_FILE_VERSION: u32 = 1;
-const STATISTICS_FILE_HEADER_LEN: usize = 8 + 4 + 8 + 8;
+const STATISTICS_FORMAT_KEY: &str = "format";
+const STATISTICS_FORMAT: &str = "modurl.running_mean_std";
+const STATISTICS_VERSION_KEY: &str = "version";
+const STATISTICS_VERSION: u64 = 1;
+const STATISTICS_COUNT_KEY: &str = "count";
+const STATISTICS_MEAN_KEY: &str = "mean";
+const STATISTICS_VARIANCE_KEY: &str = "variance";
 
 /// Running per-component mean, variance, and sample count used by the normalization wrappers.
 ///
@@ -43,15 +47,21 @@ pub enum RunningMeanStdError {
 #[derive(Debug, thiserror::Error)]
 pub enum RunningMeanStdFileError {
     #[error("failed to read or write statistics: {0}")]
-    Io(#[source] std::io::Error),
+    Record(#[source] burn::store::RecordError),
     #[error("not a ModuRL normalization statistics file")]
-    InvalidHeader,
+    NotStatisticsFile,
     #[error("unsupported normalization statistics format version {0}")]
-    UnsupportedVersion(u32),
-    #[error("statistics data has {actual} bytes, which does not match {components} components")]
-    InvalidLength { components: u64, actual: usize },
+    UnsupportedVersion(u64),
+    #[error("statistics entry `{0}` is missing or malformed")]
+    InvalidEntry(&'static str),
     #[error("invalid statistics: {0}")]
     InvalidStatistics(#[source] RunningMeanStdError),
+}
+
+impl From<burn_pack::Error> for RunningMeanStdFileError {
+    fn from(error: burn_pack::Error) -> Self {
+        Self::Record(error.into())
+    }
 }
 
 impl RunningMeanStd {
@@ -127,78 +137,110 @@ impl RunningMeanStd {
         self.mean.is_empty()
     }
 
-    /// Encodes the statistics in ModuRL's versioned little-endian binary format.
-    /// Fails like [`validate`](Self::validate), so every encoded file can be loaded again.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, RunningMeanStdError> {
-        self.validate()?;
-        let mut bytes = Vec::with_capacity(STATISTICS_FILE_HEADER_LEN + 16 * self.mean.len());
-        bytes.extend_from_slice(STATISTICS_FILE_MAGIC);
-        bytes.extend_from_slice(&STATISTICS_FILE_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&(self.mean.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&self.count.to_le_bytes());
-        for value in self.mean.iter().chain(&self.variance) {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-        Ok(bytes)
+    /// Encodes the statistics as an in-memory burnpack, the format Burn's `save_file` writes.
+    /// Fails like [`validate`](Self::validate), so every encoded pack can be loaded again.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, RunningMeanStdFileError> {
+        Ok(self.burnpack_writer()?.into_bytes()?.to_vec())
     }
 
     /// Decodes statistics written by [`to_bytes`](Self::to_bytes) and validates them like [`new`](Self::new).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RunningMeanStdFileError> {
-        if bytes.len() < STATISTICS_FILE_HEADER_LEN || &bytes[..8] != STATISTICS_FILE_MAGIC {
-            return Err(RunningMeanStdFileError::InvalidHeader);
-        }
-        let read_u32 =
-            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        let read_u64 =
-            |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-        let read_f64 =
-            |offset: usize| f64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-
-        let version = read_u32(8);
-        if version != STATISTICS_FILE_VERSION {
-            return Err(RunningMeanStdFileError::UnsupportedVersion(version));
-        }
-        let components = read_u64(12);
-        let size = usize::try_from(components)
-            .ok()
-            .filter(|size| {
-                size.checked_mul(16)
-                    .and_then(|data| data.checked_add(STATISTICS_FILE_HEADER_LEN))
-                    == Some(bytes.len())
-            })
-            .ok_or(RunningMeanStdFileError::InvalidLength {
-                components,
-                actual: bytes.len(),
-            })?;
-        let count = read_f64(20);
-        let values = (0..2 * size)
-            .map(|index| read_f64(STATISTICS_FILE_HEADER_LEN + 8 * index))
-            .collect::<Vec<_>>();
-        let (mean, variance) = values.split_at(size);
-        Self::new(mean.to_vec(), variance.to_vec(), count)
-            .map_err(RunningMeanStdFileError::InvalidStatistics)
+        Self::from_burnpack(burn_pack::Reader::from_bytes(
+            burn_pack::Bytes::from_bytes_vec(bytes.to_vec()),
+        )?)
     }
 
-    /// Writes [`to_bytes`](Self::to_bytes) to `path`, replacing an existing file.
-    /// The bytes go to a temporary file in the same directory that is renamed over `path` only after
-    /// it is fully written, so a failed save leaves any existing file untouched.
+    /// Saves the statistics to a burnpack file with Burn's writer, the same file handling as
+    /// Burn's `Module::save_file`: `.bpk` is appended when `path` has no extension, and the
+    /// file is replaced atomically so a failed save leaves an existing file untouched.
     pub fn save_file<P: AsRef<std::path::Path>>(
         &self,
         path: P,
     ) -> Result<(), RunningMeanStdFileError> {
-        let bytes = self
-            .to_bytes()
-            .map_err(RunningMeanStdFileError::InvalidStatistics)?;
-        replace_file(path.as_ref(), |file| {
-            std::io::Write::write_all(file, &bytes)
-        })
-        .map_err(RunningMeanStdFileError::Io)
+        Ok(self.burnpack_writer()?.write_to_file(path)?)
     }
 
-    /// Reads statistics written by [`save_file`](Self::save_file).
+    /// Loads statistics written by [`save_file`](Self::save_file).
     pub fn load_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, RunningMeanStdFileError> {
-        let bytes = std::fs::read(path).map_err(RunningMeanStdFileError::Io)?;
-        Self::from_bytes(&bytes)
+        Self::from_burnpack(burn_pack::Reader::from_file(path)?)
+    }
+
+    fn burnpack_writer(&self) -> Result<burn_pack::Writer, RunningMeanStdFileError> {
+        self.validate()
+            .map_err(RunningMeanStdFileError::InvalidStatistics)?;
+        let tensor = |name: &str, values: &[f64]| {
+            burn_pack::Tensor::new(
+                name.to_string(),
+                burn_pack::DType::F64,
+                [values.len()],
+                None,
+                burn_pack::Bytes::from_bytes_vec(
+                    values
+                        .iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect(),
+                ),
+            )
+        };
+        Ok(burn_pack::Writer::new(vec![
+            tensor(STATISTICS_MEAN_KEY, &self.mean),
+            tensor(STATISTICS_VARIANCE_KEY, &self.variance),
+        ])
+        .with_metadata(STATISTICS_FORMAT_KEY, STATISTICS_FORMAT)
+        .with_scalar(STATISTICS_VERSION_KEY, STATISTICS_VERSION.into())
+        .with_scalar(STATISTICS_COUNT_KEY, self.count.into()))
+    }
+
+    fn from_burnpack(reader: burn_pack::Reader) -> Result<Self, RunningMeanStdFileError> {
+        if reader
+            .metadata()
+            .get(STATISTICS_FORMAT_KEY)
+            .map(String::as_str)
+            != Some(STATISTICS_FORMAT)
+        {
+            return Err(RunningMeanStdFileError::NotStatisticsFile);
+        }
+        let scalar = |key: &'static str| {
+            reader
+                .scalars()
+                .get(key)
+                .cloned()
+                .ok_or(RunningMeanStdFileError::InvalidEntry(key))
+        };
+        let version = u64::try_from(scalar(STATISTICS_VERSION_KEY)?)
+            .map_err(|_| RunningMeanStdFileError::InvalidEntry(STATISTICS_VERSION_KEY))?;
+        if version != STATISTICS_VERSION {
+            return Err(RunningMeanStdFileError::UnsupportedVersion(version));
+        }
+        let count = f64::try_from(scalar(STATISTICS_COUNT_KEY)?)
+            .map_err(|_| RunningMeanStdFileError::InvalidEntry(STATISTICS_COUNT_KEY))?;
+
+        let tensors = reader.into_tensors()?;
+        let values = |key: &'static str| -> Result<Vec<f64>, RunningMeanStdFileError> {
+            let tensor = tensors
+                .iter()
+                .find(|tensor| tensor.name == key)
+                .filter(|tensor| {
+                    tensor.dtype == burn_pack::DType::F64 && tensor.shape.num_dims() == 1
+                })
+                .ok_or(RunningMeanStdFileError::InvalidEntry(key))?;
+            let bytes = tensor.to_bytes()?;
+            if bytes.len() != 8 * tensor.shape[0] {
+                return Err(RunningMeanStdFileError::InvalidEntry(key));
+            }
+            Ok(bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|value| f64::from_le_bytes(*value))
+                .collect())
+        };
+        Self::new(
+            values(STATISTICS_MEAN_KEY)?,
+            values(STATISTICS_VARIANCE_KEY)?,
+            count,
+        )
+        .map_err(RunningMeanStdFileError::InvalidStatistics)
     }
 
     fn update(&mut self, values: &[f64]) {
@@ -213,44 +255,6 @@ impl RunningMeanStd {
         }
         self.count = total_count;
     }
-}
-
-/// Writes a sibling temporary file with `write`, then renames it over `path`; removes it on failure.
-fn replace_file(
-    path: &std::path::Path,
-    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    static TEMPORARY_FILE_COUNTER: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
-    let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "statistics path has no file name",
-        )
-    })?;
-    let mut temporary_name = std::ffi::OsString::from(".");
-    temporary_name.push(file_name);
-    temporary_name.push(format!(
-        ".{}-{}.tmp",
-        std::process::id(),
-        TEMPORARY_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let temporary_path = path.with_file_name(temporary_name);
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary_path)?;
-    let result = write(&mut file)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            drop(file);
-            std::fs::rename(&temporary_path, path)
-        });
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary_path);
-    }
-    result
 }
 
 /// Opaque saved state for observation normalization.
@@ -747,7 +751,7 @@ mod tests {
     use super::{
         NormalizeObservationGym, NormalizeObservationGymConfigurationError,
         NormalizeObservationGymError, NormalizeRewardGym, NormalizeRewardGymConfigurationError,
-        RunningMeanStd, RunningMeanStdError, RunningMeanStdFileError, replace_file,
+        RunningMeanStd, RunningMeanStdError, RunningMeanStdFileError,
     };
     use crate::gym::PerfectStateGym;
 
@@ -906,7 +910,7 @@ mod tests {
         );
 
         let path = std::env::temp_dir().join(format!(
-            "modurl-running-mean-std-{}.bin",
+            "modurl-running-mean-std-{}.bpk",
             std::process::id()
         ));
         statistics.save_file(&path).unwrap();
@@ -915,52 +919,78 @@ mod tests {
         assert_eq!(loaded.unwrap(), statistics);
     }
 
-    #[test]
-    fn failed_save_keeps_existing_statistics_file() {
-        let directory =
-            std::env::temp_dir().join(format!("modurl-failed-save-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("obs_rms.bin");
-        let statistics = RunningMeanStd::new(vec![1.0], vec![2.0], 3.0).unwrap();
-        statistics.save_file(&path).unwrap();
-
-        let result = replace_file(&path, |file| {
-            std::io::Write::write_all(file, b"MURL")?;
-            Err(std::io::Error::other("disk full"))
-        });
-        let loaded = RunningMeanStd::load_file(&path);
-        let leftover = std::fs::read_dir(&directory).unwrap().count();
-        std::fs::remove_dir_all(&directory).unwrap();
-
-        assert!(result.is_err());
-        assert_eq!(loaded.unwrap(), statistics);
-        assert_eq!(leftover, 1);
+    fn statistics_pack(
+        format: &str,
+        version: u64,
+        count: f64,
+        mean_dtype: burn_pack::DType,
+    ) -> Vec<u8> {
+        let tensor = |name: &str, dtype| {
+            let bytes = match dtype {
+                burn_pack::DType::F32 => 1.0f32.to_le_bytes().to_vec(),
+                _ => 1.0f64.to_le_bytes().to_vec(),
+            };
+            burn_pack::Tensor::new(
+                name.to_string(),
+                dtype,
+                [1],
+                None,
+                burn_pack::Bytes::from_bytes_vec(bytes),
+            )
+        };
+        burn_pack::Writer::new(vec![
+            tensor("mean", mean_dtype),
+            tensor("variance", burn_pack::DType::F64),
+        ])
+        .with_metadata("format", format)
+        .with_scalar("version", version.into())
+        .with_scalar("count", count.into())
+        .into_bytes()
+        .unwrap()
+        .to_vec()
     }
 
     #[test]
     fn rejects_malformed_statistics_bytes() {
-        let bytes = RunningMeanStd::new(vec![0.0], vec![1.0], 2.0)
-            .unwrap()
-            .to_bytes()
-            .unwrap();
+        let valid = statistics_pack("modurl.running_mean_std", 1, 2.0, burn_pack::DType::F64);
+        assert!(RunningMeanStd::from_bytes(&valid).is_ok());
         assert!(matches!(
             RunningMeanStd::from_bytes(b"not statistics"),
-            Err(RunningMeanStdFileError::InvalidHeader)
+            Err(RunningMeanStdFileError::Record(_))
         ));
         assert!(matches!(
-            RunningMeanStd::from_bytes(&bytes[..bytes.len() - 1]),
-            Err(RunningMeanStdFileError::InvalidLength { .. })
+            RunningMeanStd::from_bytes(&valid[..valid.len() - 1]),
+            Err(RunningMeanStdFileError::Record(_))
         ));
-        let mut wrong_version = bytes.clone();
-        wrong_version[8..12].copy_from_slice(&2u32.to_le_bytes());
         assert!(matches!(
-            RunningMeanStd::from_bytes(&wrong_version),
+            RunningMeanStd::from_bytes(&statistics_pack("other", 1, 2.0, burn_pack::DType::F64)),
+            Err(RunningMeanStdFileError::NotStatisticsFile)
+        ));
+        assert!(matches!(
+            RunningMeanStd::from_bytes(&statistics_pack(
+                "modurl.running_mean_std",
+                2,
+                2.0,
+                burn_pack::DType::F64
+            )),
             Err(RunningMeanStdFileError::UnsupportedVersion(2))
         ));
-        let mut zero_count = bytes;
-        zero_count[20..28].copy_from_slice(&0.0f64.to_le_bytes());
         assert!(matches!(
-            RunningMeanStd::from_bytes(&zero_count),
+            RunningMeanStd::from_bytes(&statistics_pack(
+                "modurl.running_mean_std",
+                1,
+                2.0,
+                burn_pack::DType::F32
+            )),
+            Err(RunningMeanStdFileError::InvalidEntry("mean"))
+        ));
+        assert!(matches!(
+            RunningMeanStd::from_bytes(&statistics_pack(
+                "modurl.running_mean_std",
+                1,
+                0.0,
+                burn_pack::DType::F64
+            )),
             Err(RunningMeanStdFileError::InvalidStatistics(
                 RunningMeanStdError::InvalidCount
             ))
@@ -1031,13 +1061,15 @@ mod tests {
         let gym = TestGym::new([TestGym::step(0.0, f32::NAN, false, false, 1)]);
         let mut wrapper = NormalizeRewardGym::new(gym, 0.99).unwrap();
         wrapper.step(action()).unwrap();
-        assert_eq!(
+        assert!(matches!(
             wrapper.statistics().to_bytes(),
-            Err(RunningMeanStdError::NonFiniteMean)
-        );
+            Err(RunningMeanStdFileError::InvalidStatistics(
+                RunningMeanStdError::NonFiniteMean
+            ))
+        ));
 
         let path = std::env::temp_dir().join(format!(
-            "modurl-invalid-running-mean-std-{}.bin",
+            "modurl-invalid-running-mean-std-{}.bpk",
             std::process::id()
         ));
         assert!(matches!(
