@@ -152,6 +152,85 @@ use counter_env::CounterEnv;
 The action space must accept the actions that `step` understands. The observation
 space must match the tensors returned by `reset` and `step`.
 
+## Combine Typed Observation Fields
+
+Keep a single flat `BoxSpace` when the observation is already a feature vector,
+or when reshaping slices inside your model is enough. Use `MultiPartSpace` when
+fields need distinct shapes, kinds or encoders, such as an image, a joint vector
+and a discrete mode. It groups 2–8 typed spaces without string keys. Agents,
+buffers and wrappers still receive one flat floating-point tensor.
+
+For example, pack joint positions and velocities as two vector fields:
+
+```rust,ignore
+use burn::tensor::{DType, Device, Tensor};
+use modurl::prelude::*;
+
+let device = Device::flex();
+let space = MultiPartSpace::new((
+    BoxSpace::new_unbounded([1, 3], &device),
+    BoxSpace::new_unbounded([1, 3], &device),
+));
+let positions = Tensor::zeros([1, 3], (&device, DType::F32));
+let velocities = Tensor::zeros([1, 3], (&device, DType::F32));
+let packed = space.pack((positions, velocities))?; // [1, 6]
+let observation: Tensor<1> = packed.clone().reshape([6]);
+```
+
+Set the environment's `ObservationSpace` to
+`MultiPartSpace<(BoxSpace<2>, BoxSpace<2>)>` and return `space.clone()` from
+`observation_space`. Single-environment `reset` and `step` put the unbatched
+`observation` above in `ResetInfo` and `StepInfo`; a `MultiGym` returns the
+batched `packed` tensor instead. Propagate `SpaceError` through the environment's
+error type.
+
+On the model side, give each field its own encoder. This continues the example
+with two MLPs, each producing eight features:
+
+```rust,ignore
+let positions_encoder = MLP::builder()
+    .input_size(3).output_size(8).options((&device, DType::F32))
+    .build()?;
+let velocities_encoder = MLP::builder()
+    .input_size(3).output_size(8).options((&device, DType::F32))
+    .build()?;
+let encoder = MultiPartEncoder::new(
+    (positions_encoder, velocities_encoder), space.clone(),
+);
+let features = encoder.forward(packed)?; // [1, 16]
+```
+
+Own `encoder` and a trunk or output heads in your Burn module, and pass these
+features to the next module in its `Forward` implementation. Each field encoder
+implements `Forward<R, 2>` with the field's native input kind and `Float` output.
+For an image `BoxSpace<4>`, use a rank-4 encoder; for `Discrete`, use a rank-2
+encoder with `InputKind = Int`. See [Models, Policies, and
+Distributions](./models-policies-and-distributions.md#models-produce-tensors)
+for the model contract.
+
+Named application structs can convert to and from the typed batch tuple:
+
+```rust,ignore
+struct MotionObs { positions: Tensor<2>, velocities: Tensor<2> }
+
+impl From<MotionObs> for (Tensor<2>, Tensor<2>) {
+    fn from(obs: MotionObs) -> Self { (obs.positions, obs.velocities) }
+}
+impl From<(Tensor<2>, Tensor<2>)> for MotionObs {
+    fn from((positions, velocities): (Tensor<2>, Tensor<2>)) -> Self {
+        Self { positions, velocities }
+    }
+}
+// space.pack(obs.into())?; MotionObs::from(space.unpack(packed)?);
+```
+
+`pack` validates shapes, batch sizes and devices, but does not check bounds;
+call `space.contains(&packed)` when you need bounds validation. If any field is
+F64, packing promotes all fields to F64, and unpacked floating fields keep that
+dtype. Discrete indices travel as floats and return to `Int` on unpacking; valid
+indices are lossless because `Discrete` caps its category count at 2^24. Match
+encoder parameter dtypes to the packed dtype. Empty batches are rejected.
+
 ## Vectorize the Environment
 
 Build several instances, then wrap them as a batch:

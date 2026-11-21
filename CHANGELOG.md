@@ -9,9 +9,13 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Rust and tensor backend
 
-- Added typed `MultiPartSpace` tuples (2–8 fields) with lossless discrete transport,
-  native-rank pack/unpack, and `MultiPartEncoder` per-field Burn modules. Existing
-  flat observation models, agents, buffers, and environment signatures are unchanged.
+- Observations can now combine typed fields, such as an image, a joint vector and
+  a discrete mode, and each field can get its own encoder. A `MultiPartSpace` tuple
+  of 2–8 `BoxSpace`/`Discrete` fields packs into the existing flat observation
+  tensor, so agents, buffers, wrappers and environments work unchanged;
+  `MultiPartEncoder` unpacks it inside the model.
+  The new `SpaceError` variants `EmptyObservationBatch`, `InvalidPartShape` and
+  `IncompatibleParts` break exhaustive matches on that enum.
 
 - Discount `gamma` and advantage-estimation `lambda` parameters now consistently use `f64`,
   including PPO, A2C, DQN/DDQN, GAE, NStep, and UPGO. Callers with `f32` variables must
