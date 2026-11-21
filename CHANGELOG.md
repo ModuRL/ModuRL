@@ -156,8 +156,8 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   `NormalizeObservationGymConfigurationError` for invalid clipping limits. Handle these results
   before using the wrappers (#192).
 - Normalization wrappers can now save and restore their running statistics, so a trained policy
-  is evaluated with the statistics it trained on. `RunningMeanStd` is public and saves to a
-  burnpack (`.bpk`) file through Burn's writer with `save_file`/`load_file`; `with_update_statistics(false)` freezes it.
+  is evaluated with the statistics it trained on. `RunningMeanStd` is a public Burn module
+  that saves and loads like a model with `save_file`/`try_load_file`; `with_update_statistics(false)` freezes it.
   Exhaustive matches on `NormalizeObservationGymError` and `NormalizeRewardGymConfigurationError`
   need the new `StatisticsSizeMismatch` and `InvalidStatisticsSize` variants.
 - Added `PerfectStateGym` with `save_state` and `set_state`; core wrappers implement it when their inner gym does.

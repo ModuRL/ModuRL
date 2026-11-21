@@ -4315,7 +4315,6 @@ version = "0.1.0"
 dependencies = [
  "bon",
  "burn",
- "burn-pack",
  "proptest",
  "rand 0.10.3",
  "thiserror 2.0.21",

@@ -1,7 +1,10 @@
 //! Running observation and reward normalization wrappers.
 
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
-use burn::tensor::{Int, Tensor, TensorData, TensorReadError, kind::Basic};
+use burn::{
+    module::{Module, Param},
+    tensor::{Device, Int, Tensor, TensorData, TensorReadError, kind::Basic},
+};
 
 use crate::{
     gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo},
@@ -11,26 +14,19 @@ use crate::{
 const RUNNING_STATS_EPSILON: f64 = 1e-4;
 const NORMALIZATION_EPSILON: f64 = 1e-8;
 
-const STATISTICS_FORMAT_KEY: &str = "format";
-const STATISTICS_FORMAT: &str = "modurl.running_mean_std";
-const STATISTICS_VERSION_KEY: &str = "version";
-const STATISTICS_VERSION: u64 = 1;
-const STATISTICS_COUNT_KEY: &str = "count";
-const STATISTICS_MEAN_KEY: &str = "mean";
-const STATISTICS_VARIANCE_KEY: &str = "variance";
-
 /// Running per-component mean, variance, and sample count used by the normalization wrappers.
 ///
-/// Export it from a trained wrapper with `statistics()`, persist it with [`save_file`](Self::save_file)
-/// or [`to_bytes`](Self::to_bytes), and load it into an evaluation wrapper with `with_statistics`.
-#[derive(Debug, Clone, PartialEq)]
+/// It is a Burn [`Module`], so it saves and loads like a model: export it from a trained wrapper
+/// with `statistics()`, save it with `save_file`, and load it with `try_load_file` into a
+/// template of the same length from [`new`](Self::new).
+#[derive(Module, Debug)]
 pub struct RunningMeanStd {
-    mean: Vec<f64>,
-    variance: Vec<f64>,
-    count: f64,
+    mean: Param<Tensor<1>>,
+    variance: Param<Tensor<1>>,
+    count: Param<Tensor<1>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum RunningMeanStdError {
     #[error("statistics must have at least one component")]
     Empty,
@@ -42,47 +38,53 @@ pub enum RunningMeanStdError {
     InvalidVariance,
     #[error("count must be finite and positive")]
     InvalidCount,
+    #[error("failed to read statistics: {0}")]
+    TensorRead(#[source] TensorReadError),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum RunningMeanStdFileError {
-    #[error("failed to read or write statistics: {0}")]
-    Record(#[source] burn::store::RecordError),
-    #[error("not a ModuRL normalization statistics file")]
-    NotStatisticsFile,
-    #[error("unsupported normalization statistics format version {0}")]
-    UnsupportedVersion(u64),
-    #[error("statistics entry `{0}` is missing or malformed")]
-    InvalidEntry(&'static str),
-    #[error("invalid statistics: {0}")]
-    InvalidStatistics(#[source] RunningMeanStdError),
-}
-
-impl From<burn_pack::Error> for RunningMeanStdFileError {
-    fn from(error: burn_pack::Error) -> Self {
-        Self::Record(error.into())
-    }
+/// Wraps a `[size]` statistics tensor as a saved parameter that never takes gradients.
+fn fixed(tensor: Tensor<1>) -> Param<Tensor<1>> {
+    Param::from_tensor(tensor).set_require_grad(false)
 }
 
 impl RunningMeanStd {
-    /// Builds statistics from per-component means and variances and the number of samples they summarize.
-    pub fn new(
-        mean: Vec<f64>,
-        variance: Vec<f64>,
+    /// Starts `size` components at zero mean and unit variance on `device`. This is also the
+    /// template `try_load_file` loads saved statistics into; a file of another length is rejected.
+    pub fn new(size: usize, device: &Device) -> Self {
+        Self {
+            mean: fixed(Tensor::zeros([size], device)),
+            variance: fixed(Tensor::ones([size], device)),
+            count: fixed(Tensor::full([1], RUNNING_STATS_EPSILON, device)),
+        }
+    }
+
+    /// Builds statistics from `[size]` per-component means and variances and the number of samples they summarize.
+    pub fn from_tensors(
+        mean: Tensor<1>,
+        variance: Tensor<1>,
         count: f64,
     ) -> Result<Self, RunningMeanStdError> {
+        let count = Tensor::full([1], count, (&mean.device(), mean.dtype()));
         let statistics = Self {
-            mean,
-            variance,
-            count,
+            mean: fixed(mean),
+            variance: fixed(variance),
+            count: fixed(count),
         };
         statistics.validate()?;
         Ok(statistics)
     }
 
-    /// Checks the invariants [`new`](Self::new) enforces; updates from non-finite samples can break them.
+    /// Checks the invariants [`from_tensors`](Self::from_tensors) enforces. `try_load_file` checks
+    /// only lengths, and updates from non-finite samples can break these, so call it after either.
     pub fn validate(&self) -> Result<(), RunningMeanStdError> {
-        let (mean, variance, count) = (&self.mean, &self.variance, self.count);
+        let read = |param: &Param<Tensor<1>>| {
+            param
+                .val()
+                .try_to_vec_as::<f64>()
+                .map_err(RunningMeanStdError::TensorRead)
+        };
+        let (mean, variance, count) =
+            (read(&self.mean)?, read(&self.variance)?, read(&self.count)?);
         if mean.is_empty() {
             return Err(RunningMeanStdError::Empty);
         }
@@ -101,159 +103,63 @@ impl RunningMeanStd {
         {
             return Err(RunningMeanStdError::InvalidVariance);
         }
-        if !count.is_finite() || count <= 0.0 {
+        if !matches!(count[..], [count] if count.is_finite() && count > 0.0) {
             return Err(RunningMeanStdError::InvalidCount);
         }
         Ok(())
     }
 
-    fn initial(size: usize) -> Self {
-        Self {
-            mean: vec![0.0; size],
-            variance: vec![1.0; size],
-            count: RUNNING_STATS_EPSILON,
-        }
+    pub fn mean(&self) -> Tensor<1> {
+        self.mean.val()
     }
 
-    pub fn mean(&self) -> &[f64] {
-        &self.mean
+    pub fn variance(&self) -> Tensor<1> {
+        self.variance.val()
     }
 
-    pub fn variance(&self) -> &[f64] {
-        &self.variance
-    }
-
-    pub fn count(&self) -> f64 {
-        self.count
+    /// The number of samples summarized, as a one-element tensor.
+    pub fn count(&self) -> Tensor<1> {
+        self.count.val()
     }
 
     /// Number of normalized components.
     pub fn len(&self) -> usize {
-        self.mean.len()
+        self.mean.val().dims()[0]
     }
 
-    /// Always `false`: statistics have at least one component.
     pub fn is_empty(&self) -> bool {
-        self.mean.is_empty()
+        self.len() == 0
     }
 
-    /// Encodes the statistics as an in-memory burnpack, the format Burn's `save_file` writes.
-    /// Fails like [`validate`](Self::validate), so every encoded pack can be loaded again.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, RunningMeanStdFileError> {
-        Ok(self.burnpack_writer()?.into_bytes()?.to_vec())
+    /// Builds a one-dimensional tensor on the statistics' device with their dtype.
+    fn tensor(&self, data: TensorData) -> Tensor<1> {
+        let mean = self.mean.val();
+        Tensor::from_data(data, (&mean.device(), mean.dtype()))
     }
 
-    /// Decodes statistics written by [`to_bytes`](Self::to_bytes) and validates them like [`new`](Self::new).
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, RunningMeanStdFileError> {
-        Self::from_burnpack(burn_pack::Reader::from_bytes(
-            burn_pack::Bytes::from_bytes_vec(bytes.to_vec()),
-        )?)
+    /// Folds one `[size]` sample into the running mean and variance.
+    fn update(&mut self, values: Tensor<1>) {
+        let count = self.count.val().expand([self.len()]);
+        let total = count.clone().add_scalar(1.0);
+        let delta = values - self.mean.val();
+        let mean = self.mean.val() + delta.clone() / total.clone();
+        let variance =
+            (self.variance.val() * count.clone() + delta.square() * count / total.clone()) / total;
+        self.mean = fixed(mean);
+        self.variance = fixed(variance);
+        self.count = fixed(self.count.val().add_scalar(1.0));
     }
 
-    /// Saves the statistics to a burnpack file with Burn's writer, the same file handling as
-    /// Burn's `Module::save_file`: `.bpk` is appended when `path` has no extension, and the
-    /// file is replaced atomically so a failed save leaves an existing file untouched.
-    pub fn save_file<P: AsRef<std::path::Path>>(
-        &self,
-        path: P,
-    ) -> Result<(), RunningMeanStdFileError> {
-        Ok(self.burnpack_writer()?.write_to_file(path)?)
+    /// Standardizes `values` with the running statistics, then clips them to `[-limit, limit]`.
+    /// Centers and scales `[size]` values, then clips them to `±clip`.
+    fn normalize(&self, values: Tensor<1>, clip: Option<f64>) -> Tensor<1> {
+        self.scale(values - self.mean.val(), clip)
     }
 
-    /// Loads statistics written by [`save_file`](Self::save_file).
-    pub fn load_file<P: AsRef<std::path::Path>>(path: P) -> Result<Self, RunningMeanStdFileError> {
-        Self::from_burnpack(burn_pack::Reader::from_file(path)?)
-    }
-
-    fn burnpack_writer(&self) -> Result<burn_pack::Writer, RunningMeanStdFileError> {
-        self.validate()
-            .map_err(RunningMeanStdFileError::InvalidStatistics)?;
-        let tensor = |name: &str, values: &[f64]| {
-            burn_pack::Tensor::new(
-                name.to_string(),
-                burn_pack::DType::F64,
-                [values.len()],
-                None,
-                burn_pack::Bytes::from_bytes_vec(
-                    values
-                        .iter()
-                        .flat_map(|value| value.to_le_bytes())
-                        .collect(),
-                ),
-            )
-        };
-        Ok(burn_pack::Writer::new(vec![
-            tensor(STATISTICS_MEAN_KEY, &self.mean),
-            tensor(STATISTICS_VARIANCE_KEY, &self.variance),
-        ])
-        .with_metadata(STATISTICS_FORMAT_KEY, STATISTICS_FORMAT)
-        .with_scalar(STATISTICS_VERSION_KEY, STATISTICS_VERSION.into())
-        .with_scalar(STATISTICS_COUNT_KEY, self.count.into()))
-    }
-
-    fn from_burnpack(reader: burn_pack::Reader) -> Result<Self, RunningMeanStdFileError> {
-        if reader
-            .metadata()
-            .get(STATISTICS_FORMAT_KEY)
-            .map(String::as_str)
-            != Some(STATISTICS_FORMAT)
-        {
-            return Err(RunningMeanStdFileError::NotStatisticsFile);
-        }
-        let scalar = |key: &'static str| {
-            reader
-                .scalars()
-                .get(key)
-                .cloned()
-                .ok_or(RunningMeanStdFileError::InvalidEntry(key))
-        };
-        let version = u64::try_from(scalar(STATISTICS_VERSION_KEY)?)
-            .map_err(|_| RunningMeanStdFileError::InvalidEntry(STATISTICS_VERSION_KEY))?;
-        if version != STATISTICS_VERSION {
-            return Err(RunningMeanStdFileError::UnsupportedVersion(version));
-        }
-        let count = f64::try_from(scalar(STATISTICS_COUNT_KEY)?)
-            .map_err(|_| RunningMeanStdFileError::InvalidEntry(STATISTICS_COUNT_KEY))?;
-
-        let tensors = reader.into_tensors()?;
-        let values = |key: &'static str| -> Result<Vec<f64>, RunningMeanStdFileError> {
-            let tensor = tensors
-                .iter()
-                .find(|tensor| tensor.name == key)
-                .filter(|tensor| {
-                    tensor.dtype == burn_pack::DType::F64 && tensor.shape.num_dims() == 1
-                })
-                .ok_or(RunningMeanStdFileError::InvalidEntry(key))?;
-            let bytes = tensor.to_bytes()?;
-            if bytes.len() != 8 * tensor.shape[0] {
-                return Err(RunningMeanStdFileError::InvalidEntry(key));
-            }
-            Ok(bytes
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|value| f64::from_le_bytes(*value))
-                .collect())
-        };
-        Self::new(
-            values(STATISTICS_MEAN_KEY)?,
-            values(STATISTICS_VARIANCE_KEY)?,
-            count,
-        )
-        .map_err(RunningMeanStdFileError::InvalidStatistics)
-    }
-
-    fn update(&mut self, values: &[f64]) {
-        assert_eq!(values.len(), self.mean.len());
-        let total_count = self.count + 1.0;
-        for ((mean, variance), value) in self.mean.iter_mut().zip(&mut self.variance).zip(values) {
-            let delta = value - *mean;
-            let new_mean = *mean + delta / total_count;
-            let m2 = *variance * self.count + delta * delta * self.count / total_count;
-            *mean = new_mean;
-            *variance = m2 / total_count;
-        }
-        self.count = total_count;
+    /// Divides `[size]` values by the running standard deviation, then clips them to `±clip`.
+    fn scale(&self, values: Tensor<1>, clip: Option<f64>) -> Tensor<1> {
+        let scaled = values / self.variance.val().add_scalar(NORMALIZATION_EPSILON).sqrt();
+        clip.map_or(scaled.clone(), |limit| scaled.clamp(-limit, limit))
     }
 }
 
@@ -392,7 +298,7 @@ impl<G> NormalizeObservationGym<G> {
     }
 
     /// Normalizes an unbatched rank-`O` observation, preserving its shape, kind, dtype, and device.
-    /// Reads components as F32 for host statistics and casts normalized F32 values back to the input dtype.
+    /// Reads components as F32 into the statistics' device and dtype and casts normalized values back to the input dtype.
     fn normalize<const O: usize, K: Basic, E>(
         &mut self,
         observation: &Tensor<O, K>,
@@ -402,32 +308,25 @@ impl<G> NormalizeObservationGym<G> {
         let dtype = observation.dtype();
         let values = observation
             .try_to_vec_as::<f32>()
-            .map_err(NormalizeObservationGymError::TensorRead)?
-            .into_iter()
-            .map(f64::from)
-            .collect::<Vec<_>>();
+            .map_err(NormalizeObservationGymError::TensorRead)?;
+        let size = values.len();
         let statistics = self
             .statistics
-            .get_or_insert_with(|| RunningMeanStd::initial(values.len()));
-        if statistics.len() != values.len() {
+            .get_or_insert_with(|| RunningMeanStd::new(size, &device));
+        if statistics.len() != size {
             return Err(NormalizeObservationGymError::StatisticsSizeMismatch {
                 statistics: statistics.len(),
-                observation: values.len(),
+                observation: size,
             });
         }
+        let values = statistics.tensor(TensorData::new(values, [size]));
         if self.update_statistics {
-            statistics.update(&values);
+            statistics.update(values.clone());
         }
-
-        let normalized = values
-            .iter()
-            .zip(&statistics.mean)
-            .zip(&statistics.variance)
-            .map(|((value, mean), variance)| {
-                let value = (value - mean) / (variance + NORMALIZATION_EPSILON).sqrt();
-                self.clip.map_or(value, |limit| value.clamp(-limit, limit)) as f32
-            })
-            .collect::<Vec<_>>();
+        let normalized = statistics
+            .normalize(values, self.clip)
+            .try_to_vec_as::<f32>()
+            .map_err(NormalizeObservationGymError::TensorRead)?;
         Ok(Tensor::from_data(
             TensorData::new(normalized, shape),
             (&device, dtype),
@@ -560,7 +459,7 @@ impl<G> NormalizeRewardGym<G> {
         }
         Ok(Self {
             gym,
-            statistics: RunningMeanStd::initial(1),
+            statistics: RunningMeanStd::new(1, &Device::default()),
             discounted_reward: 0.0,
             gamma,
             clip: None,
@@ -676,17 +575,22 @@ where
         let mut step = self.gym.step(action)?;
         self.discounted_reward = self.discounted_reward * self.gamma + f64::from(step.reward);
         if self.update_statistics {
-            self.statistics.update(&[self.discounted_reward]);
+            let discounted = self
+                .statistics
+                .tensor(TensorData::new(vec![self.discounted_reward], [1]));
+            self.statistics.update(discounted);
         }
         if step.terminated || step.truncated {
             self.discounted_reward = 0.0;
         }
 
-        let normalized =
-            f64::from(step.reward) / (self.statistics.variance[0] + NORMALIZATION_EPSILON).sqrt();
-        step.reward =
-            self.clip
-                .map_or(normalized, |limit| normalized.clamp(-limit, limit)) as f32;
+        let reward = self
+            .statistics
+            .tensor(TensorData::new(vec![f64::from(step.reward)], [1]));
+        step.reward = self
+            .statistics
+            .scale(reward, self.clip)
+            .into_scalar::<f32>();
         Ok(step)
     }
 
@@ -746,14 +650,45 @@ mod tests {
             test_support::{TestGym, action, scalar},
         },
     };
-    use burn::tensor::{DType, Device, Tensor};
+    use burn::module::Module;
+    use burn::tensor::{DType, Device, Tensor, TensorData};
 
     use super::{
         NormalizeObservationGym, NormalizeObservationGymConfigurationError,
         NormalizeObservationGymError, NormalizeRewardGym, NormalizeRewardGymConfigurationError,
-        RunningMeanStd, RunningMeanStdError, RunningMeanStdFileError,
+        RunningMeanStd, RunningMeanStdError,
     };
     use crate::gym::PerfectStateGym;
+
+    fn stats(
+        mean: &[f64],
+        variance: &[f64],
+        count: f64,
+    ) -> Result<RunningMeanStd, RunningMeanStdError> {
+        let device = Device::flex();
+        let tensor = |values: &[f64]| {
+            Tensor::<1>::from_data(
+                TensorData::new(values.to_vec(), [values.len()]),
+                (&device, DType::F64),
+            )
+        };
+        RunningMeanStd::from_tensors(tensor(mean), tensor(variance), count)
+    }
+
+    /// Reads a `[size]` statistics tensor back to the host.
+    fn host(tensor: Tensor<1>) -> Vec<f64> {
+        tensor.try_to_vec_as::<f64>().unwrap()
+    }
+
+    fn assert_same(left: &RunningMeanStd, right: &RunningMeanStd) {
+        assert_eq!(host(left.mean()), host(right.mean()));
+        assert_eq!(host(left.variance()), host(right.variance()));
+        assert_eq!(host(left.count()), host(right.count()));
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("modurl-{name}-{}.bpk", std::process::id()))
+    }
 
     #[test]
     fn rejects_invalid_normalization_settings() {
@@ -872,166 +807,78 @@ mod tests {
 
     #[test]
     fn rejects_invalid_running_statistics() {
-        assert_eq!(
-            RunningMeanStd::new(vec![], vec![], 1.0),
+        assert!(matches!(
+            stats(&[], &[], 1.0),
             Err(RunningMeanStdError::Empty)
-        );
-        assert_eq!(
-            RunningMeanStd::new(vec![0.0], vec![1.0, 1.0], 1.0),
+        ));
+        assert!(matches!(
+            stats(&[0.0], &[1.0, 1.0], 1.0),
             Err(RunningMeanStdError::LengthMismatch {
                 mean: 1,
                 variance: 2
             })
-        );
-        assert_eq!(
-            RunningMeanStd::new(vec![f64::NAN], vec![1.0], 1.0),
+        ));
+        assert!(matches!(
+            stats(&[f64::NAN], &[1.0], 1.0),
             Err(RunningMeanStdError::NonFiniteMean)
-        );
+        ));
         for variance in [-1.0, f64::INFINITY] {
-            assert_eq!(
-                RunningMeanStd::new(vec![0.0], vec![variance], 1.0),
+            assert!(matches!(
+                stats(&[0.0], &[variance], 1.0),
                 Err(RunningMeanStdError::InvalidVariance)
-            );
+            ));
         }
         for count in [0.0, -1.0, f64::NAN] {
-            assert_eq!(
-                RunningMeanStd::new(vec![0.0], vec![1.0], count),
+            assert!(matches!(
+                stats(&[0.0], &[1.0], count),
                 Err(RunningMeanStdError::InvalidCount)
-            );
+            ));
         }
     }
 
     #[test]
-    fn running_statistics_round_trip_through_bytes_and_files() {
-        let statistics = RunningMeanStd::new(vec![1.5, -2.0], vec![0.25, 4.0], 12.0).unwrap();
-        assert_eq!(
-            RunningMeanStd::from_bytes(&statistics.to_bytes().unwrap()).unwrap(),
-            statistics
-        );
+    fn running_statistics_round_trip_through_burn_files() {
+        let statistics = stats(&[1.5, -2.0], &[0.25, 4.0], 12.0).unwrap();
+        let path = temp_path("running-mean-std");
+        statistics.clone().save_file(&path).unwrap();
 
-        let path = std::env::temp_dir().join(format!(
-            "modurl-running-mean-std-{}.bpk",
-            std::process::id()
-        ));
-        statistics.save_file(&path).unwrap();
-        let loaded = RunningMeanStd::load_file(&path);
+        let loaded = RunningMeanStd::new(2, &Device::flex()).try_load_file(&path);
+        let wrong_length = RunningMeanStd::new(3, &Device::flex()).try_load_file(&path);
+        let loaded = loaded.unwrap();
+        assert_same(&loaded, &statistics);
+        assert_eq!(loaded.mean().dtype(), DType::F64);
+        assert!(wrong_length.is_err());
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(loaded.unwrap(), statistics);
-    }
-
-    fn statistics_pack(
-        format: &str,
-        version: u64,
-        count: f64,
-        mean_dtype: burn_pack::DType,
-    ) -> Vec<u8> {
-        let tensor = |name: &str, dtype| {
-            let bytes = match dtype {
-                burn_pack::DType::F32 => 1.0f32.to_le_bytes().to_vec(),
-                _ => 1.0f64.to_le_bytes().to_vec(),
-            };
-            burn_pack::Tensor::new(
-                name.to_string(),
-                dtype,
-                [1],
-                None,
-                burn_pack::Bytes::from_bytes_vec(bytes),
-            )
-        };
-        burn_pack::Writer::new(vec![
-            tensor("mean", mean_dtype),
-            tensor("variance", burn_pack::DType::F64),
-        ])
-        .with_metadata("format", format)
-        .with_scalar("version", version.into())
-        .with_scalar("count", count.into())
-        .into_bytes()
-        .unwrap()
-        .to_vec()
     }
 
     #[test]
     fn statistics_and_model_files_are_not_interchangeable() {
-        use burn::module::Module;
         use burn::nn::LinearConfig;
 
         let device = Device::flex();
-        let directory = std::env::temp_dir();
-        let model_path = directory.join(format!("modurl-model-{}.bpk", std::process::id()));
-        let statistics_path =
-            directory.join(format!("modurl-statistics-{}.bpk", std::process::id()));
+        let model_path = temp_path("model");
+        let statistics_path = temp_path("statistics");
         LinearConfig::new(2, 2)
             .init(&device)
             .save_file(&model_path)
             .unwrap();
-        RunningMeanStd::new(vec![0.0, 1.0], vec![1.0, 2.0], 3.0)
-            .unwrap()
+        RunningMeanStd::new(2, &device)
             .save_file(&statistics_path)
             .unwrap();
 
-        let statistics_from_model = RunningMeanStd::load_file(&model_path);
+        let statistics_from_model = RunningMeanStd::new(2, &device).try_load_file(&model_path);
         let model_from_statistics = LinearConfig::new(2, 2)
             .init(&device)
             .try_load_file(&statistics_path);
         std::fs::remove_file(&model_path).unwrap();
         std::fs::remove_file(&statistics_path).unwrap();
-        assert!(matches!(
-            statistics_from_model,
-            Err(RunningMeanStdFileError::NotStatisticsFile)
-        ));
+        assert!(statistics_from_model.is_err());
         assert!(model_from_statistics.is_err());
     }
 
     #[test]
-    fn rejects_malformed_statistics_bytes() {
-        let valid = statistics_pack("modurl.running_mean_std", 1, 2.0, burn_pack::DType::F64);
-        assert!(RunningMeanStd::from_bytes(&valid).is_ok());
-        assert!(matches!(
-            RunningMeanStd::from_bytes(b"not statistics"),
-            Err(RunningMeanStdFileError::Record(_))
-        ));
-        assert!(matches!(
-            RunningMeanStd::from_bytes(&valid[..valid.len() - 1]),
-            Err(RunningMeanStdFileError::Record(_))
-        ));
-        assert!(matches!(
-            RunningMeanStd::from_bytes(&statistics_pack("other", 1, 2.0, burn_pack::DType::F64)),
-            Err(RunningMeanStdFileError::NotStatisticsFile)
-        ));
-        assert!(matches!(
-            RunningMeanStd::from_bytes(&statistics_pack(
-                "modurl.running_mean_std",
-                2,
-                2.0,
-                burn_pack::DType::F64
-            )),
-            Err(RunningMeanStdFileError::UnsupportedVersion(2))
-        ));
-        assert!(matches!(
-            RunningMeanStd::from_bytes(&statistics_pack(
-                "modurl.running_mean_std",
-                1,
-                2.0,
-                burn_pack::DType::F32
-            )),
-            Err(RunningMeanStdFileError::InvalidEntry("mean"))
-        ));
-        assert!(matches!(
-            RunningMeanStd::from_bytes(&statistics_pack(
-                "modurl.running_mean_std",
-                1,
-                0.0,
-                burn_pack::DType::F64
-            )),
-            Err(RunningMeanStdFileError::InvalidStatistics(
-                RunningMeanStdError::InvalidCount
-            ))
-        ));
-    }
-
-    #[test]
     fn loaded_observation_statistics_normalize_without_updating() {
-        let statistics = RunningMeanStd::new(vec![2.0], vec![4.0], 100.0).unwrap();
+        let statistics = stats(&[2.0], &[4.0], 100.0).unwrap();
         let gym = TestGym::new([TestGym::step(4.0, 0.0, false, false, 1)]);
         let mut wrapper = NormalizeObservationGym::new(gym)
             .with_statistics(statistics.clone())
@@ -1042,7 +889,7 @@ mod tests {
 
         assert!((scalar(&reset.observation) - 49.0).abs() < 1e-6);
         assert!((scalar(&step.observation) - 1.0).abs() < 1e-6);
-        assert_eq!(wrapper.statistics(), Some(&statistics));
+        assert_same(wrapper.statistics().unwrap(), &statistics);
     }
 
     #[test]
@@ -1054,10 +901,17 @@ mod tests {
         training.reset().unwrap();
         training.step(action()).unwrap();
         training.step(action()).unwrap();
-        let bytes = training.statistics().unwrap().to_bytes().unwrap();
+        let path = temp_path("exported-statistics");
+        training
+            .statistics()
+            .unwrap()
+            .clone()
+            .save_file(&path)
+            .unwrap();
 
-        let loaded = RunningMeanStd::from_bytes(&bytes).unwrap();
-        let expected = (5.0 - loaded.mean()[0]) / (loaded.variance()[0] + 1e-8).sqrt();
+        let loaded = RunningMeanStd::new(1, &Device::flex()).try_load_file(&path);
+        let loaded = loaded.unwrap();
+        let expected = (5.0 - host(loaded.mean())[0]) / (host(loaded.variance())[0] + 1e-8).sqrt();
         let mut evaluation =
             NormalizeObservationGym::new(TestGym::new([TestGym::step(5.0, 0.0, false, false, 1)]))
                 .with_statistics(loaded)
@@ -1065,12 +919,16 @@ mod tests {
         let step = evaluation.step(action()).unwrap();
 
         assert!((f64::from(scalar(&step.observation)) - expected).abs() < 1e-5);
-        assert_eq!(evaluation.statistics(), training.statistics());
+        assert_same(
+            evaluation.statistics().unwrap(),
+            training.statistics().unwrap(),
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
     fn reports_observation_statistics_size_mismatch_before_inner_gym_runs() {
-        let statistics = RunningMeanStd::new(vec![0.0, 0.0], vec![1.0, 1.0], 1.0).unwrap();
+        let statistics = stats(&[0.0, 0.0], &[1.0, 1.0], 1.0).unwrap();
         // An empty script panics if the inner gym is stepped.
         let mut wrapper =
             NormalizeObservationGym::new(TestGym::new([])).with_statistics(statistics);
@@ -1089,28 +947,14 @@ mod tests {
     }
 
     #[test]
-    fn saving_invalid_statistics_fails_before_writing() {
+    fn validate_reports_statistics_broken_by_non_finite_rewards() {
         let gym = TestGym::new([TestGym::step(0.0, f32::NAN, false, false, 1)]);
         let mut wrapper = NormalizeRewardGym::new(gym, 0.99).unwrap();
         wrapper.step(action()).unwrap();
         assert!(matches!(
-            wrapper.statistics().to_bytes(),
-            Err(RunningMeanStdFileError::InvalidStatistics(
-                RunningMeanStdError::NonFiniteMean
-            ))
+            wrapper.statistics().validate(),
+            Err(RunningMeanStdError::NonFiniteMean)
         ));
-
-        let path = std::env::temp_dir().join(format!(
-            "modurl-invalid-running-mean-std-{}.bpk",
-            std::process::id()
-        ));
-        assert!(matches!(
-            wrapper.statistics().save_file(&path),
-            Err(RunningMeanStdFileError::InvalidStatistics(
-                RunningMeanStdError::NonFiniteMean
-            ))
-        ));
-        assert!(!path.exists());
     }
 
     #[test]
@@ -1132,7 +976,7 @@ mod tests {
 
     #[test]
     fn loaded_reward_statistics_scale_without_updating() {
-        let statistics = RunningMeanStd::new(vec![0.0], vec![4.0], 100.0).unwrap();
+        let statistics = stats(&[0.0], &[4.0], 100.0).unwrap();
         let gym = TestGym::new([
             TestGym::step(0.0, 2.0, false, false, 1),
             TestGym::step(0.0, 4.0, false, false, 2),
@@ -1145,12 +989,12 @@ mod tests {
 
         assert!((wrapper.step(action()).unwrap().reward - 1.0).abs() < 1e-6);
         assert!((wrapper.step(action()).unwrap().reward - 2.0).abs() < 1e-6);
-        assert_eq!(wrapper.statistics(), &statistics);
+        assert_same(wrapper.statistics(), &statistics);
     }
 
     #[test]
     fn rejects_multi_component_reward_statistics() {
-        let statistics = RunningMeanStd::new(vec![0.0, 0.0], vec![1.0, 1.0], 1.0).unwrap();
+        let statistics = stats(&[0.0, 0.0], &[1.0, 1.0], 1.0).unwrap();
         assert!(matches!(
             NormalizeRewardGym::new((), 0.99)
                 .unwrap()
@@ -1166,16 +1010,16 @@ mod tests {
         let mut observation = NormalizeObservationGym::new(StateTestGym::new(3));
         assert!(observation.save_state().unwrap().statistics().is_none());
         observation.reset().unwrap();
-        assert_eq!(
-            observation.save_state().unwrap().statistics(),
-            observation.statistics()
+        assert_same(
+            observation.save_state().unwrap().statistics().unwrap(),
+            observation.statistics().unwrap(),
         );
 
         let mut reward = NormalizeRewardGym::new(StateTestGym::new(5), 0.9).unwrap();
         reward.step(state_action()).unwrap();
-        assert_eq!(
+        assert_same(
             reward.save_state().unwrap().statistics(),
-            reward.statistics()
+            reward.statistics(),
         );
     }
 }

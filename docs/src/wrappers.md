@@ -56,28 +56,25 @@ let gym = NormalizeRewardGym::new(gym, 0.99)
 ### Saving normalization statistics
 
 `NormalizeObservationGym` and `NormalizeRewardGym` keep their running mean, variance,
-and sample count in a `RunningMeanStd`. Export it with `statistics()`, save it with
-`save_file` or `to_bytes`, and load it into a new wrapper with `with_statistics` so a
-trained policy is evaluated or deployed with the statistics it trained on. Call
-`with_update_statistics(false)` to keep loaded statistics fixed during evaluation. The
-file holds only the statistics, so set the same `with_clip` limit used in training.
+and sample count as tensors in a `RunningMeanStd`, a Burn module. Export it with
+`statistics()`, save it with Burn's `save_file` like a model, and load it with
+`try_load_file` into a template from `RunningMeanStd::new(size, &device)`, then pass it to
+a new wrapper with `with_statistics` so a trained policy is evaluated or deployed with the
+statistics it trained on. Call `with_update_statistics(false)` to keep loaded statistics
+fixed during evaluation. The file holds only the statistics, so set the same `with_clip`
+limit used in training.
 
-The file is a burnpack (`.bpk`) written and read with Burn's own burnpack writer and
-reader, the format agent networks use with Burn's `save_file`: mean and variance are `f64`
-tensors and the count is a scalar. Saving follows Burn's file handling, including adding
-`.bpk` when the path has no extension and replacing the file atomically.
-Statistics and model checkpoints share the extension but are not interchangeable:
-`RunningMeanStd::load_file` rejects a model checkpoint, and a module's `try_load_file`
-rejects a statistics file.
+Loading checks only the length, so call `validate()` on loaded statistics. Statistics and
+model checkpoints are both `.bpk` files but are not interchangeable: each fails to load
+into the other.
 `NormalizeObservationGym::statistics()` returns an `Option` because the wrapper sizes
 its statistics from the first observation; `NormalizeRewardGym::statistics()` always
 has its single component.
 
 | Method | Result |
 | --- | --- |
-| `RunningMeanStd::new(mean, variance, count)` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
-| `RunningMeanStd::to_bytes` / `save_file` | `RunningMeanStdFileError::InvalidStatistics` when updates left the statistics invalid, for example after a NaN reward, so a saved file always loads; a failed save leaves an existing file untouched. |
-| `RunningMeanStd::from_bytes` / `load_file` | `RunningMeanStdFileError` for a missing or corrupt burnpack (`Record`), a burnpack that does not hold normalization statistics, an unsupported version, a missing or malformed entry, or invalid statistics. |
+| `RunningMeanStd::from_tensors(mean, variance, count)` / `validate` | `RunningMeanStdError` for empty or mismatched components, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
+| `RunningMeanStd::try_load_file` | Burn's `RecordError` for a missing or corrupt file, a file without statistics, or statistics of a different length than the template. |
 | `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when installed or restored statistics differ in length from the declared observation shape (checked once per install), and again if an observation's component count differs. |
 | `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component. |
 
@@ -89,12 +86,14 @@ setting. Each wrapped environment keeps its own statistics, so with
 ```rust,ignore
 // After training: rewards wrap observations, inside a vectorized wrapper.
 let reward_gym = &env.envs()[0];
-reward_gym.inner().statistics().expect("observed at least once").save_file("obs_rms.bpk")?;
-reward_gym.statistics().save_file("reward_rms.bpk")?;
+reward_gym.inner().statistics().expect("observed at least once").clone().save_file("obs_rms.bpk")?;
+reward_gym.statistics().clone().save_file("reward_rms.bpk")?;
 
-// Evaluation: normalize observations with the saved, fixed statistics and the training clip.
+// Evaluation: load into a template of the observation length, then check the values.
+let statistics = RunningMeanStd::new(obs_dim, &device).try_load_file("obs_rms.bpk")?;
+statistics.validate()?;
 let gym = NormalizeObservationGym::new(gym)
-    .with_statistics(RunningMeanStd::load_file("obs_rms.bpk")?)
+    .with_statistics(statistics)
     .with_update_statistics(false)
     .with_clip(10.0)?;
 ```
