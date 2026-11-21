@@ -53,6 +53,70 @@ let gym = NormalizeRewardGym::new(gym, 0.99)
     .expect("finite positive reward clip");
 ```
 
+### Saving normalization statistics
+
+`NormalizeObservationGym` keeps its running mean, variance, and sample count as tensors in
+a `RunningMeanStd`, a Burn module; `NormalizeRewardGym` builds one when you call
+`statistics()`. Export it with `statistics()`, save it with Burn's `save_file` like a model, and load it with
+`try_load_file` into a template from `RunningMeanStd::new(size, &device)`, then pass it to
+a new wrapper with `with_statistics` so a trained policy is evaluated or deployed with the
+statistics it trained on. Call `with_update_statistics(false)` to keep loaded statistics
+fixed during evaluation. The file holds only the statistics, so set the same `with_clip`
+limit used in training.
+
+Statistics are kept in `f64` on devices that support it, otherwise in F32. Loading keeps the saved dtype, so load `f64` statistics on a device that supports
+`f64`, even if the policy runs on another device. `try_load_file` checks parameter names and shapes but not values, so call
+`validate()` before saving, and after loading before you overwrite or delete the file (Burn reads loaded values lazily); it also rejects tensors on different devices or with different dtypes. Statistics and
+model checkpoints are both `.bpk` files but are not interchangeable: each fails to load
+into the other.
+
+`NormalizeObservationGym` promotes half-precision (F16 or BF16) statistics to F32 when it
+installs or creates them, so updates do not overflow in half precision and an observation
+equal to the mean of a zero-variance component gives `0` instead of NaN. For any other value
+of that component, its difference from the mean is divided by `sqrt(1e-8)` = `1e-4`, so it
+scales by 10,000; set `with_clip` to bound it. `NormalizeRewardGym` keeps its statistics on the host in `f64`, so
+stepping a CPU environment never touches the GPU; `statistics()` builds a new
+`RunningMeanStd` from them, in `f64` where the device supports it (F32 otherwise, never
+half precision), on the device of the
+statistics passed to `with_statistics` (Burn's default device otherwise).
+
+`NormalizeObservationGym::statistics()` returns an `Option` because the wrapper sizes
+its statistics from the first observation; `NormalizeRewardGym::statistics()` always
+has its single component.
+
+| Method | Result |
+| --- | --- |
+| `RunningMeanStd::from_tensors(mean, variance, count)` / `validate` | `RunningMeanStdError` for empty or mismatched components, tensors on different devices or with different dtypes, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
+| `RunningMeanStd::try_load_file` | Burn's `RecordError` for a missing or corrupt file, a file without statistics, or statistics of a different length than the template. |
+| `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when installed or restored statistics differ in length from the declared observation shape (checked once per install), and again if an observation's component count differs. |
+| `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component; `InvalidStatistics` if `validate()` rejects them. |
+
+Both wrappers expose `inner`, `inner_mut`, and `into_inner`. Their saved
+`PerfectStateGym` states expose `statistics()` and restore the `update_statistics`
+setting. Each wrapped environment keeps its own statistics, so with
+`VectorizedGymWrapper` read them from one of `envs()`:
+
+```rust,ignore
+// After training: rewards wrap observations, inside a vectorized wrapper.
+let reward_gym = &env.envs()[0];
+// Check the values first: a NaN reward or observation would otherwise be saved as-is.
+let obs_rms = reward_gym.inner().statistics().expect("observed at least once").clone();
+obs_rms.validate()?;
+obs_rms.save_file("obs_rms.bpk")?;
+let reward_rms = reward_gym.statistics();
+reward_rms.validate()?;
+reward_rms.save_file("reward_rms.bpk")?;
+
+// Evaluation: load into a template of the observation length, then check the values.
+// `obs_dim` is the observation's component count, the length the training wrapper saw.
+let statistics = RunningMeanStd::new(obs_dim, &device).try_load_file("obs_rms.bpk")?;
+statistics.validate()?;
+let gym = NormalizeObservationGym::new(gym)
+    .with_statistics(statistics)
+    .with_update_statistics(false)
+    .with_clip(10.0)?;
+```
+
 `FrameStackGym<G, BF, S>` uses native Burn tensors. `BF` is the stacked batch
 rank. Two `PrevRank` mappings determine the inner observation's single rank. The defaults
 stack vectors `[features]` into `[stack_size, features]`. Scalar observations use

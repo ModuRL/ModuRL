@@ -1,7 +1,10 @@
 //! Running observation and reward normalization wrappers.
 
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
-use burn::tensor::{Int, Tensor, TensorData, TensorReadError, kind::Basic};
+use burn::{
+    module::{Module, Param},
+    tensor::{DType, Device, Int, Tensor, TensorData, TensorReadError, kind::Basic},
+};
 
 use crate::{
     gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo},
@@ -11,33 +14,232 @@ use crate::{
 const RUNNING_STATS_EPSILON: f64 = 1e-4;
 const NORMALIZATION_EPSILON: f64 = 1e-8;
 
-#[derive(Clone)]
-struct RunningMeanStd {
-    mean: Vec<f64>,
-    variance: Vec<f64>,
-    count: f64,
+/// Running per-component mean, variance, and sample count used by the normalization wrappers.
+///
+/// It is a Burn [`Module`], so it saves and loads like a model: export it from a trained wrapper
+/// with `statistics()`, save it with `save_file`, and load it with `try_load_file` into a
+/// template of the same length from [`new`](Self::new).
+#[derive(Module, Debug)]
+pub struct RunningMeanStd {
+    mean: Param<Tensor<1>>,
+    variance: Param<Tensor<1>>,
+    count: Param<Tensor<1>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunningMeanStdError {
+    #[error("statistics must have at least one component")]
+    Empty,
+    #[error("mean has {mean} components but variance has {variance}")]
+    LengthMismatch { mean: usize, variance: usize },
+    #[error("mean must be finite")]
+    NonFiniteMean,
+    #[error("variance must be finite and nonnegative")]
+    InvalidVariance,
+    #[error("count must be finite and positive")]
+    InvalidCount,
+    #[error("mean, variance, and count must be on the same device")]
+    DeviceMismatch,
+    #[error("mean, variance, and count must have the same dtype")]
+    DTypeMismatch,
+    #[error("failed to read statistics: {0}")]
+    TensorRead(#[source] TensorReadError),
+}
+
+/// F64 where the device supports it; F32 otherwise, so statistics are never half precision.
+fn accumulator_dtype(supports_f64: bool) -> DType {
+    if supports_f64 { DType::F64 } else { DType::F32 }
+}
+
+/// Wraps a `[size]` statistics tensor as a saved parameter that never takes gradients.
+fn fixed(tensor: Tensor<1>) -> Param<Tensor<1>> {
+    Param::from_tensor(tensor).set_require_grad(false)
 }
 
 impl RunningMeanStd {
-    fn new(size: usize) -> Self {
+    /// Starts `size` components at zero mean and unit variance on `device`. This is also the
+    /// template `try_load_file` loads saved statistics into; a file of another length is rejected.
+    pub fn new(size: usize, device: &Device) -> Self {
+        Self::new_in(
+            size,
+            device,
+            accumulator_dtype(device.supports_dtype(DType::F64)),
+        )
+    }
+
+    fn new_in(size: usize, device: &Device, dtype: DType) -> Self {
         Self {
-            mean: vec![0.0; size],
-            variance: vec![1.0; size],
-            count: RUNNING_STATS_EPSILON,
+            mean: fixed(Tensor::zeros([size], (device, dtype))),
+            variance: fixed(Tensor::ones([size], (device, dtype))),
+            count: fixed(Tensor::full([1], RUNNING_STATS_EPSILON, (device, dtype))),
         }
     }
 
-    fn update(&mut self, values: &[f64]) {
-        assert_eq!(values.len(), self.mean.len());
-        let total_count = self.count + 1.0;
-        for ((mean, variance), value) in self.mean.iter_mut().zip(&mut self.variance).zip(values) {
-            let delta = value - *mean;
-            let new_mean = *mean + delta / total_count;
-            let m2 = *variance * self.count + delta * delta * self.count / total_count;
-            *mean = new_mean;
-            *variance = m2 / total_count;
+    /// Builds statistics from `[size]` per-component means and variances and the number of samples they summarize.
+    pub fn from_tensors(
+        mean: Tensor<1>,
+        variance: Tensor<1>,
+        count: f64,
+    ) -> Result<Self, RunningMeanStdError> {
+        let count = Tensor::full([1], count, (&mean.device(), mean.dtype()));
+        let statistics = Self {
+            mean: fixed(mean),
+            variance: fixed(variance),
+            count: fixed(count),
+        };
+        statistics.validate()?;
+        Ok(statistics)
+    }
+
+    /// Checks the invariants [`from_tensors`](Self::from_tensors) enforces, including that all
+    /// `[size]` tensors share a device. `try_load_file` checks names and shapes but not values, and
+    /// updates from non-finite samples can break these, so call it before saving and after loading.
+    pub fn validate(&self) -> Result<(), RunningMeanStdError> {
+        let device = self.mean.val().device();
+        if self.variance.val().device() != device || self.count.val().device() != device {
+            return Err(RunningMeanStdError::DeviceMismatch);
         }
-        self.count = total_count;
+        let dtype = self.mean.val().dtype();
+        if self.variance.val().dtype() != dtype || self.count.val().dtype() != dtype {
+            return Err(RunningMeanStdError::DTypeMismatch);
+        }
+        let read = |param: &Param<Tensor<1>>| {
+            param
+                .val()
+                .try_to_vec_as::<f64>()
+                .map_err(RunningMeanStdError::TensorRead)
+        };
+        let (mean, variance, count) =
+            (read(&self.mean)?, read(&self.variance)?, read(&self.count)?);
+        if mean.is_empty() {
+            return Err(RunningMeanStdError::Empty);
+        }
+        if mean.len() != variance.len() {
+            return Err(RunningMeanStdError::LengthMismatch {
+                mean: mean.len(),
+                variance: variance.len(),
+            });
+        }
+        if !mean.iter().all(|value| value.is_finite()) {
+            return Err(RunningMeanStdError::NonFiniteMean);
+        }
+        if !variance
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+        {
+            return Err(RunningMeanStdError::InvalidVariance);
+        }
+        if !matches!(count[..], [count] if count.is_finite() && count > 0.0) {
+            return Err(RunningMeanStdError::InvalidCount);
+        }
+        Ok(())
+    }
+
+    /// Number of normalized components.
+    fn len(&self) -> usize {
+        self.mean.val().dims()[0]
+    }
+
+    /// Builds a one-dimensional tensor on the statistics' device with their dtype.
+    fn tensor(&self, data: TensorData) -> Tensor<1> {
+        let mean = self.mean.val();
+        Tensor::from_data(data, (&mean.device(), mean.dtype()))
+    }
+
+    /// Folds one `[size]` sample into the running mean and variance.
+    fn update(&mut self, values: Tensor<1>) {
+        let count = self.count.val().expand([self.len()]);
+        let total = count.clone().add_scalar(1.0);
+        let delta = values - self.mean.val();
+        let mean = self.mean.val() + delta.clone() / total.clone();
+        let variance =
+            (self.variance.val() * count.clone() + delta.square() * count / total.clone()) / total;
+        self.mean = fixed(mean);
+        self.variance = fixed(variance);
+        self.count = fixed(self.count.val().add_scalar(1.0));
+    }
+
+    /// Centers and scales `[size]` values, then clips them to `±clip`.
+    fn normalize(&self, values: Tensor<1>, clip: Option<f64>) -> Tensor<1> {
+        let normalized = (values - self.mean.val())
+            / self.variance.val().add_scalar(NORMALIZATION_EPSILON).sqrt();
+        clip.map_or(normalized.clone(), |limit| normalized.clamp(-limit, limit))
+    }
+
+    /// Casts half-precision `[size]` statistics to F32, where the stabilizing epsilon and
+    /// squared deviations stay representable; wider dtypes are unchanged.
+    fn promoted(self) -> Self {
+        if !matches!(self.mean.val().dtype(), DType::F16 | DType::BF16) {
+            return self;
+        }
+        let cast = |param: Param<Tensor<1>>| fixed(param.val().cast(DType::F32));
+        Self {
+            mean: cast(self.mean),
+            variance: cast(self.variance),
+            count: cast(self.count),
+        }
+    }
+
+    /// Single-component statistics holding `moments` on `device`, in `f64` where supported.
+    fn from_moments(device: &Device, moments: RewardMoments) -> Self {
+        Self::from_moments_in(
+            device,
+            accumulator_dtype(device.supports_dtype(DType::F64)),
+            moments,
+        )
+    }
+
+    fn from_moments_in(device: &Device, dtype: DType, moments: RewardMoments) -> Self {
+        Self::new_in(1, device, dtype).with_scalars(moments)
+    }
+
+    /// Reads the single-component mean, variance, and count to the host.
+    fn scalars(&self) -> Result<RewardMoments, RunningMeanStdError> {
+        let read = |param: &Param<Tensor<1>>| {
+            param
+                .val()
+                .try_to_vec_as::<f64>()
+                .map(|values| values[0])
+                .map_err(RunningMeanStdError::TensorRead)
+        };
+        Ok(RewardMoments {
+            mean: read(&self.mean)?,
+            variance: read(&self.variance)?,
+            count: read(&self.count)?,
+        })
+    }
+
+    /// Single-component statistics holding `moments`, on this module's device and dtype.
+    fn with_scalars(&self, moments: RewardMoments) -> Self {
+        let tensor = |value: f64| fixed(self.tensor(TensorData::new(vec![value], [1])));
+        Self {
+            mean: tensor(moments.mean),
+            variance: tensor(moments.variance),
+            count: tensor(moments.count),
+        }
+    }
+}
+
+/// Host copy of single-component reward statistics, so stepping never reads from the device.
+#[derive(Debug, Clone, Copy)]
+struct RewardMoments {
+    mean: f64,
+    variance: f64,
+    count: f64,
+}
+
+impl RewardMoments {
+    fn update(&mut self, value: f64) {
+        let total = self.count + 1.0;
+        let delta = value - self.mean;
+        self.mean += delta / total;
+        self.variance = (self.variance * self.count + delta * delta * self.count / total) / total;
+        self.count = total;
+    }
+
+    fn scale(&self, value: f64, clip: Option<f64>) -> f64 {
+        let scaled = value / (self.variance + NORMALIZATION_EPSILON).sqrt();
+        clip.map_or(scaled, |limit| scaled.clamp(-limit, limit))
     }
 }
 
@@ -46,6 +248,14 @@ impl RunningMeanStd {
 pub struct NormalizeObservationGymState<S> {
     inner_state: S,
     statistics: Option<RunningMeanStd>,
+    update_statistics: bool,
+}
+
+impl<S> NormalizeObservationGymState<S> {
+    /// The saved running statistics, or `None` before the first observation.
+    pub fn statistics(&self) -> Option<&RunningMeanStd> {
+        self.statistics.as_ref()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +264,11 @@ pub enum NormalizeObservationGymError<E> {
     GymError(#[source] E),
     #[error("failed to read an observation: {0}")]
     TensorRead(#[source] TensorReadError),
+    #[error("statistics have {statistics} components but the observation has {observation}")]
+    StatisticsSizeMismatch {
+        statistics: usize,
+        observation: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -67,6 +282,8 @@ pub struct NormalizeObservationGym<G> {
     gym: G,
     statistics: Option<RunningMeanStd>,
     clip: Option<f64>,
+    update_statistics: bool,
+    statistics_shape_checked: bool,
 }
 
 impl<G> NormalizeObservationGym<G> {
@@ -75,7 +292,41 @@ impl<G> NormalizeObservationGym<G> {
             gym,
             statistics: None,
             clip: None,
+            update_statistics: true,
+            statistics_shape_checked: true,
         }
+    }
+
+    /// Starts from `statistics`, for example ones saved after training, instead of zero mean and unit variance.
+    /// Their length must equal the number of observation components; `reset` and `step` report a mismatch.
+    pub fn with_statistics(mut self, statistics: RunningMeanStd) -> Self {
+        self.statistics = Some(statistics.promoted());
+        self.statistics_shape_checked = false;
+        self
+    }
+
+    /// Sets whether `reset` and `step` update the running statistics. Disable updates to evaluate
+    /// with fixed training statistics.
+    pub fn with_update_statistics(mut self, update: bool) -> Self {
+        self.update_statistics = update;
+        self
+    }
+
+    /// The current running statistics, or `None` before the first observation.
+    pub fn statistics(&self) -> Option<&RunningMeanStd> {
+        self.statistics.as_ref()
+    }
+
+    pub fn inner(&self) -> &G {
+        &self.gym
+    }
+
+    pub fn inner_mut(&mut self) -> &mut G {
+        &mut self.gym
+    }
+
+    pub fn into_inner(self) -> G {
+        self.gym
     }
 
     /// Clips normalized observations to `[-limit, limit]`; rejects a non-finite or nonpositive `limit`.
@@ -90,34 +341,58 @@ impl<G> NormalizeObservationGym<G> {
         Ok(self)
     }
 
+    /// Rejects installed or restored statistics that cannot match the declared observation shape
+    /// before the inner gym changes. Runs once per install, since `observation_space()` may allocate.
+    fn check_statistics_shape<E>(
+        &mut self,
+        shape: impl FnOnce(&G) -> Vec<usize>,
+    ) -> Result<(), NormalizeObservationGymError<E>> {
+        if self.statistics_shape_checked {
+            return Ok(());
+        }
+        if let Some(statistics) = &self.statistics {
+            let observation = shape(&self.gym).iter().product();
+            if statistics.len() != observation {
+                return Err(NormalizeObservationGymError::StatisticsSizeMismatch {
+                    statistics: statistics.len(),
+                    observation,
+                });
+            }
+        }
+        self.statistics_shape_checked = true;
+        Ok(())
+    }
+
     /// Normalizes an unbatched rank-`O` observation, preserving its shape, kind, dtype, and device.
-    /// Reads components as F32 for host statistics and casts normalized F32 values back to the input dtype.
-    fn normalize<const O: usize, K: Basic>(
+    /// Reads components as F32 into the statistics' device and dtype and casts normalized values back to the input dtype.
+    fn normalize<const O: usize, K: Basic, E>(
         &mut self,
         observation: &Tensor<O, K>,
-    ) -> Result<Tensor<O, K>, TensorReadError> {
+    ) -> Result<Tensor<O, K>, NormalizeObservationGymError<E>> {
         let shape = observation.dims();
         let device = observation.device();
         let dtype = observation.dtype();
         let values = observation
-            .try_to_vec_as::<f32>()?
-            .into_iter()
-            .map(f64::from)
-            .collect::<Vec<_>>();
+            .try_to_vec_as::<f32>()
+            .map_err(NormalizeObservationGymError::TensorRead)?;
+        let size = values.len();
         let statistics = self
             .statistics
-            .get_or_insert_with(|| RunningMeanStd::new(values.len()));
-        statistics.update(&values);
-
-        let normalized = values
-            .iter()
-            .zip(&statistics.mean)
-            .zip(&statistics.variance)
-            .map(|((value, mean), variance)| {
-                let value = (value - mean) / (variance + NORMALIZATION_EPSILON).sqrt();
-                self.clip.map_or(value, |limit| value.clamp(-limit, limit)) as f32
-            })
-            .collect::<Vec<_>>();
+            .get_or_insert_with(|| RunningMeanStd::new(size, &device).promoted());
+        if statistics.len() != size {
+            return Err(NormalizeObservationGymError::StatisticsSizeMismatch {
+                statistics: statistics.len(),
+                observation: size,
+            });
+        }
+        let values = statistics.tensor(TensorData::new(values, [size]));
+        if self.update_statistics {
+            statistics.update(values.clone());
+        }
+        let normalized = statistics
+            .normalize(values, self.clip)
+            .try_to_vec_as::<f32>()
+            .map_err(NormalizeObservationGymError::TensorRead)?;
         Ok(Tensor::from_data(
             TensorData::new(normalized, shape),
             (&device, dtype),
@@ -140,13 +415,12 @@ where
 
     /// Normalizes the reset observation without changing its unbatched rank-`O` shape, kind, dtype, or device.
     fn reset(&mut self) -> Result<ResetInfo<I, Tensor<O, K>>, Self::Error> {
+        self.check_statistics_shape(|gym| gym.observation_space().shape())?;
         let mut reset = self
             .gym
             .reset()
             .map_err(NormalizeObservationGymError::GymError)?;
-        reset.observation = self
-            .normalize(&reset.observation)
-            .map_err(NormalizeObservationGymError::TensorRead)?;
+        reset.observation = self.normalize(&reset.observation)?;
         Ok(reset)
     }
 
@@ -156,13 +430,12 @@ where
         &mut self,
         action: <Self::ActionSpace as TensorBatchTypes>::Item,
     ) -> Result<StepInfo<I, Tensor<O, K>>, Self::Error> {
+        self.check_statistics_shape(|gym| gym.observation_space().shape())?;
         let mut step = self
             .gym
             .step(action)
             .map_err(NormalizeObservationGymError::GymError)?;
-        step.observation = self
-            .normalize(&step.observation)
-            .map_err(NormalizeObservationGymError::TensorRead)?;
+        step.observation = self.normalize(&step.observation)?;
         Ok(step)
     }
 
@@ -193,6 +466,7 @@ where
                 .save_state()
                 .map_err(NormalizeObservationGymError::GymError)?,
             statistics: self.statistics.clone(),
+            update_statistics: self.update_statistics,
         })
     }
 
@@ -201,6 +475,8 @@ where
             .set_state(&state.inner_state)
             .map_err(NormalizeObservationGymError::GymError)?;
         self.statistics.clone_from(&state.statistics);
+        self.update_statistics = state.update_statistics;
+        self.statistics_shape_checked = false;
         Ok(())
     }
 }
@@ -227,15 +503,21 @@ pub enum NormalizeRewardGymConfigurationError {
     InvalidGamma,
     #[error("clip must be finite and positive")]
     InvalidClip,
+    #[error("reward statistics must have exactly one component, got {0}")]
+    InvalidStatisticsSize(usize),
+    #[error("reward statistics are invalid; `RunningMeanStd::validate` reports why")]
+    InvalidStatistics,
 }
 
 /// Scales immediate rewards by the running standard deviation of discounted rewards.
 pub struct NormalizeRewardGym<G> {
     gym: G,
-    statistics: RunningMeanStd,
+    device: Device,
+    moments: RewardMoments,
     discounted_reward: f64,
     gamma: f64,
     clip: Option<f64>,
+    update_statistics: bool,
 }
 
 impl<G> NormalizeRewardGym<G> {
@@ -246,11 +528,63 @@ impl<G> NormalizeRewardGym<G> {
         }
         Ok(Self {
             gym,
-            statistics: RunningMeanStd::new(1),
+            device: Device::default(),
+            moments: RewardMoments {
+                mean: 0.0,
+                variance: 1.0,
+                count: RUNNING_STATS_EPSILON,
+            },
             discounted_reward: 0.0,
             gamma,
             clip: None,
+            update_statistics: true,
         })
+    }
+
+    /// Starts from saved discounted-return statistics; rejects statistics without exactly one component.
+    pub fn with_statistics(
+        mut self,
+        statistics: RunningMeanStd,
+    ) -> Result<Self, NormalizeRewardGymConfigurationError> {
+        if statistics.len() != 1 {
+            return Err(NormalizeRewardGymConfigurationError::InvalidStatisticsSize(
+                statistics.len(),
+            ));
+        }
+        statistics
+            .validate()
+            .map_err(|_| NormalizeRewardGymConfigurationError::InvalidStatistics)?;
+        self.moments = statistics
+            .scalars()
+            .map_err(|_| NormalizeRewardGymConfigurationError::InvalidStatistics)?;
+        self.device = statistics.mean.val().device();
+        Ok(self)
+    }
+
+    /// Sets whether `step` updates the running statistics. Disable updates to evaluate
+    /// with fixed training statistics.
+    pub fn with_update_statistics(mut self, update: bool) -> Self {
+        self.update_statistics = update;
+        self
+    }
+
+    /// The current running statistics of the discounted return, with one component, built from
+    /// the wrapper's host `f64` copy on the device of the installed statistics (Burn's default
+    /// device otherwise), in `f64` where that device supports it.
+    pub fn statistics(&self) -> RunningMeanStd {
+        RunningMeanStd::from_moments(&self.device, self.moments)
+    }
+
+    pub fn inner(&self) -> &G {
+        &self.gym
+    }
+
+    pub fn inner_mut(&mut self) -> &mut G {
+        &mut self.gym
+    }
+
+    pub fn into_inner(self) -> G {
+        self.gym
     }
 
     /// Clips normalized rewards to `[-limit, limit]`; rejects a non-finite or nonpositive `limit`.
@@ -267,8 +601,18 @@ impl<G> NormalizeRewardGym<G> {
 #[derive(Clone)]
 pub struct NormalizeRewardGymState<S> {
     inner_state: S,
-    statistics: RunningMeanStd,
+    device: Device,
+    moments: RewardMoments,
     discounted_reward: f64,
+    update_statistics: bool,
+}
+
+impl<S> NormalizeRewardGymState<S> {
+    /// The saved running statistics of the discounted return, built like
+    /// [`NormalizeRewardGym::statistics`].
+    pub fn statistics(&self) -> RunningMeanStd {
+        RunningMeanStd::from_moments(&self.device, self.moments)
+    }
 }
 
 impl<G, I, const BO: usize, const BA: usize, K: Basic, AK: Basic> Gym<I, BO, BA>
@@ -297,16 +641,14 @@ where
     ) -> Result<StepInfo<I, <Self::ObservationSpace as TensorBatchTypes>::Item>, Self::Error> {
         let mut step = self.gym.step(action)?;
         self.discounted_reward = self.discounted_reward * self.gamma + f64::from(step.reward);
-        self.statistics.update(&[self.discounted_reward]);
+        if self.update_statistics {
+            self.moments.update(self.discounted_reward);
+        }
         if step.terminated || step.truncated {
             self.discounted_reward = 0.0;
         }
 
-        let normalized =
-            f64::from(step.reward) / (self.statistics.variance[0] + NORMALIZATION_EPSILON).sqrt();
-        step.reward =
-            self.clip
-                .map_or(normalized, |limit| normalized.clamp(-limit, limit)) as f32;
+        step.reward = self.moments.scale(f64::from(step.reward), self.clip) as f32;
         Ok(step)
     }
 
@@ -331,15 +673,19 @@ where
     fn save_state(&self) -> Result<Self::State, Self::Error> {
         Ok(NormalizeRewardGymState {
             inner_state: self.gym.save_state()?,
-            statistics: self.statistics.clone(),
+            device: self.device.clone(),
+            moments: self.moments,
             discounted_reward: self.discounted_reward,
+            update_statistics: self.update_statistics,
         })
     }
 
     fn set_state(&mut self, state: &Self::State) -> Result<(), Self::Error> {
         self.gym.set_state(&state.inner_state)?;
-        self.statistics.clone_from(&state.statistics);
+        self.device.clone_from(&state.device);
+        self.moments = state.moments;
         self.discounted_reward = state.discounted_reward;
+        self.update_statistics = state.update_statistics;
         Ok(())
     }
 }
@@ -364,12 +710,180 @@ mod tests {
             test_support::{TestGym, action, scalar},
         },
     };
-    use burn::tensor::{DType, Device, Tensor};
+    use burn::module::Module;
+    use burn::tensor::{DType, Device, Tensor, TensorData};
+
+    use proptest::{collection::vec, option, prelude::*};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        NormalizeObservationGym, NormalizeObservationGymConfigurationError, NormalizeRewardGym,
-        NormalizeRewardGymConfigurationError,
+        NORMALIZATION_EPSILON, NormalizeObservationGym, NormalizeObservationGymConfigurationError,
+        NormalizeObservationGymError, NormalizeRewardGym, NormalizeRewardGymConfigurationError,
+        RUNNING_STATS_EPSILON, RewardMoments, RunningMeanStd, RunningMeanStdError,
+        accumulator_dtype, fixed,
     };
+    use crate::gym::PerfectStateGym;
+
+    fn stats(
+        mean: &[f64],
+        variance: &[f64],
+        count: f64,
+    ) -> Result<RunningMeanStd, RunningMeanStdError> {
+        RunningMeanStd::from_tensors(
+            tensor(mean, DType::F64),
+            tensor(variance, DType::F64),
+            count,
+        )
+    }
+
+    fn tensor(values: &[f64], dtype: DType) -> Tensor<1> {
+        Tensor::from_data(
+            TensorData::new(values.to_vec(), [values.len()]),
+            (&Device::flex(), dtype),
+        )
+    }
+
+    /// Reads a `[size]` statistics tensor back to the host.
+    fn host(tensor: Tensor<1>) -> Vec<f64> {
+        tensor.try_to_vec_as::<f64>().unwrap()
+    }
+
+    fn assert_same(left: &RunningMeanStd, right: &RunningMeanStd) {
+        assert_eq!(left.mean.val().dtype(), right.mean.val().dtype());
+        assert_eq!(host(left.mean.val()), host(right.mean.val()));
+        assert_eq!(host(left.variance.val()), host(right.variance.val()));
+        assert_eq!(host(left.count.val()), host(right.count.val()));
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("modurl-{name}-{}-{id}.bpk", std::process::id()))
+    }
+
+    /// Saves `statistics` with Burn and loads them into a fresh template, as the docs show.
+    /// Deletes the checkpoint on drop; Burn reads loaded tensors from it lazily.
+    struct Checkpoint(std::path::PathBuf);
+
+    impl Drop for Checkpoint {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn reload(statistics: &RunningMeanStd) -> (RunningMeanStd, Checkpoint) {
+        let file = Checkpoint(temp_path("statistics"));
+        statistics.clone().save_file(&file.0).unwrap();
+        let loaded = RunningMeanStd::new(statistics.len(), &Device::flex())
+            .try_load_file(&file.0)
+            .unwrap();
+        (loaded, file)
+    }
+
+    #[test]
+    fn validated_statistics_keep_their_values_when_the_file_is_overwritten() {
+        let path = temp_path("overwritten");
+        stats(&[1.0], &[1.0], 1.0)
+            .unwrap()
+            .save_file(&path)
+            .unwrap();
+        let loaded = RunningMeanStd::new(1, &Device::flex())
+            .try_load_file(&path)
+            .unwrap();
+        loaded.validate().unwrap();
+        stats(&[5.0], &[1.0], 1.0)
+            .unwrap()
+            .save_file(&path)
+            .unwrap();
+        assert_eq!(host(loaded.mean.val()), vec![1.0]);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    fn scalar_moments(statistics: &RunningMeanStd) -> RewardMoments {
+        statistics.scalars().unwrap()
+    }
+
+    fn assert_close(actual: f64, expected: f64, tolerance: f64) -> Result<(), TestCaseError> {
+        prop_assert!(
+            actual.is_finite() && (actual - expected).abs() <= tolerance * (expected.abs() + 1.0),
+            "{actual} is not within {tolerance} of {expected}"
+        );
+        Ok(())
+    }
+
+    /// Valid single-component statistics in any float dtype, with exact zero variances and,
+    /// outside F16, counts beyond F16's range.
+    fn statistics() -> impl Strategy<Value = RunningMeanStd> {
+        prop_oneof![
+            Just(DType::F16),
+            Just(DType::BF16),
+            Just(DType::F32),
+            Just(DType::F64)
+        ]
+        .prop_flat_map(|dtype| {
+            let max_count = if dtype == DType::F16 { 6e4 } else { 1e6 };
+            (
+                Just(dtype),
+                -1e3f64..1e3,
+                prop_oneof![Just(0.0), 1e-6f64..1e3],
+                1e-4f64..max_count,
+            )
+        })
+        .prop_map(|(dtype, mean, variance, count)| {
+            RunningMeanStd::from_tensors(tensor(&[mean], dtype), tensor(&[variance], dtype), count)
+                .unwrap()
+        })
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Corruption {
+        Empty,
+        LengthMismatch,
+        NonFiniteMean,
+        InvalidVariance,
+        InvalidCount,
+        MixedDtypes,
+    }
+
+    fn corruption() -> impl Strategy<Value = Corruption> {
+        prop_oneof![
+            Just(Corruption::Empty),
+            Just(Corruption::LengthMismatch),
+            Just(Corruption::NonFiniteMean),
+            Just(Corruption::InvalidVariance),
+            Just(Corruption::InvalidCount),
+            Just(Corruption::MixedDtypes),
+        ]
+    }
+
+    fn reports(corruption: Corruption, error: &RunningMeanStdError) -> bool {
+        matches!(
+            (corruption, error),
+            (Corruption::Empty, RunningMeanStdError::Empty)
+                | (
+                    Corruption::LengthMismatch,
+                    RunningMeanStdError::LengthMismatch { .. }
+                )
+                | (
+                    Corruption::NonFiniteMean,
+                    RunningMeanStdError::NonFiniteMean
+                )
+                | (
+                    Corruption::InvalidVariance,
+                    RunningMeanStdError::InvalidVariance
+                )
+                | (Corruption::InvalidCount, RunningMeanStdError::InvalidCount)
+                | (Corruption::MixedDtypes, RunningMeanStdError::DTypeMismatch)
+        )
+    }
+
+    fn observation_script(observations: &[f32]) -> TestGym {
+        TestGym::new(
+            observations
+                .iter()
+                .map(|&observation| TestGym::step(observation, 0.0, false, false, 0)),
+        )
+    }
 
     #[test]
     fn rejects_invalid_normalization_settings() {
@@ -397,7 +911,9 @@ mod tests {
         let observations =
             Tensor::<2>::from_data([[1.0f64, 2.0], [3.0, 4.0]], (&device, DType::F64));
         let mut wrapper = NormalizeObservationGym::new(());
-        let normalized = wrapper.normalize(&observations).unwrap();
+        let normalized = wrapper
+            .normalize::<2, _, std::convert::Infallible>(&observations)
+            .unwrap();
         assert_eq!(normalized.dims(), [2, 2]);
         assert_eq!(normalized.dtype(), DType::F64);
         assert_eq!(normalized.device(), device);
@@ -482,5 +998,290 @@ mod tests {
             |observation| observation.into_data(),
             |_: &()| (),
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn invalid_statistics_are_rejected_when_built_and_after_loading(
+            corruption in corruption(),
+            dtype in prop_oneof![Just(DType::F32), Just(DType::F64)],
+            len in 1usize..4,
+            non_finite in prop_oneof![Just(f64::NAN), Just(f64::INFINITY), Just(f64::NEG_INFINITY)],
+            negative in -1e3f64..-1e-6,
+            nonpositive in prop_oneof![Just(0.0), -1e3f64..0.0],
+        ) {
+            let (mut mean, mut variance, mut count) = (vec![0.0; len], vec![1.0; len], 1.0);
+            let mut variance_dtype = dtype;
+            match corruption {
+                Corruption::Empty => (mean, variance) = (Vec::new(), Vec::new()),
+                Corruption::LengthMismatch => variance.push(1.0),
+                Corruption::NonFiniteMean => mean[len - 1] = non_finite,
+                Corruption::InvalidVariance => {
+                    variance[len - 1] = if non_finite.is_nan() { negative } else { non_finite };
+                }
+                Corruption::InvalidCount => {
+                    count = if non_finite.is_nan() { nonpositive } else { non_finite };
+                }
+                Corruption::MixedDtypes => {
+                    variance_dtype = if dtype == DType::F32 { DType::F64 } else { DType::F32 };
+                }
+            }
+
+            let built = RunningMeanStd::from_tensors(
+                tensor(&mean, dtype),
+                tensor(&variance, variance_dtype),
+                count,
+            );
+            prop_assert!(built.as_ref().is_err_and(|error| reports(corruption, error)), "{built:?}");
+
+            if !matches!(corruption, Corruption::Empty | Corruption::LengthMismatch) {
+                let unchecked = RunningMeanStd {
+                    mean: fixed(tensor(&mean, dtype)),
+                    variance: fixed(tensor(&variance, variance_dtype)),
+                    count: fixed(tensor(&[count], dtype)),
+                };
+                let (loaded, _file) = reload(&unchecked);
+                let loaded = loaded.validate();
+                prop_assert!(loaded.as_ref().is_err_and(|error| reports(corruption, error)), "{loaded:?}");
+            }
+        }
+
+        #[test]
+        fn frozen_statistics_normalize_by_the_formula_after_reloading(
+            statistics in statistics(),
+            offsets in vec(prop_oneof![Just(0.0f64), -1e3f64..1e3], 1..8),
+            clip in option::of(1.0f64..20.0),
+        ) {
+            let (loaded, _file) = reload(&statistics);
+            prop_assert!(loaded.validate().is_ok());
+            assert_same(&loaded, &statistics);
+            let RewardMoments { mean, variance, count } = scalar_moments(&statistics);
+            let observations: Vec<f32> = offsets.iter().map(|offset| (mean + offset) as f32).collect();
+
+            let mut wrapper = NormalizeObservationGym::new(observation_script(&observations))
+                .with_statistics(loaded)
+                .with_update_statistics(false);
+            if let Some(limit) = clip {
+                wrapper = wrapper.with_clip(limit).unwrap();
+            }
+            for &observation in &observations {
+                let normalized = f64::from(scalar(&wrapper.step(action()).unwrap().observation));
+                let expected = (f64::from(observation) - mean) / (variance + NORMALIZATION_EPSILON).sqrt();
+                let expected = clip.map_or(expected, |limit| expected.clamp(-limit, limit));
+                assert_close(normalized, expected, 1e-4)?;
+            }
+            let frozen = scalar_moments(wrapper.statistics().unwrap());
+            prop_assert_eq!((frozen.mean, frozen.variance, frozen.count), (mean, variance, count));
+        }
+
+        #[test]
+        fn trained_observation_statistics_match_f64_updates_and_reload_identically(
+            installed in option::of(statistics()),
+            observations in vec(prop_oneof![Just(300.0f32), -1e4f32..1e4], 1..20),
+            probes in vec(-1e4f32..1e4, 1..4),
+        ) {
+            let mut expected = installed.as_ref().map_or(
+                RewardMoments { mean: 0.0, variance: 1.0, count: RUNNING_STATS_EPSILON },
+                scalar_moments,
+            );
+            let script: Vec<f32> = observations.iter().chain(&probes).copied().collect();
+            let mut training = NormalizeObservationGym::new(observation_script(&script));
+            if let Some(statistics) = installed {
+                training = training.with_statistics(statistics);
+            }
+            for &observation in &observations {
+                expected.update(f64::from(observation));
+                prop_assert!(scalar(&training.step(action()).unwrap().observation).is_finite());
+            }
+
+            let trained = training.statistics().unwrap().clone();
+            prop_assert!(trained.validate().is_ok());
+            prop_assert!(!matches!(trained.mean.val().dtype(), DType::F16 | DType::BF16));
+            let actual = scalar_moments(&trained);
+            assert_close(actual.mean, expected.mean, 1e-3)?;
+            assert_close(actual.variance, expected.variance, 1e-3)?;
+            assert_close(actual.count, expected.count, 1e-6)?;
+
+            let (loaded, _file) = reload(&trained);
+            assert_same(&loaded, &trained);
+            training.update_statistics = false;
+            let mut evaluation = NormalizeObservationGym::new(observation_script(&probes))
+                .with_statistics(loaded)
+                .with_update_statistics(false);
+            for _ in &probes {
+                prop_assert_eq!(
+                    scalar(&evaluation.step(action()).unwrap().observation),
+                    scalar(&training.step(action()).unwrap().observation)
+                );
+            }
+        }
+
+        #[test]
+        fn trained_reward_statistics_reload_to_the_same_scaling(
+            installed in option::of(statistics()),
+            gamma in 0.0f64..=1.0,
+            rewards in vec((prop_oneof![Just(2e-4f32), -1e3f32..1e3], prop::bool::weighted(0.1)), 1..30),
+            probes in vec(-1e3f32..1e3, 1..4),
+            clip in option::of(1.0f64..20.0),
+            supports_f64 in any::<bool>(),
+        ) {
+            let script = |rewards: &mut dyn Iterator<Item = (f32, bool)>| {
+                TestGym::new(rewards.map(|(reward, done)| TestGym::step(0.0, reward, done, false, 0)))
+            };
+            let probe_steps = || probes.iter().map(|&reward| (reward, false));
+            let with_clip = |wrapper: NormalizeRewardGym<TestGym>| match clip {
+                Some(limit) => wrapper.with_clip(limit).unwrap(),
+                None => wrapper,
+            };
+            let mut training = with_clip(
+                NormalizeRewardGym::new(script(&mut rewards.iter().copied().chain(probe_steps())), gamma)
+                    .unwrap(),
+            );
+            if let Some(statistics) = installed {
+                training = training.with_statistics(statistics).unwrap();
+            }
+            let start = training.moments.count;
+            for _ in &rewards {
+                prop_assert!(training.step(action()).unwrap().reward.is_finite());
+            }
+            assert_close(training.moments.count, start + rewards.len() as f64, 1e-12)?;
+
+            let exported = if supports_f64 {
+                training.statistics()
+            } else {
+                RunningMeanStd::from_moments_in(&Device::flex(), accumulator_dtype(false), training.moments)
+            };
+            prop_assert_eq!(exported.mean.val().dtype(), accumulator_dtype(supports_f64));
+            prop_assert!(exported.validate().is_ok());
+            let (loaded, _file) = reload(&exported);
+            assert_same(&loaded, &exported);
+
+            training.update_statistics = false;
+            let mut evaluation = with_clip(
+                NormalizeRewardGym::new(script(&mut probe_steps()), gamma)
+                    .unwrap()
+                    .with_statistics(loaded)
+                    .unwrap()
+                    .with_update_statistics(false),
+            );
+            for _ in &probes {
+                let reloaded = f64::from(evaluation.step(action()).unwrap().reward);
+                let trained = f64::from(training.step(action()).unwrap().reward);
+                if supports_f64 {
+                    prop_assert_eq!(reloaded, trained);
+                } else {
+                    assert_close(reloaded, trained, 1e-5)?;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn statistics_and_model_files_are_not_interchangeable() {
+        use burn::nn::LinearConfig;
+
+        let device = Device::flex();
+        let model_path = temp_path("model");
+        let statistics_path = temp_path("statistics");
+        LinearConfig::new(2, 2)
+            .init(&device)
+            .save_file(&model_path)
+            .unwrap();
+        RunningMeanStd::new(2, &device)
+            .save_file(&statistics_path)
+            .unwrap();
+
+        let statistics_from_model = RunningMeanStd::new(2, &device).try_load_file(&model_path);
+        let wrong_length = RunningMeanStd::new(3, &device).try_load_file(&statistics_path);
+        let model_from_statistics = LinearConfig::new(2, 2)
+            .init(&device)
+            .try_load_file(&statistics_path);
+        std::fs::remove_file(&model_path).unwrap();
+        std::fs::remove_file(&statistics_path).unwrap();
+        assert!(statistics_from_model.is_err());
+        assert!(wrong_length.is_err());
+        assert!(model_from_statistics.is_err());
+    }
+
+    #[test]
+    fn new_statistics_accumulate_in_f64_where_supported() {
+        assert_eq!(accumulator_dtype(false), DType::F32);
+        let statistics = RunningMeanStd::new(1, &Device::flex());
+        assert_eq!(statistics.mean.val().dtype(), DType::F64);
+
+        let mut statistics = stats(&[0.0], &[1.0], 16_777_216.0).unwrap();
+        statistics.update(tensor(&[1.0], DType::F64));
+        assert_eq!(host(statistics.count.val()), vec![16_777_217.0]);
+    }
+
+    #[test]
+    fn reports_observation_statistics_size_mismatch_before_inner_gym_runs() {
+        let statistics = stats(&[0.0, 0.0], &[1.0, 1.0], 1.0).unwrap();
+        // An empty script panics if the inner gym is stepped.
+        let mut wrapper =
+            NormalizeObservationGym::new(TestGym::new([])).with_statistics(statistics);
+        for result in [
+            wrapper.reset().map(|_| ()),
+            wrapper.step(action()).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(NormalizeObservationGymError::StatisticsSizeMismatch {
+                    statistics: 2,
+                    observation: 1
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_multi_component_reward_statistics() {
+        let statistics = stats(&[0.0, 0.0], &[1.0, 1.0], 1.0).unwrap();
+        assert!(matches!(
+            NormalizeRewardGym::new((), 0.99)
+                .unwrap()
+                .with_statistics(statistics),
+            Err(NormalizeRewardGymConfigurationError::InvalidStatisticsSize(
+                2
+            ))
+        ));
+    }
+
+    #[test]
+    fn validate_reports_statistics_broken_by_non_finite_rewards() {
+        let gym = TestGym::new([TestGym::step(0.0, f32::NAN, false, false, 1)]);
+        let mut wrapper = NormalizeRewardGym::new(gym, 0.99).unwrap();
+        wrapper.step(action()).unwrap();
+        assert!(matches!(
+            wrapper.statistics().validate(),
+            Err(RunningMeanStdError::NonFiniteMean)
+        ));
+    }
+
+    #[test]
+    fn saved_states_expose_statistics_and_restore_update_statistics() {
+        let mut observation = NormalizeObservationGym::new(StateTestGym::new(3));
+        assert!(observation.save_state().unwrap().statistics().is_none());
+        observation.reset().unwrap();
+        let state = observation.save_state().unwrap();
+        assert_same(
+            state.statistics().unwrap(),
+            observation.statistics().unwrap(),
+        );
+        observation.update_statistics = false;
+        observation.set_state(&state).unwrap();
+        assert!(observation.update_statistics);
+
+        let mut reward = NormalizeRewardGym::new(StateTestGym::new(5), 0.9)
+            .unwrap()
+            .with_update_statistics(false);
+        reward.step(state_action()).unwrap();
+        let state = reward.save_state().unwrap();
+        assert_same(&state.statistics(), &reward.statistics());
+        reward.update_statistics = true;
+        reward.set_state(&state).unwrap();
+        assert!(!reward.update_statistics);
     }
 }

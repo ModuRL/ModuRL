@@ -440,7 +440,8 @@ pub use info::{
 pub use normalize::{
     NormalizeObservationGym, NormalizeObservationGymConfigurationError,
     NormalizeObservationGymError, NormalizeObservationGymState, NormalizeRewardGym,
-    NormalizeRewardGymConfigurationError, NormalizeRewardGymState,
+    NormalizeRewardGymConfigurationError, NormalizeRewardGymState, RunningMeanStd,
+    RunningMeanStdError,
 };
 pub(crate) use observation::split_legal_action_mask;
 pub use observation::{
