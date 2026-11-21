@@ -6,7 +6,11 @@ use burn::{
     tensor::{DType, Float, Tensor, TensorCreationOptions, TensorData, kind::Basic},
 };
 
+pub mod multi_part;
 pub mod probabilistic_model;
+pub use multi_part::{
+    EncodeObservationParts, MultiPartEncoder, MultiPartEncoderError, PartEncoder,
+};
 
 /// Executes a tensor-to-tensor computation with explicit ranks and model-defined input and output kinds.
 /// Parameter-owning models also implement Burn's `Module` so optimizers can visit their parameters.

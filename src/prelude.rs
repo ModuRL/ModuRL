@@ -61,6 +61,9 @@ pub use crate::models::{
     probabilistic_model::ProbabilisticPolicy, probabilistic_model::ProbabilisticPolicyModel,
     probabilistic_model::ProbabilisticPolicyModelError,
 };
+pub use crate::models::{
+    EncodeObservationParts, MultiPartEncoder, MultiPartEncoderError, PartEncoder,
+};
 pub use crate::multi_agent::MultiAgentGym;
 pub use crate::objectives::{bellman_targets, clipped_value_loss};
 pub use crate::parameter_schedule::{
@@ -68,6 +71,7 @@ pub use crate::parameter_schedule::{
     ScheduleProgressError,
 };
 pub use crate::spaces::{ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace, SpaceError};
+pub use crate::spaces::{MultiPartSpace, ObservationPart, ObservationParts};
 pub use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 pub use crate::wrappers::{
     ClipRewardGym, ClipRewardGymError, DeviceMultiGymWrapper, EpisodeStatistics,
