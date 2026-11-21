@@ -1,5 +1,11 @@
 # Double DQN
 
+Save trained online weights with `agent.network().clone().save_file("ddqn.bpk")`
+and Burn's `Module` trait in scope. Load them into a matching model with
+`try_load_file`, then pass it to `.online_q_network(...)` on the DDQN builder.
+See [Save and Load Weights](./dqn.md#save-and-load-weights) for the shared
+pattern and the distinction between weight snapshots and full training state.
+
 Double DQN, or DDQN, uses the same setup, builder fields, and training loop as
 DQN. Its difference is the next-observation target: the online Q-network chooses the
 next action, and the target Q-network evaluates that selected action. This

@@ -9,6 +9,9 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Rust and tensor backend
 
+- DQN and DDQN now expose the trained online Q-network through `network()`,
+  following PPO's model inspection and Burn `.bpk` weight persistence pattern.
+
 - Discount `gamma` and advantage-estimation `lambda` parameters now consistently use `f64`,
   including PPO, A2C, DQN/DDQN, GAE, NStep, and UPGO. Callers with `f32` variables must
   convert them to `f64`; custom advantage estimators must update their method signatures.
