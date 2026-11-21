@@ -73,8 +73,8 @@ into the other.
 `NormalizeObservationGym` promotes half-precision (F16 or BF16) statistics to F32 when it
 installs or creates them, so updates do not overflow and an observation equal to the mean
 of a zero-variance component gives `0` instead of NaN. Any other value of that component is
-divided by the square root of the stabilizing epsilon (`1e-4`), so set `with_clip` to bound
-it. `NormalizeRewardGym` keeps its statistics on the host in `f64`, so
+divided by `sqrt(1e-8)` = `1e-4`, so such values scale by 10,000; set `with_clip` to bound
+them. `NormalizeRewardGym` keeps its statistics on the host in `f64`, so
 stepping a CPU environment never touches the GPU; `statistics()` builds a new
 `RunningMeanStd` from them, in `f64` where the device supports it (F32 otherwise, never
 half precision), on the device of the
