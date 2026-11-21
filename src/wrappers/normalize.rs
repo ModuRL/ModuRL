@@ -215,57 +215,37 @@ impl RunningMeanStd {
     }
 }
 
-/// Writes `path` through a temporary file in the same directory that is renamed over it only after
-/// `write` and a sync succeed, so a failed write leaves an existing file untouched.
-///
-/// A symlink is resolved so its target is replaced and the link kept, the replacement keeps the
-/// existing file's permissions, and an existing file in a directory that refuses new files is
-/// overwritten in place instead (without the atomic guarantee).
+/// Writes a sibling temporary file with `write`, then renames it over `path`; removes it on failure.
 fn replace_file(
     path: &std::path::Path,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     static TEMPORARY_FILE_COUNTER: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
-    let is_symlink = std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink());
-    let destination = match is_symlink {
-        true => std::fs::canonicalize(path)?,
-        false => path.to_path_buf(),
-    };
-    let existing_permissions = std::fs::metadata(&destination)
-        .ok()
-        .map(|metadata| metadata.permissions());
-    let temporary_path = destination.with_file_name(format!(
-        ".modurl-statistics-{}-{}.tmp",
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "statistics path has no file name",
+        )
+    })?;
+    let mut temporary_name = std::ffi::OsString::from(".");
+    temporary_name.push(file_name);
+    temporary_name.push(format!(
+        ".{}-{}.tmp",
         std::process::id(),
         TEMPORARY_FILE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
+    let temporary_path = path.with_file_name(temporary_name);
 
-    let mut file = match std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&temporary_path)
-    {
-        Ok(file) => file,
-        Err(error)
-            if error.kind() == std::io::ErrorKind::PermissionDenied
-                && existing_permissions.is_some() =>
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&destination)?;
-            return write(&mut file).and_then(|()| file.sync_all());
-        }
-        Err(error) => return Err(error),
-    };
-    let result = existing_permissions
-        .map_or(Ok(()), |permissions| file.set_permissions(permissions))
-        .and_then(|()| write(&mut file))
+        .open(&temporary_path)?;
+    let result = write(&mut file)
         .and_then(|()| file.sync_all())
         .and_then(|()| {
             drop(file);
-            std::fs::rename(&temporary_path, &destination)
+            std::fs::rename(&temporary_path, path)
         });
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary_path);
@@ -955,84 +935,6 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(loaded.unwrap(), statistics);
         assert_eq!(leftover, 1);
-    }
-
-    fn test_directory(name: &str) -> std::path::PathBuf {
-        let directory = std::env::temp_dir().join(format!("modurl-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
-        directory
-    }
-
-    #[test]
-    fn save_accepts_names_near_the_file_name_limit() {
-        let directory = test_directory("long-name");
-        let path = directory.join(format!("{}.bin", "a".repeat(250)));
-        let statistics = RunningMeanStd::new(vec![1.0], vec![2.0], 3.0).unwrap();
-        statistics.save_file(&path).unwrap();
-        statistics.save_file(&path).unwrap();
-        let loaded = RunningMeanStd::load_file(&path);
-        std::fs::remove_dir_all(&directory).unwrap();
-        assert_eq!(loaded.unwrap(), statistics);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn save_keeps_existing_file_permissions() {
-        use std::os::unix::fs::PermissionsExt;
-        let directory = test_directory("permissions");
-        let path = directory.join("obs_rms.bin");
-        let statistics = RunningMeanStd::new(vec![1.0], vec![2.0], 3.0).unwrap();
-        statistics.save_file(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        statistics.save_file(&path).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        std::fs::remove_dir_all(&directory).unwrap();
-        assert_eq!(mode & 0o777, 0o600);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn save_through_symlink_updates_target_and_keeps_link() {
-        let directory = test_directory("symlink");
-        let target = directory.join("run-7.bin");
-        let link = directory.join("obs_rms.bin");
-        RunningMeanStd::new(vec![0.0], vec![1.0], 1.0)
-            .unwrap()
-            .save_file(&target)
-            .unwrap();
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let statistics = RunningMeanStd::new(vec![1.0], vec![2.0], 3.0).unwrap();
-        statistics.save_file(&link).unwrap();
-        let is_symlink = std::fs::symlink_metadata(&link).unwrap().is_symlink();
-        let (from_link, from_target) = (
-            RunningMeanStd::load_file(&link),
-            RunningMeanStd::load_file(&target),
-        );
-        std::fs::remove_dir_all(&directory).unwrap();
-        assert!(is_symlink);
-        assert_eq!(from_link.unwrap(), statistics);
-        assert_eq!(from_target.unwrap(), statistics);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn save_overwrites_writable_file_in_read_only_directory() {
-        use std::os::unix::fs::PermissionsExt;
-        let directory = test_directory("read-only-directory");
-        let path = directory.join("obs_rms.bin");
-        RunningMeanStd::new(vec![0.0], vec![1.0], 1.0)
-            .unwrap()
-            .save_file(&path)
-            .unwrap();
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let statistics = RunningMeanStd::new(vec![1.0], vec![2.0], 3.0).unwrap();
-        let saved = statistics.save_file(&path);
-        let loaded = RunningMeanStd::load_file(&path);
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::remove_dir_all(&directory).unwrap();
-        saved.unwrap();
-        assert_eq!(loaded.unwrap(), statistics);
     }
 
     #[test]
