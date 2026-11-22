@@ -132,11 +132,16 @@ let step = env.step(actions)?; // steps each shared game once
 
 Rows are ordered first by inner gym and then by that gym's own row order.
 `group_offsets()` maps the flattened rows back to their inner gyms. All inner
-gyms must expose the same observation and action shapes, and each inner gym
-keeps responsibility for its own auto-reset behavior. The stack checks action
+gyms must expose the same observation and action shape trees, and each inner
+gym keeps responsibility for its own auto-reset behavior. At construction,
+`StackedMultiGymError::IncompatibleObservationShape` and
+`StackedMultiGymError::IncompatibleActionShape` report mismatched spaces
+with `Shape` values in the `expected` and `actual` fields. The stack checks action
 batch size before stepping and validates each group's step and reset observation
-shapes, reward shape, and metadata lengths before concatenating. Dtypes and
-devices must still match the spaces and tensors used by each inner gym.
+shapes, reward shape, and metadata lengths before concatenating. This output
+validation requires a leaf observation shape and returns
+`StackedMultiGymError::NonLeafObservationShape` for a tuple. Dtypes and devices
+must still match the spaces and tensors used by each inner gym.
 
 With the `multithreading` feature enabled,
 `MultithreadedStackedMultiGym` runs each inner `MultiGym` on a persistent
@@ -158,7 +163,8 @@ let mut env = MultithreadedStackedMultiGym::new(
 )?;
 ```
 
-The whole inner gym remains one unit of work, so coupled player rows are never
+The threaded stack uses the same shape checks and errors. The whole inner gym
+remains one unit of work, so coupled player rows are never
 split across threads. If an inner gym returns an error, reset the complete
 stack before stepping it again.
 

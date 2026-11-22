@@ -134,6 +134,9 @@ and `Tensor<2>` batches. `Discrete` supplies `Tensor<1, Int>` items and
 `Tensor<2, Int>` batches. `Gym`, `MultiGym`, and `Agent` use these shared types.
 Custom spaces implement `TensorBatchTypes` once before implementing the space
 methods. Access an item type as `<S as TensorBatchTypes>::Item`.
+For a single-tensor space, implement `shape()` by returning
+`Shape::Leaf` with the dimensions of that item, not its batch. See
+[Core Concepts](./core-concepts.md) for the shape tree.
 Single-environment tensors omit the batch axis. Scalar values use
 `[1]` individually and `[batch_size, 1]` in batches. Space operations use
 batched tensors. The associated spaces determine the native tensor kinds:

@@ -66,6 +66,15 @@ observation is kept in `terminal_observations`.
 An action space (`ActionSpace`) describes what actions the environment accepts.
 An observation space (`ObservationSpace`) describes the input shape your networks need.
 
+Both spaces' `shape()` methods return a `Shape` tree for one item, excluding
+the batch axis. `Shape::Leaf(Vec<usize>)` stores the dimensions of one tensor,
+and `Shape::Tuple(Vec<Shape>)` stores child shapes, which can themselves be
+tuples. Import `Shape` from `modurl::spaces` or `modurl::prelude`. Use
+`as_leaf()` to borrow the dimensions or `as_tuple()` to borrow the children;
+each returns `None` on the other variant. Built-in `BoxSpace` and `Discrete`
+return leaves. `ActionMap::policy_shape()` still returns a `Vec<usize>` for
+the policy output, which can differ from the environment action shape.
+
 CartPole has a discrete action space. That is why the PPO example uses
 `CategoricalDistribution`: the policy chooses from a fixed set of actions.
 

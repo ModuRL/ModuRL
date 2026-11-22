@@ -61,6 +61,9 @@ the global collection timestep used by training and logging.
 
 DDPG and TD3 use owned models. Each actor implements `Module` and `Forward<O, A>`.
 Observations use `[batch_size, ...observation_shape]`; actions use `[batch_size, ...action_shape]`.
+Both builders require `Shape::Leaf` item shapes for the observation and action
+spaces, and reject tuple shapes with
+`DeterministicActorCriticConfigurationError::NonLeafShape`.
 The agent creates a detached target actor during construction.
 The [DDPG chapter](./ddpg.md) shows the complete builder configuration.
 

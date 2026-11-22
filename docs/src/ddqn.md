@@ -36,7 +36,8 @@ agent.learn(&mut env, 500_000).expect("DDQN learning failed");
 `DDQNAgent` has the same configuration validation as `DQNAgent`: the replay
 capacity must be at least the batch size; the replay capacity, batch size,
 update frequency, target-update interval, and training horizon must be nonzero;
-and gamma and epsilon values must stay in the inclusive `0.0..=1.0` range.
+gamma and epsilon values must stay in the inclusive `0.0..=1.0` range; and
+the observation space must have a leaf shape.
 
 This is a change in the agent's learning target, not a change in the Q-network
 shape or device setup. Use [Value-Based Training](./q-learning.md) for the
