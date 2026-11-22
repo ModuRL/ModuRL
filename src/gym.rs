@@ -1,3 +1,4 @@
+use crate::observation_batch::{ObservationBatch, ObservationBatchError};
 use crate::spaces::{ActionSpace, Discrete, ObservationSpace, Shape};
 use crate::tensor_rank::{NextRank, TensorBatchTypes};
 use burn::tensor::{
@@ -288,6 +289,7 @@ fn combine_steps<I, T, const O: usize, K: Basic, E>(
 ) -> Result<MultiGymStepInfo<I, T>, StackedMultiGymError<E>>
 where
     T: NextRank<Next = Tensor<O, K>>,
+    Tensor<O, K>: ObservationBatch<Item = T>,
 {
     for (gym_index, step) in steps.iter().enumerate() {
         let group_size = group_size(group_offsets, gym_index);
@@ -324,15 +326,16 @@ where
             vec![group_size],
         )?;
     }
-    Ok(combine_step_outputs::<I, T, O, K>(steps))
+    Ok(combine_step_outputs::<I, T, O, K>(steps)?)
 }
 
 /// Concatenates observations `[group_size, ...observation_shape]` and rewards `[group_size, 1]` from validated groups.
 fn combine_step_outputs<I, T, const O: usize, K: Basic>(
     steps: Vec<MultiGymStepInfo<I, T>>,
-) -> MultiGymStepInfo<I, T>
+) -> Result<MultiGymStepInfo<I, T>, ObservationBatchError>
 where
     T: NextRank<Next = Tensor<O, K>>,
+    Tensor<O, K>: ObservationBatch<Item = T>,
 {
     let count = steps.iter().map(|step| step.infos.len()).sum();
     let mut observations = Vec::with_capacity(steps.len());
@@ -349,14 +352,14 @@ where
         truncated.extend(step.truncated);
         terminal_observations.extend(step.terminal_observations);
     }
-    MultiGymStepInfo {
-        observations: Tensor::cat(observations, 0),
+    Ok(MultiGymStepInfo {
+        observations: ObservationBatch::cat(observations)?,
         rewards: Tensor::cat(rewards, 0),
         infos,
         terminated,
         truncated,
         terminal_observations,
-    }
+    })
 }
 
 fn validate_output_shape<E>(

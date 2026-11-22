@@ -36,7 +36,9 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 ### Tensor shapes and space traits
 
 - Added `ObservationBatch` and `ObservationBatchError` for fallible tensor batching and row selection.
-  Implemented for single tensors; existing gyms and agents do not use the trait yet.
+  Implemented for single tensors. Vectorized, threaded, stacked, and device gym wrappers now use it.
+  Their errors (`VectorizedGymError`, `StackedMultiGymError`, and `TensorMapMultiGymError`) add an
+  `ObservationBatch` variant wrapping `ObservationBatchError`; existing shape checks keep their errors.
 - Breaking: observation and action `shape()` methods now return `Shape::Leaf` or `Shape::Tuple` instead of `Vec<usize>`.
   `Shape` is available in `modurl::prelude`.
   `Shape::Tuple` is metadata only for now; space traits still exchange single tensors.
