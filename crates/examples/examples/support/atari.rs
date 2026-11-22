@@ -22,8 +22,8 @@ impl ObservationSpace<4> for FrameObservationSpace {
         observations.dims()[1..] == [4, 84, 84] && observations.dtype() == DType::U8
     }
 
-    fn shape(&self) -> Vec<usize> {
-        vec![4, 84, 84]
+    fn shape(&self) -> Shape {
+        Shape::Leaf(vec![4, 84, 84])
     }
 }
 

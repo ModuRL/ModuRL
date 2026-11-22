@@ -8,7 +8,7 @@ use burn::{
 
 use crate::{
     gym::{Gym, LegalActionsGym, PerfectStateGym, ResetInfo, StepInfo},
-    spaces::{ActionSpace, ObservationSpace},
+    spaces::{ActionSpace, ObservationSpace, Shape},
 };
 
 const RUNNING_STATS_EPSILON: f64 = 1e-4;
@@ -260,6 +260,8 @@ impl<S> NormalizeObservationGymState<S> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum NormalizeObservationGymError<E> {
+    #[error("observation space must have a leaf shape")]
+    NonLeafShape,
     #[error("wrapped gym error: {0}")]
     GymError(#[source] E),
     #[error("failed to read an observation: {0}")]
@@ -293,7 +295,7 @@ impl<G> NormalizeObservationGym<G> {
             statistics: None,
             clip: None,
             update_statistics: true,
-            statistics_shape_checked: true,
+            statistics_shape_checked: false,
         }
     }
 
@@ -345,13 +347,17 @@ impl<G> NormalizeObservationGym<G> {
     /// before the inner gym changes. Runs once per install, since `observation_space()` may allocate.
     fn check_statistics_shape<E>(
         &mut self,
-        shape: impl FnOnce(&G) -> Vec<usize>,
+        shape: impl FnOnce(&G) -> Shape,
     ) -> Result<(), NormalizeObservationGymError<E>> {
         if self.statistics_shape_checked {
             return Ok(());
         }
+        let shape = shape(&self.gym);
+        let axes = shape
+            .as_leaf()
+            .ok_or(NormalizeObservationGymError::NonLeafShape)?;
         if let Some(statistics) = &self.statistics {
-            let observation = shape(&self.gym).iter().product();
+            let observation = axes.iter().product();
             if statistics.len() != observation {
                 return Err(NormalizeObservationGymError::StatisticsSizeMismatch {
                     statistics: statistics.len(),

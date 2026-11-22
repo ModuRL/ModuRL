@@ -83,7 +83,7 @@ fn main() {
 
     // Actor network: 2x64, tanh activation
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
+        .input_size(observation_space.shape().as_leaf().unwrap()[0])
         .output_size(action_space.get_possible_values())
         .options((&device, DTYPE))
         .activation(burn::nn::Tanh)
@@ -101,7 +101,7 @@ fn main() {
 
     // Critic network: 2x64, tanh activation
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
+        .input_size(observation_space.shape().as_leaf().unwrap()[0])
         .output_size(1)
         .options((&device, DTYPE))
         .activation(burn::nn::Tanh)

@@ -49,7 +49,7 @@ Q-network:
 
 ```rust
 let online_q_network = DuelingMLP::builder()
-    .input_size(observation_space.shape()[0])
+    .input_size(observation_space.shape().as_leaf().unwrap()[0])
     .output_size(2)
     .options(&device)
     .hidden_layer_sizes(vec![64, 64])

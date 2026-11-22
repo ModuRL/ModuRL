@@ -1,4 +1,4 @@
-use crate::spaces::{ActionSpace, Discrete, ObservationSpace};
+use crate::spaces::{ActionSpace, Discrete, ObservationSpace, Shape};
 use crate::tensor_rank::{NextRank, TensorBatchTypes};
 use burn::tensor::{
     DType, IndexingUpdateOp, Int, Slice, Tensor, TensorData,
@@ -203,8 +203,8 @@ where
 
 struct GymBatchMetadata {
     num_envs: usize,
-    observation_shape: Vec<usize>,
-    action_shape: Vec<usize>,
+    observation_shape: Shape,
+    action_shape: Shape,
 }
 
 /// Collects slot count and item shapes so stacked gyms can check group compatibility and assign batch rows.
@@ -222,8 +222,8 @@ where
 /// Checks nonempty groups and matching item shapes, then returns cumulative row boundaries for splitting actions and combining observations.
 fn batch_offsets<E>(
     groups: &[GymBatchMetadata],
-    observation_shape: &[usize],
-    action_shape: &[usize],
+    observation_shape: &Shape,
+    action_shape: &Shape,
 ) -> Result<Vec<usize>, StackedMultiGymError<E>> {
     if groups.is_empty() {
         return Err(StackedMultiGymError::Empty);
@@ -235,17 +235,17 @@ fn batch_offsets<E>(
         if group.num_envs == 0 {
             return Err(StackedMultiGymError::EmptyInner { gym_index });
         }
-        if group.observation_shape != observation_shape {
+        if group.observation_shape != *observation_shape {
             return Err(StackedMultiGymError::IncompatibleObservationShape {
                 gym_index,
-                expected: observation_shape.to_vec(),
+                expected: observation_shape.clone(),
                 actual: group.observation_shape.clone(),
             });
         }
-        if group.action_shape != action_shape {
+        if group.action_shape != *action_shape {
             return Err(StackedMultiGymError::IncompatibleActionShape {
                 gym_index,
-                expected: action_shape.to_vec(),
+                expected: action_shape.clone(),
                 actual: group.action_shape.clone(),
             });
         }
@@ -264,8 +264,11 @@ fn validate_group_observations<E>(
     field: &'static str,
     actual: &[usize],
     group_size: usize,
-    observation_shape: &[usize],
+    observation_shape: &Shape,
 ) -> Result<(), StackedMultiGymError<E>> {
+    let observation_shape = observation_shape
+        .as_leaf()
+        .ok_or(StackedMultiGymError::NonLeafObservationShape)?;
     let mut expected = Vec::with_capacity(observation_shape.len() + 1);
     expected.push(group_size);
     expected.extend_from_slice(observation_shape);
@@ -277,7 +280,7 @@ fn validate_group_observations<E>(
 fn combine_steps<I, T, const O: usize, K: Basic, E>(
     steps: Vec<MultiGymStepInfo<I, T>>,
     group_offsets: &[usize],
-    observation_shape: &[usize],
+    observation_shape: &Shape,
 ) -> Result<MultiGymStepInfo<I, T>, StackedMultiGymError<E>>
 where
     T: NextRank<Next = Tensor<O, K>>,

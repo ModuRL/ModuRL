@@ -30,8 +30,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let action_space = env.action_space();
     let observation_space = env.observation_space();
-    let observation_size = observation_space.shape().iter().product();
-    let action_size = action_space.shape().iter().product();
+    let observation_size = observation_space
+        .shape()
+        .as_leaf()
+        .unwrap()
+        .iter()
+        .product();
+    let action_size = action_space.shape().as_leaf().unwrap().iter().product();
     let online_actor = MLP::builder()
         .input_size(observation_size)
         .output_size(action_size)

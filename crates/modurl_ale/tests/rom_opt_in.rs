@@ -30,7 +30,7 @@ where
     let reset = env.reset().unwrap();
     assert_eq!(
         reset.observation.dims().as_slice(),
-        env.observation_space().shape()
+        env.observation_space().shape().as_leaf().unwrap()
     );
     assert_eq!(reset.observation.dtype(), DType::U8);
     assert_eq!(reset.observation.device(), Device::flex());

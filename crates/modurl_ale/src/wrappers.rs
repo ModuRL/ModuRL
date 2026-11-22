@@ -6,7 +6,7 @@ use burn::tensor::{
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
     sampling::{SamplingError, sample_u32_inclusive},
-    spaces::{Discrete, ObservationSpace},
+    spaces::{Discrete, ObservationSpace, Shape},
     tensor_rank::{NextRank, PrevRank, TensorBatchTypes},
     wrappers::EpisodeStatisticsInfo,
 };
@@ -309,8 +309,8 @@ impl<K: Basic> ObservationSpace<3> for WarpObservationSpace<K> {
             && dtype_matches
     }
 
-    fn shape(&self) -> Vec<usize> {
-        vec![84, 84]
+    fn shape(&self) -> Shape {
+        Shape::Leaf(vec![84, 84])
     }
 }
 

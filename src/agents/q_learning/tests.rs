@@ -5,7 +5,7 @@ use crate::tensor_rank::{PrevRank, TensorBatchTypes};
 use crate::{
     gym::{Gym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
     objectives::bellman_targets,
-    spaces::BoxSpace,
+    spaces::{BoxSpace, Shape},
 };
 use burn::{module::Param, optim::SgdConfig};
 use std::{
@@ -479,8 +479,8 @@ where
         observations.dims()[1..].iter().all(|size| *size == 1)
     }
 
-    fn shape(&self) -> Vec<usize> {
-        vec![1; R - 1]
+    fn shape(&self) -> Shape {
+        Shape::Leaf(vec![1; R - 1])
     }
 }
 
@@ -752,7 +752,10 @@ fn learn_preserves_schedule_replay_alignment_target_snapshots_and_episode_metric
         agent.target_q_network.values.val().into_data()
     );
     assert_eq!(agent.get_action_space().get_possible_values(), 2);
-    assert_eq!(agent.get_observation_space().shape(), [1]);
+    assert_eq!(
+        agent.get_observation_space().shape().as_leaf().unwrap(),
+        [1]
+    );
     let len = agent.experience_replay.len();
     let mut incompatible = VectorizedGymWrapper::from(EpisodeEnv {
         device,

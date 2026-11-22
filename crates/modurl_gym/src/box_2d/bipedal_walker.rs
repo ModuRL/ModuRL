@@ -893,8 +893,14 @@ mod tests {
     fn default_spaces_match_gymnasium() {
         let mut environment = BipedalWalkerV3::builder().build().unwrap();
         assert_eq!(environment.reset_flat_for_test().unwrap().dims(), [24]);
-        assert_eq!(environment.action_space().shape(), vec![4]);
-        assert_eq!(environment.observation_space().shape(), vec![24]);
+        assert_eq!(
+            environment.action_space().shape().as_leaf().unwrap(),
+            vec![4]
+        );
+        assert_eq!(
+            environment.observation_space().shape().as_leaf().unwrap(),
+            vec![24]
+        );
     }
 
     #[test]

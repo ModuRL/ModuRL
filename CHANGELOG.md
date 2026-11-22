@@ -35,6 +35,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Tensor shapes and space traits
 
+- Breaking: observation and action `shape()` methods now return `Shape::Leaf` or `Shape::Tuple` instead of `Vec<usize>`.
 - Removed the combined `Space` trait. Implement `ActionSpace<A>` for action checks and sampling,
   `ObservationSpace<O>` for observation checks, and `ActionMap<L, A>` for policy-to-environment conversion.
 - Both space roles have an associated tensor `Kind`. `ObservationSpace` has no associated error type;

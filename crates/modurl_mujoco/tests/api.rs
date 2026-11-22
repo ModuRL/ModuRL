@@ -9,7 +9,7 @@ fn default_shapes_and_metadata_match_gymnasium() {
     assert!(ant_reset.observation.device() == Device::flex());
     assert_eq!(ant_reset.observation.dims(), [105]);
     assert_eq!(ant_reset.observation.dtype(), DType::F32);
-    assert_eq!(ant.action_space().shape(), vec![8]);
+    assert_eq!(ant.action_space().shape().as_leaf().unwrap(), vec![8]);
     assert!(ant_reset.info.x_position.is_finite());
     assert!(ant_reset.info.x_velocity.is_none());
 
@@ -17,19 +17,22 @@ fn default_shapes_and_metadata_match_gymnasium() {
     let half_cheetah_reset = half_cheetah.reset().unwrap();
     assert!(half_cheetah_reset.observation.device() == Device::flex());
     assert_eq!(half_cheetah_reset.observation.dims(), [17]);
-    assert_eq!(half_cheetah.action_space().shape(), vec![6]);
+    assert_eq!(
+        half_cheetah.action_space().shape().as_leaf().unwrap(),
+        vec![6]
+    );
 
     let mut hopper = HopperV5::builder().build().unwrap();
     let hopper_reset = hopper.reset().unwrap();
     assert!(hopper_reset.observation.device() == Device::flex());
     assert_eq!(hopper_reset.observation.dims(), [11]);
-    assert_eq!(hopper.action_space().shape(), vec![3]);
+    assert_eq!(hopper.action_space().shape().as_leaf().unwrap(), vec![3]);
 
     let mut humanoid = HumanoidV5::builder().build().unwrap();
     let humanoid_reset = humanoid.reset().unwrap();
     assert!(humanoid_reset.observation.device() == Device::flex());
     assert_eq!(humanoid_reset.observation.dims(), [348]);
-    assert_eq!(humanoid.action_space().shape(), vec![17]);
+    assert_eq!(humanoid.action_space().shape().as_leaf().unwrap(), vec![17]);
     assert_eq!(humanoid_reset.info.tendon_length.len(), 2);
     assert_eq!(humanoid_reset.info.tendon_velocity.len(), 2);
     assert!(humanoid_reset.info.x_velocity.is_none());
@@ -38,7 +41,7 @@ fn default_shapes_and_metadata_match_gymnasium() {
     let walker_reset = walker.reset().unwrap();
     assert!(walker_reset.observation.device() == Device::flex());
     assert_eq!(walker_reset.observation.dims(), [17]);
-    assert_eq!(walker.action_space().shape(), vec![6]);
+    assert_eq!(walker.action_space().shape().as_leaf().unwrap(), vec![6]);
 }
 
 #[test]

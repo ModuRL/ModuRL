@@ -30,13 +30,15 @@ use crate::{
     models::probabilistic_model::ExpectationPolicy,
     objectives::{bellman_targets, clipped_value_loss},
     parameter_schedule::{ParameterSchedule, ScheduleProgress, ScheduleProgressError},
-    spaces::{ActionMap, ObservationSpace},
+    spaces::{ActionMap, ObservationSpace, Shape},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
 };
 
 #[derive(Debug, thiserror::Error)]
 pub enum SACConfigurationError {
+    #[error("space must have a leaf shape")]
+    NonLeafShape,
     #[error("at least one critic is required")]
     NoCritics,
     #[error("replay capacity must be nonzero")]
@@ -606,7 +608,7 @@ impl<'a, G: SACModelTypes, OS, AS, GE, I, const A: usize> SACAgent<'a, G, OS, AS
         space_storage_shape::<A>("action", action_space.shape(), replay_capacity)?;
         space_storage_shape::<L>(
             "policy action",
-            action_space.policy_shape(),
+            Shape::Leaf(action_space.policy_shape()),
             replay_capacity,
         )?;
 
@@ -738,7 +740,12 @@ where
         observations: &Tensor<O, OS::Kind>,
     ) -> Result<(), SACError<PE, GE, SE, CE>> {
         let mut expected = vec![observations.dims()[0]];
-        expected.extend(self.observation_space.shape());
+        expected.extend(
+            self.observation_space
+                .shape()
+                .as_leaf()
+                .ok_or(SACConfigurationError::NonLeafShape)?,
+        );
         if observations.dims()[0] == 0 {
             return Err(SACError::EmptyBatch);
         }
@@ -774,7 +781,12 @@ where
             .tensor_from_neurons(latent)
             .map_err(SACError::SpaceError)?;
         let mut expected = vec![batch_size];
-        expected.extend(self.action_space.shape());
+        expected.extend(
+            self.action_space
+                .shape()
+                .as_leaf()
+                .ok_or(SACConfigurationError::NonLeafShape)?,
+        );
         if actions.dims().to_vec() != expected {
             return Err(SACError::Shape {
                 field: "actions",
@@ -1289,7 +1301,11 @@ where
         }
 
         for terminal in step.terminal_observations.iter().flatten() {
-            let expected = self.observation_space.shape();
+            let expected_tree = self.observation_space.shape();
+            let expected = expected_tree
+                .as_leaf()
+                .ok_or(SACConfigurationError::NonLeafShape)?
+                .to_vec();
             if terminal.dims().to_vec() != expected {
                 return Err(SACError::Shape {
                     field: "terminal observations",
@@ -1652,12 +1668,15 @@ fn validate_sac_configuration(
 /// Validates the runtime event-axis count and nonempty event dimensions; performs no tensor conversion.
 fn space_storage_shape<const R: usize>(
     field: &'static str,
-    event_shape: Vec<usize>,
+    event_shape: Shape,
     capacity: usize,
 ) -> Result<[usize; R], SACConfigurationError> {
     const {
         assert!(R >= 2, "space storage needs capacity and event axes");
     }
+    let event_shape = event_shape
+        .as_leaf()
+        .ok_or(SACConfigurationError::NonLeafShape)?;
     if event_shape.contains(&0) {
         return Err(SACConfigurationError::EmptySpace);
     }

@@ -61,8 +61,9 @@ fn main() {
     let rollout_batch_size = 5 * env.num_envs();
     let action_space = env.action_space();
     let observation_space = env.observation_space();
-    let observation_size = observation_space.shape()[0];
-    let action_shape = action_space.shape();
+    let observation_size = observation_space.shape().as_leaf().unwrap()[0];
+    let action_shape_tree = action_space.shape();
+    let action_shape = action_shape_tree.as_leaf().unwrap();
     let action_size = action_shape.iter().product::<usize>();
 
     let actor = GaussianParameterModule {

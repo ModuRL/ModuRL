@@ -2,13 +2,15 @@ use super::{
     LegalActionsMultiGym, MultiGym, MultiGymStepInfo, PerfectStateMultiGym, batch_metadata,
     batch_offsets, combine_steps,
 };
-use crate::spaces::{ActionSpace, ObservationSpace};
+use crate::spaces::{ActionSpace, ObservationSpace, Shape};
 use crate::tensor_rank::TensorBatchTypes;
 use burn::tensor::{Slice, Tensor};
 use std::marker::PhantomData;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StackedMultiGymError<E> {
+    #[error("observation space must have a leaf shape")]
+    NonLeafObservationShape,
     #[error("at least one inner gym is required")]
     Empty,
     #[error("inner gym {gym_index} reported no batch slots")]
@@ -16,14 +18,14 @@ pub enum StackedMultiGymError<E> {
     #[error("inner gym {gym_index} has observation shape {actual:?}, expected {expected:?}")]
     IncompatibleObservationShape {
         gym_index: usize,
-        expected: Vec<usize>,
-        actual: Vec<usize>,
+        expected: Shape,
+        actual: Shape,
     },
     #[error("inner gym {gym_index} has action shape {actual:?}, expected {expected:?}")]
     IncompatibleActionShape {
         gym_index: usize,
-        expected: Vec<usize>,
-        actual: Vec<usize>,
+        expected: Shape,
+        actual: Shape,
     },
     /// An inner gym changed its number of batch slots after construction.
     #[error("inner gym {gym_index} changed batch size from {expected} to {actual}")]
@@ -63,7 +65,7 @@ pub enum StackedMultiGymError<E> {
 pub struct StackedMultiGym<G, I = (), const O: usize = 2, const A: usize = 2> {
     gyms: Vec<G>,
     group_offsets: Vec<usize>,
-    observation_shape: Vec<usize>,
+    observation_shape: Shape,
     _info: PhantomData<fn() -> I>,
 }
 

@@ -23,7 +23,7 @@ mod getting_started {
         let observation_space = env.observation_space();
 
         let actor_network = MLP::builder()
-            .input_size(observation_space.shape()[0])
+            .input_size(observation_space.shape().as_leaf().unwrap()[0])
             .output_size(action_space.get_possible_values())
             .options((&device, DType::F32))
             .activation(Tanh)
@@ -32,7 +32,7 @@ mod getting_started {
             .expect("failed to build actor network");
 
         let critic_network = MLP::builder()
-            .input_size(observation_space.shape()[0])
+            .input_size(observation_space.shape().as_leaf().unwrap()[0])
             .output_size(1)
             .options((&device, DType::F32))
             .activation(Tanh)
@@ -93,7 +93,7 @@ mod dqn {
         let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
         let observation_space = env.observation_space();
         let online_q_network = MLP::builder()
-            .input_size(observation_space.shape()[0])
+            .input_size(observation_space.shape().as_leaf().unwrap()[0])
             .output_size(env.action_space().get_possible_values())
             .options((&device, DType::F32))
             .hidden_layer_sizes(vec![64, 64])
@@ -146,7 +146,7 @@ mod ddqn {
         let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
         let observation_space = env.observation_space();
         let online_q_network = MLP::builder()
-            .input_size(observation_space.shape()[0])
+            .input_size(observation_space.shape().as_leaf().unwrap()[0])
             .output_size(env.action_space().get_possible_values())
             .options((&device, DType::F32))
             .hidden_layer_sizes(vec![64, 64])
@@ -339,7 +339,7 @@ mod ppo_configuration {
         let observation_space = env.observation_space();
 
         let actor_network = MLP::builder()
-            .input_size(observation_space.shape()[0])
+            .input_size(observation_space.shape().as_leaf().unwrap()[0])
             .output_size(action_space.get_possible_values())
             .options((&device, DType::F32))
             .activation(Tanh)
@@ -348,7 +348,7 @@ mod ppo_configuration {
             .expect("failed to build actor network");
 
         let critic_network = MLP::builder()
-            .input_size(observation_space.shape()[0])
+            .input_size(observation_space.shape().as_leaf().unwrap()[0])
             .output_size(1)
             .options((&device, DType::F32))
             .activation(Tanh)

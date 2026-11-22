@@ -238,7 +238,10 @@ where
         if stack_size == 0 {
             return Err(FrameStackGymConfigurationError::ZeroStackSize);
         }
-        let leading_axis = observation_space.shape().first().copied();
+        let leading_axis = observation_space
+            .shape()
+            .as_leaf()
+            .and_then(|axes| axes.first().copied());
         if leading_axis != Some(stack_size) {
             return Err(FrameStackGymConfigurationError::InvalidObservationSpace {
                 stack_size,
@@ -501,7 +504,7 @@ mod tests {
     use crate::tensor_rank::TensorBatchTypes;
     use crate::{
         gym::{Gym, LegalActionsGym, ResetInfo, StepInfo},
-        spaces::{BoxSpace, Discrete, ObservationSpace},
+        spaces::{BoxSpace, Discrete, ObservationSpace, Shape},
         tensor_rank::PrevRank,
         wrappers::{
             state_test_support::{StateTestGym, action as state_action, assert_state_round_trip},
@@ -568,7 +571,7 @@ mod tests {
         assert_eq!(&step_values[1..], &[0.0, 1.0]);
 
         let space = wrapper.observation_space();
-        assert_eq!(space.shape(), [3]);
+        assert_eq!(space.shape().as_leaf().unwrap(), [3]);
         assert_eq!(
             space
                 .low()
@@ -628,8 +631,8 @@ mod tests {
             values.dims()[1..] == self.shape[1..]
         }
 
-        fn shape(&self) -> Vec<usize> {
-            self.shape[1..].to_vec()
+        fn shape(&self) -> Shape {
+            Shape::Leaf(self.shape[1..].to_vec())
         }
     }
 
@@ -662,7 +665,10 @@ mod tests {
         let reset = wrapper.reset().unwrap();
         assert_eq!(reset.observation.dims(), [2, 4]);
         assert_eq!(wrapper.step(action()).unwrap().observation.dims(), [2, 4]);
-        assert_eq!(wrapper.observation_space().shape(), vec![2, 4]);
+        assert_eq!(
+            wrapper.observation_space().shape().as_leaf().unwrap(),
+            vec![2, 4]
+        );
     }
 
     #[test]
@@ -729,7 +735,7 @@ mod tests {
         let step = wrapper.step(action()).unwrap();
 
         let observation_space = wrapper.observation_space();
-        assert_eq!(observation_space.shape(), vec![4, 1]);
+        assert_eq!(observation_space.shape().as_leaf().unwrap(), vec![4, 1]);
         assert!(observation_space.contains(&reset.observation.clone().unsqueeze::<3>()));
         assert_eq!(
             reset.observation.into_data().try_to_vec::<f32>().unwrap(),

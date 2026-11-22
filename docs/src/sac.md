@@ -89,7 +89,7 @@ impl Forward<2, 2> for GaussianModule {
 Build the distribution with the environment's action shape:
 
 ```rust,ignore
-let action_size = action_space.shape()[0];
+let action_size = action_space.shape().as_leaf().unwrap()[0];
 let mean = sac_mlp(observation_size, action_size, 0.01, &device)?;
 let log_std = Param::from_tensor(Tensor::zeros([1, action_size], (&device, DType::F32)));
 let distribution = TransformedDistribution::new(

@@ -37,7 +37,7 @@ fn main() {
     let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let observation_space = env.observation_space();
     let online_q_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
+        .input_size(observation_space.shape().as_leaf().unwrap()[0])
         .output_size(env.action_space().get_possible_values())
         .options((&device, DType::F32))
         .hidden_layer_sizes(vec![64, 64])

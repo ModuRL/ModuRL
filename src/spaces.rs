@@ -1,6 +1,31 @@
 use crate::tensor_rank::{PrevRank, TensorBatchTypes};
 use burn::tensor::{DType, Device, Distribution, Float, Int, Tensor};
 
+/// Shape of one environment value, excluding the batch axis.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Leaf(Vec<usize>),
+    Tuple(Vec<Shape>),
+}
+
+impl Shape {
+    /// Returns tensor axes for a leaf.
+    pub fn as_leaf(&self) -> Option<&[usize]> {
+        match self {
+            Self::Leaf(axes) => Some(axes),
+            Self::Tuple(_) => None,
+        }
+    }
+
+    /// Returns child shapes for a tuple.
+    pub fn as_tuple(&self) -> Option<&[Shape]> {
+        match self {
+            Self::Leaf(_) => None,
+            Self::Tuple(shapes) => Some(shapes),
+        }
+    }
+}
+
 /// Checks which rank-`O` observation batches are valid.
 /// A single environment uses a batch of one.
 /// The associated observation tensor omits the batch axis and preserves the tensor kind.
@@ -31,7 +56,7 @@ pub trait ObservationSpace<const O: usize>:
     fn contains(&self, values: &Self::Batch) -> bool;
 
     /// Returns the shape of one environment value, excluding the batch axis.
-    fn shape(&self) -> Vec<usize>;
+    fn shape(&self) -> Shape;
 }
 
 /// Checks valid environment actions and supplies random action batches.
@@ -66,7 +91,7 @@ pub trait ActionSpace<const A: usize>:
     fn contains(&self, values: &Self::Batch) -> bool;
 
     /// Returns the shape of one environment action, excluding the batch axis.
-    fn shape(&self) -> Vec<usize>;
+    fn shape(&self) -> Shape;
 
     /// Samples actions `[batch_size, ...self.shape()]` using the device RNG.
     fn sample_batch(&self, batch_size: usize, device: &Device) -> Result<Self::Batch, Self::Error>;
@@ -115,8 +140,8 @@ impl Discrete {
     }
 
     /// Returns the scalar item shape `[1]`, excluding the batch axis.
-    pub fn shape(&self) -> Vec<usize> {
-        vec![1]
+    pub fn shape(&self) -> Shape {
+        Shape::Leaf(vec![1])
     }
 
     /// Samples U32 actions `[batch_size, 1]` uniformly among columns equal to 1.0 in a Float mask `[batch_size, n]`.
@@ -146,7 +171,7 @@ impl ObservationSpace<2> for Discrete {
         self.contains(values)
     }
 
-    fn shape(&self) -> Vec<usize> {
+    fn shape(&self) -> Shape {
         self.shape()
     }
 }
@@ -159,7 +184,7 @@ impl ActionSpace<2> for Discrete {
         self.contains(values)
     }
 
-    fn shape(&self) -> Vec<usize> {
+    fn shape(&self) -> Shape {
         self.shape()
     }
 
@@ -243,8 +268,8 @@ impl<const R: usize> BoxSpace<R> {
     }
 
     /// Returns the action/observation shape, excluding the leading batch axis.
-    pub fn shape(&self) -> Vec<usize> {
-        self.low.dims()[1..].to_vec()
+    pub fn shape(&self) -> Shape {
+        Shape::Leaf(self.low.dims()[1..].to_vec())
     }
 
     pub(crate) fn low(&self) -> &Tensor<R> {
@@ -274,7 +299,7 @@ where
         self.contains(values)
     }
 
-    fn shape(&self) -> Vec<usize> {
+    fn shape(&self) -> Shape {
         self.shape()
     }
 }
@@ -290,7 +315,7 @@ where
         self.contains(values)
     }
 
-    fn shape(&self) -> Vec<usize> {
+    fn shape(&self) -> Shape {
         self.shape()
     }
 
@@ -323,7 +348,7 @@ where
     Tensor<R>: PrevRank,
 {
     fn policy_shape(&self) -> Vec<usize> {
-        self.shape()
+        self.low.dims()[1..].to_vec()
     }
 
     /// Clips `[batch_size, ...self.shape()]` in the policy output's dtype.
@@ -408,6 +433,23 @@ mod tests {
     use burn::tensor::TensorData;
 
     #[test]
+    fn shape_tree_preserves_structure_and_leaf_axes() {
+        assert_eq!(Shape::Leaf(vec![2, 3]).as_leaf(), Some([2, 3].as_slice()));
+        assert_eq!(Shape::Leaf(vec![]).as_leaf(), Some([].as_slice()));
+        assert_eq!(Shape::Leaf(vec![2, 3]).as_tuple(), None);
+        assert_eq!(Shape::Tuple(vec![]).as_tuple(), Some([].as_slice()));
+        let tree = Shape::Tuple(vec![Shape::Leaf(vec![2]), Shape::Tuple(vec![])]);
+        assert_eq!(tree.as_leaf(), None);
+        assert_eq!(
+            tree.as_tuple(),
+            Some([Shape::Leaf(vec![2]), Shape::Tuple(vec![])].as_slice())
+        );
+        assert_eq!(tree, tree.clone());
+        assert_ne!(tree, Shape::Tuple(vec![Shape::Leaf(vec![2])]));
+        assert_ne!(Shape::Leaf(vec![]), Shape::Tuple(vec![]));
+    }
+
+    #[test]
     fn discrete_samples_indices_and_decodes_logits() {
         let _guard = RNG_LOCK.lock().unwrap();
         let device = Device::flex();
@@ -454,7 +496,7 @@ mod tests {
                 .is_err()
         );
         let single = Discrete::new(1).unwrap();
-        assert_eq!(single.shape(), vec![1]);
+        assert_eq!(single.shape().as_leaf().unwrap(), vec![1]);
         assert_eq!(single.policy_shape(), vec![1]);
         assert_eq!(
             single
@@ -533,7 +575,7 @@ mod tests {
                 assert!(space.contains(&samples.clone().slice([row..row + 1, 0..2, 0..2])));
             }
             assert!(space.contains(&samples));
-            assert_eq!(space.shape(), vec![2, 2]);
+            assert_eq!(space.shape().as_leaf().unwrap(), vec![2, 2]);
             let unbounded = BoxSpace::<2>::new(
                 Tensor::<2>::from_data([[f64::NEG_INFINITY]], &device).cast(dtype),
                 Tensor::<2>::from_data([[f64::INFINITY]], &device).cast(dtype),
@@ -679,7 +721,7 @@ mod tests {
                     Batch = Tensor<2, Int>,
                 >,
         > = Box::new(Discrete::new(3).unwrap());
-        assert_eq!(observations.shape(), vec![2, 3, 4]);
+        assert_eq!(observations.shape().as_leaf().unwrap(), vec![2, 3, 4]);
         assert!(observations.contains(&Tensor::zeros([5, 2, 3, 4], &device)));
         assert!(!observations.contains(&Tensor::zeros([5, 2, 4, 3], &device)));
         assert!(!observations.contains(&Tensor::full([5, 2, 3, 4], 256.0, &device)));
