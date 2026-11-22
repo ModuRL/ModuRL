@@ -63,6 +63,7 @@ pub use crate::models::{
 };
 pub use crate::multi_agent::MultiAgentGym;
 pub use crate::objectives::{bellman_targets, clipped_value_loss};
+pub use crate::observation_batch::{ObservationBatch, ObservationBatchError};
 pub use crate::parameter_schedule::{
     ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
     ScheduleProgressError,

@@ -6,6 +6,7 @@ pub mod gym;
 pub mod models;
 pub mod multi_agent;
 pub mod objectives;
+pub mod observation_batch;
 pub mod parameter_schedule;
 pub mod prelude;
 pub mod sampling;
