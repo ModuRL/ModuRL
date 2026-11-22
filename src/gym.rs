@@ -264,11 +264,8 @@ fn validate_group_observations<E>(
     field: &'static str,
     actual: &[usize],
     group_size: usize,
-    observation_shape: &Shape,
+    observation_shape: &[usize],
 ) -> Result<(), StackedMultiGymError<E>> {
-    let observation_shape = observation_shape
-        .as_leaf()
-        .ok_or(StackedMultiGymError::NonLeafObservationShape)?;
     let mut expected = Vec::with_capacity(observation_shape.len() + 1);
     expected.push(group_size);
     expected.extend_from_slice(observation_shape);
@@ -280,7 +277,7 @@ fn validate_group_observations<E>(
 fn combine_steps<I, T, const O: usize, K: Basic, E>(
     steps: Vec<MultiGymStepInfo<I, T>>,
     group_offsets: &[usize],
-    observation_shape: &Shape,
+    observation_shape: &[usize],
 ) -> Result<MultiGymStepInfo<I, T>, StackedMultiGymError<E>>
 where
     T: NextRank<Next = Tensor<O, K>>,

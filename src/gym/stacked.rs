@@ -65,7 +65,7 @@ pub enum StackedMultiGymError<E> {
 pub struct StackedMultiGym<G, I = (), const O: usize = 2, const A: usize = 2> {
     gyms: Vec<G>,
     group_offsets: Vec<usize>,
-    observation_shape: Shape,
+    observation_shape: Vec<usize>,
     _info: PhantomData<fn() -> I>,
 }
 
@@ -85,6 +85,10 @@ where
         let observation_shape = first.observation_space().shape();
         let action_shape = first.action_space().shape();
         let group_offsets = batch_offsets(&groups, &observation_shape, &action_shape)?;
+        let observation_shape = observation_shape
+            .as_leaf()
+            .ok_or(StackedMultiGymError::NonLeafObservationShape)?
+            .to_vec();
         Ok(Self {
             gyms,
             group_offsets,

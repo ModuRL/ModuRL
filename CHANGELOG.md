@@ -37,6 +37,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 - Breaking: observation and action `shape()` methods now return `Shape::Leaf` or `Shape::Tuple` instead of `Vec<usize>`.
   `Shape` is available in `modurl::prelude`.
+  `Shape::Tuple` is metadata only for now; space traits still exchange single tensors.
 - Removed the combined `Space` trait. Implement `ActionSpace<A>` for action checks and sampling,
   `ObservationSpace<O>` for observation checks, and `ActionMap<L, A>` for policy-to-environment conversion.
 - Both space roles have an associated tensor `Kind`. `ObservationSpace` has no associated error type;
@@ -122,7 +123,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   Removed `Batch` and `InvalidActionBatch` from both enums, and `ChangedBatchSize` and `InvalidOutputShape` from stacked errors.
   Added `VectorizedGymError::Empty` and feature-gated `WorkerDisconnected` variants for threaded failures.
   Added `StackedMultiGymError::NonLeafObservationShape` for non-leaf observation
-  shapes during reset and step. The `expected` and `actual` fields of
+  shapes during construction. The `expected` and `actual` fields of
   `StackedMultiGymError::IncompatibleObservationShape` and
   `StackedMultiGymError::IncompatibleActionShape` now use `Shape` instead of `Vec<usize>`.
   Candle tensor-error conversions are removed;

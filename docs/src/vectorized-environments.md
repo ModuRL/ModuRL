@@ -136,11 +136,12 @@ gyms must expose the same observation and action shape trees, and each inner
 gym keeps responsibility for its own auto-reset behavior. At construction,
 `StackedMultiGymError::IncompatibleObservationShape` and
 `StackedMultiGymError::IncompatibleActionShape` report mismatched spaces
-with `Shape` values in the `expected` and `actual` fields. The stack checks action
+with `Shape` values in the `expected` and `actual` fields. Both stack constructors
+require a leaf observation shape and return
+`StackedMultiGymError::NonLeafObservationShape` for a tuple before any inner gym
+resets or steps. The stack checks action
 batch size before stepping and validates each group's step and reset observation
-shapes, reward shape, and metadata lengths before concatenating. This output
-validation requires a leaf observation shape and returns
-`StackedMultiGymError::NonLeafObservationShape` for a tuple. Dtypes and devices
+shapes, reward shape, and metadata lengths before concatenating. Dtypes and devices
 must still match the spaces and tensors used by each inner gym.
 
 With the `multithreading` feature enabled,

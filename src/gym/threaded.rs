@@ -2,7 +2,7 @@ use super::{
     Gym, GymBatchMetadata, MultiGym, MultiGymStepInfo, StackedMultiGymError, VectorizedGymError,
     VectorizedGymWrapper, batch_metadata, batch_offsets, combine_step_outputs, combine_steps,
 };
-use crate::spaces::{ActionSpace, ObservationSpace, Shape};
+use crate::spaces::{ActionSpace, ObservationSpace};
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{Slice, Tensor, kind::Basic};
 use std::{sync::mpsc, thread};
@@ -92,7 +92,7 @@ where
     group_offsets: Vec<usize>,
     action_space: G::ActionSpace,
     observation_space: G::ObservationSpace,
-    observation_shape: Shape,
+    observation_shape: Vec<usize>,
 }
 
 impl<G, I, const O: usize, const A: usize, const U: usize, K: Basic + 'static, AK: Basic + 'static>
@@ -134,6 +134,10 @@ where
         let observation_shape = observation_space.shape();
         let action_shape = action_space.shape();
         let group_offsets = batch_offsets(&metadata, &observation_shape, &action_shape)?;
+        let observation_shape = observation_shape
+            .as_leaf()
+            .ok_or(StackedMultiGymError::NonLeafObservationShape)?
+            .to_vec();
         Ok(Self {
             groups,
             group_offsets,
