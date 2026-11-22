@@ -75,8 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut env = DeviceMultiGymWrapper::new(env, Device::flex(), device.clone());
     let action_space = env.action_space();
     let observation_space = env.observation_space();
-    let observation_size = observation_space.shape()[0];
-    let action_size = action_space.shape().iter().product();
+    let observation_size = observation_space.shape().as_leaf().unwrap()[0];
+    let action_size = action_space.shape().as_leaf().unwrap().iter().product();
     let model = GaussianModule {
         mean: sac_mlp(observation_size, action_size, 0.01, &device)?,
         log_std: Param::from_tensor(Tensor::zeros([1, action_size], (&device, DTYPE))),

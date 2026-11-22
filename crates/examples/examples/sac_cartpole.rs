@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut env = DeviceMultiGymWrapper::new(env, environment_device, device.clone());
     let action_space = env.action_space();
     let observation_space = env.observation_space();
-    let observation_size = observation_space.shape()[0];
+    let observation_size = observation_space.shape().as_leaf().unwrap()[0];
     let action_count = action_space.get_possible_values();
     let policy = ProbabilisticPolicyModel::new(
         sac_mlp(observation_size, action_count, 0.01, &device)?,

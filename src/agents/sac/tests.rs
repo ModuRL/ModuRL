@@ -6,7 +6,7 @@ use crate::{
     },
     gym::{Gym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
     models::{Forward, probabilistic_model::ProbabilisticPolicyModel},
-    spaces::{ActionSpace, BoxSpace, Discrete},
+    spaces::{ActionSpace, BoxSpace, Discrete, Shape},
     tensor_rank::TensorBatchTypes,
 };
 use burn::{
@@ -85,8 +85,8 @@ impl ObservationSpace<2> for BooleanSpace {
         values.dims()[1] == 1
     }
 
-    fn shape(&self) -> Vec<usize> {
-        vec![1]
+    fn shape(&self) -> Shape {
+        Shape::Leaf(vec![1])
     }
 }
 

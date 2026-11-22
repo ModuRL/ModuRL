@@ -23,7 +23,7 @@ fn getting_started_program_trains_one_rollout() {
     let observation_space = env.observation_space();
 
     let actor_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
+        .input_size(observation_space.shape().as_leaf().unwrap()[0])
         .output_size(action_space.get_possible_values())
         .options((&device, DType::F32))
         .activation(Tanh)
@@ -32,7 +32,7 @@ fn getting_started_program_trains_one_rollout() {
         .expect("failed to build actor network");
 
     let critic_network = MLP::builder()
-        .input_size(observation_space.shape()[0])
+        .input_size(observation_space.shape().as_leaf().unwrap()[0])
         .output_size(1)
         .options((&device, DType::F32))
         .activation(Tanh)

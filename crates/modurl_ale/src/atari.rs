@@ -3,7 +3,7 @@ use bon::bon;
 use burn::tensor::{DType, Device, Int, Tensor, TensorData, TensorReadError};
 use modurl::{
     gym::{Gym, ResetInfo, StepInfo},
-    spaces::{Discrete, ObservationSpace},
+    spaces::{Discrete, ObservationSpace, Shape},
     tensor_rank::{NextRank, PrevRank, TensorBatchTypes},
 };
 use std::{
@@ -95,8 +95,8 @@ where
             && observations.device() == Device::flex()
     }
 
-    fn shape(&self) -> Vec<usize> {
-        self.shape.clone()
+    fn shape(&self) -> Shape {
+        Shape::Leaf(self.shape.clone())
     }
 }
 
@@ -310,7 +310,7 @@ where
             return Tensor::from_data(
                 TensorData::from_bytes(
                     self.ale.screen_rgb_bytes(),
-                    self.observation_space.shape(),
+                    self.observation_space.shape.clone(),
                     DType::U8,
                 ),
                 (&Device::flex(), DType::U8),
@@ -322,7 +322,10 @@ where
             self.ale.get_screen_grayscale(&mut self.buffer_bytes);
         }
         Tensor::from_data(
-            TensorData::new(self.buffer_bytes.clone(), self.observation_space.shape()),
+            TensorData::new(
+                self.buffer_bytes.clone(),
+                self.observation_space.shape.clone(),
+            ),
             (&Device::flex(), DType::U8),
         )
     }
@@ -480,7 +483,7 @@ mod tests {
             [2, 160, 210, 3],
             (&Device::flex(), DType::U8)
         )));
-        assert_eq!(space.shape(), [210, 160, 3]);
+        assert_eq!(space.shape().as_leaf().unwrap(), [210, 160, 3]);
     }
 
     #[test]

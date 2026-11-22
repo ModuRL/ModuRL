@@ -283,8 +283,14 @@ mod tests {
     fn default_spaces_match_gymnasium() {
         let mut environment = PendulumV1::builder().build().unwrap();
         assert_eq!(environment.reset().unwrap().observation.dims(), [3]);
-        assert_eq!(environment.action_space().shape(), vec![1]);
-        assert_eq!(environment.observation_space().shape(), vec![3]);
+        assert_eq!(
+            environment.action_space().shape().as_leaf().unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            environment.observation_space().shape().as_leaf().unwrap(),
+            vec![3]
+        );
     }
 
     #[test]

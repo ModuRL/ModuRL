@@ -242,7 +242,7 @@ mod schedule_tests {
         distributions::{CategoricalDistribution, GaussianDistribution},
         gym::{Gym, MultiGym, ResetInfo, StepInfo, VectorizedGymError, VectorizedGymWrapper},
         models::{MLP, probabilistic_model::ProbabilisticPolicyModel},
-        spaces::{ActionMap, BoxSpace, Discrete},
+        spaces::{ActionMap, BoxSpace, Discrete, Shape},
     };
 
     #[derive(Module, Debug)]
@@ -730,8 +730,8 @@ mod schedule_tests {
                 values.dims()[1] == 1
             }
 
-            fn shape(&self) -> Vec<usize> {
-                vec![1]
+            fn shape(&self) -> Shape {
+                Shape::Leaf(vec![1])
             }
         }
         let device = Device::flex().autodiff();
@@ -856,8 +856,8 @@ mod schedule_tests {
                 values.dims()[1] == 1
             }
 
-            fn shape(&self) -> Vec<usize> {
-                vec![1]
+            fn shape(&self) -> Shape {
+                Shape::Leaf(vec![1])
             }
         }
 

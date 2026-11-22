@@ -67,7 +67,9 @@ pub use crate::parameter_schedule::{
     ConstantSchedule, ExponentialSchedule, LinearSchedule, ParameterSchedule, ScheduleProgress,
     ScheduleProgressError,
 };
-pub use crate::spaces::{ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace, SpaceError};
+pub use crate::spaces::{
+    ActionMap, ActionSpace, BoxSpace, Discrete, ObservationSpace, Shape, SpaceError,
+};
 pub use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 pub use crate::wrappers::{
     ClipRewardGym, ClipRewardGymError, DeviceMultiGymWrapper, EpisodeStatistics,

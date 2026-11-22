@@ -1,4 +1,4 @@
-use crate::spaces::{ActionSpace, Discrete, ObservationSpace};
+use crate::spaces::{ActionSpace, Discrete, ObservationSpace, Shape};
 use crate::tensor_rank::{NextRank, TensorBatchTypes};
 use burn::tensor::{
     DType, IndexingUpdateOp, Int, Slice, Tensor, TensorData,
@@ -203,8 +203,8 @@ where
 
 struct GymBatchMetadata {
     num_envs: usize,
-    observation_shape: Vec<usize>,
-    action_shape: Vec<usize>,
+    observation_shape: Shape,
+    action_shape: Shape,
 }
 
 /// Collects slot count and item shapes so stacked gyms can check group compatibility and assign batch rows.
@@ -222,11 +222,18 @@ where
 /// Checks nonempty groups and matching item shapes, then returns cumulative row boundaries for splitting actions and combining observations.
 fn batch_offsets<E>(
     groups: &[GymBatchMetadata],
-    observation_shape: &[usize],
-    action_shape: &[usize],
+    observation_shape: &Shape,
+    action_shape: &Shape,
 ) -> Result<Vec<usize>, StackedMultiGymError<E>> {
     if groups.is_empty() {
         return Err(StackedMultiGymError::Empty);
+    }
+    if observation_shape.as_leaf().is_none()
+        || groups
+            .iter()
+            .any(|group| group.observation_shape.as_leaf().is_none())
+    {
+        return Err(StackedMultiGymError::NonLeafObservationShape);
     }
     let mut offsets = Vec::with_capacity(groups.len() + 1);
     offsets.push(0);
@@ -235,17 +242,17 @@ fn batch_offsets<E>(
         if group.num_envs == 0 {
             return Err(StackedMultiGymError::EmptyInner { gym_index });
         }
-        if group.observation_shape != observation_shape {
+        if group.observation_shape != *observation_shape {
             return Err(StackedMultiGymError::IncompatibleObservationShape {
                 gym_index,
-                expected: observation_shape.to_vec(),
+                expected: observation_shape.clone(),
                 actual: group.observation_shape.clone(),
             });
         }
-        if group.action_shape != action_shape {
+        if group.action_shape != *action_shape {
             return Err(StackedMultiGymError::IncompatibleActionShape {
                 gym_index,
-                expected: action_shape.to_vec(),
+                expected: action_shape.clone(),
                 actual: group.action_shape.clone(),
             });
         }

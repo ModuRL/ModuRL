@@ -134,6 +134,10 @@ where
         let observation_shape = observation_space.shape();
         let action_shape = action_space.shape();
         let group_offsets = batch_offsets(&metadata, &observation_shape, &action_shape)?;
+        let observation_shape = observation_shape
+            .as_leaf()
+            .ok_or(StackedMultiGymError::NonLeafObservationShape)?
+            .to_vec();
         Ok(Self {
             groups,
             group_offsets,

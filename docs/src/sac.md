@@ -89,7 +89,7 @@ impl Forward<2, 2> for GaussianModule {
 Build the distribution with the environment's action shape:
 
 ```rust,ignore
-let action_size = action_space.shape()[0];
+let action_size = action_space.shape().as_leaf().unwrap()[0];
 let mean = sac_mlp(observation_size, action_size, 0.01, &device)?;
 let log_std = Param::from_tensor(Tensor::zeros([1, action_size], (&device, DType::F32)));
 let distribution = TransformedDistribution::new(
@@ -248,6 +248,8 @@ User models or explicit preprocessing perform input conversions. Replay stores r
 environment rewards must match the configured dtype and critic outputs. Policy statistics are still converted to compute dtype.
 For F64 critics, configure the environment to emit F64 rewards or map them explicitly before passing them to the agent.
 The agent owns concrete native policy and critic models; the builder returns `SACConfigurationError` for invalid construction.
+Both the observation and action spaces must have a `Shape::Leaf` item shape.
+The builder rejects tuple shapes with `SACConfigurationError::NonLeafShape`.
 Runtime failures retain policy, critic, environment, space, tensor-read, and replay causes in `SACError`.
 
 A categorical CPU example is also available:

@@ -34,7 +34,7 @@ before using the wrapper.
 | --- | --- |
 | `TimeLimitGym::new` | `TimeLimitGymConfigurationError::ZeroMaxEpisodeSteps` for a zero step limit. |
 | `MaxAndSkipGym::new` | `MaxAndSkipGymConfigurationError::ZeroSkip` for zero action repeats. |
-| `FrameStackGym::new` | `FrameStackGymConfigurationError::ZeroStackSize` for a zero stack size, or `InvalidObservationSpace` when the leading item axis is missing or differs from the stack size. |
+| `FrameStackGym::new` | `FrameStackGymConfigurationError::ZeroStackSize` for a zero stack size, or `FrameStackGymConfigurationError::InvalidObservationSpace` when the supplied observation space has a tuple shape or its leading item axis is missing or differs from the stack size. For a tuple, the error has `leading_axis: None`. |
 | `NormalizeRewardGym::new` | `NormalizeRewardGymConfigurationError::InvalidGamma` for a non-finite discount or one outside `0..=1`. |
 | `NormalizeRewardGym::with_clip` | `NormalizeRewardGymConfigurationError::InvalidClip` for a non-finite or nonpositive limit. |
 | `NormalizeObservationGym::with_clip` | `NormalizeObservationGymConfigurationError::InvalidClip` for a non-finite or nonpositive limit. |
@@ -88,6 +88,7 @@ has its single component.
 | --- | --- |
 | `RunningMeanStd::from_tensors(mean, variance, count)` / `validate` | `RunningMeanStdError` for empty or mismatched components, tensors on different devices or with different dtypes, a non-finite mean, a negative or non-finite variance, or a nonpositive count. |
 | `RunningMeanStd::try_load_file` | Burn's `RecordError` for a missing or corrupt file, a file without statistics, or statistics of a different length than the template. |
+| `NormalizeObservationGym::reset` / `step` | `NormalizeObservationGymError::NonLeafShape` if the declared observation shape is a tuple. The wrapper checks before calling the inner gym, even if no statistics were supplied. |
 | `NormalizeObservationGym::with_statistics` | Infallible; `reset` and `step` return `NormalizeObservationGymError::StatisticsSizeMismatch` before calling the inner gym when installed or restored statistics differ in length from the declared observation shape (checked once per install), and again if an observation's component count differs. |
 | `NormalizeRewardGym::with_statistics` | `NormalizeRewardGymConfigurationError::InvalidStatisticsSize` unless the statistics have exactly one component; `InvalidStatistics` if `validate()` rejects them. |
 

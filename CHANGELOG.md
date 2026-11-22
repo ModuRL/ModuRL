@@ -35,6 +35,9 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 
 ### Tensor shapes and space traits
 
+- Breaking: observation and action `shape()` methods now return `Shape::Leaf` or `Shape::Tuple` instead of `Vec<usize>`.
+  `Shape` is available in `modurl::prelude`.
+  `Shape::Tuple` is metadata only for now; space traits still exchange single tensors.
 - Removed the combined `Space` trait. Implement `ActionSpace<A>` for action checks and sampling,
   `ObservationSpace<O>` for observation checks, and `ActionMap<L, A>` for policy-to-environment conversion.
 - Both space roles have an associated tensor `Kind`. `ObservationSpace` has no associated error type;
@@ -50,7 +53,7 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   Rewards, values, log probabilities, entropy, and termination masks also use `[batch_size, 1]`.
   Rollout scalars use `[time, num_envs, 1]`; candidate scalars use `[batch_size, candidate_count, 1]`.
   Reductions over action components retain a trailing scalar axis. Overall scalar losses remain `[1]`.
-- `Discrete::shape()` now returns `[1]`, rather than a category-logit shape.
+- `Discrete::shape()` now returns `Shape::Leaf(vec![1])`, rather than a category-logit shape.
   `Discrete::policy_shape()` returns `[action_count]`, including `[1]` for a one-category space.
   Discrete batches use `Int` tensors `[batch_size, 1]`; `sample_batch` produces I32 indices.
   Sampling rejects category counts outside `1..=2^24` with `SpaceError::InvalidCategoryCount`.
@@ -70,6 +73,10 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   runtime failures continue to use `QAgentError`. `QLearningConfigurationError`
   no longer implements `Clone`, `Copy`, `PartialEq`, or `Eq` because it can contain
   a tensor read error.
+- Added `SACConfigurationError::NonLeafShape` and
+  `DeterministicActorCriticConfigurationError::NonLeafShape` for non-leaf observation
+  or action shapes, and `QLearningConfigurationError::NonLeafShape` for non-leaf
+  observation shapes.
 - PPO and A2C use `.logger(...)` instead of `.logging_info(...)` to match the other agents.
 - All agent optimizers accept constant `f64` learning rates or a `ParameterSchedule`.
   Off-policy updates evaluate the rate at their collection timestep; invalid rates return an error.
@@ -115,6 +122,10 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
 - Updated `VectorizedGymError` and `StackedMultiGymError` for the Burn interfaces.
   Removed `Batch` and `InvalidActionBatch` from both enums, and `ChangedBatchSize` and `InvalidOutputShape` from stacked errors.
   Added `VectorizedGymError::Empty` and feature-gated `WorkerDisconnected` variants for threaded failures.
+  Added `StackedMultiGymError::NonLeafObservationShape` for non-leaf observation
+  shapes during construction. The `expected` and `actual` fields of
+  `StackedMultiGymError::IncompatibleObservationShape` and
+  `StackedMultiGymError::IncompatibleActionShape` now use `Shape` instead of `Vec<usize>`.
   Candle tensor-error conversions are removed;
   callers must satisfy the documented tensor layouts and backend requirements.
 - `PPOAgent` and `A2CAgent` builders remove `.device(...)`. Rollout collection uses the observation device.
@@ -160,6 +171,8 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   that saves and loads like a model with `save_file`/`try_load_file`; `with_update_statistics(false)` freezes it.
   Exhaustive matches on `NormalizeObservationGymError` and `NormalizeRewardGymConfigurationError`
   need the new `StatisticsSizeMismatch`, `InvalidStatisticsSize`, and `InvalidStatistics` variants.
+- Added `NormalizeObservationGymError::NonLeafShape` for non-leaf observation
+  shapes; `reset` and `step` check the declared shape before calling the inner gym.
 - Added `PerfectStateGym` with `save_state` and `set_state`; core wrappers implement it when their inner gym does.
 - `TimeLimitGym::new` takes a `usize` step limit, and its saved state stores the elapsed step count as `usize`.
 - Added `PerfectStateMultiGym` with per-slot `save_state` and `set_state`; `VectorizedGymWrapper`, `StackedMultiGym`, and the input, output, and device wrappers implement it when their inner gyms do.
@@ -181,7 +194,9 @@ The workspace has fully migrated from Candle to Burn: the core crate, every agen
   and forward associated space types instead of boxed `Space` values.
   Tensor-read failures use Burn errors where applicable.
 - `FrameStackGym` becomes `FrameStackGym<G, BF = 3, S = BoxSpace<BF>>`.
-  Its constructor accepts a pre-stacked observation-space type `S`; the space's first item axis must equal `stack_size`.
+  Its constructor accepts a pre-stacked observation-space type `S`; the space
+  must have a leaf shape whose first item axis equals `stack_size`, or it returns
+  `FrameStackGymConfigurationError::InvalidObservationSpace`.
   Stacking adds an item axis and preserves native observation kind, including integer and boolean frames.
 - Classic-control and Box2D builders in `modurl_gym` remove `.device(...)`. Each environment owns a host RNG seeded through the builder's `.seed(u64)`;
   unseeded environments use OS entropy and do not follow `Device::seed`. Observations, space bounds, and physics remain on CPU.

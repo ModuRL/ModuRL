@@ -404,8 +404,11 @@ mod tests {
         let device = Device::flex();
         let mut discrete = FixedEnv::new(device.clone());
         assert_eq!(discrete.reset().unwrap().observation.dims(), [4]);
-        assert_eq!(discrete.observation_space().shape(), vec![4]);
-        assert_eq!(discrete.action_space().shape(), vec![1]);
+        assert_eq!(
+            discrete.observation_space().shape().as_leaf().unwrap(),
+            vec![4]
+        );
+        assert_eq!(discrete.action_space().shape().as_leaf().unwrap(), vec![1]);
         let mut discrete = VectorizedGymWrapper::from(discrete);
         assert_eq!(discrete.reset().unwrap().dims(), [1, 4]);
         let step = discrete
@@ -419,7 +422,10 @@ mod tests {
 
         let mut continuous = FixedContinuousEnv::new(device.clone());
         assert_eq!(continuous.reset().unwrap().observation.dims(), [4]);
-        assert_eq!(continuous.action_space().shape(), vec![1]);
+        assert_eq!(
+            continuous.action_space().shape().as_leaf().unwrap(),
+            vec![1]
+        );
         let mut continuous = VectorizedGymWrapper::from(continuous);
         assert_eq!(continuous.reset().unwrap().dims(), [1, 4]);
         let step = continuous

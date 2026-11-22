@@ -5,7 +5,7 @@ use crate::{
     },
     buffers::experience_replay::ReplayStorage,
     gym::{Gym, ResetInfo, StepInfo, VectorizedGymWrapper},
-    spaces::BoxSpace,
+    spaces::{BoxSpace, Shape},
     wrappers::{OutputMapMultiGymWrapper, TensorMapMultiGymError},
 };
 use burn::{
@@ -441,8 +441,11 @@ fn collection_keeps_delay_cadence_terminal_targets_and_episode_metrics() {
     );
     assert_eq!(logger.replay_lengths, [2, 4]);
     assert_ne!(agent.target_actor.weight.val().into_data(), initial);
-    assert_eq!(agent.get_action_space().shape(), [1]);
-    assert_eq!(agent.get_observation_space().shape(), [1]);
+    assert_eq!(agent.get_action_space().shape().as_leaf().unwrap(), [1]);
+    assert_eq!(
+        agent.get_observation_space().shape().as_leaf().unwrap(),
+        [1]
+    );
     let batch = agent
         .replay
         .as_mut()
@@ -584,8 +587,8 @@ impl ObservationSpace<3> for BooleanSpace {
         values.dims()[1..] == [1, 1]
     }
 
-    fn shape(&self) -> Vec<usize> {
-        vec![1, 1]
+    fn shape(&self) -> Shape {
+        Shape::Leaf(vec![1, 1])
     }
 }
 
@@ -866,7 +869,7 @@ fn builder_and_actions_reject_invalid_contracts() {
         ))
     ));
     assert!(matches!(
-        space_storage_shape::<3>("observation", vec![1], 8),
+        space_storage_shape::<3>("observation", Shape::Leaf(vec![1]), 8),
         Err(DeterministicActorCriticConfigurationError::SpaceRank {
             expected: 2,
             actual: 1,
@@ -874,7 +877,7 @@ fn builder_and_actions_reject_invalid_contracts() {
         })
     ));
     assert!(matches!(
-        space_storage_shape::<2>("action", vec![0], 8),
+        space_storage_shape::<2>("action", Shape::Leaf(vec![0]), 8),
         Err(DeterministicActorCriticConfigurationError::ZeroItemDimension { .. })
     ));
     let agent = agent(&device, DType::F32, 1);

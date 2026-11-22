@@ -33,6 +33,8 @@ pub mod dqn;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QLearningConfigurationError {
+    #[error("space must have a leaf shape")]
+    NonLeafShape,
     #[error("reading Q-learning configuration failed: {0}")]
     Tensor(#[from] TensorReadError),
     #[error("Q-network parameters must share one device")]
@@ -485,7 +487,10 @@ where
         if checked_learning_rate(learning_rate.value(0.0)).is_none() {
             return Err(QLearningConfigurationError::InvalidLearningRate);
         }
-        let observation_shape = observation_space.shape();
+        let observation_shape_tree = observation_space.shape();
+        let observation_shape = observation_shape_tree
+            .as_leaf()
+            .ok_or(QLearningConfigurationError::NonLeafShape)?;
         if legal_action_mask && R != 2 {
             return Err(QLearningConfigurationError::LegalActionMaskRequiresRank2 { actual: R });
         }

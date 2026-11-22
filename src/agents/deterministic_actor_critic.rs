@@ -16,7 +16,7 @@ use crate::{
     models::Forward,
     objectives::bellman_targets,
     parameter_schedule::{ParameterSchedule, ScheduleProgress, ScheduleProgressError},
-    spaces::{ActionMap, ObservationSpace},
+    spaces::{ActionMap, ObservationSpace, Shape},
     tensor_operations::transfer_bool_tensor,
     tensor_rank::{NextRank, TensorBatchTypes},
 };
@@ -45,6 +45,8 @@ mod tests;
 /// Invalid deterministic actor-critic configuration.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum DeterministicActorCriticConfigurationError {
+    #[error("space must have a leaf shape")]
+    NonLeafShape,
     /// TD3 received an empty critic ensemble.
     #[error("at least one critic is required")]
     NoCritics,
@@ -565,7 +567,7 @@ impl<G: DeterministicActorCriticModelTypes, OS, AS, S, GE, const A: usize>
         space_storage_shape::<A>("action", action_space.shape(), replay_capacity)?;
         space_storage_shape::<A>(
             "policy action",
-            action_space.policy_shape(),
+            Shape::Leaf(action_space.policy_shape()),
             replay_capacity,
         )?;
         let replay_storage_config = ReplayStorageConfig::from_models(
@@ -724,8 +726,11 @@ where
         latent: Tensor<A>,
         count: usize,
     ) -> Result<Tensor<A>, DeterministicActorCriticError<AE, GE, SE, CE>> {
-        let expected =
-            space_storage_shape::<A>("policy action", self.action_space.policy_shape(), count)?;
+        let expected = space_storage_shape::<A>(
+            "policy action",
+            Shape::Leaf(self.action_space.policy_shape()),
+            count,
+        )?;
         self.validate_float_tensor("policy actions", &latent, expected)?;
         let actions = self
             .action_space
@@ -1153,7 +1158,11 @@ where
             });
         }
         for terminal in step.terminal_observations.iter().flatten() {
-            let expected = self.observation_space.shape();
+            let expected_tree = self.observation_space.shape();
+            let expected = expected_tree
+                .as_leaf()
+                .ok_or(DeterministicActorCriticConfigurationError::NonLeafShape)?
+                .to_vec();
             if terminal.dims().to_vec() != expected {
                 return Err(DeterministicActorCriticError::Shape {
                     field: "terminal observations",
@@ -1330,12 +1339,15 @@ where
 /// Builds rank-R storage shape [capacity, ...item_shape] from exactly R - 1 nonzero item axes.
 fn space_storage_shape<const R: usize>(
     field: &'static str,
-    item_shape: Vec<usize>,
+    item_shape: Shape,
     capacity: usize,
 ) -> Result<[usize; R], DeterministicActorCriticConfigurationError> {
     const {
         assert!(R >= 2, "storage requires capacity and item axes");
     }
+    let item_shape = item_shape
+        .as_leaf()
+        .ok_or(DeterministicActorCriticConfigurationError::NonLeafShape)?;
     if item_shape.len() != R - 1 {
         return Err(DeterministicActorCriticConfigurationError::SpaceRank {
             field,
@@ -1347,7 +1359,7 @@ fn space_storage_shape<const R: usize>(
         return Err(DeterministicActorCriticConfigurationError::ZeroItemDimension { field });
     }
     let mut shape = [capacity; R];
-    shape[1..].copy_from_slice(&item_shape);
+    shape[1..].copy_from_slice(item_shape);
     Ok(shape)
 }
 

@@ -295,7 +295,10 @@ mod tests {
                 .build()
                 .unwrap();
             assert_eq!(agent.get_action_space().get_possible_values(), 2);
-            assert_eq!(agent.get_observation_space().shape(), [4]);
+            assert_eq!(
+                agent.get_observation_space().shape().as_leaf().unwrap(),
+                [4]
+            );
             let actions = agent.act(&Tensor::zeros([2, 4], &device), &mut ()).unwrap();
             assert_eq!(actions.dims(), [2, 1]);
             assert_eq!(actions.into_data().try_to_vec::<u32>().unwrap(), [1, 1]);
