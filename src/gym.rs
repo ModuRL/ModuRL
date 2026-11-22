@@ -228,6 +228,13 @@ fn batch_offsets<E>(
     if groups.is_empty() {
         return Err(StackedMultiGymError::Empty);
     }
+    if observation_shape.as_leaf().is_none()
+        || groups
+            .iter()
+            .any(|group| group.observation_shape.as_leaf().is_none())
+    {
+        return Err(StackedMultiGymError::NonLeafObservationShape);
+    }
     let mut offsets = Vec::with_capacity(groups.len() + 1);
     offsets.push(0);
     let mut total = 0;
