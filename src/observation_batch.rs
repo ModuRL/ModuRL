@@ -1,7 +1,10 @@
 //! Operations on observation tensors with a leading environment batch axis.
 
 use crate::tensor_rank::PrevRank;
-use burn::tensor::{DType, Device, Int, Slice, Tensor, TensorReadError, kind::Autodiff};
+use burn::tensor::{
+    Bool, DType, Device, Int, IntDType, Slice, Tensor, TensorReadError,
+    kind::{Autodiff, Kind},
+};
 use std::fmt::Debug;
 
 /// Observation batches shaped `[batch_size, ...item_shape]`.
@@ -21,7 +24,8 @@ pub trait ObservationBatch: Clone + Debug + Send + Sized {
     fn row(&self, index: usize) -> Result<Self::Item, ObservationBatchError>;
     /// Returns the number of environment rows.
     fn batch_size(&self) -> usize;
-    /// Moves the batch to a device without changing shape, kind, or dtype.
+    /// Moves the batch to a device supporting its numeric dtype, preserving shape and kind.
+    /// Cross-device Bool transfers use the destination's default Bool storage dtype.
     fn to_device(self, device: &Device) -> Self;
     /// Removes the autodiff association without changing shape, kind, or dtype.
     fn without_autodiff(self) -> Self;
@@ -87,12 +91,27 @@ where
                 .collect()
         };
         let batch_size = self.batch_size();
-        for index in values {
+        for &index in &values {
             if index < 0 || index >= batch_size as i128 {
                 return Err(ObservationBatchError::IndexOutOfBounds { index, batch_size });
             }
         }
-        Ok(Tensor::select(self, 0, indices.cast(DType::I64)))
+        if K::KIND == Kind::Bool || !matches!(indices.dtype(), DType::I32 | DType::I64) {
+            if values.is_empty() {
+                let mut shape = self.dims();
+                shape[0] = 0;
+                return Ok(Tensor::empty(shape, (&self.device(), self.dtype())));
+            }
+            let rows = values
+                .into_iter()
+                .map(|index| {
+                    let index = index as usize;
+                    self.clone().slice([Slice::from(index..index + 1)])
+                })
+                .collect();
+            return Ok(Tensor::cat(rows, 0));
+        }
+        Ok(Tensor::select(self, 0, indices))
     }
 
     fn row(&self, index: usize) -> Result<Self::Item, ObservationBatchError> {
@@ -114,6 +133,11 @@ where
     }
 
     fn to_device(self, device: &Device) -> Self {
+        if K::KIND == Kind::Bool && self.device() != *device {
+            let tensor = Tensor::<R, Bool>::from_dispatch(self.into_dispatch());
+            let tensor = tensor.cast(IntDType::I32).to_device(device).bool();
+            return Tensor::from_dispatch(tensor.into_dispatch());
+        }
         Tensor::to_device(self, device)
     }
 
@@ -156,7 +180,7 @@ fn validate_tensors<const D: usize, K: Autodiff>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::tensor::{Bool, Float};
+    use burn::tensor::Float;
 
     /// Exercises `[batch_size, 2]` tensors, preserving their values, kind, and dtype.
     #[allow(deprecated)]
@@ -261,6 +285,74 @@ mod tests {
             detached.try_to_vec_as::<bool>().unwrap(),
             vec![true, false, false, true]
         );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn boolean_selection_preserves_dtype_and_can_be_concatenated() {
+        for device in [Device::flex(), Device::ndarray()] {
+            let batch = Tensor::<2, Bool>::from_data([[true, false], [false, true]], &device);
+            for rows in [vec![1i32], vec![]] {
+                let indices = Tensor::from_data(rows.as_slice(), (&device, DType::I32));
+                let selected = ObservationBatch::select(batch.clone(), indices).unwrap();
+                let combined =
+                    ObservationBatch::cat(vec![batch.clone(), selected.clone()]).unwrap();
+                assert_eq!(selected.dtype(), batch.dtype());
+                assert_eq!(selected.dims(), [rows.len(), 2]);
+                assert_eq!(
+                    selected.try_to_vec_as::<bool>().unwrap(),
+                    if rows.is_empty() {
+                        vec![]
+                    } else {
+                        vec![false, true]
+                    }
+                );
+                assert_eq!(combined.dims(), [2 + rows.len(), 2]);
+                let mut expected = vec![true, false, false, true];
+                if !rows.is_empty() {
+                    expected.extend([false, true]);
+                }
+                assert_eq!(combined.try_to_vec_as::<bool>().unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn boolean_transfer_uses_destination_storage_and_preserves_values() {
+        for source in [Device::flex(), Device::ndarray()] {
+            for destination in [Device::flex(), Device::ndarray()] {
+                let source = source.clone().autodiff();
+                let batch = Tensor::<2, Bool>::from_data([[true, false], [false, true]], &source);
+                let transferred = ObservationBatch::to_device(batch, &destination);
+                assert_eq!(transferred.device(), destination.clone().autodiff());
+                assert_eq!(transferred.dims(), [2, 2]);
+                assert_eq!(
+                    transferred.try_to_vec_as::<bool>().unwrap(),
+                    vec![true, false, false, true]
+                );
+                assert!(transferred.is_autodiff());
+                let default = Tensor::<2, Bool>::from_data([[true, false]], &destination);
+                assert_eq!(transferred.dtype(), default.dtype());
+            }
+        }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn selection_accepts_original_integer_index_dtypes() {
+        for device in [Device::flex(), Device::ndarray()] {
+            for dtype in [DType::I32, DType::I64, DType::U8] {
+                let indices = Tensor::<1, Int>::from_data([1i32, 0], (&device, dtype));
+                let floats = Tensor::<2>::from_data([[1.0f32], [2.0]], &device);
+                let selected = ObservationBatch::select(floats, indices.clone()).unwrap();
+                assert_eq!(selected.try_to_vec_as::<f32>().unwrap(), vec![2.0, 1.0]);
+                let integers = Tensor::<2, Int>::from_data([[1u8], [2]], (&device, DType::U8));
+                let selected = ObservationBatch::select(integers, indices).unwrap();
+                assert_eq!(selected.dtype(), DType::U8);
+                assert_eq!(selected.try_to_vec_as::<u8>().unwrap(), vec![2, 1]);
+            }
+        }
     }
 
     #[test]
