@@ -2,6 +2,7 @@ use super::{
     Gym, GymBatchMetadata, MultiGym, MultiGymStepInfo, StackedMultiGymError, VectorizedGymError,
     VectorizedGymWrapper, batch_metadata, batch_offsets, combine_step_outputs, combine_steps,
 };
+use crate::observation_batch::ObservationBatch;
 use crate::spaces::{ActionSpace, ObservationSpace};
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{Slice, Tensor, kind::Basic};
@@ -101,7 +102,7 @@ where
     G: MultiGym<I, O, A> + 'static,
     G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>> + ObservationBatch<Item = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     G::Error: Send + 'static,
     G::ObservationSpace: Clone,
@@ -162,7 +163,7 @@ where
     G: MultiGym<I, O, A> + 'static,
     G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>> + ObservationBatch<Item = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
     G::Error: Send + 'static,
     G::ObservationSpace: Clone,
@@ -276,7 +277,7 @@ where
                 &self.observation_shape,
             )?;
         }
-        Ok(Tensor::cat(observations, 0))
+        Ok(ObservationBatch::cat(observations)?)
     }
 }
 
@@ -314,7 +315,7 @@ where
     G: Gym<I, BO, BA> + 'static,
     G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK, Item = Tensor<A, AK>>,
-    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>> + ObservationBatch<Item = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
     Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,
     Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
@@ -367,7 +368,7 @@ where
     G: Gym<I, BO, BA> + 'static,
     G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK, Item = Tensor<A, AK>>,
-    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>> + ObservationBatch<Item = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
     Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,
     Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
@@ -426,7 +427,7 @@ where
             })
             .collect();
         let steps = replies.into_iter().collect::<Result<Vec<_>, _>>()?;
-        Ok(combine_step_outputs::<I, Tensor<O, K>, BO, K>(steps))
+        Ok(combine_step_outputs::<I, Tensor<O, K>, BO, K>(steps)?)
     }
 
     fn action_space(&self) -> Self::ActionSpace {
@@ -465,7 +466,7 @@ where
             })
             .collect();
         let observations = replies.into_iter().collect::<Result<Vec<_>, _>>()?;
-        Ok(Tensor::cat(observations, 0))
+        Ok(ObservationBatch::cat(observations)?)
     }
 }
 
@@ -475,6 +476,55 @@ mod tests {
     use super::*;
     use crate::spaces::{BoxSpace, Discrete};
     use burn::tensor::{Device, Int};
+
+    #[test]
+    fn threaded_batch_errors_are_recoverable_on_reset_and_step() {
+        let device = Device::flex();
+        for observation in mismatched_observations() {
+            let observations = vec![Tensor::zeros([2], &device), observation];
+            let factories = observations
+                .into_iter()
+                .map(|observation| move || ObservationEnv { observation })
+                .collect();
+            let mut env = MultithreadedVectorizedGymWrapper::new(
+                factories,
+                BoxSpace::new_unbounded([1, 2], &device),
+                Discrete::new(2).unwrap(),
+            )
+            .unwrap();
+            assert!(matches!(
+                env.reset(),
+                Err(VectorizedGymError::ObservationBatch(_))
+            ));
+            assert!(matches!(
+                env.step(Tensor::<2, Int>::zeros([2, 1], &device)),
+                Err(VectorizedGymError::ObservationBatch(_))
+            ));
+        }
+        for observation in mismatched_observations().into_iter().skip(1) {
+            let observations = vec![Tensor::zeros([2], &device), observation];
+            let factories = observations
+                .into_iter()
+                .map(|observation| {
+                    move || VectorizedGymWrapper::from(ObservationEnv { observation })
+                })
+                .collect();
+            let mut env = MultithreadedStackedMultiGym::new(
+                factories,
+                BoxSpace::new_unbounded([1, 2], &device),
+                Discrete::new(2).unwrap(),
+            )
+            .unwrap();
+            assert!(matches!(
+                env.reset(),
+                Err(StackedMultiGymError::ObservationBatch(_))
+            ));
+            assert!(matches!(
+                env.step(Tensor::<2, Int>::zeros([2, 1], &device)),
+                Err(StackedMultiGymError::ObservationBatch(_))
+            ));
+        }
+    }
 
     #[test]
     fn invalid_threaded_vectorized_batches_do_not_advance_workers() {

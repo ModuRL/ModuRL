@@ -307,3 +307,49 @@ impl Gym<(), 2, 2> for ContinuousEnv {
         BoxSpace::new_unbounded([1, 2], &Device::flex())
     }
 }
+
+pub(super) struct ObservationEnv {
+    pub(super) observation: Tensor<1>,
+}
+
+impl Gym for ObservationEnv {
+    type Error = TestError;
+    type ActionSpace = Discrete;
+    type ObservationSpace = BoxSpace<2>;
+
+    /// Accepts scalar Int actions `[1]` and returns the configured observation `[item_size]`.
+    fn step(&mut self, _action: Tensor<1, Int>) -> Result<StepInfo, Self::Error> {
+        Ok(StepInfo {
+            observation: self.observation.clone(),
+            reward: 0.0,
+            terminated: false,
+            truncated: false,
+            info: (),
+        })
+    }
+
+    /// Returns the configured observation `[item_size]`.
+    fn reset(&mut self) -> Result<ResetInfo, Self::Error> {
+        Ok(ResetInfo {
+            observation: self.observation.clone(),
+            info: (),
+        })
+    }
+
+    fn observation_space(&self) -> Self::ObservationSpace {
+        BoxSpace::new_unbounded([1, 2], &Device::flex())
+    }
+
+    fn action_space(&self) -> Self::ActionSpace {
+        Discrete::new(2).unwrap()
+    }
+}
+
+#[allow(deprecated)]
+pub(super) fn mismatched_observations() -> Vec<Tensor<1>> {
+    vec![
+        Tensor::zeros([3], &Device::flex()),
+        Tensor::zeros([2], (&Device::flex(), DType::F64)),
+        Tensor::zeros([2], &Device::ndarray()),
+    ]
+}

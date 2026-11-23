@@ -2,13 +2,16 @@ use super::{
     LegalActionsMultiGym, MultiGym, MultiGymStepInfo, PerfectStateMultiGym, batch_metadata,
     batch_offsets, combine_steps,
 };
+use crate::observation_batch::{ObservationBatch, ObservationBatchError};
 use crate::spaces::{ActionSpace, ObservationSpace, Shape};
 use crate::tensor_rank::TensorBatchTypes;
-use burn::tensor::{Slice, Tensor};
+use burn::tensor::Slice;
 use std::marker::PhantomData;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StackedMultiGymError<E> {
+    #[error("observation batching failed: {0}")]
+    ObservationBatch(#[from] ObservationBatchError),
     #[error("observation space must have a leaf shape")]
     NonLeafObservationShape,
     #[error("at least one inner gym is required")]
@@ -151,6 +154,8 @@ where
 impl<G, I, const O: usize, const A: usize> MultiGym<I, O, A> for StackedMultiGym<G, I, O, A>
 where
     G: MultiGym<I, O, A>,
+    <G::ObservationSpace as TensorBatchTypes>::Batch:
+        ObservationBatch<Item = <G::ObservationSpace as TensorBatchTypes>::Item>,
 {
     type Error = StackedMultiGymError<G::Error>;
     type ActionSpace = G::ActionSpace;
@@ -219,7 +224,7 @@ where
             )?;
             observations.push(observation);
         }
-        Ok(Tensor::cat(observations, 0))
+        Ok(ObservationBatch::cat(observations)?)
     }
 }
 
@@ -227,6 +232,8 @@ impl<G, I, const O: usize, const A: usize> PerfectStateMultiGym<I, O, A>
     for StackedMultiGym<G, I, O, A>
 where
     G: PerfectStateMultiGym<I, O, A>,
+    <G::ObservationSpace as TensorBatchTypes>::Batch:
+        ObservationBatch<Item = <G::ObservationSpace as TensorBatchTypes>::Item>,
 {
     type State = G::State;
 
@@ -248,6 +255,8 @@ where
 impl<G, I, const O: usize> LegalActionsMultiGym<I, O> for StackedMultiGym<G, I, O, 2>
 where
     G: LegalActionsMultiGym<I, O>,
+    <G::ObservationSpace as TensorBatchTypes>::Batch:
+        ObservationBatch<Item = <G::ObservationSpace as TensorBatchTypes>::Item>,
 {
     fn legal_actions(&self, slot: usize) -> Result<Vec<usize>, Self::Error> {
         let (gym_index, local_slot) = self.locate_slot(slot)?;
@@ -264,8 +273,27 @@ mod tests {
     use super::*;
     use crate::wrappers::OutputMapMultiGymWrapper;
     use crate::wrappers::state_test_support::{StateTestGym, assert_slot_round_trip};
-    use burn::tensor::{DType, Device, Int};
+    use burn::tensor::{DType, Device, Int, Tensor};
     use std::convert::Infallible;
+
+    #[test]
+    fn stacked_batch_dtype_and_device_errors_are_recoverable() {
+        for observation in mismatched_observations().into_iter().skip(1) {
+            let groups = vec![Tensor::zeros([2], &Device::flex()), observation]
+                .into_iter()
+                .map(|observation| VectorizedGymWrapper::from(ObservationEnv { observation }))
+                .collect();
+            let mut env = StackedMultiGym::new(groups).unwrap();
+            assert!(matches!(
+                env.reset(),
+                Err(StackedMultiGymError::ObservationBatch(_))
+            ));
+            assert!(matches!(
+                env.step(Tensor::<2, Int>::zeros([2, 1], &Device::flex())),
+                Err(StackedMultiGymError::ObservationBatch(_))
+            ));
+        }
+    }
 
     #[test]
     fn stacked_slots_restore_independently_across_groups() {

@@ -2,6 +2,7 @@
 //!
 //! The modules group observation transformations, reward transformations, and episode controls.
 
+use crate::observation_batch::{ObservationBatch, ObservationBatchError};
 use crate::tensor_rank::{NextRank, PrevRank, TensorBatchTypes};
 use burn::tensor::{Device, Int, Slice, Tensor, kind::Basic};
 use std::convert::Infallible;
@@ -14,6 +15,8 @@ use crate::{
 /// Reports an environment failure or a caller-defined mapping failure.
 #[derive(Debug, thiserror::Error)]
 pub enum TensorMapMultiGymError<E, M = Infallible> {
+    #[error("observation batching failed: {0}")]
+    ObservationBatch(#[from] ObservationBatchError),
     #[error("wrapped gym error: {0}")]
     Gym(#[source] E),
     #[error("tensor mapping failed: {0}")]
@@ -275,32 +278,33 @@ where
 fn transfer_batched_observations<I, const O: usize, K: Basic, const U: usize>(
     step: &mut MultiGymStepInfo<I, Tensor<U, K>>,
     device: &Device,
-) where
+) -> Result<(), ObservationBatchError>
+where
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
+    Tensor<O, K>: ObservationBatch<Item = Tensor<U, K>>,
 {
-    let count = step.observations.dims()[0];
-    let terminal_count = step.terminal_observations.iter().flatten().count();
-    let mut parts = Vec::with_capacity(terminal_count + 1);
-    parts.push(step.observations.clone());
-    for observation in step.terminal_observations.iter().flatten() {
-        let mut observation_batch_shape = [1; O];
-        observation_batch_shape[1..].copy_from_slice(&observation.dims());
-        parts.push(observation.clone().reshape(observation_batch_shape));
-    }
+    let count = ObservationBatch::batch_size(&step.observations);
+    let terminals: Vec<_> = step
+        .terminal_observations
+        .iter()
+        .flatten()
+        .cloned()
+        .collect();
     // Pack terminal rows with current observations so one transfer supplies both next-observation layouts.
-    let packed = if terminal_count == 0 {
-        parts.remove(0)
+    let packed = if terminals.is_empty() {
+        step.observations.clone()
     } else {
-        Tensor::cat(parts, 0)
-    }
-    .to_device(device);
+        ObservationBatch::cat(vec![
+            step.observations.clone(),
+            <Tensor<O, K> as ObservationBatch>::stack(terminals)?,
+        ])?
+    };
+    let packed = ObservationBatch::to_device(packed, device);
     step.observations = packed.clone().slice([Slice::from(0..count)]);
     for (offset, observation) in step.terminal_observations.iter_mut().flatten().enumerate() {
-        *observation = packed
-            .clone()
-            .slice([Slice::from(count + offset..count + offset + 1)])
-            .reshape(observation.dims());
+        *observation = ObservationBatch::row(&packed, count + offset)?;
     }
+    Ok(())
 }
 
 /// Transfers actions to the environment device and observations and rewards to the agent device.
@@ -339,7 +343,7 @@ where
     G: MultiGym<I, O, A>,
     G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>> + ObservationBatch<Item = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
 {
     type Error = TensorMapMultiGymError<G::Error>;
@@ -356,7 +360,7 @@ where
         let action = action.to_device(&self.environment_device);
         let mut step = self.gym.step(action).map_err(TensorMapMultiGymError::Gym)?;
         if step.observations.device() != self.agent_device {
-            transfer_batched_observations(&mut step, &self.agent_device);
+            transfer_batched_observations(&mut step, &self.agent_device)?;
         }
         step.rewards = step.rewards.to_device(&self.agent_device);
         Ok(step)
@@ -364,11 +368,10 @@ where
 
     /// Transfers rank-`O` reset observations `[num_envs, ...observation_shape]` to the agent device, preserving kind and dtype.
     fn reset(&mut self) -> Result<Tensor<O, K>, Self::Error> {
-        Ok(self
-            .gym
-            .reset()
-            .map_err(TensorMapMultiGymError::Gym)?
-            .to_device(&self.agent_device))
+        Ok(ObservationBatch::to_device(
+            self.gym.reset().map_err(TensorMapMultiGymError::Gym)?,
+            &self.agent_device,
+        ))
     }
 
     fn num_envs(&self) -> usize {
@@ -390,7 +393,7 @@ where
     G: PerfectStateMultiGym<I, O, A>,
     G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<A, Kind = AK>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>> + ObservationBatch<Item = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
 {
     type State = G::State;
@@ -414,7 +417,7 @@ where
     G: LegalActionsMultiGym<I, O>,
     G::ObservationSpace: ObservationSpace<O, Kind = K, Item = Tensor<U, K>>,
     G::ActionSpace: ActionSpace<2, Kind = Int>,
-    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>>,
+    Tensor<O, K>: PrevRank<Prev = Tensor<U, K>> + ObservationBatch<Item = Tensor<U, K>>,
     Tensor<U, K>: NextRank<Next = Tensor<O, K>>,
 {
     fn legal_actions(&self, slot: usize) -> Result<Vec<usize>, Self::Error> {
@@ -680,6 +683,30 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
+    fn device_wrapper_reports_terminal_batch_errors() {
+        for observation in [
+            Tensor::zeros([4], &Device::flex()),
+            Tensor::zeros([3], (&Device::flex(), DType::F64)),
+            Tensor::zeros([3], &Device::ndarray()),
+        ] {
+            let gym = OutputMapMultiGymWrapper::new(
+                TensorMapTestGym,
+                Ok::<_, Infallible>,
+                move |mut step: MultiGymStepInfo| {
+                    step.terminal_observations[1] = Some(observation.clone());
+                    Ok::<_, Infallible>(step)
+                },
+            );
+            let mut gym = DeviceMultiGymWrapper::new(gym, Device::flex(), Device::ndarray());
+            assert!(matches!(
+                gym.step(Tensor::zeros([2, 1], &Device::flex())),
+                Err(TensorMapMultiGymError::ObservationBatch(_))
+            ));
+        }
+    }
+
+    #[test]
     fn packed_transfer_preserves_scalar_integer_and_boolean_layouts() {
         let device = Device::flex();
         let mut integers = MultiGymStepInfo::<(), Tensor<1, Int>> {
@@ -690,7 +717,7 @@ mod tests {
             truncated: vec![false, false],
             terminal_observations: vec![None, Some(Tensor::from_data([8i32], &device))],
         };
-        transfer_batched_observations(&mut integers, &device);
+        transfer_batched_observations(&mut integers, &device).unwrap();
         assert_eq!(integers.observations.dims(), [2, 1]);
         assert_eq!(
             integers.terminal_observations[1].as_ref().unwrap().dims(),
@@ -712,7 +739,7 @@ mod tests {
             truncated: vec![false, false],
             terminal_observations: vec![None, Some(Tensor::from_data([true, true], &device))],
         };
-        transfer_batched_observations(&mut booleans, &device);
+        transfer_batched_observations(&mut booleans, &device).unwrap();
         assert_eq!(booleans.observations.dims(), [2, 2]);
         assert_eq!(
             booleans.terminal_observations[1].as_ref().unwrap().dims(),
@@ -738,14 +765,14 @@ mod tests {
         for observation in step.terminal_observations.iter_mut().flatten() {
             *observation = observation.clone().cast(DType::F64);
         }
-        transfer_batched_observations(&mut step, &device);
+        transfer_batched_observations(&mut step, &device).unwrap();
         assert_eq!(step.observations.dtype(), DType::F64);
         assert_eq!(
             step.terminal_observations[1].as_ref().unwrap().dtype(),
             DType::F64
         );
         step.terminal_observations = vec![None, None];
-        transfer_batched_observations(&mut step, &device);
+        transfer_batched_observations(&mut step, &device).unwrap();
         assert_eq!(step.observations.dims(), [2, 3]);
     }
 }

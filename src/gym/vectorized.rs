@@ -2,6 +2,7 @@ use super::{
     Gym, LegalActionsGym, LegalActionsMultiGym, MultiGym, MultiGymStepInfo, PerfectStateGym,
     PerfectStateMultiGym,
 };
+use crate::observation_batch::{ObservationBatch, ObservationBatchError};
 use crate::spaces::{ActionSpace, ObservationSpace};
 use crate::tensor_rank::{NextRank, PrevRank};
 use burn::tensor::{DType, Int, Slice, Tensor, TensorData, kind::Basic};
@@ -9,6 +10,8 @@ use std::marker::PhantomData;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VectorizedGymError<E> {
+    #[error("observation batching failed: {0}")]
+    ObservationBatch(#[from] ObservationBatchError),
     #[error("at least one environment is required")]
     Empty,
     #[error("slot {slot} is out of range for {num_envs} environments")]
@@ -83,7 +86,7 @@ where
     G: Gym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK, Item = Tensor<A, AK>>,
-    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>> + ObservationBatch<Item = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
     Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,
     Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
@@ -131,7 +134,7 @@ where
             terminated.push(step.terminated);
             truncated.push(step.truncated);
         }
-        let observations: Tensor<BO, K> = Tensor::stack(observations, 0);
+        let observations: Tensor<BO, K> = ObservationBatch::stack(observations)?;
         let rewards = Tensor::from_data(
             TensorData::new(rewards, [count, 1]),
             (&observations.device(), DType::F32),
@@ -166,7 +169,7 @@ where
         for env in &mut self.envs {
             observations.push(env.reset().map_err(VectorizedGymError::Single)?.observation);
         }
-        Ok(Tensor::stack(observations, 0))
+        Ok(ObservationBatch::stack(observations)?)
     }
 }
 
@@ -177,7 +180,7 @@ where
     G: PerfectStateGym<I, BO, BA>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<BA, Kind = AK, Item = Tensor<A, AK>>,
-    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>> + ObservationBatch<Item = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
     Tensor<BA, AK>: PrevRank<Prev = Tensor<A, AK>>,
     Tensor<A, AK>: NextRank<Next = Tensor<BA, AK>>,
@@ -210,7 +213,7 @@ where
     G: LegalActionsGym<I, BO>,
     G::ObservationSpace: ObservationSpace<BO, Kind = K, Item = Tensor<O, K>>,
     G::ActionSpace: ActionSpace<2, Kind = Int, Item = Tensor<A, Int>>,
-    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>>,
+    Tensor<BO, K>: PrevRank<Prev = Tensor<O, K>> + ObservationBatch<Item = Tensor<O, K>>,
     Tensor<O, K>: NextRank<Next = Tensor<BO, K>>,
     Tensor<2, Int>: PrevRank<Prev = Tensor<A, Int>>,
     Tensor<A, Int>: NextRank<Next = Tensor<2, Int>>,
@@ -232,6 +235,27 @@ mod tests {
     use crate::spaces::{BoxSpace, Discrete};
     use crate::wrappers::state_test_support::{StateTestGym, assert_slot_round_trip};
     use burn::tensor::{Device, Int};
+
+    #[test]
+    fn vectorized_batch_errors_are_recoverable_on_reset_and_step() {
+        for observation in mismatched_observations() {
+            let mut env = VectorizedGymWrapper::new(vec![
+                ObservationEnv {
+                    observation: Tensor::zeros([2], &Device::flex()),
+                },
+                ObservationEnv { observation },
+            ])
+            .unwrap();
+            assert!(matches!(
+                env.reset(),
+                Err(VectorizedGymError::ObservationBatch(_))
+            ));
+            assert!(matches!(
+                env.step(Tensor::<2, Int>::zeros([2, 1], &Device::flex())),
+                Err(VectorizedGymError::ObservationBatch(_))
+            ));
+        }
+    }
 
     #[test]
     fn vectorized_slots_restore_independently() {
