@@ -186,7 +186,7 @@
                             </script>
                         </div>
                         {{#if print_enable}}
-                        <a href="{{ path_to_root }}print.html" title="Print this book" aria-label="Print this book">
+                        <a id="mdbook-print-link" href="{{ path_to_root }}print.html" title="Print this book" aria-label="Print this book">
                             {{fa "solid" "print" "print-button"}}
                         </a>
                         {{/if}}
@@ -333,6 +333,30 @@
         });
         </script>
         {{/if}}
+        {{else if print_enable}}
+        <script>
+        (() => {
+            const printLink = document.getElementById('mdbook-print-link');
+            let printFrame;
+
+            printLink.addEventListener('click', (event) => {
+                if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+                event.preventDefault();
+                if (printFrame) return;
+
+                printFrame = document.createElement('iframe');
+                printFrame.hidden = true;
+                printFrame.src = printLink.href;
+                printFrame.addEventListener('load', () => {
+                    printFrame.contentWindow.addEventListener('afterprint', () => {
+                        printFrame.remove();
+                        printFrame = null;
+                    }, { once: true });
+                }, { once: true });
+                document.body.append(printFrame);
+            });
+        })();
+        </script>
         {{/if}}
 
         {{#if fragment_map}}
